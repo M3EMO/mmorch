@@ -16,6 +16,8 @@ const RUTA_NEXTEST_TOML: &str = "/etc/root-oraculo/nextest.toml";
 const LINEAS_NEXTEST_TOML: &[&str] = &[
     "[store]",
     "dir = \"/salida/target/nextest\"",
+    "[profile.ci]",
+    "fail-fast = false",
     "[profile.ci.junit]",
     "path = \"junit.xml\"",
 ];
