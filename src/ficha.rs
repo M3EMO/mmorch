@@ -94,6 +94,8 @@ pub struct ReqFicha {
 #[serde(default)]
 pub struct TecnicaFicha {
     pub lenguaje: String,
+    /// Runner de tests. Vacío equivale a `pytest`. Valores: `pytest`, `nextest`.
+    pub runner: String,
     pub version_minima: String,
     pub dependencias_permitidas: Vec<String>,
     pub plataformas: Vec<String>,
@@ -344,19 +346,25 @@ pub fn borrador_tarea(ficha: &Ficha, nombre: &str) -> Result<String, ErrorFicha>
     if lenguaje.is_empty() {
         return Err(ErrorFicha::Estructura("tecnica.lenguaje está vacío".into()));
     }
+    // Vacío y "pytest" dan la salida de siempre. Solo `:3` trae cargo-nextest.
+    let (version_imagen, contrato, oculto) = match ficha.tecnica.runner.trim() {
+        "" | "pytest" => (1, CMD_CONTRATO.into(), CMD_OCULTO.into()),
+        "nextest" => (3, cmd_nextest("contrato"), cmd_nextest("oculto")),
+        otro => {
+            return Err(ErrorFicha::Estructura(format!(
+                "tecnica.runner desconocido: {otro}; usá \"pytest\" o \"nextest\""
+            )));
+        }
+    };
     let borrador = Borrador {
         nombre: nombre.into(),
         lenguaje: lenguaje.into(),
-        imagen: format!("localhost/root-oraculo-{lenguaje}:1"),
+        imagen: format!("localhost/root-oraculo-{lenguaje}:{version_imagen}"),
         spec: "bootstrap/docs/SPEC.md".into(),
         repeticiones: 5,
         repeticiones_inestable: 10,
-        contrato: Cmd {
-            cmd: CMD_CONTRATO.into(),
-        },
-        oculto: Cmd {
-            cmd: CMD_OCULTO.into(),
-        },
+        contrato: Cmd { cmd: contrato },
+        oculto: Cmd { cmd: oculto },
         requisito: ficha.producto.requisito.iter().map(req_borrador).collect(),
         eficiencia: ficha.tecnica.limite.iter().find_map(|l| {
             l.minimo.map(|piso| Eficiencia {
@@ -374,6 +382,14 @@ pub fn borrador_tarea(ficha: &Ficha, nombre: &str) -> Result<String, ErrorFicha>
 // Mismos comandos que scripts/instalar-oraculos.sh.
 const CMD_CONTRATO: &str = "ORACULO_REPO=/repo CARGO_TARGET_DIR=/salida/target python3 -m pytest -q -p no:cacheprovider --junitxml=/salida/contrato.xml /oraculo/contrato";
 const CMD_OCULTO: &str = "ORACULO_REPO=/repo CARGO_TARGET_DIR=/salida/target python3 -m pytest -q -p no:cacheprovider --junitxml=/salida/oculto.xml /oraculo/oculto";
+
+/// Comando de nextest que copia el junit a `/salida/<xml>.xml`. El `cp` corre aunque nextest falle,
+/// y el código de salida de nextest se conserva.
+fn cmd_nextest(xml: &str) -> String {
+    format!(
+        "CARGO_TARGET_DIR=/salida/target cargo nextest run --offline --profile ci; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/{xml}.xml || exit 1; exit $s"
+    )
+}
 
 #[derive(Serialize)]
 struct Borrador {
