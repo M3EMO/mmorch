@@ -174,10 +174,10 @@ Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 |---|---|---|---|---|---|---|---|
 | S1 | Hay tareas suficientes de Rust | Minar 50 commits de 10 repos elegidos con semilla, con los criterios 1 a 5. **Medido: 3 de 50, 6 %, y da "cambia". Ampliado: 16 admitidos de 109 commits, y da "frena" (P94).** Regla nueva: 40 o más admitidos, en 5 repos o más, sostiene | 10 % o más admitidos, de 3 repos o más | De 2 % a 10 %: más repos o minería más larga | Menos de 2 % | 0 USD; GitHub, P79 | 1 a 2 días de CPU |
 | S2 | El costo entra en 50 USD | 3 tareas de punta a punta: 27 evaluaciones (ver el plan, vuelta del 2026-11-09 (3)) y 10 tentativas del saboteador | Proyección de Root de 50 USD o menos | De 50 a 75 USD: el usuario amplía | Más de 75 USD | Hasta 5 USD de los 50, P80, después del cierre | 1 día |
-| S3a | El tiempo es viable | Lo mide S2 | 60 minutos o menos por evaluación, y 7 días o menos en total | Hasta 14 días: se elige por tamaño de repo | Más de 14 días | Incluido en S2 | Incluido |
+| S3a | El tiempo es viable | Lo mide S2 | 60 minutos o menos por evaluación, y 7 días o menos en total | Hasta 14 días: se elige por tamaño de repo | Más de 14 días | Incluido en S2 | **Medido en parte: cada evaluación tardó 16,2 minutos o menos. Falta `corre`** |
 | S3b | El recall de 0,8 es alcanzable | La pasada sobre los 10 defectos frescos | 7 o más de 10 | 4 a 6: el juez y la pasada se amplían antes de D4 | 3 o menos: el usuario decide | **Medido: 0 de 10, 0,4665 USD. Frena** | Hecho |
 | S9 (medido: 66 de 100, sostiene) | El mapa sirve en Rust | 100 crates de categorías conocidas: ¿el vecino más cercano comparte categoría? | 60 % o más | 30 % a 60 %: otro modelo | Menos de 30 % en dos modelos: el mapa no mide | 0 USD; bajar un modelo, P79 | Horas |
-| S13 | El saboteador da casos válidos | 10 intentos en las 3 tareas de S2 | 5 o más compilan, pasan limpios y su test da rojo | 2 a 4: mejorar el prompt | 1 o menos | Incluido en S2 | Incluido |
+| S13 | El saboteador da casos válidos | 10 intentos en las 3 tareas de S2 | 5 o más compilan, pasan limpios y su test da rojo | 2 a 4: mejorar el prompt | 1 o menos | Incluido en S2 | **Medido: 10 de 10 válidas, cerca de 8 distintas. Sostiene** |
 
 Los umbrales de S1, S3a, S9 y S13 son criterio mío, no una medición. No tienen otra base.
 

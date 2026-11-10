@@ -6201,3 +6201,161 @@ Vd solo mira hallazgos y descartes, así que la carga no cambia lo que mide.
 **Después de S2:** proyección, y el dataset según lo medido.
 
 **Preguntas al usuario:** ninguna nueva. Solo si t1 cae en la tercera o la cuarta fila de la tabla.
+
+## Vuelta del 2026-11-09 (4): ajuste real, Vd, defectos de Root y D4
+
+**Estado.** La punta local es 540c4e1, sin push. P84 va en 9,8129 de 12 USD. S2 va en 1,4826 de 5 USD. `corre` espera el login del host. El usuario dijo "Mas tarde", así que no lo pido otra vez.
+
+## 1. Los 5 reales de ajuste
+
+**Repo:** Canop/broot. **Commits:** sus 5 admitidos por criterios 1 a 4: `dfd25e0c224d`, `f8203f9eaadc`, `acfc065e13ea`, `1f77962e6ff3` y `136a5c6c719e`. Tres de ellos son t1, t2 y t3 de S2.
+
+**¿Choca con S2? No, con una regla.**
+- Ajuste se puede mirar. Mostrar sus fichas o evaluarlo no gasta nada sellado.
+- Ningún builder de S2 ve salidas del buscador. El buscador no ve fichas.
+- **Regla:** las 3 tareas de S2 quedan como piloto. No entran a D3, ni al conjunto separado del recall de D4. Eso ya sigue de P94 a: los commits de arreglo van al buscador.
+- **Dato a la vista:** el padre de t3 es `8f3ea21af75c`, una candidata de función nueva. El padre de t3 trae su solución. No choca: cada builder corre fresco y ve solo su tarea. Sí obliga a algo en D4: la tarea `8f3ea21af75c` tampoco entra al conjunto separado del recall.
+
+**Etiquetas, fijadas antes de correr cualquier variante.**
+1. Por commit, tomá `git diff -U0 <padre> <commit>` sobre los `.rs` de producción. Los tests quedan afuera.
+2. La etiqueta son las líneas del lado del padre que el arreglo borra o cambia.
+3. Un trozo que solo agrega líneas se etiqueta con la línea del padre anterior y la siguiente al punto de inserción.
+4. Guardá todo en `~/.cache/root-wt/mineria/ajuste-reales.jsonl`, con repo, commit, padre, archivo y líneas.
+5. Calculá su sha256, informalo en tu próximo informe, y dejá el archivo en solo lectura.
+6. Si después hace falta un cambio, va en un archivo nuevo, con su motivo. El viejo no se pisa.
+
+Esto no es un sellado secreto: ajuste se mira. Es una etiqueta fija antes de medir.
+
+**Copias, una por commit.**
+- `git -C repos/Canop_broot archive <padre> | tar -x -C copias/ajuste-real/<commit10>/`.
+- Sin `.git`. Así el buscador no ve la historia futura con el arreglo.
+- Un defecto por copia. Eso evita el problema M2.
+- **Chequeo:** la copia compila en contenedor sin red, con `cargo build --offline`. Es un build, no una suite. Si tu restricción de esta vuelta incluye builds, esperá.
+
+**Medición.**
+- V3 con la misma configuración que dio 0,833 en sembrados: `auditar --solo-medir` sobre todos los `.rs` de producción del crate.
+- No le pases los archivos del arreglo: eso filtra la ubicación.
+- Un acierto es un hallazgo en el mismo archivo, a 3 líneas o menos de una línea etiquetada (`VENTANA_MEDICION`).
+- Va por cupo, así que espera el login, igual que `corre`.
+- **Regla ya fijada:** 3 o más de 5 abren el final con V3. Menos de 3 dejan el final sellado y vuelve al usuario.
+
+## 2. Qué cambia con Vd en 0,125
+
+**Para el conjunto final: nada.** El final corre una sola variante: la de mayor recall en ajuste, con la regla de 3 de 5. Vd no era candidata con 0,125. La candidata sigue siendo V3, con 0,833. V0 todavía puede cambiar eso.
+
+**Para el Freno A: no se dispara.** Freno A pide que ninguna variante llegue a 0,5 por línea en ajuste. V3 da 0,833, V1 0,739 y V2 0,708. Vd queda descartada, nada más.
+
+**Para "Root no evalúa repos reales sin recall 0,8": la regla sigue, y ahora tiene un dato propio.**
+- Vd es el buscador que Root trae hoy: sondas más juez. Midió 0,125.
+- Los 3 aciertos vienen de cargo-mutants. El juez no acertó ninguno.
+- Root dijo "listo" en 22 de 24 copias con un defecto sembrado. Hoy un "listo" de Root no dice nada sobre defectos que no encontró.
+- **Consecuencia nueva.** Levantar la regla pide dos cosas: una variante que pase el final, y que Root use esa variante como buscador. Si V3 pasa, esa integración va al usuario. V3 va por cupo, y eso cambia el costo de cada evaluación.
+
+**V0 y el tope de P84.** Quedan 2,1871 USD de P84, y yo le asigné 3. Corré V0 con `--tope-usd 2.18`. Si corta, se informa como medición parcial. No pido más tope: V0 ya no decide la hipótesis de familia, porque V1 la debilitó.
+
+## 3. Defectos de Root, en orden
+
+El orden sigue el daño: primero lo que da una decisión falsa, después lo que impide medir.
+
+| Orden | Defecto | Causa medida | Arreglo mínimo | Test de aceptación | Destino |
+|---|---|---|---|---|---|
+| 1 | (a) "listo" con test oculto fallando | `no_listo` solo mira tests ocultos fallidos que ningún requisito nombra (`src/oracle/informe.rs:305`). Un test nombrado solo baja Completitud, y 0,986 pasa el mínimo de 0,9 | Todo test oculto fallido y no inestable dispara NoListo, con su id y su requisito | Test unitario: un requisito con 2 tests, 1 falla, Completitud 0,95: da NoListo. El mismo test inestable no dispara | **Pregunta P95**, y después Tarea 80 |
+| 2 | (c) el juez sin cobertura en un repo grande | El juez lee el comienzo de los 5 archivos más grandes, 6000 caracteres cada uno (`src/oracle/juez.rs:156`, `extractos`). En t1 cubre 6 de 10 de peso en Arquitectura, y 7 de 13 en Diseño | Lectura guiada por el cambio: si la tarea trae estado inicial, primero los trozos cambiados con 40 líneas de contexto. Después, el comienzo de los archivos grandes. Se suma la huella de prompt y rúbricas en `Fila` (revisión de cierre, punto 19) | Test unitario: un cambio en la línea 900 entra al extracto. En t1, `calibrar` de Arquitectura y Diseño da línea base. El costo por evaluación queda en 1,4 veces o menos | **Hito 1b**, antes de D4 |
+| 3 | (e) el juez casi no da línea | Misma causa que (c). El juez ve líneas numeradas, pero solo el comienzo del archivo. Un defecto más abajo es invisible | Va con (c). Además, un hallazgo con línea fuera del extracto mostrado queda "sin línea", y se informa | Test unitario de esa validación. La mejora se mide en sembrados de ajuste, nunca en los 10 frescos ni en el final | **Hito 1b**, junto con (c) |
+| 4 | (b) bloqueo por avisos previos | `bloqueos` bloquea por todo hallazgo de Seguridad de severidad 3, sin mirar su origen (`src/oracle/informe.rs:372`). En t1 son 7 avisos de cargo-audit sobre un `Cargo.lock` viejo | Si la tarea trae estado inicial, Seguridad también se mide ahí. Un hallazgo con el mismo id en los dos estados queda "previo": se informa y no bloquea. Los secretos bloquean siempre | Test unitario: el padre de t1 contra sí mismo no bloquea. Una dependencia vulnerable nueva sí bloquea. Un secreto previo sí bloquea | **Pregunta P96**, y después hito 1b |
+| 5 | (d) alarma por `capas` | No es un defecto de Root. `capas_sin_modulo` hace lo previsto: una capa declarada sin módulos da severidad 3 (`src/oracle/perfiles/rust.rs:674`). El error está en `armar_s2.py`, que declaró `capas = [["patron"]]`. Además, ese hallazgo es de Arquitectura, así que no causó el bloqueo | Regla de D3: `capas` sale del mapa real de módulos del repo bueno, o queda vacío | Chequeo C de D3: `evaluar` sobre el repo bueno da cero hallazgos "falta la capa" | **Regla de D3.** Sin código en Root |
+
+**Por qué (c) y (e) van antes de D4.** D4 calibra el juez por versión. Calibrar el juez de hoy y cambiarlo después tira esa calibración.
+
+**Por qué (a) y (b) son preguntas.** Cambian lo que prometen "listo" y "bloqueado". Hoy "listo" tolera hasta un 10 % de Completitud perdida, y eso parece intencional.
+
+## 4. Proyección de D4
+
+**Costo unitario medido en S2,** con el juez de hoy:
+- `evaluar`: 0,052 a 0,077 USD, media 0,063. Minutos: 5,8 a 8,1.
+- `calibrar` completo, por dimensión con n = 2: 0,126 a 0,215 USD, media 0,165. Minutos: 8,5 a 16,2.
+- Una evaluación con juez adentro de `calibrar` cuesta lo mismo que un `evaluar`: cerca de 0,063 USD.
+- Mis intervalos fueron altos esta vez. Antes fueron bajos por 1,9 veces. No corrijo el sesgo con una sola muestra.
+
+**Escenario A, D4 como está escrito:** 100 evaluaciones, 5 por tarea.
+- 6,3 USD, con banda de 5,2 a 7,7.
+- 7 a 12 horas de CPU, en serie.
+
+**Escenario B, filas calibradas por tarea:** "calibrada" pide 5 defectos y 5 limpios. Con 3 dimensiones de juez y los limpios compartidos, son 3 bases, 15 defectos y 5 limpios: 23 evaluaciones por tarea.
+- 20 tareas dan 460 evaluaciones: 29 USD, con banda de 24 a 35.
+- 31 a 54 horas de CPU.
+- **El escenario A no calibra ninguna fila.** Con 5 evaluaciones por tarea no llegan 5 defectos y 5 limpios. A solo sirve para una calibración agrupada por versión, y esa definición no existe todavía.
+
+**Con la lectura ampliada de (c):** el juez usa 25.745 tokens de entrada y 16.401 de salida por llamada, en promedio. Duplicar la lectura suma cerca de 10.000 tokens de entrada. Si la salida no crece, el multiplicador queda en 1,4 o menos. B quedaría en hasta 40 USD.
+
+**Curva de recall sobre un conjunto separado:** Vd costó 0,10 USD y 14 minutos por copia, con carga. Con 20 copias: 2 USD y cerca de 5 horas. Con V3 por cupo: 0 USD de API.
+
+**Presupuesto.** Del dataset quedan 38,7 USD o menos, después de P84 y S2. B con lectura ampliada no entra. Eso va al usuario al cerrar D3, con los números medidos de (c). No lo pregunto hoy.
+
+**Sin dato:**
+- `corre`: cupo, minutos y tokens por tarea. Es la parte más grande del tiempo, y no tiene ni una muestra.
+- La salida del juez con lectura ampliada. Puede crecer.
+- Los minutos del saboteador por tentativa. No vinieron en tu informe.
+- Cuántas dimensiones de juez aplican en cada tarea. S2 mostró "no aplica" en Arquitectura de t2 y t3.
+
+**S3a.** Cada evaluación tardó 16,2 minutos o menos. Entra en "60 minutos o menos". El total de 7 días depende de `corre`, y no lo puedo cerrar.
+
+## Datos de tu informe
+
+**criterios-nf: alcanza para medir, y no alcanza para D3.**
+- 7 de 38 pasan los criterios 1 a 4: 5 de broot, `986362956e` de smallvec y `6f8e882844` de serie.
+- **`986362956e` queda afuera.** Sus tests son doctests. nextest no corre doctests, así que la partición oculta no corre. Sumar `--doc` es código, y no lo vale por una tarea.
+- Quedan 6 tareas de función nueva, y 5 son de broot. D3 pide 20, estratificadas.
+- El criterio 5 sigue sin medir en todas.
+- Eso va al usuario en P97.
+
+**Regla de D3 para el anexo de tests.**
+1. El diff del commit se parte en producción y tests. Tests son los archivos de `tests/` y los bloques `#[cfg(test)]` dentro de `src/`.
+2. El repo bueno es el padre más el diff de producción.
+3. El diff de tests va a `/oraculo/oculto/test.patch`. `oculto.cmd` lo aplica.
+4. Un trozo que mezcla líneas de producción y de test descarta la tarea. Partirlo a mano no es determinista.
+5. **Chequeos C:** el parche aplica limpio sobre el padre y sobre el repo bueno; con el parche, el repo bueno da verde y el padre da rojo; sin el parche, el repo bueno pasa el contrato; el repo bueno no contiene ningún test del parche.
+6. En una tarea de función nueva, "el padre da rojo" incluye "no compila".
+7. Los tests ocultos deben dar verde en el repo bueno. Memora y brasa no cumplían esto: de ahí salieron los 13 "listo" de Vd con un test fallando.
+
+**S13: sostiene.** 10 de 10 válidas, cerca de 8 distintas. Cuento 8: un par que coincide en archivo y línea es un solo caso. La banda pedía 5 o más.
+
+**V3 sobre los 6 defectos de S2:** 4 de 6. Es informativo. Con 6 casos no concluye nada, y no entra a ningún conjunto del buscador.
+
+## 5. Qué corre en paralelo mientras espera el login
+
+**Lo que espera el login:** todo lo que va por cupo con la credencial del host. Eso es `corre`, V3 en ajuste real, las fichas nuevas y el saboteador.
+
+**Ahora, sin cupo:**
+1. **V0, por API,** con tope de 2,18 USD. V0 no mide tiempo, así que la carga no lo ensucia.
+2. **Etiquetas y copias del ajuste real.** Solo git, sin ejecutar código ajeno. El build va cuando lo permitas.
+3. **Medición offline de (c) y (e),** sin API. Sobre los 24 veredictos de Vd, contá cuántos defectos caen dentro de los extractos que leyó el juez. Contá también cuántos de los 44 hallazgos del juez tienen su línea dentro de un extracto. Ese número es el techo del juez de hoy.
+4. **Partición de tests de las 6 tareas de función nueva,** con la regla de D3. El chequeo con podman va cuando lo permitas.
+
+**Cuando vuelva el login, en este orden:**
+1. `corre` de t1, t2 y t3, solo en la CPU. Sin V0, sin builds y sin otro cupo a la vez. S3a mide sus minutos, y la carga o el límite de cupo los ensucian.
+2. Después, V3 en ajuste real y las fichas, en paralelo. Ninguna de las dos mide tiempo.
+
+**Lo que no se mezcla:** una medición de minutos corre sola. Una medición de recall puede correr con carga. Dos gastos se cuentan por separado: P84 para V0 y P80 para `corre`.
+
+## Preguntas para el usuario (2026-11-09, 4)
+
+**P95: Root dijo "listo" en 13 copias con un test oculto fallando.** Hoy, un test oculto que falla solo baja la completitud, y "listo" acepta hasta un 10 % de completitud perdida.
+
+- **a)** Todo test oculto que falla, y no es inestable, da "no listo". Recomendada: los tests ocultos son la especificación, y un "listo" con un test en rojo engaña.
+- **b)** Dejarlo como está. "Listo" sigue tolerando hasta un 10 % de completitud perdida.
+- **c)** Bajar la tolerancia, sin llevarla a cero. Decime el porcentaje.
+
+**P96: los tres repos de S2 dieron "bloqueado" por avisos de seguridad que ya estaban antes del cambio.** En t1 son 7 avisos sobre dependencias viejas.
+
+- **a)** Bloquea solo lo que el cambio introduce. Lo previo se informa, y no bloquea. Un secreto bloquea siempre. Recomendada: "bloqueado" debe decir algo sobre el cambio, y hoy bloquea casi todo repo real.
+- **b)** Dejarlo como está. Todo aviso grave bloquea, sin importar su origen.
+- **c)** Separar dos decisiones: "bloqueado por el cambio" y "bloqueado por la base".
+
+**P97: el dataset tiene 6 tareas de función nueva, y D3 pide 20.** Cinco de las seis son de broot.
+
+- **a)** Minar otra reserva solo para el dataset. Colab filtra si la punta pasa `cargo test`, dentro de las 50 unidades de P92. Sin API. Son varios días.
+- **b)** Seguir con 6 tareas. El dataset queda chico y casi de un solo repo.
+- **c)** Hacer a, y además sumar al dataset los 5 arreglos de broot después de medir el ajuste real. Las 3 tareas de S2 y `8f3ea21af75c` no entran al conjunto separado del recall. Recomendada: suma 5 tareas hoy sin minar, y las 3 de S2 ya tienen ficha aprobada.
+
+Con c, cambia la regla que fijé arriba en la sección 1: las 3 tareas de S2 dejan de ser solo piloto.
