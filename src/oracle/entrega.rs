@@ -181,9 +181,13 @@ fn args_build(red: bool, etiqueta: &str, dockerfile: &str, contexto: &str) -> Ve
     vec![
         "build".into(),
         PROXY_FUERA.into(),
-        // Sin capacidades, sin ganancia de privilegios y con tope de memoria (Tarea 9d4).
+        // Se quitan todas las capacidades y se devuelven cinco (Tarea 9d4).
+        // Sin ganancia de privilegios y con tope de memoria.
         // `podman build` no acepta `--pids-limit`: el tope de procesos no va aquí.
         "--cap-drop=all".into(),
+        // CHOWN, DAC_OVERRIDE y FOWNER: un RUN toca archivos del rootfs con otro dueño.
+        // SETUID y SETGID: los gestores de paquetes cambian de usuario y de grupo.
+        "--cap-add=CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID".into(),
         "--security-opt=no-new-privileges".into(),
         format!("--memory={MEMORIA}"),
         "--network".into(),
@@ -2594,6 +2598,7 @@ pub(crate) mod tests {
             let args = args_build(red, "etiqueta", "Dockerfile", ".");
             for esperado in [
                 "--cap-drop=all".to_string(),
+                "--cap-add=CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID".to_string(),
                 "--security-opt=no-new-privileges".to_string(),
                 format!("--memory={MEMORIA}"),
             ] {
@@ -2716,21 +2721,33 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn guarda_escenario_sin_ping_ni_procesos_de_mas() {
+    fn guarda_escenario_sin_capacidades_ni_procesos_de_mas() {
         crate::saltar_sin_podman!();
-        // GUARDA: sin capacidades, `ping` falla. Con el tope de procesos, un bucle que crea
-        // más procesos que el límite falla también. Ninguno de los dos sale 0.
+        // GUARDA: `ping` con grupo 0 sale 0 por ping_group_range, por eso se miden capacidades.
+        // Sin capacidades, `chown` a otro usuario falla. Con el tope de procesos, un bucle que crea
+        // más procesos que el límite falla también.
         let corredor = FabricaReal
             .iniciar("docker.io/library/alpine:3.20", None)
             .expect("arranca el contenedor de escenario");
-        let ping = Escenario {
-            id: "ping".into(),
-            cmd: "ping -c 1 -W 1 127.0.0.1".into(),
+        let sin_capacidades = Escenario {
+            id: "capacidades".into(),
+            cmd: "grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/self/status".into(),
         };
-        let r = corredor.correr(&ping).expect("corre el escenario");
+        let r = corredor
+            .correr(&sin_capacidades)
+            .expect("corre el escenario");
+        assert!(
+            matches!(r, Prueba::Paso),
+            "el contenedor tiene capacidades efectivas"
+        );
+        let chown = Escenario {
+            id: "chown".into(),
+            cmd: "chown nobody /tmp".into(),
+        };
+        let r = corredor.correr(&chown).expect("corre el escenario");
         assert!(
             !matches!(r, Prueba::Paso),
-            "ping salió 0 dentro del contenedor"
+            "chown salió 0 dentro del contenedor"
         );
         let bomba = Escenario {
             id: "procesos".into(),
@@ -2940,6 +2957,7 @@ pub(crate) mod tests {
                 "build",
                 "--http-proxy=false",
                 "--cap-drop=all",
+                "--cap-add=CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID",
                 "--security-opt=no-new-privileges",
                 "--memory=2g",
                 "--network",
@@ -2960,6 +2978,7 @@ pub(crate) mod tests {
                 "build",
                 "--http-proxy=false",
                 "--cap-drop=all",
+                "--cap-add=CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID",
                 "--security-opt=no-new-privileges",
                 "--memory=2g",
                 "--network",

@@ -84,3 +84,19 @@ Versión medida: podman 5.8.9 en el host. No se midió la versión dentro de la 
 4. **`inestables_de` y filas nuevas.** Decisión: se usa la fila más reciente que sea vigente y del mismo `tarea_hash`. Una fila nueva de otro `tarea.toml` no tapa a una vieja válida. `aplicar` y `motivo_sin_calibrar` siguen con la más reciente sin filtrar. Las dos reglas pueden divergir en ese caso.
 5. **`--cap-drop=all` en el build.** El brief lo pide. Puede romper un `RUN` que cambie dueños o ejecute `setuid`. ¿Se acepta ese costo?
 6. **Redactor con listas vacías.** Un redactor que devuelve una lista vacía, con acciones visibles, produce un aviso por lista. Decisión: se acepta, porque es la regla pedida.
+
+## Corrección 90b
+
+La suite con podman del orquestador dio 3 fallas en el punto 1. Esta corrección las arregla.
+
+Qué se hizo, en `src/oracle/entrega.rs`:
+- `args_build` agrega `--cap-add=CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID` después de `--cap-drop=all`. Con `--cap-drop=all` solo, un `RUN touch` falla con "Permission denied".
+- `args_build` mantiene `--security-opt=no-new-privileges` y `--memory`. Un comentario explica por qué cada capacidad queda.
+- Los tests `entrega_args_build_llevan_capacidades_y_memoria_sin_pids_limit` y `entrega_red_args_sin_credenciales_ni_montajes` esperan el nuevo argumento.
+- La guarda pasa a llamarse `guarda_escenario_sin_capacidades_ni_procesos_de_mas`. `ping` sale 0 porque `ping_group_range` vale `0 0`.
+- La guarda comprueba que `CapEff` valga `0000000000000000` y que `chown nobody /tmp` no salga 0. La parte de los 700 procesos no cambia.
+
+Tests corridos con podman, sin `ROOT_SIN_PODMAN`:
+- `cargo test --lib guarda_escenario_sin_capacidades`: 1 verde, incluida la parte de los 700 procesos.
+- `cargo test --test entrega containerfile`: 2 verdes.
+- `cargo test --lib entrega_`: 99 verdes, 0 fallas.
