@@ -4,11 +4,11 @@
 //! (`construir_dockerfile`, Tarea 9d2) no se conecta a `evaluar`: Tarea 13 la arma. Si un `RUN`
 //! pide red, la construcción se repite una vez con red, sin credenciales ni montajes (Tarea 9d3).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use schemars::JsonSchema;
@@ -105,23 +105,51 @@ pub fn construir_dockerfile(
     construir_con(repo, home, tarea, imagenes, PLAZO_BUILD, &PodmanReal).map(|c| c.resultado)
 }
 
+/// Resultado de la sonda de red del host (Tarea 91).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Red {
+    /// El control corre y la prueba con `pasta` sale 0.
+    Hay,
+    /// El control corre y la prueba con `pasta` falla: el host no arma la red.
+    NoHay,
+    /// El control no corre: la sonda no dice nada de la red. Trae el motivo.
+    NoCorrio(String),
+}
+
 /// Corre `podman` con argumentos. El real llama a `correr_podman`; los tests usan un falso.
 pub(crate) trait Podman {
     fn correr(&self, args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo>;
 
-    /// Sonda de red del host (Tarea 91): verdadero si un contenedor de `imagen` arma la red `pasta`.
-    /// Solo se pregunta cuando la repetición con red falló.
-    fn red_disponible(&self, imagen: &str) -> bool {
+    /// Sonda de red del host (Tarea 91). Solo se pregunta cuando la repetición con red falló.
+    fn red_disponible(&self, imagen: &str) -> Red {
         sonda_de_red(|args| self.correr(args, PLAZO_CORTO), imagen)
     }
 }
 
-/// Corre la sonda de red con `correr`. Verdadero solo si el contenedor sale con 0.
-/// Un `Err` de podman cuenta como sin red.
+/// Sonda de red de `imagen`. Primero el control sin red: si no corre, `NoCorrio`. Luego la prueba
+/// con `pasta`: sale 0 es `Hay`; si no, `NoHay`.
 fn sonda_de_red(
     correr: impl Fn(&[&str]) -> Result<SalidaPodman, ErrorOraculo>,
     imagen: &str,
-) -> bool {
+) -> Red {
+    let control = correr(&[
+        "run",
+        PROXY_FUERA,
+        "--rm",
+        "--network",
+        "none",
+        "--pull=never",
+        "--entrypoint",
+        "sh",
+        imagen,
+        "-c",
+        "true",
+    ]);
+    match control {
+        Err(error) => return Red::NoCorrio(error.to_string()),
+        Ok(salida) if salida.codigo != 0 => return Red::NoCorrio(motivo_de_control(&salida)),
+        Ok(_) => {}
+    }
     let prueba = correr(&[
         "run",
         PROXY_FUERA,
@@ -135,7 +163,40 @@ fn sonda_de_red(
         "-c",
         "true",
     ]);
-    matches!(prueba, Ok(salida) if salida.codigo == 0)
+    if matches!(prueba, Ok(salida) if salida.codigo == 0) {
+        Red::Hay
+    } else {
+        Red::NoHay
+    }
+}
+
+/// Motivo de un control que sale con código distinto de 0: la última línea del stderr, o el código.
+fn motivo_de_control(salida: &SalidaPodman) -> String {
+    ultima_linea_de(&salida.stderr)
+        .unwrap_or_else(|| format!("sin salida de error, código {}", salida.codigo))
+}
+
+/// Sonda con memoria por imagen. Una imagen con red `Hay` ya no corre la sonda. Lo demás no se guarda.
+fn sonda_con_memoria(
+    memoria: &Mutex<HashSet<String>>,
+    correr: impl Fn(&[&str]) -> Result<SalidaPodman, ErrorOraculo>,
+    imagen: &str,
+) -> Red {
+    let guardada = memoria
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(imagen);
+    if guardada {
+        return Red::Hay;
+    }
+    let red = sonda_de_red(correr, imagen);
+    if red == Red::Hay {
+        memoria
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(imagen.to_string());
+    }
+    red
 }
 
 /// Podman real: lanza el binario con `correr_podman`.
@@ -146,10 +207,11 @@ impl Podman for PodmanReal {
         correr_podman_build("podman", args, plazo)
     }
 
-    /// Se guarda una vez por proceso: la red del host no cambia de una imagen a otra.
-    fn red_disponible(&self, imagen: &str) -> bool {
-        static SONDA: OnceLock<bool> = OnceLock::new();
-        *SONDA.get_or_init(|| sonda_de_red(|args| self.correr(args, PLAZO_CORTO), imagen))
+    /// Las imágenes con red `Hay` quedan por proceso. Una imagen no vale por otra.
+    fn red_disponible(&self, imagen: &str) -> Red {
+        static MEMORIA_RED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+        let memoria = MEMORIA_RED.get_or_init(|| Mutex::new(HashSet::new()));
+        sonda_con_memoria(memoria, |args| self.correr(args, PLAZO_CORTO), imagen)
     }
 }
 
@@ -556,34 +618,55 @@ fn construir_con<'a>(
                         SONDA,
                         reqs,
                     ));
-                } else if !podman.red_disponible(&tarea.imagen) {
-                    // El host no arma la red: no hay veredicto. La última línea del stderr solo es un dato.
-                    let dato = red_no_configurada(&salida)
-                        .or_else(|| ultima_linea_de(&salida.stderr))
-                        .unwrap_or_else(|| "sin salida de error".into());
-                    avisos.push(format!("{AVISO_RED_NO_ARRANCO}: {dato}"));
-                    resultado
-                        .pendientes
-                        .push(pendiente_de_build(MOTIVO_RED_EN_HOST.into()));
-                    return Ok(Construccion {
-                        resultado,
-                        imagen: None,
-                        avisos,
-                    });
                 } else {
-                    // Con la red del host, el fallo es del producto: hallazgo. Si podman no arrancó, aviso.
-                    match clasificar_fallo(&salida, &ruta, &texto, reqs, true) {
-                        Ok(desenlace) => anotar_desenlace(&mut resultado, desenlace),
-                        Err(error) => {
-                            avisos.push(format!("{AVISO_RED_NO_ARRANCO}: {error}"));
-                            resultado.pendientes.push(pendiente_de_build(motivo));
+                    match podman.red_disponible(&tarea.imagen) {
+                        Red::NoCorrio(motivo_sonda) => {
+                            // La sonda no corrió: no dice si el host tiene red. Es infraestructura, no pendiente.
+                            resultado.sin_veredicto.push(MotivoSinVeredicto {
+                                causa: format!(
+                                    "infraestructura: la sonda de red no pudo correr: {motivo_sonda}"
+                                ),
+                                linea,
+                                imagen: None,
+                            });
+                            avisos.push(format!("{AVISO_RED_NO_ARRANCO}: {motivo_sonda}"));
+                            return Ok(Construccion {
+                                resultado,
+                                imagen: None,
+                                avisos,
+                            });
+                        }
+                        Red::NoHay => {
+                            // El host no arma la red: no hay veredicto. La última línea del stderr solo es un dato.
+                            let dato = red_no_configurada(&salida)
+                                .or_else(|| ultima_linea_de(&salida.stderr))
+                                .unwrap_or_else(|| "sin salida de error".into());
+                            avisos.push(format!("{AVISO_RED_NO_ARRANCO}: {dato}"));
+                            resultado
+                                .pendientes
+                                .push(pendiente_de_build(MOTIVO_RED_EN_HOST.into()));
+                            return Ok(Construccion {
+                                resultado,
+                                imagen: None,
+                                avisos,
+                            });
+                        }
+                        Red::Hay => {
+                            // Con la red del host, el fallo es del producto: hallazgo. Si podman no arrancó, aviso.
+                            match clasificar_fallo(&salida, &ruta, &texto, reqs, true) {
+                                Ok(desenlace) => anotar_desenlace(&mut resultado, desenlace),
+                                Err(error) => {
+                                    avisos.push(format!("{AVISO_RED_NO_ARRANCO}: {error}"));
+                                    resultado.pendientes.push(pendiente_de_build(motivo));
+                                }
+                            }
+                            return Ok(Construccion {
+                                resultado,
+                                imagen: None,
+                                avisos,
+                            });
                         }
                     }
-                    return Ok(Construccion {
-                        resultado,
-                        imagen: None,
-                        avisos,
-                    });
                 }
             }
             otro => {
@@ -3095,9 +3178,18 @@ pub(crate) mod tests {
         args.iter().any(|a| a.starts_with("pasta"))
     }
 
-    /// Verdadero si la llamada es la sonda de red del host (Tarea 91): un `run` con `pasta` y `sh`.
+    /// Verdadero si la llamada es la prueba de la sonda de red del host (Tarea 91): un `run` con `pasta` y `sh`.
     fn es_sonda_de_red(args: &[&str]) -> bool {
         args[0] == "run" && args.contains(&"sh") && args.iter().any(|a| a.starts_with("pasta"))
+    }
+
+    /// Verdadero si la llamada es el control de la sonda: un `run` sin red con `sh -c true` sobre la
+    /// imagen base. `tiene_sh` usa la misma forma, pero con la etiqueta de build (`root-entrega-*`).
+    fn es_control_de_red(args: &[&str]) -> bool {
+        args[0] == "run"
+            && args.contains(&"none")
+            && args.ends_with(&["-c", "true"])
+            && !args[args.len() - 3].starts_with("root-entrega-")
     }
 
     /// Salida de la sonda de red cuando el host no arma la red `pasta`.
@@ -3119,17 +3211,36 @@ pub(crate) mod tests {
         responde_build_con_sonda(sin_red, con_red, true)
     }
 
-    /// Como `responde_build`. `sonda_ok` dice si la sonda de red del host sale bien.
+    /// Como `responde_build`. `sonda_ok` dice si la prueba de la sonda de red del host sale bien.
+    /// El control sale verde.
     pub(crate) fn responde_build_con_sonda(
         sin_red: SalidaPodman,
         con_red: SalidaPodman,
         sonda_ok: bool,
     ) -> impl Fn(&[&str]) -> SalidaPodman {
+        responde_build_con_control(sin_red, con_red, true, sonda_ok)
+    }
+
+    /// Como `responde_build_con_sonda`. `control_ok` dice si el control sin red de la sonda corre.
+    /// `prueba_ok` dice si la prueba con `pasta` sale bien.
+    pub(crate) fn responde_build_con_control(
+        sin_red: SalidaPodman,
+        con_red: SalidaPodman,
+        control_ok: bool,
+        prueba_ok: bool,
+    ) -> impl Fn(&[&str]) -> SalidaPodman {
         move |args| match args[0] {
             "build" if es_build_con_red(args) => con_red.clone(),
             "build" => sin_red.clone(),
+            "run" if es_control_de_red(args) => {
+                if control_ok {
+                    salida_ok()
+                } else {
+                    salida_control_roja()
+                }
+            }
             "run" if es_sonda_de_red(args) => {
-                if sonda_ok {
+                if prueba_ok {
                     salida_ok()
                 } else {
                     salida_sonda_roja()
@@ -3774,6 +3885,184 @@ pub(crate) mod tests {
         );
         assert_eq!(podman.builds().len(), 1, "{:?}", podman.builds());
         assert!(gates_de_repeticion(home.path()).is_empty());
+    }
+
+    /// Escena de un test de la sonda: repo, casa y tarea en un temporal dentro del proyecto, no en /tmp.
+    struct EscenaSonda {
+        _base: tempfile::TempDir,
+        repo: PathBuf,
+        home: PathBuf,
+        tarea: Tarea,
+    }
+
+    fn escena_de_sonda(dockerfile: &str) -> EscenaSonda {
+        let base = tempfile::Builder::new()
+            .prefix("sonda-")
+            .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+            .expect("temporal del proyecto");
+        let repo = base.path().join("repo");
+        fs::create_dir_all(&repo).expect("crea el repo");
+        fs::write(repo.join("Dockerfile"), dockerfile).expect("escribe el Dockerfile");
+        let home = base.path().join("home");
+        fs::create_dir_all(&home).expect("crea la casa");
+        let carpeta_tarea = base.path().join("tarea");
+        fs::create_dir_all(&carpeta_tarea).expect("crea la carpeta de la tarea");
+        fs::write(
+            carpeta_tarea.join("tarea.toml"),
+            "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"i\"\nspec = \"s\"\n\
+             [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n",
+        )
+        .expect("escribe tarea.toml");
+        let tarea = Tarea::cargar_de(&carpeta_tarea).expect("carga la tarea");
+        EscenaSonda {
+            _base: base,
+            repo,
+            home,
+            tarea,
+        }
+    }
+
+    #[test]
+    fn build_con_control_que_falla_da_infraestructura_no_pendiente() {
+        let escena = escena_de_sonda(DF_RED);
+        let podman = PodmanFalso::nuevo(responde_build_con_control(
+            salida_sin_red(),
+            salida_red_no_configurada(),
+            false,
+            true,
+        ));
+        let c = construir_con(
+            &escena.repo,
+            &escena.home,
+            &escena.tarea,
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("un control de red roto no tumba la construcción");
+        let r = &c.resultado;
+        assert_eq!(r.sin_veredicto.len(), 1, "{:?}", r.sin_veredicto);
+        let causa = &r.sin_veredicto[0].causa;
+        assert!(causa.contains("infraestructura"), "{causa}");
+        assert!(causa.contains("image not found"), "{causa}");
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+    }
+
+    #[test]
+    fn build_con_control_verde_y_prueba_roja_queda_pendiente_con_su_motivo() {
+        let escena = escena_de_sonda(DF_RED);
+        let podman = PodmanFalso::nuevo(responde_build_con_control(
+            salida_sin_red(),
+            salida_red_no_configurada(),
+            true,
+            false,
+        ));
+        let c = construir_con(
+            &escena.repo,
+            &escena.home,
+            &escena.tarea,
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(r.sin_veredicto.is_empty(), "{:?}", r.sin_veredicto);
+        assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
+        assert_eq!(r.pendientes[0].motivo, MOTIVO_RED_EN_HOST);
+    }
+
+    /// Sonda de mentira que cuenta sus llamadas. El control sale verde. La prueba con `pasta` sale
+    /// según `prueba_ok`.
+    fn sonda_que_cuenta(
+        llamadas: &Cell<u32>,
+        prueba_ok: bool,
+    ) -> impl Fn(&[&str]) -> Result<SalidaPodman, ErrorOraculo> + '_ {
+        move |args: &[&str]| {
+            llamadas.set(llamadas.get() + 1);
+            let es_prueba = args.iter().any(|a| a.starts_with("pasta"));
+            Ok(if es_prueba && !prueba_ok {
+                salida_sonda_roja()
+            } else {
+                salida_ok()
+            })
+        }
+    }
+
+    #[test]
+    fn sonda_que_fallo_una_vez_y_pasa_la_segunda_da_hay_red() {
+        let memo = Mutex::new(HashSet::new());
+        let llamadas = Cell::new(0);
+        let correr = |_: &[&str]| -> Result<SalidaPodman, ErrorOraculo> {
+            let k = llamadas.get();
+            llamadas.set(k + 1);
+            Ok(if k == 0 {
+                salida_control_roja()
+            } else {
+                salida_ok()
+            })
+        };
+        assert_eq!(
+            sonda_con_memoria(&memo, correr, "imagen"),
+            Red::NoCorrio("Error: image not found".into())
+        );
+        assert_eq!(sonda_con_memoria(&memo, correr, "imagen"), Red::Hay);
+    }
+
+    #[test]
+    fn hay_red_de_una_imagen_no_vale_para_otra() {
+        let memo = Mutex::new(HashSet::new());
+        let llamadas = Cell::new(0);
+        assert_eq!(
+            sonda_con_memoria(&memo, sonda_que_cuenta(&llamadas, true), "imagen-a"),
+            Red::Hay
+        );
+        let tras_a = llamadas.get();
+        assert!(tras_a > 0, "la primera vez la sonda corre");
+        assert_eq!(
+            sonda_con_memoria(&memo, sonda_que_cuenta(&llamadas, true), "imagen-a"),
+            Red::Hay
+        );
+        assert_eq!(
+            llamadas.get(),
+            tras_a,
+            "una imagen recordada no corre la sonda"
+        );
+        assert_eq!(
+            sonda_con_memoria(&memo, sonda_que_cuenta(&llamadas, false), "imagen-b"),
+            Red::NoHay
+        );
+        assert!(llamadas.get() > tras_a, "la imagen B corre su propia sonda");
+        let guardadas = memo.lock().expect("memoria");
+        assert!(guardadas.contains("imagen-a"));
+        assert!(!guardadas.contains("imagen-b"));
+    }
+
+    #[test]
+    fn sonda_de_red_nohay_y_nocorrio_no_se_guardan() {
+        let memo = Mutex::new(HashSet::new());
+        let llamadas = Cell::new(0);
+        assert_eq!(
+            sonda_con_memoria(&memo, sonda_que_cuenta(&llamadas, false), "imagen"),
+            Red::NoHay
+        );
+        assert!(memo.lock().expect("memoria").is_empty());
+        let roja = |_: &[&str]| -> Result<SalidaPodman, ErrorOraculo> { Ok(salida_control_roja()) };
+        assert!(matches!(
+            sonda_con_memoria(&memo, roja, "imagen"),
+            Red::NoCorrio(_)
+        ));
+        assert!(memo.lock().expect("memoria").is_empty());
+    }
+
+    /// Salida del control de la sonda cuando podman no encuentra la imagen base.
+    pub(crate) fn salida_control_roja() -> SalidaPodman {
+        SalidaPodman {
+            paso: None,
+            codigo: 125,
+            stdout: String::new(),
+            stderr: "Error: image not found\n".into(),
+        }
     }
 
     /// Salida de `podman build` con red cuando podman no puede armar la red del `RUN` (sin `slirp4netns`).
