@@ -386,8 +386,13 @@ struct Corrida<'a> {
 #[derive(Debug)]
 enum Suite {
     Clasificada(Clasificacion),
+    /// El contrato no compila (nextest, código 101). La clasificación la arma `evaluar_con`.
+    NoCompila,
     SinVeredicto(String),
 }
+
+/// Aviso del producto que no compila: su contrato no corre y la oculta tampoco.
+const MOTIVO_PRODUCTO_NO_COMPILA: &str = "el producto no compila";
 
 /// Evalúa `repo` con la tarea: corre el contrato y el oculto sobre una copia del repo, y las sondas.
 pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> {
@@ -693,6 +698,7 @@ fn evaluar_con(
         historial: ruta_historial.as_deref(),
     };
     // Una suite que la parte no pide no corre. Cada suite recibe sus exclusiones (desempate 1).
+    let mut no_compila = false;
     let contrato = if partes.contrato {
         match evaluar_suite(
             &corrida,
@@ -704,6 +710,14 @@ fn evaluar_con(
             deps.correr,
         )? {
             Suite::Clasificada(c) => c,
+            Suite::NoCompila => {
+                no_compila = true;
+                avisos.push("contrato: la suite no compila".into());
+                clasificacion_fallida(
+                    esperados_de_requisitos(tarea, "contrato", &excluidos_del_contrato(tarea)),
+                    MOTIVO_PRODUCTO_NO_COMPILA.into(),
+                )
+            }
             Suite::SinVeredicto(motivo) => {
                 avisos.push(format!("contrato: {motivo}"));
                 let motivo = format!("suite del contrato sin veredicto: {motivo}");
@@ -726,16 +740,26 @@ fn evaluar_con(
         .map(|e| e.test.clone())
         .collect();
     let oculto = if partes.oculto {
-        match evaluar_suite(
-            &corrida,
-            &tarea.oculto,
-            DIR_OCULTO,
-            XML_OCULTO,
-            "oculto",
-            &excluidos,
-            deps.correr,
-        )? {
+        // Con el producto roto, la oculta no corre: sus tests esperados cuentan como fallados.
+        let suite = if no_compila {
+            Suite::NoCompila
+        } else {
+            evaluar_suite(
+                &corrida,
+                &tarea.oculto,
+                DIR_OCULTO,
+                XML_OCULTO,
+                "oculto",
+                &excluidos,
+                deps.correr,
+            )?
+        };
+        match suite {
             Suite::Clasificada(c) => c,
+            Suite::NoCompila => clasificacion_fallida(
+                esperados_de_requisitos(tarea, "oculto", &excluidos),
+                MOTIVO_PRODUCTO_NO_COMPILA.into(),
+            ),
             Suite::SinVeredicto(motivo) => {
                 avisos.push(format!("oculto: {motivo}"));
                 let motivo = format!("suite oculta sin veredicto: {motivo}");
@@ -813,6 +837,7 @@ fn evaluar_con(
         entrega,
         &partes,
         deps.calibracion,
+        no_compila,
     )?;
     let mut tasas = BTreeMap::new();
     for (id, tasa) in &contrato.tasas {
@@ -828,7 +853,12 @@ fn evaluar_con(
         .collect();
     // Los avisos del historial de cada suite (líneas ilegibles) llegan al veredicto.
     avisos.extend(contrato.avisos.iter().cloned());
-    avisos.extend(oculto.avisos.iter().cloned());
+    // El aviso del producto que no compila sale de las dos suites: va una vez.
+    for aviso in &oculto.avisos {
+        if !avisos.contains(aviso) {
+            avisos.push(aviso.clone());
+        }
+    }
     let mut todos = hallazgos;
     todos.extend(medicion.hallazgos);
     avisos.extend(medicion.avisos);
@@ -875,7 +905,7 @@ fn evaluar_con(
         contrato_fallidos: fallidos_de(&contrato),
         hallazgos_descartados: medicion.hallazgos_descartados,
         extractos: medicion.extractos,
-        no_compila: false,
+        no_compila,
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
     let redactor_medido = deps
@@ -997,6 +1027,7 @@ fn medir(
     entrega: ResultadoEntrega,
     partes: &Partes,
     calibracion: &Calibraciones,
+    no_compila: bool,
 ) -> Result<Medicion, ErrorOraculo> {
     let resultados = requisitos::desde_clasificaciones(contrato, oculto);
     let estados = requisitos::evaluar_requisitos(
@@ -1049,7 +1080,18 @@ fn medir(
     }
     let mut hallazgos: Vec<Hallazgo> = sondas.iter().flat_map(|s| s.hallazgos.clone()).collect();
     // El juez ve los hallazgos de las sondas (el ciclo de módulos topa `diseno.modularidad`).
-    let juicio = juzgar_diseno(tarea, juez, repo, &hallazgos)?;
+    // Con el producto roto, el juez no se consulta: su juicio queda vacío.
+    let juicio = if no_compila {
+        Juicio {
+            resultado: None,
+            hallazgos: Vec::new(),
+            avisos: vec!["sin juez: el producto no compila".into()],
+            topes: juez::topes_desde_sondas(&hallazgos, juez.rubricas),
+            descartados: Vec::new(),
+        }
+    } else {
+        juzgar_diseno(tarea, juez, repo, &hallazgos)?
+    };
     hallazgos.extend(requisitos::hallazgos_inestables(
         &tarea.requisito,
         &resultados,
@@ -1073,7 +1115,19 @@ fn medir(
         .map(|&dimension| match dimension {
             // Una dimensión que la calibración no pidió no se mide: sin veredicto, no un puntaje falso.
             _ if !partes.mide(dimension) => sin_veredicto_puntaje(dimension, NO_MEDIDA.into()),
-            Dimension::Funciona => funciona(tarea, contrato, oculto, &entrega.escenarios),
+            Dimension::Funciona => {
+                let puntaje = funciona(tarea, contrato, oculto, &entrega.escenarios);
+                // Con el producto roto y sin tests esperados, Funciona vale 0 y tiene veredicto.
+                if no_compila && puntaje.sin_veredicto.as_deref() == Some(MOTIVO_SIN_TESTS) {
+                    Puntaje {
+                        valor: 0.0,
+                        sin_veredicto: None,
+                        ..puntaje
+                    }
+                } else {
+                    puntaje
+                }
+            }
             Dimension::Diseno => {
                 let excluidos = excluidos_de(
                     calibracion,
@@ -1749,7 +1803,7 @@ fn funciona(
     let (pasa_oculto, total_oculto) = fraccion_pasa(oculto, &del_oculto);
     let total = total_contrato + total_oculto;
     if total == 0 {
-        return sin_veredicto_puntaje(DIMENSION, "no hay tests que medir".into());
+        return sin_veredicto_puntaje(DIMENSION, MOTIVO_SIN_TESTS.into());
     }
     let mut partes = vec![(pasa_contrato + pasa_oculto) as f32 / total as f32];
     if !tarea.escenario.is_empty() {
@@ -1783,6 +1837,9 @@ fn funciona(
         faltantes: Vec::new(),
     }
 }
+
+/// Motivo de Funciona sin tests esperados: no hay nada que medir.
+const MOTIVO_SIN_TESTS: &str = "no hay tests que medir";
 
 /// Tests que pasan y tests medidos de una suite, sin los de `entorno` (ids sin prefijo de esa suite).
 /// Los omitidos no cuentan.
@@ -2175,20 +2232,29 @@ fn sin_veredicto_o_no_compila(
     if !es_suite_fallida(&motivo) {
         return Suite::SinVeredicto(motivo);
     }
+    // Solo el contrato sale `NoCompila`: `evaluar_con` lo marca como producto roto.
+    if suite == "contrato" && motivo == MOTIVO_NO_COMPILA {
+        return Suite::NoCompila;
+    }
     let esperados = esperados_de_requisitos(c.tarea, suite, excluidos);
     if esperados.is_empty() {
         return Suite::SinVeredicto(motivo);
     }
+    Suite::Clasificada(clasificacion_fallida(esperados, motivo))
+}
+
+/// Clasificación de una suite que no corre o no compila: cada test esperado cuenta como fallado, con `aviso`.
+fn clasificacion_fallida(esperados: BTreeSet<String>, aviso: String) -> Clasificacion {
     let total = esperados.len() as u32;
-    Suite::Clasificada(Clasificacion {
+    Clasificacion {
         estables: esperados
             .into_iter()
             .map(|id| (id, ResultadoTest::Falla))
             .collect(),
         conteo: Conteo { pasa: 0, total },
-        avisos: vec![motivo],
+        avisos: vec![aviso],
         ..Clasificacion::default()
-    })
+    }
 }
 
 /// Ids que la suite `suite` debía correr según sus requisitos (`pruebas` y `bordes`), sin `excluidos`.
@@ -3880,7 +3946,12 @@ mod tests {
             &correr,
         )
         .expect("sin infra");
-        assert_no_compila(&s, &["test_a::t1", "test_a::t3"]);
+        // El contrato que no compila sale `NoCompila`: `evaluar_con` arma su clasificación con estos esperados.
+        assert!(matches!(s, Suite::NoCompila), "{s:?}");
+        assert_eq!(
+            esperados_de_requisitos(&tarea, "contrato", &BTreeSet::new()),
+            BTreeSet::from(["test_a::t1".to_string(), "test_a::t3".to_string()])
+        );
     }
 
     #[test]
@@ -3952,6 +4023,275 @@ mod tests {
             matches!(&s, Suite::SinVeredicto(m) if m == MOTIVO_NO_COMPILA),
             "{s:?}"
         );
+    }
+
+    /// Tarea de Rust con las dos suites en nextest. Sus requisitos son los de `tarea_rust`: los ocultos
+    /// `test_b::t3` y `t4`.
+    fn tarea_rust_nextest(base: &Path) -> Tarea {
+        let mut tarea = tarea_rust(base);
+        tarea.contrato.cmd = cmd_nextest_de_prueba("contrato");
+        tarea.oculto.cmd = cmd_nextest_de_prueba("oculto");
+        tarea
+    }
+
+    /// Evaluación de `tarea` (nextest) sobre `repo`, con la caché de `base` lista.
+    fn evaluar_nextest(base: &Path, tarea: &Tarea, repo: &Path, deps: Dependencias) -> Veredicto {
+        let home = home_con_cache(base, LOCK_SANO);
+        evaluar_con(repo, tarea, &opciones(&home), deps).expect("evalúa")
+    }
+
+    /// Ejecutor de suites nextest. El contrato sale con `codigo_contrato` y su junit (si hay). La oculta sale
+    /// con `codigo_oculto` y su junit (si hay), y cada corrida suya suma en `ocultas`. Otra corrida es un error.
+    fn ejecutor_suites_nextest<'a>(
+        codigo_contrato: i32,
+        junit_contrato: Option<&'static str>,
+        codigo_oculto: i32,
+        junit_oculto: Option<&'static str>,
+        ocultas: &'a Cell<u32>,
+    ) -> impl Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo> + 'a {
+        move |e: &contenedor::Ejecucion| {
+            if e.oraculo_destino.as_deref() == Some(DIR_CONTRATO) {
+                if let Some(texto) = junit_contrato {
+                    fs::write(e.salida.join(XML_CONTRATO), texto).expect("junit");
+                }
+                return Ok(resultado_falso(codigo_contrato, ""));
+            }
+            assert_eq!(
+                e.oraculo_destino.as_deref(),
+                Some(DIR_OCULTO),
+                "corrida inesperada"
+            );
+            ocultas.set(ocultas.get() + 1);
+            if let Some(texto) = junit_oculto {
+                fs::write(e.salida.join(XML_OCULTO), texto).expect("junit");
+            }
+            Ok(resultado_falso(codigo_oculto, ""))
+        }
+    }
+
+    /// Herramientas sanas, salvo `cargo mutants`: con el build roto, cargo-mutants sale con error y sin salida.
+    struct HerramientasSinMutantes(HerramientasSanas);
+
+    impl EjecutorHerramienta for HerramientasSinMutantes {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if cmd.contains("cargo mutants") {
+                return Ok(SalidaHerramienta {
+                    codigo: 101,
+                    ..SalidaHerramienta::default()
+                });
+            }
+            self.0.ejecutar(cmd)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            self.0.tiene_rustsec()
+        }
+    }
+
+    fn herramientas_sin_mutantes() -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
+        |_: &Preparada| {
+            Box::new(HerramientasSinMutantes(HerramientasSanas {
+                faltan: Vec::new(),
+                fuga: false,
+            }))
+        }
+    }
+
+    #[test]
+    fn oraculo_no_compila_contrato_deja_funciona_en_cero_y_ocultos_fallados() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust_nextest(base.path());
+        let ocultas = Cell::new(0);
+        let correr = ejecutor_suites_nextest(101, None, 0, None, &ocultas);
+        let v = evaluar_nextest(
+            base.path(),
+            &tarea,
+            &repo,
+            deps_de(&correr, &herramientas(&[])),
+        );
+        assert!(v.no_compila);
+        let funciona = puntaje_de_prueba(&v, Dimension::Funciona);
+        assert_eq!(funciona.sin_veredicto, None, "{funciona:?}");
+        assert_eq!(funciona.valor, 0.0);
+        assert_eq!(v.ocultos_fallidos, vec!["test_b::t3", "test_b::t4"]);
+        let completitud = puntaje_de_prueba(&v, Dimension::Completitud);
+        assert_eq!(completitud.sin_veredicto, None, "{completitud:?}");
+        assert_eq!(completitud.valor, 0.0);
+    }
+
+    #[test]
+    fn oraculo_no_compila_no_corre_la_oculta_ni_llama_al_juez() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust_nextest(base.path());
+        let ocultas = Cell::new(0);
+        let correr = ejecutor_suites_nextest(101, None, 0, None, &ocultas);
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([item_juez(MODULARIDAD_ID, 2, json!([ev_lib()]))]),
+                json!([]),
+            ),
+            0.25,
+        );
+        let rubricas = [rubrica_diseno()];
+        let v = evaluar_nextest(
+            base.path(),
+            &tarea,
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        assert_eq!(ocultas.get(), 0);
+        assert_eq!(juez.llamadas(), 0);
+        assert!(v.costo_usd.abs() < 1e-9, "{}", v.costo_usd);
+        assert!(
+            v.hallazgos_descartados.is_empty(),
+            "{:?}",
+            v.hallazgos_descartados
+        );
+        assert!(
+            v.avisos
+                .contains(&"sin juez: el producto no compila".to_string()),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    #[test]
+    fn oraculo_no_compila_mantiene_las_sondas_de_seguridad() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust_nextest(base.path());
+        let ocultas = Cell::new(0);
+        let correr = ejecutor_suites_nextest(101, None, 0, None, &ocultas);
+        let v = evaluar_nextest(
+            base.path(),
+            &tarea,
+            &repo,
+            deps_de(&correr, &herramientas_con_fuga()),
+        );
+        assert!(v.no_compila);
+        let seguridad = puntaje_de_prueba(&v, Dimension::Seguridad);
+        assert_eq!(seguridad.sin_veredicto, None, "{seguridad:?}");
+        assert!(
+            v.hallazgos
+                .iter()
+                .any(|h| h.dimension == Dimension::Seguridad),
+            "{:?}",
+            v.hallazgos
+        );
+    }
+
+    #[test]
+    fn oraculo_no_compila_sin_pruebas_esperadas_da_funciona_en_cero_con_veredicto() {
+        // Sin tests esperados, Funciona no tiene qué medir: con el producto roto, vale 0 con veredicto.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let mut tarea = tarea_rust_nextest(base.path());
+        tarea.requisito.clear();
+        let ocultas = Cell::new(0);
+        let correr = ejecutor_suites_nextest(101, None, 0, None, &ocultas);
+        let v = evaluar_nextest(
+            base.path(),
+            &tarea,
+            &repo,
+            deps_de(&correr, &herramientas(&[])),
+        );
+        assert!(v.no_compila);
+        let funciona = puntaje_de_prueba(&v, Dimension::Funciona);
+        assert_eq!(funciona.sin_veredicto, None, "{funciona:?}");
+        assert_eq!(funciona.valor, 0.0);
+    }
+
+    #[test]
+    fn oraculo_no_compila_pruebas_con_mutantes_rotos_no_da_verde() {
+        // cargo-mutants no corre con el build roto: Pruebas no puede quedar verde.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust_nextest(base.path());
+        let ocultas = Cell::new(0);
+        let correr = ejecutor_suites_nextest(101, None, 0, None, &ocultas);
+        let v = evaluar_nextest(
+            base.path(),
+            &tarea,
+            &repo,
+            deps_de(&correr, &herramientas_sin_mutantes()),
+        );
+        assert!(v.no_compila);
+        let pruebas = puntaje_de_prueba(&v, Dimension::Pruebas);
+        assert!(pruebas.sin_veredicto.is_some(), "{pruebas:?}");
+    }
+
+    #[test]
+    fn oraculo_no_compila_con_pytest_y_codigo_1_no_cambia() {
+        // Guarda: con pytest, la falla del contrato es la de siempre.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust(base.path());
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO_CON_FALLA);
+        let v = evaluar_con(
+            &repo,
+            &tarea,
+            &opciones(&home),
+            deps_de(&correr, &herramientas(&[])),
+        )
+        .expect("evalúa");
+        assert!(!v.no_compila);
+        assert!(
+            !v.avisos
+                .contains(&"contrato: la suite no compila".to_string())
+        );
+        assert_eq!(v.contrato_fallidos, vec!["test_a::t1"]);
+    }
+
+    #[test]
+    fn oraculo_no_compila_nextest_contrato_verde_no_cambia() {
+        // Guarda: nextest con el contrato en 0 y junit verde, evaluación de siempre.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust_nextest(base.path());
+        let ocultas = Cell::new(0);
+        let correr =
+            ejecutor_suites_nextest(0, Some(JUNIT_CONTRATO), 100, Some(JUNIT_OCULTO), &ocultas);
+        let v = evaluar_nextest(
+            base.path(),
+            &tarea,
+            &repo,
+            deps_de(&correr, &herramientas(&[])),
+        );
+        assert!(!v.no_compila);
+        assert!(v.contrato_fallidos.is_empty(), "{:?}", v.contrato_fallidos);
+        assert_eq!(ocultas.get(), 1);
+    }
+
+    #[test]
+    fn oraculo_no_compila_oculta_101_con_contrato_compilado_no_es_no_compila() {
+        // Guarda: la oculta que no compila no marca el producto. Sigue la regla de la Tarea 95.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust_nextest(base.path());
+        let ocultas = Cell::new(0);
+        let correr = ejecutor_suites_nextest(0, Some(JUNIT_CONTRATO), 101, None, &ocultas);
+        let v = evaluar_nextest(
+            base.path(),
+            &tarea,
+            &repo,
+            deps_de(&correr, &herramientas(&[])),
+        );
+        assert!(!v.no_compila);
+        assert!(
+            v.avisos.contains(&MOTIVO_NO_COMPILA.to_string()),
+            "{:?}",
+            v.avisos
+        );
+        assert_eq!(v.ocultos_fallidos, vec!["test_b::t3", "test_b::t4"]);
+        assert_eq!(ocultas.get(), 1);
     }
 
     #[test]
