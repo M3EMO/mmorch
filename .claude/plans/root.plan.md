@@ -7202,3 +7202,74 @@ P95 a P100 siguen abiertas. **P101 sigue abierta, con la recomendación cambiada
 - **a)** Subir el tope de S2 de 5 a 7 USD, y medir las dos.
 - **b)** Medir solo Diseño, dentro de lo que queda. Recomendada: en Arquitectura, la sonda detecta el defecto sin el juez, así que esa medición casi no informa.
 - **c)** No medir ahora.
+
+## Vuelta del 2026-11-11 (10): Tarea 88, capas y Tarea 89
+
+**Estado.** La Tarea 88 está en `laptop/tarea-88` (76f95c6), con 2974, 0 y 4 con podman. Las mezclas de la 84 a la 88 y P95 a P101 esperan al usuario.
+
+## 1. Las capas propuestas revelan un defecto de la sonda
+
+**Lo que vi.** t1 da 3 capas, y `cli` queda en la capa de abajo, como si no usara a nadie. En broot, `cli` usa media aplicación.
+
+**La causa.** `usos_de_crate` (`src/oracle/perfiles/rust.rs:591`) solo lee `crate::nombre` dentro de una misma línea. broot importa así, en varias líneas:
+
+```rust
+use {
+    crate::{
+        app::*,
+        ...
+    },
+};
+```
+
+La línea `crate::{` da un nombre vacío, y el resto del bloque no se lee. Mi aproximación en Python vio solo 17 aristas por la misma razón.
+
+**Defecto (h): la sonda de Arquitectura no ve los imports agrupados.** Es una forma muy común en Rust. En un repo real, la sonda pierde la mayoría de las dependencias. Entonces no ve los ciclos ni los usos hacia una capa anterior que esos imports esconden.
+
+**¿t1 con 3 capas sirve para `CicloEntreCapas`?** Sirve en lo técnico. La verificación pasó: hay 2 capas o más, y el inyector aplica. El inyector escribe un `use` de una sola línea, y la sonda lo ve. Pero las capas salen de un grafo casi vacío. Miden la sonda sobre una arquitectura que la sonda no ve. **Las capas de t1 a t3 se derivan de nuevo después de la Tarea 89.** No se aplican las de la 88.
+
+**¿Cambiar `capas` invalida filas viejas de Arquitectura? Hoy no, y debería.**
+- La huella de `Fila` junta el prompt del juez y las rúbricas. No junta el `tarea.toml` ni el código de las sondas.
+- Cambiar `capas` cambia lo que la sonda marca. Una fila medida con otras capas ya no vale.
+- Cambiar la sonda, como hace la Tarea 89, tampoco invalida nada hoy.
+- **Decisión, en la Tarea 89:** `Fila` suma `tarea_hash`, con el hash del `tarea.toml`. Si la fila lo trae y difiere del actual, la fila no calibra. Además, la huella de cada dimensión suma una versión de sus sondas. La Tarea 89 sube la versión de Arquitectura.
+- Las filas viejas sin `tarea_hash` siguen valiendo. Las de Arquitectura en t1 no calibran igual, porque su defecto nunca aplicó.
+
+## 2. Las 7 preguntas de la Tarea 88
+
+1. **`ROOT_HOME/tmp` contra `/tmp` de `calibra`:** acepto `ROOT_HOME/tmp` para la verificación. Unificar `calibra` vale después: en Fedora, `/tmp` suele vivir en memoria, y broot copiado ocupa RAM. No va en la 89.
+2. **La verificación copia solo los `.rs`:** acepto. El inyector solo toca `src/`.
+3. **La verificación ignora los hallazgos de ciclo:** acepto. Los ciclos van en una capa, y la sonda los informa aparte.
+4. **Repo sin `.rs` da código 2, y repo sin módulos da `capas = []`:** acepto.
+5. **Tarea sin `[arquitectura]` falla con "menos de 2 capas":** acepto.
+6. **Grupos de igual altura comparten capa:** acepto.
+7. **`--json` global:** acepto.
+
+## 3. Los puntos incompletos de la Tarea 88
+
+- **La guarda del vencimiento no corrió en rojo:** acepto. Es una guarda de un camino que ya funcionaba.
+- **El `rm` después de una señal dice "no se borró":** se corrige en la 89. Si la señal ya terminó el hijo, ese `rm` no corre.
+- **`correr_paso_de_quitar` no nombra el contenedor:** se corrige en la 89.
+- **`FALTA_CAPA` repite el texto de `capas_sin_modulo`:** se unifica en la 89. Una sola constante, en `rust.rs`.
+- **codegraph sin llamadores en el worktree:** el brief ya pide `codegraph init .` y `codegraph sync`. La 89 lo repite.
+
+## 4. Qué sigue sin esperar al usuario, por valor para el hito 1
+
+1. **Tarea 89, ya.** El defecto (h) invalida la sonda de Arquitectura en repos reales. Sin la 89, ninguna calibración de Arquitectura en D4 mide algo real. Lleva también `tarea_hash`, la versión de sondas en la huella y los tres arreglos chicos.
+2. **Verificar los MEDIUM de seguridad de la revisión de cierre,** sin API. Se lo pedí al orquestador en la vuelta (7). Los que más pesan son el 7, un transcript sin redactar el `accessToken`, y el 13, `/salida` leída siguiendo symlinks. Si siguen abiertos, van a la Tarea 90.
+3. **Después de mezclar la 89:** derivar de nuevo las capas de t1 a t3, verificarlas y aplicarlas.
+4. **Más inyectores de Diseño y de Arquitectura para el juez.** Es trabajo del hito 1b. Su valor depende de lo que mida P101, así que espera ese dato.
+
+## 5. Tarea 89
+
+Brief: `docs/builds/brief-local-89.md`, con base 76f95c6 y rama `laptop/tarea-89`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Imports agrupados en la sonda de Arquitectura, y `FALTA_CAPA` único | `src/oracle/perfiles/rust.rs`, `src/oracle/capas.rs` |
+| 2 | `tarea_hash` en `Fila`, y versión de sondas en la huella | `src/oracle/calibra.rs`, `docs/interfaces.md` |
+| 3 | Mensajes del `rm` y del paso de quitar | `src/corre/ejecutor.rs` |
+
+Los tres puntos no comparten archivos, y corren en paralelo.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
