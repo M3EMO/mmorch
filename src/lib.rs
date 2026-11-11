@@ -191,6 +191,9 @@ fn oraculo_calibrar(
         presupuesto.as_ref(),
         &|tarea, ruta, opciones| oracle::evaluar(ruta, tarea, opciones),
     )?;
+    for linea in lineas_de_avisos(&calibrada.avisos) {
+        eprintln!("{linea}");
+    }
     let fila = calibrada.fila;
     if json {
         println!("{}", serde_json::to_string_pretty(&fila)?);
@@ -216,6 +219,14 @@ fn oraculo_calibrar(
         }
     }
     Ok(0)
+}
+
+/// Una línea `aviso: <texto>` por aviso, en el mismo orden.
+fn lineas_de_avisos(avisos: &[String]) -> Vec<String> {
+    avisos
+        .iter()
+        .map(|aviso| format!("aviso: {aviso}"))
+        .collect()
 }
 
 /// Una métrica con dos decimales, o `sin medir` si no tiene casos de una clase.
@@ -1192,6 +1203,20 @@ fn imprimir_registrados(json: bool, cuantos: usize) {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn lineas_de_avisos_escribe_una_linea_por_aviso_en_orden() {
+        let avisos = vec!["primero".to_string(), "segundo".to_string()];
+        assert_eq!(
+            lineas_de_avisos(&avisos),
+            vec!["aviso: primero".to_string(), "aviso: segundo".to_string()]
+        );
+    }
+
+    #[test]
+    fn lineas_de_avisos_sin_avisos_es_vacio() {
+        assert!(lineas_de_avisos(&[]).is_empty());
+    }
 
     #[test]
     fn oraculo_auditar_tope_usd_no_positivo_sale_con_uso_sin_tocar_nada() {
