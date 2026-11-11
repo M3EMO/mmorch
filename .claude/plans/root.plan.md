@@ -7810,3 +7810,64 @@ Brief: `docs/builds/brief-local-96.md`, con base d4e6722 y rama `laptop/tarea-96
 Los tres puntos no comparten archivos, y corren en paralelo.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
+
+## Vuelta del 2026-11-11 (19): Pruebas en t2 y t3, y Tarea 97
+
+**Estado.** Las mezclas de la 84 a la 96 y P95 a P101 esperan al usuario. La Tarea 96 se construye ahora.
+
+**t2 y t3 confirman la vuelta (17).** Funciona detectó 2 de 2, porque la mutación cayó en código que los tests ejecutan. Completitud dio 0 de 2 por el 101, que arreglan la 95 y la 96. Los limpios dieron 6 de 6.
+
+## 1. Por qué el puntaje de Pruebas subió en t2
+
+**Lo que leí** en `src/oracle/mutacion.rs`:
+- La sonda lista los mutantes sobre la copia (`comando_de_listado`). Después toma 15 repartidos en toda la lista (`muestra_repartida`, línea 364). Corre solo esos, con `-F`.
+- `leer_viables` cuenta `CaughtMutant` y `Timeout` como muertos. `Unviable` no cuenta.
+- El puntaje es muertos sobre la muestra. La calibración detecta si el puntaje del caso es menor que el de la base.
+
+**Las causas posibles, en orden de probabilidad.** Sin el `outcomes.json` de cada corrida no puedo cerrarlo. Los casos no lo guardan.
+1. **Un `Timeout` nuevo.** cargo-mutants fija el plazo de cada mutante según cuánto tarda la corrida de base de esa misma ejecución. El caso tiene tres tests apagados, así que su base tarda menos, y el plazo de cada mutante baja. Un mutante lento que antes sobrevivía ahora vence el plazo. Root lo cuenta como muerto, y el puntaje sube. Este mecanismo es sistemático: el limpio no lo ve, porque el limpio no apaga tests. Encaja con los datos: el limpio dio 1 de 15, igual que la base.
+2. **Un test inestable** que falla al azar con un mutante. Es posible, pero el limpio repitió la base exacta.
+3. **Una muestra distinta.** Descarto esta causa. `assert_borrado` solo agrega `#[ignore]` en el módulo de tests. cargo-mutants no muta tests, así que la lista y la muestra repartida quedan iguales.
+
+**Lo que no es la causa:** la sonda de Pruebas no está midiendo mal la calidad de los tests. Está midiendo ruido de la herramienta.
+
+## 2. El criterio de detección de `assert_borrado`
+
+**No cambia a "mirar el mutante elegido".**
+- El defecto apaga justo los tests que mataban al mutante elegido. Si esos eran sus únicos asesinos, el mutante sobrevive seguro. El criterio daría una detección casi segura por construcción.
+- Además, la calibración debe medir lo que Root informa: el puntaje. Si el mutante sobrevive y el puntaje no baja, el usuario no ve la debilidad. Eso es un fallo real.
+
+**Sí cambia la medición, para sacar el ruido y verlo.**
+1. **Plazo fijo.** La base de la calibración guarda la duración de su corrida de base de cargo-mutants. Cada caso corre con `--timeout` fijo, calculado de esa duración, en vez del plazo automático. Apagar tests deja de cambiar el plazo. Ataca la causa 1.
+2. **Estado por mutante.** El veredicto de Pruebas guarda el estado de cada mutante de la muestra: muerto, vivo o vencido. Cada caso de calibración lo guarda también.
+3. **Mutantes cambiados.** Cada caso lista los mutantes de la muestra que cambiaron de estado frente a la base, aparte del elegido. Un caso con cambios así queda marcado como ruidoso. Sigue contando, y la fila informa cuántos casos ruidosos hubo.
+4. **El criterio sigue igual:** el puntaje del caso menor que el de la base.
+
+**Lo que mide Pruebas en la calibración, dicho claro.** Con el mutante elegido dentro de la muestra, la detección depende sobre todo de que la herramienta sea estable. Igual que Funciona, Pruebas es una dimensión de oráculo. Su calibración prueba el camino de la medición y mide su ruido. No mide un juicio.
+
+## 3. La muestra de Pruebas dentro del cambio
+
+**Sí, igual que Funciona.**
+- El puntaje base de t2 es 1 de 15, y el de t3 es 1 de 12. La muestra cae casi toda fuera del código que cubren los tests ocultos.
+- Root evalúa el cambio de un builder. El puntaje de Pruebas debe decir si los tests cubren ese cambio, no si broot estaba bien probado antes.
+- **Regla:** si la tarea trae `bootstrap/`, la muestra sale de los mutantes cuya línea cae dentro de los rangos cambiados (`cambios::rangos_cambiados`). Sin mutantes dentro del cambio, Pruebas no tiene veredicto, con su motivo.
+- **Sin `bootstrap/`,** la muestra repartida de hoy no cambia.
+- **Esto también cambia la evaluación, no solo la calibración.** El puntaje de Pruebas de una tarea con estado inicial pasa a hablar del cambio. Es la misma regla que ya usan la lectura guiada del juez y Funciona. No pide pregunta: no cambia qué promete "listo", sino de qué código habla un puntaje.
+
+## 4. Tarea 97
+
+Brief: `docs/builds/brief-local-97.md`. Base: punta de `laptop/tarea-96`, que completa el orquestador. Rama `laptop/tarea-97`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Estado por mutante en el veredicto y en cada caso, y mutantes cambiados | `src/oracle/mutacion.rs`, `src/oracle/calibra.rs`, `docs/interfaces.md` |
+| 2 | Plazo fijo de cargo-mutants desde la base | `src/oracle/mutacion.rs`, `src/oracle/calibra.rs` |
+| 3 | Muestra dentro del cambio | `src/oracle/mutacion.rs` |
+
+- Los tres puntos tocan `mutacion.rs`, así que van en serie: 1, 2 y 3.
+- **Toca un archivo del brief 96:** `src/oracle/calibra.rs`, en los puntos 1 y 2. Hace falta, porque ahí se guardan los casos y se arma la corrida de cada caso. La 97 arranca sobre la punta de la 96, así que no hay choque.
+- Si el punto 3 necesita los rangos desde `src/oracle/mod.rs`, el builder lo dice y lo toca lo mínimo.
+
+**Después de mezclar:** el orquestador repite la calibración de Pruebas en t2, sin API. Con el estado por mutante, se ve cuál fue la causa.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
