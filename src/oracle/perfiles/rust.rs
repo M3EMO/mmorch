@@ -15,6 +15,8 @@ const SONDA_ESTRUCTURA: &str = "estructura-nativa";
 const SONDA_ARQUITECTURA: &str = "arquitectura-nativa";
 /// Texto con que la sonda de arquitectura nombra un ciclo de módulos. El juez lo usa para el tope.
 pub const REGLA_CICLO: &str = "ciclo de módulos";
+/// Inicio del texto de una capa sin módulo en el repo. `capas.rs` lo usa para reconocer esa falta.
+pub(crate) const FALTA_CAPA: &str = "falta la capa";
 
 /// Límites de la sonda de estructura. Por defecto: 500 líneas, 80 por función, 10 de bloque.
 pub struct LimitesEstructura {
@@ -535,27 +537,25 @@ fn aristas_de(
         };
         // Un archivo de la raíz no tiene raíz que lo declare: sus `crate::X` solo cuentan si X es módulo.
         let es_modulo = modulo_de(&archivo.ruta).is_some();
-        for linea in analizar(&archivo.lineas).iter().filter(|l| !l.de_test) {
-            for nombre in usos_de_crate(&linea.limpia) {
-                let destino = if modulos.contains(&nombre) {
-                    nombre
-                } else if con_raiz && es_modulo {
-                    match raiz_de_modulo(&origen, archivos) {
-                        Some(raiz) => raiz.to_string(),
-                        None => continue,
-                    }
-                } else {
-                    continue;
-                };
-                if destino != origen {
-                    aristas
-                        .entry((origen.clone(), destino))
-                        .or_insert_with(|| Uso {
-                            archivo: archivo.ruta.clone(),
-                            linea: linea.numero,
-                            cita: linea.cruda.clone(),
-                        });
+        for uso in usos_de_crate_en(&analizar(&archivo.lineas)) {
+            let destino = if modulos.contains(&uso.nombre) {
+                uso.nombre
+            } else if con_raiz && es_modulo {
+                match raiz_de_modulo(&origen, archivos) {
+                    Some(raiz) => raiz.to_string(),
+                    None => continue,
                 }
+            } else {
+                continue;
+            };
+            if destino != origen {
+                aristas
+                    .entry((origen.clone(), destino))
+                    .or_insert_with(|| Uso {
+                        archivo: archivo.ruta.clone(),
+                        linea: uso.linea,
+                        cita: uso.cita,
+                    });
             }
         }
     }
@@ -587,18 +587,157 @@ fn declara_modulo(archivo: &Archivo, modulo: &str) -> bool {
         .any(|l| !l.de_test && formas.iter().any(|f| l.limpia.trim() == f))
 }
 
-/// Nombres X de cada `crate::X` en la línea.
-fn usos_de_crate(limpia: &str) -> Vec<String> {
-    limpia
-        .match_indices("crate::")
-        .filter_map(|(i, _)| {
-            let nombre: String = limpia[i + "crate::".len()..]
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            (!nombre.is_empty()).then_some(nombre)
-        })
+/// Un `crate::X` de un fuente: X, la línea donde aparece X y la línea cruda como cita.
+struct UsoDeCrate {
+    nombre: String,
+    linea: u32,
+    cita: String,
+}
+
+/// Usos `crate::X` fuera de tests. Una sentencia `use` se lee entera, hasta su `;`, aunque ocupe varias
+/// líneas. El resto de líneas se lee una a una, como antes.
+fn usos_de_crate_en(lineas: &[Linea]) -> Vec<UsoDeCrate> {
+    let mut salida = Vec::new();
+    let mut i = 0;
+    while i < lineas.len() {
+        let linea = &lineas[i];
+        if linea.de_test {
+            i += 1;
+        } else if es_inicio_de_use(&linea.limpia) {
+            let fin = (i..lineas.len())
+                .find(|&k| lineas[k].limpia.contains(';'))
+                .unwrap_or(lineas.len() - 1);
+            let mut texto = String::new();
+            let mut inicios = Vec::new();
+            for l in &lineas[i..=fin] {
+                inicios.push(texto.len());
+                texto.push_str(&l.limpia);
+                texto.push('\n');
+            }
+            for (nombre, byte) in nombres_en(&texto) {
+                // La línea de X es la última que empieza antes de su byte.
+                let k = inicios.partition_point(|&s| s <= byte) - 1;
+                let l = &lineas[i + k];
+                salida.push(UsoDeCrate {
+                    nombre,
+                    linea: l.numero,
+                    cita: l.cruda.clone(),
+                });
+            }
+            i = fin + 1;
+        } else {
+            for (nombre, _) in nombres_en(&linea.limpia) {
+                salida.push(UsoDeCrate {
+                    nombre,
+                    linea: linea.numero,
+                    cita: linea.cruda.clone(),
+                });
+            }
+            i += 1;
+        }
+    }
+    salida
+}
+
+/// Verdadero si la línea empieza una sentencia `use`, con o sin `pub`, `pub(crate)` o `pub(in ...)`.
+fn es_inicio_de_use(limpia: &str) -> bool {
+    let mut resto = limpia.trim_start();
+    if let Some(tras_pub) = resto.strip_prefix("pub") {
+        let tras_pub = tras_pub.trim_start();
+        resto = match tras_pub.strip_prefix('(') {
+            Some(dentro) => match dentro.find(')') {
+                Some(fin) => dentro[fin + 1..].trim_start(),
+                None => return false,
+            },
+            None => tras_pub,
+        };
+    }
+    resto
+        .strip_prefix("use")
+        .is_some_and(|r| r.is_empty() || r.starts_with(|c: char| c.is_whitespace() || c == '{'))
+}
+
+/// Nombres X de cada `crate::X` del texto, con el byte donde empieza X. Con `crate::{...}` da el primer
+/// segmento de cada elemento de nivel superior del grupo, sin `self`.
+fn nombres_en(texto: &str) -> Vec<(String, usize)> {
+    let cs: Vec<(usize, char)> = texto.char_indices().collect();
+    let mut salida = Vec::new();
+    let mut i = 0;
+    while i < cs.len() {
+        if !empieza_crate(&cs, i) {
+            i += 1;
+            continue;
+        }
+        let j = i + "crate::".len();
+        if cs.get(j).is_some_and(|&(_, c)| c == '{') {
+            let (grupo, fin) = elementos_de_grupo(&cs, j + 1);
+            salida.extend(grupo);
+            i = fin;
+        } else {
+            let nombre = ident_desde(&cs, j);
+            if !nombre.is_empty() {
+                salida.push((nombre, cs[j].0));
+            }
+            i = j;
+        }
+    }
+    salida
+}
+
+/// Identificador que empieza en `cs[desde]`. Vacío si no hay.
+fn ident_desde(cs: &[(usize, char)], desde: usize) -> String {
+    cs.get(desde..)
+        .unwrap_or_default()
+        .iter()
+        .take_while(|(_, c)| es_ident(*c))
+        .map(|(_, c)| *c)
         .collect()
+}
+
+/// Verdadero si `cs[i..]` empieza con `crate::` como palabra: no precedido por letra, cifra o `_`.
+fn empieza_crate(cs: &[(usize, char)], i: usize) -> bool {
+    let previo_ok = i == 0 || !es_ident(cs[i - 1].1);
+    previo_ok
+        && "crate::"
+            .chars()
+            .enumerate()
+            .all(|(k, c)| cs.get(i + k).is_some_and(|&(_, x)| x == c))
+}
+
+fn es_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Elementos de un grupo `crate::{...}` que empieza en `desde`, justo después de `{`. Da cada primer nombre y
+/// el índice justo después de la `}` que cierra el grupo.
+fn elementos_de_grupo(cs: &[(usize, char)], desde: usize) -> (Vec<(String, usize)>, usize) {
+    let mut salida = Vec::new();
+    let mut inicio = desde;
+    let mut profundidad = 0usize;
+    for k in desde..cs.len() {
+        match cs[k].1 {
+            '{' => profundidad += 1,
+            '}' if profundidad > 0 => profundidad -= 1,
+            ',' if profundidad == 0 => {
+                salida.extend(primer_nombre(cs, inicio, k));
+                inicio = k + 1;
+            }
+            '}' => {
+                salida.extend(primer_nombre(cs, inicio, k));
+                return (salida, k + 1);
+            }
+            _ => {}
+        }
+    }
+    salida.extend(primer_nombre(cs, inicio, cs.len()));
+    (salida, cs.len())
+}
+
+/// Primer identificador de `cs[desde..hasta]`, con su byte. Nada si está vacío o es `self`.
+fn primer_nombre(cs: &[(usize, char)], desde: usize, hasta: usize) -> Option<(String, usize)> {
+    let p = (desde..hasta).find(|&k| !cs[k].1.is_whitespace())?;
+    let nombre = ident_desde(cs, p);
+    (!nombre.is_empty() && nombre != "self").then_some((nombre, cs[p].0))
 }
 
 /// Camino `[m, ..., m]` de un ciclo que pasa por `modulo`. Solo lo da el módulo menor de su
@@ -705,8 +844,8 @@ fn capas_sin_modulo(
             continue;
         }
         let nombres = capa.join(", ");
-        let cita = format!("módulos: {mapa}; falta la capa [{nombres}]");
-        let detalle = format!("falta la capa [{nombres}]: ninguno de sus módulos está en el repo");
+        let cita = format!("módulos: {mapa}; {FALTA_CAPA} [{nombres}]");
+        let detalle = format!("{FALTA_CAPA} [{nombres}]: ninguno de sus módulos está en el repo");
         hallazgos.push(crear_hallazgo(
             Dimension::Arquitectura,
             3,
@@ -1336,5 +1475,123 @@ mod tests {
         assert_eq!(r.valor, None, "{:?}", r.hallazgos);
         assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
         assert_eq!(r.motivo.as_deref(), Some(MOTIVO_SIN_MODULOS));
+    }
+
+    fn archivo_de(ruta: &str, texto: &str) -> Archivo {
+        Archivo {
+            ruta: ruta.into(),
+            lineas: texto.lines().map(String::from).collect(),
+        }
+    }
+
+    fn modulos_de(nombres: &[&str]) -> BTreeSet<String> {
+        nombres.iter().map(|m| m.to_string()).collect()
+    }
+
+    #[test]
+    fn aristas_bloque_agrupado_llega_a_app_y_display() {
+        let texto = "use {\n    crate::{\n        app::*,\n        display::Screen,\n    },\n    std::io,\n};\n";
+        let archivos = [archivo_de("src/x.rs", texto)];
+        let mods = modulos_de(&["x", "app", "display"]);
+        let aristas = aristas_entre_modulos(&archivos, &mods);
+        let claves: Vec<String> = aristas.keys().map(|(o, d)| format!("{o}->{d}")).collect();
+        assert_eq!(claves, ["x->app", "x->display"]);
+        let uso = &aristas[&("x".to_string(), "display".to_string())];
+        assert_eq!((uso.linea, uso.cita.as_str()), (4, "display::Screen,"));
+    }
+
+    #[test]
+    fn aristas_grupo_en_una_linea_da_el_primer_segmento_de_cada_camino() {
+        let archivos = [archivo_de("src/x.rs", "use crate::{a::X, b::{c, d}};\n")];
+        let mods = modulos_de(&["x", "a", "b", "c", "d"]);
+        let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+            .keys()
+            .map(|(o, d)| format!("{o}->{d}"))
+            .collect();
+        assert_eq!(claves, ["x->a", "x->b"]);
+    }
+
+    #[test]
+    fn aristas_pub_crate_use_agrupado_en_varias_lineas() {
+        let archivos = [archivo_de(
+            "src/x.rs",
+            "pub(crate) use crate::{\n    a,\n};\n",
+        )];
+        let mods = modulos_de(&["x", "a"]);
+        let aristas = aristas_entre_modulos(&archivos, &mods);
+        let claves: Vec<String> = aristas.keys().map(|(o, d)| format!("{o}->{d}")).collect();
+        assert_eq!(claves, ["x->a"]);
+        let uso = &aristas[&("x".to_string(), "a".to_string())];
+        assert_eq!((uso.linea, uso.cita.as_str()), (2, "a,"));
+    }
+
+    #[test]
+    fn aristas_ignoran_self_en_grupos() {
+        let texto = "use crate::{self};\nuse crate::a::{self, b};\n";
+        let archivos = [archivo_de("src/x.rs", texto)];
+        let mods = modulos_de(&["x", "a", "b"]);
+        let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+            .keys()
+            .map(|(o, d)| format!("{o}->{d}"))
+            .collect();
+        assert_eq!(claves, ["x->a"]);
+    }
+
+    #[test]
+    fn aristas_agrupado_dentro_de_test_no_cuenta() {
+        let texto = "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    use crate::{\n        app::X,\n    };\n}\n";
+        let archivos = [archivo_de("src/x.rs", texto)];
+        let mods = modulos_de(&["x", "app"]);
+        assert!(aristas_entre_modulos(&archivos, &mods).is_empty());
+    }
+
+    #[test]
+    fn aristas_expresion_con_crate_sigue_contando() {
+        let archivos = [archivo_de("src/x.rs", "fn f() { crate::app::run(); }\n")];
+        let mods = modulos_de(&["x", "app"]);
+        let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+            .keys()
+            .map(|(o, d)| format!("{o}->{d}"))
+            .collect();
+        assert_eq!(claves, ["x->app"]);
+    }
+
+    #[test]
+    fn sonda_arquitectura_ciclo_escondido_en_import_agrupado_da_hallazgo() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "src/a.rs",
+            "use crate::{\n    b::algo,\n};\npub fn f() {}\n",
+        );
+        escribir(
+            dir.path(),
+            "src/b.rs",
+            "pub fn algo() {}\nuse crate::a::f;\n",
+        );
+        let r = arquitectura_nativa(dir.path(), &[], &[]);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        let h = &r.hallazgos[0];
+        assert_eq!(h.severidad, 3);
+        assert_eq!((h.archivo.as_str(), h.linea), ("src/a.rs", 2));
+        assert!(h.detalle.contains("a -> b -> a"), "{}", h.detalle);
+        assert!(h.detalle.starts_with(REGLA_CICLO), "{}", h.detalle);
+    }
+
+    #[test]
+    fn sonda_arquitectura_uso_hacia_capa_anterior_en_import_agrupado_da_hallazgo() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/protocolo/mod.rs", "pub fn p() {}\n");
+        escribir(dir.path(), "src/comandos/mod.rs", "pub fn c() {}\n");
+        escribir(
+            dir.path(),
+            "src/almacen/mod.rs",
+            "fn a() {}\nuse crate::{\n    protocolo::p,\n};\n",
+        );
+        let r = arquitectura_nativa(dir.path(), &capas(), &[]);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].archivo, "src/almacen/mod.rs");
+        assert_eq!(r.hallazgos[0].linea, 3);
+        assert_eq!(r.hallazgos[0].severidad, 3);
     }
 }

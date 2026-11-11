@@ -13,15 +13,13 @@ use crate::borrado;
 use crate::oracle::calibra::inyectar::{Defecto, inyectar};
 use crate::oracle::perfiles::modulo_de;
 use crate::oracle::perfiles::rust::{
-    REGLA_CICLO, adyacencias, alcanzables, archivos_rs, aristas_de_capas, arquitectura_nativa,
-    fuentes_o_sin_veredicto,
+    FALTA_CAPA, REGLA_CICLO, adyacencias, alcanzables, archivos_rs, aristas_de_capas,
+    arquitectura_nativa, fuentes_o_sin_veredicto,
 };
 use crate::tipos::Dimension;
 
 /// Semilla del inyector en la verificación. Solo importa si aplica o no: la semilla no cambia eso.
 const SEMILLA: u64 = 42;
-/// Inicio del texto de la falta de capa. Lo escribe `capas_sin_modulo` en `perfiles/rust.rs`.
-const FALTA_CAPA: &str = "falta la capa";
 
 /// Una arista `origen -> destino` entre dos módulos del repo.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -302,6 +300,30 @@ mod tests {
         let p = proponer_capas(dir.path()).expect("propone");
         assert_eq!(p.capas, capas(&[&["a"], &["b", "c"]]));
         assert_eq!(p.ciclos, capas(&[&["b", "c"]]));
+    }
+
+    #[test]
+    fn propone_capas_con_imports_agrupados() {
+        let dir = tempfile::tempdir().expect("repo");
+        escribir(dir.path(), "Cargo.toml", "[package]\nname = \"fixture\"\n");
+        escribir(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod a;\npub mod b;\npub mod c;\n",
+        );
+        escribir(
+            dir.path(),
+            "src/a.rs",
+            "use crate::{\n    b::{f, g},\n    c,\n};\npub fn a() {}\n",
+        );
+        escribir(
+            dir.path(),
+            "src/b.rs",
+            "use crate::{\n    c::h,\n};\npub fn b() {}\n",
+        );
+        escribir(dir.path(), "src/c.rs", "pub fn c() {}\n");
+        let p = proponer_capas(dir.path()).expect("propone");
+        assert_eq!(p.capas, capas(&[&["a"], &["b"], &["c"]]));
     }
 
     #[test]
