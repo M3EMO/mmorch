@@ -6649,3 +6649,87 @@ P95, P96, P97 y P98 siguen abiertas, como están en las vueltas del 2026-11-09 (
 - **P99 no cambia.** La opción a ya dice "nombre, firma y módulo". La regla del rojo es cómo se calcula.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-11 (1): aceptación de la Tarea 81, peor caso y lo que sigue
+
+**Estado.** Las Tareas 80 y 81 están mezcladas. La punta local es a190bd4, sin push. La suite con podman dio 2841 verdes y 0 fallas. S2 va en 2,2950 de 5 USD por API. P95 a P99 siguen sin respuesta.
+
+## 1. Las 7 preguntas de la Tarea 81
+
+1. **Huella en dimensiones solo de sondas: cambia.** Una dimensión sin ítems de juez no depende del prompt del juez. Su huella debe juntar solo sus rúbricas. Hoy, cambiar el prompt descalibra Seguridad sin motivo. Va a la Tarea 82.
+2. **Cambio más grande que `extracto_max`: cambia.** Una ventana debe perder primero el contexto, no la parte cambiada. Si el cambio solo ya pasa el tope, el resto va en otra ventana del mismo archivo, dentro del total. Va a la Tarea 82.
+3. **Archivo con cambio que no entra y vuelve como archivo grande:** acepto. Leer algo del archivo es mejor que nada.
+4. **Hallazgo sin extractos:** acepto. Sin extractos no hay contra qué validar, y el gate de evidencia sigue activo.
+5. **Orden de los motivos de descarte:** acepto. Un solo motivo por hallazgo alcanza.
+6. **Motivo visible "calibración de otro juez": autorizo `tipos.rs`, `mod.rs` e `informe.rs`.** `Puntaje` suma `motivo_sin_calibrar: Option<String>`, con `#[serde(default)]`. Usa `Calibraciones::motivo_sin_calibrar`, que ya tiene test. Va a la Tarea 82.
+7. **memora y brasa sin calibrar en dimensiones de juez:** era lo previsto. No se recalibran.
+
+## 2. La aceptación en t1
+
+**El test de la vuelta 71 pasa.** El test pedía línea base en Arquitectura y Diseño de t1. Las dos dimensiones dan veredicto en todos sus casos. Antes cubrían 6 de 10 y 7 de 13 de peso, sin línea base. La lectura guiada resolvió la cobertura.
+
+**Ese test mide cobertura, no calidad.** Lo que dicen los números:
+- **Arquitectura:** el defecto salió "no aplica". La causa probable es `capas = [["patron"]]`, que no tiene módulos reales (defecto d). Sin defecto aplicado no hay sensibilidad.
+- **Diseño, 0,0 con n = 2:** son 1 defecto y 1 limpio. Con un caso por clase, el número no estima nada.
+- **Lo que sí dice el limpio.** Un limpio es una copia idéntica a la base. Detectar significa bajar 2 niveles o más frente a la base (`detecta_item`, `src/oracle/calibra.rs:1883`). El juez bajó `diseno.errores` 2 niveles sobre el mismo código. Eso es ruido del juez entre dos corridas, no un defecto.
+- **Lo que dice el defecto.** El juez no lo vio. No sé si la línea del defecto cayó dentro de lo leído. Los extractos ahora quedan guardados, así que se puede mirar.
+
+**Medición barata, con etiqueta computable.** El mismo código debe dar el mismo nivel.
+1. Corré `evaluar` dos veces más sobre el commit real de t1, con el binario mezclado.
+2. Compará el nivel de cada ítem de Diseño y Arquitectura entre las tres corridas: la base de `calibrar` y estas dos.
+3. Costo: cerca de 0,14 USD de P80. Quedan 2,705.
+4. **Lectura.** Si un ítem cambia 2 niveles o más sin cambio de código, ese ítem no puede calibrar con un solo juicio por caso. Eso va al planner antes de D4.
+5. Además, mirá en los extractos guardados del caso con defecto si su línea cayó dentro de lo leído. Sin API.
+
+## 3. El peor caso de 1,70 USD
+
+**No es una estimación: es una cota.** La fórmula es 3 intentos, por 256 KiB de entrada y 32.000 tokens de salida, por cada llamada de juez (`peor_caso_de_caso`, `src/oracle/calibra.rs:1096`). Lo medido es de 0,08 a 0,22 USD por paso. La cota es unas 10 a 20 veces mayor.
+
+**La cota se queda.** Garantiza que el gasto nunca pasa el tope. Es una regla de dinero, y no la aflojo por el promedio.
+
+**Dos correcciones de la cota, para la Tarea 82:**
+- **Entrada.** Usar el tamaño máximo real del prompt, que sale de `LimitesPrompt` más la spec y las rúbricas, en vez de 256 KiB fijos. Esto la baja.
+- **Segundo pedido.** El juez puede pedir otra vez los ítems faltantes, y la cota cuenta un solo pedido (revisión de cierre, punto 5). Esto la sube.
+- No sé cuál de las dos pesa más. El builder informa la cota nueva para t1.
+
+**Mientras tanto, el uso correcto del tope.** Pasá a `calibrar` todo lo que queda de P80 como `--tope-usd`, no un tope por paso. El freno de 4,0 y 4,5 USD de la vuelta 69 sigue. El primer intento de Diseño frenó porque el tope del paso quedó debajo de la cota.
+
+## 4. Lo que sigue sin depender de P95 a P99
+
+**Tarea 82, chica. Escribo el brief cuando lo pidas.**
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Huella de una dimensión solo de sondas sin el prompt del juez | `src/oracle/calibra.rs` |
+| 2 | Ventana de cambio: se recorta primero el contexto | `src/oracle/juez.rs` |
+| 3 | Motivo visible "calibración de otro juez" | `src/tipos.rs`, `src/oracle/mod.rs`, `src/oracle/informe.rs` |
+| 4 | Cota del peor caso: entrada real y segundo pedido | `src/oracle/calibra.rs` y la constante en `src/oracle/juez.rs` |
+
+Los puntos 1 y 4 comparten `calibra.rs`, y van en serie. Los puntos 2 y 3 corren en paralelo con ellos.
+
+**Tarea 83, después: los HIGH de la revisión de cierre que no dependen del usuario.**
+- Punto 1: la credencial queda en disco si `corre` muere por una señal.
+- Punto 2: un `RUN` que falla con más de 4 KB de salida da `Infra`.
+- Punto 4: lecturas sin tope de la salida de un contenedor.
+- El punto 3 necesita probar las herramientas reales, así que va aparte.
+- La razón del orden: D3 y D4 corren `corre` y `evaluar` sobre repos ajenos, muchas veces.
+
+**En paralelo ahora:**
+1. La medición de estabilidad de la sección 2. Va por API, y no mide minutos.
+2. La mirada de los extractos del defecto de Diseño. Sin API.
+3. La Tarea 82, por cupo, con `ROOT_SIN_PODMAN=1`.
+4. El brief de la Tarea 83, cuando lo pidas.
+
+**Lo que espera:**
+- La limpieza de los worktrees auxiliares espera P100.
+- El chequeo de esbozos de la interfaz espera que permitas podman.
+- El final espera P98, las fichas esperan P99 y la minería espera P97.
+
+## Preguntas para el usuario (2026-11-11, 1)
+
+P95, P96, P97, P98 y P99 siguen abiertas, como están en las vueltas anteriores.
+
+**P100: el organizador dejó dos worktrees auxiliares de la Tarea 81 (`~/.cache/root-wt/local81-p4` y `~/.cache/root-wt/local81-base`) y la rama `laptop/tarea-81-p4`.** La Tarea 81 ya está mezclada.
+
+- **a)** Borrarlos. Recomendada: su trabajo ya está en la punta, y ocupan disco.
+- **b)** Dejarlos por ahora.
