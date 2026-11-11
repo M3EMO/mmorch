@@ -8079,3 +8079,109 @@ Brief: `docs/builds/brief-local-100.md`. Base: punta de la última tarea mezclab
 - Puede correr en paralelo con la 98 y la 99.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P102 siguen abiertas.
+
+## Vuelta del 2026-11-11 (23): la cadena 98 a 100, el ruido de Pruebas, y Tarea 101
+
+**Estado.** La 98, la 99 y la 100 están encadenadas en `laptop/tarea-100r` (4a6ef27), sin conflictos. Con podman dieron 3171, 0 y 4. La revisión de la 98 y la 99 no halló HIGH. Las mezclas de la 84 a la 100 y P95 a P102 esperan al usuario.
+
+**Lo medido con la cadena.**
+- Pruebas, con el commit y sus tests: 3 de 3 detectados, y 3 de 3 limpios. Es la primera dimensión de oráculo con su camino probado de punta a punta en S2.
+- Un repo de t1 que no compila da `no_compila`, y Funciona y Completitud en 0. La decisión es "bloqueado" por los RUSTSEC previos, que es el caso de P96.
+
+## 1. Un hueco que encontré: compilaciones rotas que cuentan como detección
+
+**Lo que leí.** `rompe_la_compilacion` (`src/oracle/calibra.rs:2000`) devuelve falso para Funciona y Completitud. Una mutación que rompe el build cuenta como un caso válido de esas dos dimensiones.
+
+**Por qué es grave ahora.** Con la Tarea 99, un build roto da Funciona y Completitud en 0. Una mutación que no compila se detecta siempre, por construcción.
+
+**Dónde pasa:**
+- El operador "agregar `!`" de la 98 puede dar `!x == 1`, que no compila (pregunta 4 de la 98).
+- `modulo_borrado` borra un módulo que se usa. Siempre rompe el build. En memora y brasa dio 10 de 10, y esas detecciones fueron seguras por construcción. Esas filas nunca midieron nada.
+
+**Decisión.**
+1. En Funciona y Completitud, un caso cuya copia da `no_compila` con la base compilando es una inyección inválida. Va a reemplazo, como hoy en las otras dimensiones.
+2. El operador "agregar `!`" envuelve la condición entera: `!(…)`. Así compila.
+3. **`modulo_borrado` sale de la calibración.** Su detección es segura por construcción, con o sin estado inicial.
+4. **`cuerpo_vaciado` pasa a ser el defecto de Completitud en toda tarea.** Con `bootstrap/`, solo en funciones que ya existían, como hoy. Sin `bootstrap/`, en cualquier función de producción.
+5. Esto resuelve la pregunta 1 de la 98: la rotación entre los dos defectos desaparece.
+
+## 2. "Ruidoso" se dispara sin ruido
+
+**Lo que pasa.** En t1 y t2, los `mutantes_cambiados` son otros mutantes que mataban los mismos tests que el defecto apagó. Pasan de muerto a vivo por el defecto, no por la herramienta. En t2 son `replace > with ==` y `replace > with >=`, en la misma línea 85.
+
+**Definición nueva.** Un cambio de estado es ruido si el defecto no lo explica:
+- **De muerto a vivo, explicado:** todos los tests que mataban a ese mutante en la base están entre los tests apagados. No es ruido.
+- **De muerto a vivo, sin explicar:** al menos uno de sus asesinos de la base sigue activo. Es ruido.
+- **De vivo a muerto:** siempre es ruido. Apagar tests no mata mutantes. Es el caso de la vuelta (19).
+
+Los asesinos de cada mutante en la base ya existen: `MutanteMuerto.tests`, de `tests-fallidos.txt`. El limpio no apaga tests, así que en el limpio todo cambio es ruido, como hoy.
+
+## 3. Los 13 "delete field"
+
+**La causa, de la Tarea 100:** cargo-mutants 27.1.0 ignora `-F` para los mutantes "delete field ... from struct ... expression". Corren siempre.
+
+**Decisión: se excluyen con `--exclude-re`, en el listado y en la corrida.**
+- En el listado, así nunca entran a la muestra.
+- En la corrida, así no gastan tiempo. En t1 son 13 mutantes de más por corrida.
+- El patrón va en una constante, con el comentario de la versión de cargo-mutants y del motivo.
+- Se revisa al subir de versión cargo-mutants.
+- **El costo es claro:** Root no mide ese tipo de mutante. Es el precio de una muestra que Root controla.
+
+## 4. El repo con tests para calibrar Pruebas
+
+**Hoy** el orquestador lo arma a mano en `rep100/`.
+
+**Decisión: una carpeta fija en la tarea, `oraculos/<tarea>/con_tests/`.**
+1. Tiene el árbol del commit real: el repo bueno más el diff de tests.
+2. La escribe el generador de la minería (`armar_s2.py`, y el de D3), igual que `bootstrap/`.
+3. `calibrar --dimension pruebas` la usa sola si existe, en vez de `--repo`. Lo informa en la fila.
+4. Vive dentro de `oraculos/`, igual que `oculto/`. Un builder nunca la ve, y leerla cuenta como leer el oráculo.
+5. Sin `con_tests/`, todo sigue como hoy.
+
+## 5. Las 14 preguntas y los dos MEDIUM
+
+**Tarea 98:**
+1. **La rotación de Completitud:** queda resuelta por la sección 1.
+2. **`cuerpo_vaciado` en funciones sin tests:** se acepta. Dentro del cambio, una función que los tests no ejecutan es un escape real. Agregar ese chequeo haría la detección más segura por construcción.
+3. **El comentario de `en_cambio` y `docs/interfaces.md` para `cuerpo_vaciado`:** van a la 101.
+4. **"Agregar `!`" que no compila:** queda resuelto por la sección 1.
+5. **El cruce del cuerpo, de la firma al cierre:** acepto.
+
+**Tarea 99:**
+1. **101 sin tests esperados marca `no_compila`:** acepto.
+2. **Funciona sin veredicto por escenarios:** acepto.
+3. **Diseño sin juez queda sin veredicto:** acepto.
+4. **La regla sin clave: cambia.** Pasa a `no_compila: el producto o sus tests no compilan`, con la clave como las demás.
+5. **`docs/interfaces.md`:** acepto.
+
+**Tarea 100:**
+1. **Conectar el aviso de `fuera_de_la_muestra`:** va a la 101. `mod.rs` ya no lo toca ninguna tarea en curso.
+2. **Los `StructField`:** queda resuelto por la sección 3.
+3. **Una muestra con un `StructField`:** con la sección 3, ya no puede pasar.
+4. **`aviso_de_mas`:** vuelve en la 101, al conectar el aviso.
+
+**MEDIUM 1, `linea_limpia` no ve comentarios de bloque ni cadenas crudas:** se cierra en la 101. `inyectar.rs` usa `analizar` de `src/oracle/perfiles/rust.rs:292`, el mismo lector de las sondas. Así un comentario de bloque no se muta, y también se cierra el LOW 7.
+
+**MEDIUM 2, el 101 incluye tests que no compilan:** se acepta, y cambia el texto. nextest da 101 si no compila el build de los tests, y ese build incluye al producto. El motivo dice "el producto o sus tests no compilan".
+
+**Los LOW:**
+- **3, `const fn`, `async fn`, `unsafe fn` y `pub(super) fn`:** se cierra en la 101, en `nombre_de_funcion`.
+- **4, la `{` de un genérico `<{ N }>`:** se acepta. Es raro.
+- **5, `declara_fn` compara solo por nombre:** se acepta. El error queda del lado de una función menos.
+- **6, anti revertir entre funciones:** se acepta. Es conservador.
+- **8, con `no_compila` el juez no corre:** se acepta. El juez no mide Seguridad: sus dimensiones son Diseño, Arquitectura y Estructura. Los secretos los ve gitleaks.
+
+## 6. Tarea 101
+
+Brief: `docs/builds/brief-local-101.md`, con base 4a6ef27 y rama `laptop/tarea-101`.
+
+| Grupo | Qué | Archivos |
+|---|---|---|
+| A | Inválida si no compila; "ruidoso" nuevo; `con_tests/` | `src/oracle/calibra.rs` |
+| B | `--exclude-re` de "delete field"; el aviso de `fuera_de_la_muestra`; la regla con clave | `src/oracle/mutacion.rs`, `src/oracle/mod.rs`, `src/oracle/informe.rs` |
+| C | `modulo_borrado` fuera; `cuerpo_vaciado` en toda tarea; `analizar` en `inyectar.rs`; `!(…)`; calificadores de `fn` | `src/oracle/calibra/inyectar.rs` |
+
+- Los tres grupos no comparten archivos, y corren en paralelo. Dentro de cada grupo, los puntos van en serie.
+- `docs/interfaces.md` se regenera una sola vez, al final.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P102 siguen abiertas.
