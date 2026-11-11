@@ -7961,3 +7961,55 @@ P95 a P101 siguen abiertas.
 - **a)** Para las dimensiones de juez, "calibrada" pasa a pedir una cota inferior de Wilson de 0,8 o más, con los casos de todas las tareas juntos, por versión de Root. Son unos 16 a 30 casos por dimensión. Para las dimensiones de oráculo, "calibrada" pide un defecto detectado y todos los limpios bien. Recomendada: es la única que dice algo con este tamaño de muestra, y abarata D4, porque no pide 5 y 5 por tarea.
 - **b)** Dejar la regla de hoy, por tarea, y mostrar al lado la cota de Wilson como dato.
 - **c)** Dejar la regla de hoy, sin cambios.
+
+## Vuelta del 2026-11-11 (21): un producto que no compila, y Tarea 99
+
+**Estado.** La Tarea 96 dio 3115, 0 y 4 con podman. La 97 se construye desde 7b65814. Las mezclas de la 84 a la 96 y P95 a P102 esperan al usuario.
+
+**El control de la evaluación real confirma lo que esperaba.** El repo bueno de t1 da "bloqueado" por los 7 avisos RUSTSEC del `Cargo.lock` de broot. Ese es el caso de P96. Arquitectura marca "falta la capa [patron]" porque las capas todavía no se aplicaron. Pruebas da 0,05 porque la muestra cae fuera del cambio, y eso lo arregla la 97.
+
+## 1. Dónde corta la evaluación
+
+**Lo que leí** en `src/oracle/mod.rs`, cerca de la línea 695:
+- La suite del contrato corre primero. Si da `Suite::SinVeredicto`, Root arma un veredicto sin veredicto en las nueve dimensiones y termina.
+- La regla de la 95 marca en rojo los tests esperados cuando nextest sale con 101. En la suite del contrato de S2, los requisitos no nombran tests `contrato:`, así que no hay esperados. Sin esperados, queda sin veredicto, y corta todo.
+- El resultado: un producto que no compila da "sin decisión", no "no listo". No da verde, pero tampoco dice lo que pasó.
+
+## 2. Decisión: "no compila" es un resultado propio
+
+1. **Un `Suite::NoCompila` nuevo.** Con `runner = "nextest"`, si la suite del contrato sale con 101, el resultado es "no compila". No es "sin veredicto".
+2. **La suite oculta no corre.** Usa el mismo build, y también saldría con 101. Cada test oculto esperado cuenta como fallo, con el motivo "el producto no compila".
+3. **Las dimensiones que necesitan compilar** dan su veredicto en rojo:
+   - Funciona: 0, con veredicto.
+   - Completitud: sale de los ocultos en rojo, así que da 0, con veredicto.
+   - Pruebas: sin veredicto, porque cargo-mutants necesita compilar. Es lo que ya pasa: su base falla.
+4. **Las sondas que no necesitan compilar siguen.** Son gitleaks, cargo audit y las sondas nativas de Estructura y Arquitectura. Una sonda que sí necesita compilar, como clippy, queda sin veredicto en su ítem.
+5. **El juez no corre.** La decisión ya es "no listo", así que gastar API en un producto que no compila no cambia nada.
+6. **Regla de decisión nueva, en `no_listo`:** "el producto no compila". Va antes de los demás disparos de `no_listo`. Los bloqueos siguen primero, como hoy.
+7. Fuera de nextest, nada cambia.
+
+**¿Un rojo puede volverse verde? No.**
+- La regla convierte "sin decisión" en "no listo". Nunca da "listo".
+- El 101 llega del proceso que lanzó Root. El producto solo puede provocarlo rompiendo su build, y eso lo perjudica.
+- El riesgo de un rojo falso por una dependencia que no está en la caché ya se aceptó en la vuelta (17).
+
+**¿Pide una decisión del usuario? No.** Un producto que no compila no está listo. Hoy Root ya no da "listo" en ese caso. Solo cambia "sin decisión" por la decisión que corresponde.
+
+## 3. Tarea 99, base y paralelo
+
+Brief: `docs/builds/brief-local-99.md`, con base 7b65814, la punta de la 96, y rama `laptop/tarea-99`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Regla "el producto no compila" en la decisión, y el campo `no_compila` | `src/oracle/informe.rs`, `src/tipos.rs` |
+| 2 | `Suite::NoCompila` en el contrato, sin oculto ni juez | `src/oracle/mod.rs` |
+
+Los dos puntos van en serie: el 2 llena el campo que define el 1.
+
+**¿Puede correr en paralelo con la 98? Sí.**
+- La 97 toca `mutacion.rs`, `calibra.rs` y `docs/interfaces.md`. La 98 toca `inyectar.rs`. La 99 toca `mod.rs`, `informe.rs` y `tipos.rs`.
+- Ninguna de las tres comparte archivos de código. La 97 puede tocar `mod.rs` solo si su punto 3 lo pide.
+- `docs/interfaces.md` es un archivo generado. Si la 97 y la 99 lo cambian las dos, se regenera al mezclar la segunda.
+- **Orden de mezcla:** 97, 98 y 99. Si la 97 tocó `mod.rs`, la 99 se rebasa antes de mezclar.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P102 siguen abiertas.
