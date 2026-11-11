@@ -18,7 +18,7 @@ use serde_json::{Map, json};
 
 use super::juez::{ExtractoGuardado, huella_del_prompt};
 use super::memo::{Alcance, MemoSondas, ReusoSondas};
-use super::mutacion::MutanteMuerto;
+use super::mutacion::{MutanteEstado, MutanteMuerto};
 use super::rubrica::{Mide, Rubrica, cargar_embebidas};
 use super::tarea::Tarea;
 use super::{
@@ -88,6 +88,9 @@ pub struct Fila {
     /// hallazgos no detectan (Tarea 63). Una fila sin el campo vale vacía.
     #[serde(default)]
     pub ruidosos: Vec<String>,
+    /// Casos medidos con `mutantes_cambiados` no vacío. Siguen contando para las métricas. Sin el campo vale 0.
+    #[serde(default)]
+    pub casos_ruidosos: u32,
     /// `true` si el tope de gasto detuvo la calibración antes de medir todos sus casos (decisión 48). Una
     /// fila incompleta no calibra la dimensión, aunque su exactitud llegue a `UMBRAL`.
     #[serde(default)]
@@ -500,6 +503,15 @@ pub struct CasoGuardado {
     /// Nombre del mutante muerto que eligió `AssertBorrado`. `None` en los demás defectos.
     #[serde(default)]
     pub mutante: Option<String>,
+    /// Estado de cada mutante de la muestra del caso, en orden. Vacío si el caso no midió mutación.
+    #[serde(default)]
+    pub mutantes: Vec<MutanteEstado>,
+    /// Mutantes de la muestra cuyo estado cambió frente a la base, sin el mutante elegido. Vacío si no cambió ninguno.
+    #[serde(default)]
+    pub mutantes_cambiados: Vec<String>,
+    /// `true` si `mutantes_cambiados` no está vacío: el caso movió mutantes que no son su defecto.
+    #[serde(default)]
+    pub ruidoso: bool,
     /// Nombres completos de los tests que `AssertBorrado` apagó. Vacío en los demás defectos.
     #[serde(default)]
     pub tests_apagados: Vec<String>,
@@ -699,6 +711,8 @@ struct Ronda<'a> {
     prefijo: String,
     /// Veredictos de los limpios compartidos con las otras dimensiones con juez. `None` si la dimensión no comparte.
     compartidos: Option<&'a Compartidos>,
+    /// Muestra de mutación de la base. Cada caso la compara para ver qué mutantes cambiaron.
+    mutantes_base: &'a [MutanteEstado],
 }
 
 impl Ronda<'_> {
@@ -730,15 +744,22 @@ impl Medido {
     }
 }
 
+/// Lo que devuelve evaluar una copia: el veredicto, si reusó el `target` y la muestra de mutación que midió.
+struct Evaluada {
+    veredicto: Veredicto,
+    reusado: bool,
+    mutantes: Vec<MutanteEstado>,
+}
+
 /// Evalúa la copia `copia` del caso `i` como `tipo`. Reusa el `target` de la base si `puede_reusar` lo permite.
-/// Devuelve el veredicto y si el caso reusó: un aviso de `target` frío cuenta como compilación en frío.
-/// La llamada corre con el id del caso fijado, para que sus reservas lo lleven.
+/// Devuelve el veredicto, si el caso reusó y la muestra de mutación: un aviso de `target` frío cuenta como
+/// compilación en frío. La llamada corre con el id del caso fijado, para que sus reservas lo lleven.
 fn evaluar_copia(
     r: &Ronda,
     copia: &Path,
     tipo: TipoCaso,
     i: usize,
-) -> Result<(Veredicto, bool), ErrorOraculo> {
+) -> Result<Evaluada, ErrorOraculo> {
     let digest_ahora = (r.leer_digest)();
     let reusa = target::puede_reusar(
         r.repo_bueno,
@@ -752,14 +773,21 @@ fn evaluar_copia(
         _ => Target::Ninguno,
     };
     let id = r.id_de(i);
+    // Vacía la muestra de una evaluación anterior: lo que quede en el hilo es de esta evaluación.
+    let _ = super::mutacion::tomar_muestra();
     let veredicto = con_caso(&id, || {
         en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
     })?;
+    let mutantes = super::mutacion::tomar_muestra();
     let frio = veredicto
         .avisos
         .iter()
         .any(|aviso| aviso.starts_with(AVISO_TARGET_FRIO));
-    Ok((veredicto, reusa && !frio))
+    Ok(Evaluada {
+        veredicto,
+        reusado: reusa && !frio,
+        mutantes,
+    })
 }
 
 /// Mide el caso `i`. Los pares llevan un defecto: el de `defectos[(i / 2) % len]`, la misma rotación de los
@@ -783,7 +811,11 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         }
         let copia = r.tmp.join(format!("caso-{i}"));
         super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
-        let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Limpio, i)?;
+        let Evaluada {
+            veredicto,
+            reusado,
+            mutantes,
+        } = evaluar_copia(r, &copia, TipoCaso::Limpio, i)?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
         // Un juez rechazado por el límite no mide: su veredicto no se guarda ni cuenta.
@@ -793,8 +825,13 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         if let Some(c) = compartido {
             c.guardar(i as u32, &veredicto)?;
         }
+        // Un limpio no tiene mutante elegido: cuenta cualquier mutante que cambió.
+        let mutantes_cambiados =
+            super::mutacion::mutantes_cambiados(r.mutantes_base, &mutantes, None);
         let caso = Caso {
             target_reusado: reusado,
+            mutantes,
+            mutantes_cambiados,
             ..Caso::nuevo(i as u32, None, veredicto)
         };
         return Ok(Medido {
@@ -847,7 +884,11 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         };
         // `AssertBorrado` acota la mutación al archivo de su mutante: solo ese archivo se vuelve a medir.
         let acotado = inyeccion.mutante_archivo.as_deref();
-        let (veredicto, reusado) = super::mutacion::con_archivo_acotado(acotado, || {
+        let Evaluada {
+            veredicto,
+            reusado,
+            mutantes,
+        } = super::mutacion::con_archivo_acotado(acotado, || {
             evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)
         })?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
@@ -876,10 +917,10 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
                 continue;
             }
         }
-        medido = Some((inyeccion, veredicto, reusado));
+        medido = Some((inyeccion, veredicto, reusado, mutantes));
         break;
     }
-    let Some((inyeccion, veredicto, reusado)) = medido else {
+    let Some((inyeccion, veredicto, reusado, mutantes)) = medido else {
         return Ok(Medido {
             reemplazos: invalidos,
             caso: None,
@@ -891,9 +932,17 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             }),
         });
     };
+    // El mutante elegido por `AssertBorrado` no cuenta: es el defecto, no un efecto colateral.
+    let mutantes_cambiados = super::mutacion::mutantes_cambiados(
+        r.mutantes_base,
+        &mutantes,
+        inyeccion.mutante.as_deref(),
+    );
     let caso = Caso {
         reemplazos: invalidos,
         target_reusado: reusado,
+        mutantes,
+        mutantes_cambiados,
         ..Caso::nuevo(i as u32, Some(inyeccion), veredicto)
     };
     Ok(Medido {
@@ -922,7 +971,7 @@ fn la_suite_no_la_ejecuta(
         return Ok(false);
     };
     fs::write(&ruta, sondada).map_err(|e| super::infra("escribir la sonda", e))?;
-    let (veredicto, _) = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)?;
+    let Evaluada { veredicto, .. } = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)?;
     borrado::borrar_dir_dentro(r.tmp, &copia).map_err(|e| super::infra("borrar una copia", e))?;
     Ok(motivo_de_deteccion(r.base, &veredicto, r.dimension, &BTreeSet::new()).is_none())
 }
@@ -972,6 +1021,8 @@ fn calibrar_medida_con_hilos(
         None => tempfile::tempdir().map_err(|e| super::infra("carpeta temporal", e))?,
     };
     let destino_target = tmp.path().join(NOMBRE_TARGET_BASE);
+    // Vacía la muestra de mutación del hilo: lo que quede después es de la base.
+    let _ = super::mutacion::tomar_muestra();
     // La base corre con el límite activo: su juez también cuenta. Una base rechazada no mide nada.
     let base = en_limite(tope, || {
         evaluador(
@@ -980,6 +1031,8 @@ fn calibrar_medida_con_hilos(
             Target::Guardar(destino_target.clone()),
         )
     });
+    // Los casos comparan su muestra con la de la base. Las bases repetidas no la pisan.
+    let mutantes_base = super::mutacion::tomar_muestra();
     let base = match (base, detencion_de_rechazo(tope)) {
         (_, Some(detencion)) => return Ok(medida_detenida(detencion)),
         (Err(error), None) => return Err(error),
@@ -1085,6 +1138,7 @@ fn calibrar_medida_con_hilos(
             (ahora() * 1000.0) as u64
         ),
         compartidos,
+        mutantes_base: &mutantes_base,
     };
     let hilos = hilos.max(1);
     let (tx, rx) = mpsc::channel::<(usize, Result<Medido, ErrorOraculo>)>();
@@ -1285,6 +1339,10 @@ fn fila_de(
         inestable: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
+        casos_ruidosos: casos
+            .iter()
+            .filter(|c| !c.mutantes_cambiados.is_empty())
+            .count() as u32,
         inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
@@ -1587,6 +1645,7 @@ fn fila_no_aplica(
         inestable: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
+        casos_ruidosos: 0,
         inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
@@ -1712,6 +1771,10 @@ struct Caso {
     valor: Option<f32>,
     /// Extractos que leyó el juez en este caso. Vacío mientras el veredicto no los lleve.
     extractos: Vec<ExtractoGuardado>,
+    /// Estado de cada mutante de la muestra de este caso. Vacío si el caso no midió mutación.
+    mutantes: Vec<MutanteEstado>,
+    /// Mutantes cuyo estado cambió frente a la base, sin el mutante elegido. Vacío en un caso reusado.
+    mutantes_cambiados: Vec<String>,
 }
 
 impl Caso {
@@ -1739,6 +1802,8 @@ impl Caso {
             limpio_reusado: false,
             piso: false,
             omitidos: Vec::new(),
+            mutantes: Vec::new(),
+            mutantes_cambiados: Vec::new(),
         }
     }
 
@@ -1779,6 +1844,9 @@ impl CasoGuardado {
                 .map(|i| i.tests_apagados.clone())
                 .unwrap_or_default(),
             en_cambio: caso.inyeccion.as_ref().is_some_and(|i| i.en_cambio),
+            mutantes: caso.mutantes.clone(),
+            mutantes_cambiados: caso.mutantes_cambiados.clone(),
+            ruidoso: !caso.mutantes_cambiados.is_empty(),
         }
     }
 
@@ -1809,6 +1877,9 @@ impl CasoGuardado {
             mutante: None,
             tests_apagados: Vec::new(),
             en_cambio: false,
+            mutantes: Vec::new(),
+            mutantes_cambiados: Vec::new(),
+            ruidoso: false,
         }
     }
 }
@@ -2308,6 +2379,7 @@ mod tests {
             inestable: None,
             reemplazos: 0,
             ruidosos: Vec::new(),
+            casos_ruidosos: 0,
             inestables: Vec::new(),
             huella: None,
             extractos_base: Vec::new(),
@@ -8416,5 +8488,132 @@ mod tests {
         json.as_object_mut().expect("objeto").remove("inestables");
         let fila: Fila = serde_json::from_value(json).expect("lee");
         assert!(fila.inestables.is_empty());
+    }
+
+    /// Listado de dos mutantes de `src/a.rs`, como lo deja `cargo mutants --list --json`.
+    const LISTADO_DOS: &str = r#"[{"name":"src/a.rs:1:1: replace x -> u8 with 0"},{"name":"src/a.rs:2:1: replace y -> u8 with 1"}]"#;
+    /// Base: `x` lo caza y `y` se escapa.
+    const MUTANTES_BASE: &str = r#"{"total_mutants":2,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/a.rs:1:1: replace x -> u8 with 0","file":"src/a.rs","span":{"start":{"line":1}}}},"summary":"CaughtMutant"},{"scenario":{"Mutant":{"name":"src/a.rs:2:1: replace y -> u8 with 1","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"MissedMutant"}]}"#;
+    /// Defecto: `x` ya no lo caza. Es un mutante que cambió y no es el elegido.
+    const MUTANTES_DEFECTO: &str = r#"{"total_mutants":2,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/a.rs:1:1: replace x -> u8 with 0","file":"src/a.rs","span":{"start":{"line":1}}}},"summary":"MissedMutant"},{"scenario":{"Mutant":{"name":"src/a.rs:2:1: replace y -> u8 with 1","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"MissedMutant"}]}"#;
+
+    /// Ejecutor de cargo-mutants que responde el listado y `outcomes` como reporte de la corrida.
+    struct MutacionFalsa {
+        outcomes: &'static str,
+    }
+
+    impl EjecutorHerramienta for MutacionFalsa {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            let mut salida = SalidaHerramienta::default();
+            if cmd.contains("--list") {
+                salida
+                    .archivos
+                    .insert("listado.json".into(), LISTADO_DOS.into());
+            } else if !cmd.starts_with("command -v") {
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), self.outcomes.into());
+            }
+            Ok(salida)
+        }
+    }
+
+    #[test]
+    fn calibra_caso_con_un_mutante_que_cambia_queda_ruidoso() {
+        let (_t, tarea) = tarea_prueba();
+        // Base y limpios miden `MUTANTES_BASE`; cada caso con defecto mide `MUTANTES_DEFECTO`.
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let outcomes = match tipo {
+                TipoCaso::Defecto(_) => MUTANTES_DEFECTO,
+                _ => MUTANTES_BASE,
+            };
+            let _ = crate::oracle::mutacion::sonda_mutacion(&MutacionFalsa { outcomes }, &tarea);
+            Ok(diseno_con(&[(ITEM_MODULARIDAD, 3), (ITEM_ROBUSTEZ, 3)]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            4,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let con_defecto = medida
+            .casos
+            .iter()
+            .find(|c| c.es_defecto)
+            .expect("hay un caso con defecto");
+        let guardado = CasoGuardado::de(con_defecto);
+        let esperado = vec!["src/a.rs:1:1: replace x -> u8 with 0".to_string()];
+        assert_eq!(guardado.mutantes_cambiados, esperado);
+        assert!(guardado.ruidoso, "{guardado:?}");
+        assert_eq!(guardado.mutantes.len(), 2, "{:?}", guardado.mutantes);
+        let limpio = medida
+            .casos
+            .iter()
+            .find(|c| !c.es_defecto)
+            .expect("hay un caso limpio");
+        assert!(
+            limpio.mutantes_cambiados.is_empty(),
+            "{:?}",
+            limpio.mutantes_cambiados
+        );
+    }
+
+    #[test]
+    fn calibra_fila_cuenta_los_casos_ruidosos_sin_mover_las_metricas() {
+        let (_t, tarea) = tarea_prueba();
+        let limpio = Caso::nuevo(1, None, Veredicto::default());
+        let mut ruidoso = Caso::nuevo(3, None, Veredicto::default());
+        ruidoso.mutantes_cambiados = vec!["src/a.rs:1:1: replace x -> u8 with 0".into()];
+        let fila = fila_de(
+            &tarea,
+            Dimension::Diseno,
+            42,
+            &[limpio, ruidoso],
+            &[],
+            0,
+            false,
+        );
+        assert_eq!(fila.casos_ruidosos, 1);
+        assert_eq!(
+            (fila.n, fila.limpios),
+            (2, 2),
+            "el caso ruidoso sigue contando"
+        );
+        assert_eq!(fila.especificidad, Some(1.0));
+    }
+
+    #[test]
+    fn calibra_caso_guardado_viejo_carga_sin_los_campos_de_mutacion() {
+        let caso = Caso::nuevo(0, None, Veredicto::default());
+        let mut vieja = serde_json::to_value(CasoGuardado::de(&caso)).expect("serializa");
+        let objeto = vieja.as_object_mut().expect("objeto");
+        for clave in ["mutantes", "mutantes_cambiados", "ruidoso"] {
+            objeto.remove(clave);
+        }
+        let leido: CasoGuardado = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert!(leido.mutantes.is_empty());
+        assert!(leido.mutantes_cambiados.is_empty());
+        assert!(!leido.ruidoso);
+    }
+
+    #[test]
+    fn calibra_fila_vieja_sin_casos_ruidosos_lee_cero() {
+        let fila = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        vieja
+            .as_object_mut()
+            .expect("objeto")
+            .remove("casos_ruidosos");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!(leida.casos_ruidosos, 0);
     }
 }

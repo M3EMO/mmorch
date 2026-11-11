@@ -627,6 +627,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "Una medición de una dimensión de una tarea, con su muestra.",
       "type": "object",
       "properties": {
+        "casos_ruidosos": {
+          "description": "Casos medidos con `mutantes_cambiados` no vacío. Siguen contando para las métricas. Sin el campo vale 0.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "defectos": {
           "description": "Defectos aplicados y medidos. La sensibilidad sale de ellos.",
           "type": "integer",
@@ -899,6 +906,22 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "default": null
     },
+    "mutantes": {
+      "description": "Estado de cada mutante de la muestra del caso, en orden. Vacío si el caso no midió mutación.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MutanteEstado"
+      }
+    },
+    "mutantes_cambiados": {
+      "description": "Mutantes de la muestra cuyo estado cambió frente a la base, sin el mutante elegido. Vacío si no cambió ninguno.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
     "niveles": {
       "description": "Nivel de cada ítem de la dimensión calibrada en este caso. Vacío si no hay puntaje.",
       "type": "object",
@@ -954,6 +977,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "type": "boolean",
       "default": false
     },
+    "ruidoso": {
+      "description": "`true` si `mutantes_cambiados` no está vacío: el caso movió mutantes que no son su defecto.",
+      "type": "boolean",
+      "default": false
+    },
     "sin_veredicto": {
       "description": "Motivo por el que la dimensión calibrada quedó sin veredicto en este caso.",
       "type": [
@@ -1003,6 +1031,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "detectado"
   ],
   "$defs": {
+    "EstadoMutante": {
+      "description": "Estado de un mutante de la muestra. `Vencido` es un `Timeout`: cuenta como muerto en el puntaje.",
+      "type": "string",
+      "enum": [
+        "muerto",
+        "vivo",
+        "vencido"
+      ]
+    },
     "ExtractoGuardado": {
       "description": "Una ventana del prompt del juez, sin su texto. `motivo` es `cambio`, `grande` o `sonda`.",
       "type": "object",
@@ -1029,6 +1066,22 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "desde",
         "hasta",
         "motivo"
+      ]
+    },
+    "MutanteEstado": {
+      "description": "Un mutante de la muestra y su estado. `nombre` es el `name` del reporte de cargo-mutants.",
+      "type": "object",
+      "properties": {
+        "estado": {
+          "$ref": "#/$defs/EstadoMutante"
+        },
+        "nombre": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nombre",
+        "estado"
       ]
     }
   }

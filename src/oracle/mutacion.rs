@@ -5,6 +5,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::oracle::ErrorOraculo;
@@ -37,6 +38,53 @@ pub struct ResultadoMutacion {
     /// Mutantes del listado (viables o no), si la muestra quedó corta.
     pub total_conocido: Option<u32>,
     pub truncado: bool,
+    /// Mutantes de la muestra, en orden, con su estado. El puntaje no cambia: `Vencido` cuenta como muerto.
+    #[serde(default)]
+    pub mutantes: Vec<MutanteEstado>,
+}
+
+/// Estado de un mutante de la muestra. `Vencido` es un `Timeout`: cuenta como muerto en el puntaje.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EstadoMutante {
+    Muerto,
+    Vivo,
+    Vencido,
+}
+
+/// Un mutante de la muestra y su estado. `nombre` es el `name` del reporte de cargo-mutants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MutanteEstado {
+    pub nombre: String,
+    pub estado: EstadoMutante,
+}
+
+thread_local! {
+    /// Última muestra que midió `sonda_mutacion` en este hilo. La toma `tomar_muestra`.
+    static ULTIMA_MUESTRA: RefCell<Vec<MutanteEstado>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Saca la muestra que midió la última `sonda_mutacion` de este hilo. Deja la muestra vacía.
+pub(crate) fn tomar_muestra() -> Vec<MutanteEstado> {
+    ULTIMA_MUESTRA.with(|u| std::mem::take(&mut *u.borrow_mut()))
+}
+
+/// Nombres, en orden de `caso`, de los mutantes que están en `base` y en `caso` con estado distinto.
+/// No cuenta `elegido`. Un nombre que solo está en una de las dos listas no cuenta.
+pub(crate) fn mutantes_cambiados(
+    base: &[MutanteEstado],
+    caso: &[MutanteEstado],
+    elegido: Option<&str>,
+) -> Vec<String> {
+    caso.iter()
+        .filter(|c| Some(c.nombre.as_str()) != elegido)
+        .filter(|c| {
+            base.iter()
+                .find(|b| b.nombre == c.nombre)
+                .is_some_and(|b| b.estado != c.estado)
+        })
+        .map(|c| c.nombre.clone())
+        .collect()
 }
 
 /// Mutante muerto de la muestra: un cambio de comportamiento que algún test detecta.
@@ -104,6 +152,8 @@ struct Viable {
     linea: u32,
     nombre: String,
     muerto: bool,
+    /// Estado del mutante. `Vencido` (`Timeout`) también tiene `muerto` en verdadero.
+    estado: EstadoMutante,
     /// Log del mutante, si el reporte lo trae. Lo usan los tests que fallaron con él.
     log_path: Option<String>,
     /// Verdadero si el resumen es `Timeout`: no se le atribuyen tests.
@@ -133,11 +183,12 @@ fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
     // `Baseline` es la marca de fin: sin él, la lista no prueba que la corrida terminó.
     let mut hay_baseline = false;
     for resultado in &resultados {
-        let de = |m: &Mutante, muerto: bool| Viable {
+        let de = |m: &Mutante, estado: EstadoMutante| Viable {
             archivo: m.file.clone(),
             linea: m.span.start.line,
             nombre: m.name.clone(),
-            muerto,
+            muerto: estado != EstadoMutante::Vivo,
+            estado,
             log_path: resultado.log_path.clone(),
             timeout: resultado.summary == "Timeout",
         };
@@ -157,8 +208,9 @@ fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
             },
             Escenario::Mutant(mutante) => match resultado.summary.as_str() {
                 "Unviable" => {}
-                "CaughtMutant" | "Timeout" => viables.push(de(mutante, true)),
-                "MissedMutant" => viables.push(de(mutante, false)),
+                "CaughtMutant" => viables.push(de(mutante, EstadoMutante::Muerto)),
+                "Timeout" => viables.push(de(mutante, EstadoMutante::Vencido)),
+                "MissedMutant" => viables.push(de(mutante, EstadoMutante::Vivo)),
                 otro => {
                     return Err(ErrorOraculo::Infra(format!(
                         "resumen de mutante desconocido: {otro}"
@@ -246,6 +298,13 @@ pub fn parsear_outcomes(
         muestra: muestra.len() as u32,
         total_conocido: truncado.then_some(total),
         truncado,
+        mutantes: muestra
+            .iter()
+            .map(|v| MutanteEstado {
+                nombre: v.nombre.clone(),
+                estado: v.estado,
+            })
+            .collect(),
     })
 }
 
@@ -449,11 +508,19 @@ fn desde_sonda(sonda: ResultadoSonda) -> ResultadoMutacion {
         muestra: 0,
         total_conocido: None,
         truncado: false,
+        mutantes: Vec::new(),
     }
 }
 
 /// Sonda de mutación. Solo Rust. Sin `cargo-mutants` en la imagen, no corre el comando largo.
 pub fn sonda_mutacion(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoMutacion {
+    let resultado = medir_mutantes(ej, tarea);
+    ULTIMA_MUESTRA.with(|u| *u.borrow_mut() = resultado.mutantes.clone());
+    resultado
+}
+
+/// Cuerpo de `sonda_mutacion`. Su resultado sale con la muestra de `mutantes`.
+fn medir_mutantes(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoMutacion {
     if tarea.lenguaje != "rust" {
         return desde_sonda(sin_veredicto(
             DIMENSION,
@@ -1404,5 +1471,72 @@ mod tests {
             "termina con el cp: {cmd}"
         );
         assert!(es_comando_de_mutacion(&cmd), "{cmd}");
+    }
+
+    /// Mutante de la muestra con su estado, para los tests de `mutantes_cambiados`.
+    fn est(nombre: &str, estado: EstadoMutante) -> MutanteEstado {
+        MutanteEstado {
+            nombre: nombre.into(),
+            estado,
+        }
+    }
+
+    #[test]
+    fn mutacion_muestra_da_muerto_vivo_y_vencido_en_orden() {
+        // Los viables en orden: a1 caza, a2 no compila (no cuenta), b3 se escapa, b4 agota el tiempo, c5 caza.
+        let r = parsear_outcomes(MUERTOS_MIXTOS, 60, &[]).expect("parsea");
+        assert_eq!(
+            r.mutantes,
+            vec![
+                est("a1", EstadoMutante::Muerto),
+                est("b3", EstadoMutante::Vivo),
+                est("b4", EstadoMutante::Vencido),
+                est("c5", EstadoMutante::Muerto),
+            ]
+        );
+    }
+
+    #[test]
+    fn mutacion_sonda_deja_su_muestra_y_tomar_muestra_la_saca() {
+        let r = sonda_mutacion(&con_reporte(MUERTOS_MIXTOS), &tarea_pruebas(60));
+        assert_eq!(r.mutantes.len(), 4, "{:?}", r.mutantes);
+        assert_eq!(tomar_muestra(), r.mutantes);
+        assert!(tomar_muestra().is_empty(), "tras tomarla queda vacía");
+        // Una sonda sin herramienta también sobrescribe la muestra: queda vacía.
+        let _ = sonda_mutacion(&con_reporte(MUERTOS_MIXTOS), &tarea_pruebas(60));
+        let _ = sonda_mutacion(&falta_la_herramienta(), &tarea_pruebas(60));
+        assert!(tomar_muestra().is_empty(), "la sonda sin muestra la vacía");
+    }
+
+    #[test]
+    fn mutacion_mutantes_cambiados_omite_el_elegido_y_lista_el_resto() {
+        // `x` pasa de muerto a vivo, `y` de vencido a muerto, `q` solo está en la base, `w` solo en el caso.
+        let base = vec![
+            est("x", EstadoMutante::Muerto),
+            est("y", EstadoMutante::Vencido),
+            est("z", EstadoMutante::Vivo),
+            est("q", EstadoMutante::Muerto),
+        ];
+        let caso = vec![
+            est("x", EstadoMutante::Vivo),
+            est("y", EstadoMutante::Muerto),
+            est("z", EstadoMutante::Vivo),
+            est("w", EstadoMutante::Vivo),
+        ];
+        assert_eq!(mutantes_cambiados(&base, &caso, Some("x")), vec!["y"]);
+        assert_eq!(mutantes_cambiados(&base, &caso, Some("y")), vec!["x"]);
+        assert_eq!(mutantes_cambiados(&base, &caso, None), vec!["x", "y"]);
+        assert!(mutantes_cambiados(&base, &base, None).is_empty());
+    }
+
+    #[test]
+    fn mutacion_puntaje_no_cambia_con_el_estado_vencido() {
+        // `Vencido` cuenta como muerto: el valor sale igual que antes del estado nuevo.
+        let r = parsear_outcomes(MUERTOS_MIXTOS, 60, &[]).expect("parsea");
+        assert_eq!((r.muertos, r.vivos, r.muestra), (3, 1, 4));
+        assert_eq!(r.sonda.valor, Some(0.75));
+        let r = parsear_outcomes(SIN_ASSERTS, 60, &[]).expect("parsea");
+        assert_eq!((r.muertos, r.vivos, r.muestra), (2, 7, 9));
+        assert!((r.sonda.valor.expect("valor") - 2.0 / 9.0).abs() < 1e-6);
     }
 }
