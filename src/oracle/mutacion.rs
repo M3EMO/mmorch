@@ -489,10 +489,14 @@ fn fuera_de(del_reporte: &[String], pedidos: &[String]) -> Vec<String> {
 /// Aviso del veredicto por los mutantes que cargo-mutants corrió fuera de la muestra. `None` si no hubo ninguno.
 pub(crate) fn aviso_de_mas(fuera: &[String]) -> Option<String> {
     (!fuera.is_empty()).then(|| {
-        format!(
-            "cargo-mutants corrió {} mutantes que no estaban en la muestra",
-            fuera.len()
-        )
+        if fuera.len() == 1 {
+            "cargo-mutants corrió 1 mutante que no estaba en la muestra".to_string()
+        } else {
+            format!(
+                "cargo-mutants corrió {} mutantes que no estaban en la muestra",
+                fuera.len()
+            )
+        }
     })
 }
 
@@ -2088,6 +2092,14 @@ mod tests {
             Some("cargo-mutants corrió 2 mutantes que no estaban en la muestra")
         );
         assert_eq!(aviso_de_mas(&[]), None);
+    }
+
+    #[test]
+    fn mutacion_aviso_de_mas_usa_singular_con_uno() {
+        assert_eq!(
+            aviso_de_mas(&strs(&["x1"])).as_deref(),
+            Some("cargo-mutants corrió 1 mutante que no estaba en la muestra")
+        );
     }
 
     #[test]
