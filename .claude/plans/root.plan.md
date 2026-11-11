@@ -7021,3 +7021,100 @@ Los tres puntos no comparten archivos, y corren en paralelo.
 **Después de la 86, la revisión de cierre queda así:** los 5 HIGH cerrados. De los MEDIUM, los que tocan `corre` y el aislamiento de escenarios son los puntos 6, 7, 10, 11, 13 y 15. No verifiqué si siguen abiertos en la punta: la HIGH 3 mostró que una revisión vieja puede estar ya resuelta. Antes de ordenarlos, el orquestador los verifica contra 3cd5898, sin API. Los ordeno cuando lleguen esa verificación y los datos de calibración de t1.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P100 siguen abiertas.
+
+## Vuelta del 2026-11-11 (8): calibración en t1, Tarea 86 y Tarea 87
+
+**Estado.** La Tarea 86 está en `laptop/tarea-86` (70788ac). Su suite con podman corre ahora. Las mezclas de la 84, la 85 y la 86 esperan la orden del usuario. P80 va en 3,1641 de 5 USD.
+
+## 1. Lo que dicen los datos de t1
+
+- **Seguridad:** 1,0 y 1,0, sin API. La base se juzgó una sola vez. El camino sin juez de la Tarea 84 funciona de punta a punta.
+- **Arquitectura:** el limpio dio bien. El defecto no aplicó otra vez. La causa probable sigue siendo `capas = [["patron"]]`, sin módulos reales (defecto d).
+- **Diseño:** el limpio dio bien. El falso positivo de la Tarea 81 desapareció con la regla de estabilidad. Esa regla cumple lo que prometía.
+- **Diseño, defecto:** no detectado. El juez leyó la línea, porque un extracto cubre de la 46 a la 114.
+
+## 2. Defecto sobre un ítem en el piso
+
+**Lo que medí en los casos guardados** (`~/.local/share/root/calibracion/*diseno*.casos.jsonl`, solo lectura):
+- Los 28 defectos de Diseño apuntan al mismo ítem: `diseno.errores`. Diseño tiene un solo tipo de defecto.
+- En brasa, `diseno.errores` arranca en 2 o 3. Se detectan 7 de 13.
+- En memora, la base no guardaba niveles, y se detectan 8 de 10.
+- En t1, t2 y t3 de S2, la base da 0 en 4 de 5 casos. Ninguno se detecta.
+- En las otras dimensiones, los casos no guardan el nivel base del ítem apuntado, así que no se puede medir el piso. Esas dimensiones detectan sobre todo por sondas. Seguridad dio 1,0.
+
+**El piso cierra una vía, no todas.** La regla de detección tiene tres vías: sondas, una cita del juez a 5 líneas o menos del defecto, o una baja fuerte del ítem (`src/oracle/calibra/regla.rs`). En el piso solo se cierra la tercera. Memora detectó 8 de 10 sin nivel base, así que las otras vías funcionan.
+
+**Decisión: el caso en el piso se queda, y se marca.**
+1. El caso guarda `piso: true` si el nivel base del ítem apuntado no permite la baja de su dimensión.
+2. La fila cuenta `defectos_en_piso`.
+3. La línea de `calibrar` muestra cuántos defectos estaban en el piso.
+4. La sensibilidad no cambia de fórmula. Un defecto en el piso que el juez no cita es un fallo real: el juez leyó la línea y no la marcó.
+
+**Por qué no reemplazarlo.** Reemplazar los casos en el piso deja a Diseño sin casos en repos reales. Los tres repos de S2 tienen `diseno.errores` en 0. Además, la vía de la cita sí mide algo real.
+
+**Riesgo para D4, sin tarea por ahora.** Diseño se calibra con un solo tipo de defecto, sobre un solo ítem. Una exactitud de 0,9 en Diseño dice "detecta errores tragados". No dice nada de modularidad, estado u operabilidad. Más inyectores de Diseño serían trabajo del hito 1b. Lo pongo en el orden cuando haya datos de sensibilidad real.
+
+## 3. Juicio que omite ítems en un caso
+
+**Lo que pasa hoy.** El juez puede responder `sin_evidencia` en un ítem. Eso cumple el contrato. Para un ítem de juez sin nivel, `detecta_item` no cuenta ni detección ni falsa alarma. El caso sigue midiendo su ítem apuntado.
+
+**Decisión: no se agrega una regla nueva, pero se cuenta.**
+1. Cada caso guarda `omitidos`: los ítems estables en la base que el juez dejó sin nivel en ese caso.
+2. La fila cuenta las omisiones.
+3. Si el ítem apuntado es el omitido, el caso no entra a la sensibilidad. Eso ya pasa hoy, y se informa como tal.
+4. Con datos de varias tareas, decido si una omisión frecuente vuelve inestable un ítem. Hoy hay un solo caso.
+
+## 4. Las 3 preguntas de la Tarea 86
+
+1. **La ventana entre el `wait` y el borrado del pid: se cierra.** Un `kill` sobre un pid ya esperado puede caer en otro proceso. Es el MEDIUM 2 de la revisión de la señal. La forma limpia es guardar el `Child` en el estado compartido y esperarlo con `try_wait` bajo el cerrojo. El hilo de la señal lo termina con el `Child`, no con el pid. Un hijo esperado nunca se mata. Va a la Tarea 87.
+2. **Un error de `esperar` mata al hijo:** sí. Un hijo vivo con la credencial montada es justo lo que estas tareas cierran. Falla cerrado. Va a la Tarea 87.
+3. **Varios hijos a la vez:** no. Pero un segundo registro da error, en vez de pisar al primero. Así un uso concurrente futuro falla a la vista. Va a la Tarea 87.
+
+## 5. La revisión de la señal de la 85
+
+- **HIGH, el hilo principal sigue tras la señal.** La Tarea 86 hace que un spawn después de "terminando" no lance nada. Queda un hueco posible: el hilo principal puede preparar la copia de la credencial después de que el hilo de la señal la borró. La Tarea 87 verifica ese camino. Si existe, `lanzar` mira "terminando" antes de preparar la copia, bajo el cerrojo, y el hilo de la señal conserva el cerrojo hasta salir.
+- **MEDIUM 1, el registro pisado por la limpieza:** la Tarea 86 agregó `registrar` en `correr_hijo`. La Tarea 87 lo confirma con un test.
+- **MEDIUM 2:** va con la pregunta 1.
+- **MEDIUM 3, error de borrado tragado:** se acepta. El mensaje sale por stderr, y el barrido del próximo arranque borra la copia.
+- **MEDIUM 4, deriva de `btime`:** se cierra. Esta máquina es una laptop que se suspende. La tolerancia sube de 2 a 300 segundos. Que otro `r00t` reuse el pid en ese tiempo es casi imposible.
+- **MEDIUM 5, el barrido aborta ante un error:** se cierra. Un error en una corrida se informa, y el barrido sigue con las demás.
+
+## 6. Tarea 87
+
+Brief: `docs/builds/brief-local-87.md`, con base 70788ac y rama `laptop/tarea-87`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Hijo en estado compartido: `try_wait` bajo cerrojo, terminar por `Child`, error de `esperar` mata, segundo registro da error, copia mirando "terminando" | `src/corre/ejecutor.rs`, `src/corre/corrida.rs` |
+| 2 | Barrido: tolerancia de 300 s y errores por corrida | `src/corre/barrido.rs` |
+| 3 | Calibración: `piso` y `omitidos` por caso, y sus conteos en la fila | `src/oracle/calibra.rs`, `src/lib.rs`, `docs/interfaces.md` |
+
+Los tres puntos no comparten archivos, y corren en paralelo.
+
+## 7. El escenario B de D4
+
+**El costo sí se puede revisar.**
+- Con la estabilidad y la lectura guiada, un juicio cuesta cerca de 0,08 USD. Antes eran 0,063.
+- Por tarea, B pide 3 dimensiones de juez con 3 juicios de base cada una, 15 defectos y 5 limpios compartidos. Son 29 juicios: cerca de 2,3 USD.
+- Con 20 tareas son cerca de 46 USD.
+- Del presupuesto del dataset quedan cerca de 37 USD de API, después de P84 y P80.
+- **B no entra.** Con 15 tareas son cerca de 35 USD, y entra justo.
+
+**La factibilidad no se puede revisar todavía.** En repos reales no hay ni un defecto de juez detectado:
+- Diseño: 0 de 1 en t1, y 0 de 4 en los casos anteriores de S2.
+- Arquitectura: el defecto no aplicó en ninguna tarea de S2.
+
+**Lo que falta medir, en t1:**
+1. **Diseño con n = 10:** 5 defectos y 5 limpios. Mide la vía de la cita en el piso. Son cerca de 13 juicios: 1,1 USD.
+2. **Arquitectura con n = 10,** después de corregir `capas` en el `tarea.toml` de t1 con la regla de D3. El arreglo no lleva código ni API. Son cerca de 1,1 USD.
+3. Las dos juntas pasan lo que queda de P80: 1,84 USD. Por eso va P101.
+
+## Preguntas para el usuario (2026-11-11, 8)
+
+P95 a P100 siguen abiertas.
+
+**P101: para saber si D4 vale su costo, hace falta medir si Root detecta defectos reales en Diseño y Arquitectura.** Hoy no hay ni uno detectado en un repo real. Medir las dos en t1, con 10 casos cada una, cuesta cerca de 2,2 USD. Quedan 1,84 USD de los 5 de S2 (P80). La plata sale del presupuesto de 50 USD del dataset.
+
+- **a)** Subir el tope de S2 de 5 a 7 USD, y medir las dos. Recomendada: D4 cuesta cerca de 46 USD, y estas dos medidas dicen si conviene gastarlos.
+- **b)** Medir solo Diseño, dentro de lo que queda.
+- **c)** No medir ahora.
