@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::contenedor::{args_podman_builder, estado_de, fisica, validar_montajes};
 use super::{ErrorCorre, copiar_sin_mcp, verificar_vigencia, vida_restante};
@@ -300,6 +300,40 @@ fn revisar_plugin(plugin: &Path) -> Result<(), ErrorCorre> {
             plugin.display()
         ))),
     }
+}
+
+/// Quita los contenedores del builder que lanzó este proceso: los que llevan `root-builder-<pid>-` en
+/// el nombre. Corre `<programa> ps` y luego `<programa> rm -f -t 0 <nombres>`, con `plazo` en total.
+/// Ignora los errores: quien llama está saliendo y no tiene a quién avisar.
+pub fn quitar_builders_de_este_proceso(programa: &str, plazo: Duration) {
+    let inicio = Instant::now();
+    let prefijo = format!("root-builder-{}-", std::process::id());
+    let filtro = format!("name={prefijo}");
+    let args_ps = [
+        "ps",
+        "-a",
+        "--format",
+        "{{.Names}}",
+        "--filter",
+        filtro.as_str(),
+    ];
+    let args_ps: Vec<String> = args_ps.iter().map(|a| a.to_string()).collect();
+    let Ok(Fin::Termino(salida)) = correr_proceso(programa, &args_ps, plazo) else {
+        return;
+    };
+    let nombres: Vec<String> = String::from_utf8_lossy(&salida.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|nombre| nombre.starts_with(&prefijo))
+        .map(str::to_string)
+        .collect();
+    if nombres.is_empty() {
+        return;
+    }
+    let mut args_rm: Vec<String> = ["rm", "-f", "-t", "0"].map(String::from).into();
+    args_rm.extend(nombres);
+    let restante = plazo.saturating_sub(inicio.elapsed());
+    let _ = correr_proceso(programa, &args_rm, restante);
 }
 
 /// Nombre único de un contenedor del builder: `root-builder-<pid>-<contador>`.
@@ -958,5 +992,73 @@ mod tests {
                 .expect("lanza");
             assert_eq!(salida.codigo, 9, "{clave} debe cortar el builder");
         }
+    }
+
+    /// Script de prueba ejecutable con `cuerpo`, en `dir`. Devuelve su ruta.
+    fn programa_falso(dir: &Path, cuerpo: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let ruta = dir.join("podman-falso");
+        fs::write(&ruta, format!("#!/bin/sh\n{cuerpo}\n")).expect("script");
+        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+        ruta
+    }
+
+    #[test]
+    fn quitar_builders_pide_por_nombre_solo_los_de_este_proceso() {
+        let tmp = TempDir::new().expect("tmp");
+        let log = tmp.path().join("podman.log");
+        let pid = std::process::id();
+        let cuerpo = format!(
+            "echo \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\necho root-builder-{pid}-0\necho root-builder-{pid}-1\necho root-builder-1-0\necho otro\nfi",
+            log.display()
+        );
+        let programa = programa_falso(tmp.path(), &cuerpo);
+        quitar_builders_de_este_proceso(programa.to_str().expect("ruta"), Duration::from_secs(10));
+        let anotado = fs::read_to_string(&log).expect("log");
+        assert!(
+            anotado.contains(&format!(
+                "ps -a --format {{{{.Names}}}} --filter name=root-builder-{pid}-"
+            )),
+            "{anotado}"
+        );
+        assert!(
+            anotado.contains(&format!(
+                "rm -f -t 0 root-builder-{pid}-0 root-builder-{pid}-1"
+            )),
+            "{anotado}"
+        );
+        assert!(!anotado.contains("root-builder-1-0"), "{anotado}");
+        assert!(!anotado.contains("otro"), "{anotado}");
+    }
+
+    #[test]
+    fn quitar_builders_sin_nombres_no_llama_a_rm() {
+        let tmp = TempDir::new().expect("tmp");
+        let log = tmp.path().join("podman.log");
+        let cuerpo = format!("echo \"$*\" >> '{}'", log.display());
+        let programa = programa_falso(tmp.path(), &cuerpo);
+        quitar_builders_de_este_proceso(programa.to_str().expect("ruta"), Duration::from_secs(10));
+        let anotado = fs::read_to_string(&log).expect("log");
+        assert!(!anotado.contains(" rm "), "{anotado}");
+    }
+
+    #[test]
+    fn quitar_builders_respeta_el_plazo() {
+        let tmp = TempDir::new().expect("tmp");
+        let programa = programa_falso(tmp.path(), "exec sleep 30");
+        let inicio = std::time::Instant::now();
+        quitar_builders_de_este_proceso(
+            programa.to_str().expect("ruta"),
+            Duration::from_millis(300),
+        );
+        assert!(
+            inicio.elapsed() < Duration::from_secs(10),
+            "no espera el fin"
+        );
+    }
+
+    #[test]
+    fn quitar_builders_con_programa_inexistente_no_falla() {
+        quitar_builders_de_este_proceso("/no/existe/podman", Duration::from_secs(1));
     }
 }

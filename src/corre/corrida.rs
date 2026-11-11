@@ -2,10 +2,14 @@
 //! lanzamiento por rol, sesiones, lecturas del oráculo, evaluación y la fila de `runs.jsonl`.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
+use signal_hook::consts::{SIGINT, SIGTERM};
+use signal_hook::iterator::{Handle, Signals};
 
 use crate::borrado;
 use crate::config::Config;
@@ -16,6 +20,7 @@ use crate::corre::costo_cortado::{
     costo_de_uso, evento_de_corte, evento_sesion_de_corte, precio_de_rol, turnos_de_transcript,
     uso_de_transcript,
 };
+use crate::corre::ejecutor;
 use crate::corre::git_seguro;
 use crate::corre::redacta::{redactar, token_de_copia};
 use crate::corre::{
@@ -185,6 +190,11 @@ fn correr_interno(
         corrida: &corrida,
         hecho: false,
     };
+    // Desde acá, una señal quita la copia y sale. El vigía vive hasta el fin de `correr`.
+    let _vigia = VigilaSenales::iniciar(&corrida).map_err(|fuente| ErrorCorre::Io {
+        contexto: "registrar las señales SIGINT y SIGTERM".into(),
+        fuente,
+    })?;
     let id = corrida.id.clone();
     // Sin líneas distintivas, el oráculo solo se ve por rutas y nombres: se anota en el log.
     if !huellas.tiene_lineas() {
@@ -735,6 +745,68 @@ fn registrar_sesion(
         return gate(ruta_eventos, id, FASE_SESION, motivo, Some(lanzado.rol));
     }
     Ok(())
+}
+
+/// Programa de podman que quita los contenedores del builder al recibir una señal.
+const PODMAN: &str = "podman";
+/// Plazo total para quitar los contenedores del builder al recibir una señal.
+const PLAZO_AL_SENAL: Duration = Duration::from_secs(10);
+
+/// Vigila SIGINT y SIGTERM mientras la copia de la credencial existe.
+/// Un hilo espera las señales. Así el borrado nunca corre dentro del manejador.
+/// Al soltarla, el hilo termina y se quitan los registros de señal.
+struct VigilaSenales {
+    manejador: Handle,
+    hilo: Option<JoinHandle<()>>,
+}
+
+impl VigilaSenales {
+    /// Registra SIGINT y SIGTERM y arranca el hilo que espera las señales.
+    fn iniciar(corrida: &Corrida) -> io::Result<VigilaSenales> {
+        let mut senales = Signals::new([SIGINT, SIGTERM])?;
+        let manejador = senales.handle();
+        let corrida = corrida.clone();
+        let hilo = thread::spawn(move || {
+            for senal in senales.forever() {
+                al_recibir_senal(&corrida, senal, PODMAN, |codigo| {
+                    std::process::exit(codigo);
+                });
+            }
+        });
+        Ok(VigilaSenales {
+            manejador,
+            hilo: Some(hilo),
+        })
+    }
+}
+
+impl Drop for VigilaSenales {
+    fn drop(&mut self) {
+        // Cerrar el manejador termina el `forever` del hilo. El hilo libera las señales al terminar.
+        self.manejador.close();
+        if let Some(hilo) = self.hilo.take() {
+            let _ = hilo.join();
+        }
+    }
+}
+
+/// Qué hace `r00t corre` al recibir `senal`.
+/// Quita la copia de la credencial y los contenedores del builder de este proceso.
+/// Luego llama a `salir` con el código de la señal.
+/// Si la copia ya no existe, no es error: la carrera con `GuardiaCredencial::cerrar` es normal.
+fn al_recibir_senal(corrida: &Corrida, senal: i32, programa: &str, salir: impl Fn(i32)) {
+    if let Err(error) = quitar_credencial(corrida) {
+        eprintln!(
+            "r00t corre: al recibir una señal no se pudo borrar la copia de la credencial: {error}"
+        );
+    }
+    ejecutor::quitar_builders_de_este_proceso(programa, PLAZO_AL_SENAL);
+    salir(codigo_de_senal(senal));
+}
+
+/// Código de salida de una señal que mata el proceso: 128 más su número. SIGINT da 130 y SIGTERM, 143.
+fn codigo_de_senal(senal: i32) -> i32 {
+    128 + senal
 }
 
 /// Guardia de la copia de la credencial de una corrida. La copia es de Root y se borra siempre al
@@ -3066,5 +3138,119 @@ mod tests {
         let fila = correr_con(&e, &Builder::default(), &[], CONFIG).expect("corre");
         assert!(!fila.reanudada);
         assert_eq!(fila.vueltas, 2, "planifica y construye");
+    }
+
+    /// Copia de prueba de una corrida bajo `base`: `<base>/corre-memo-ecc-test-1-2-0/` con su copia.
+    fn corrida_de_prueba(base: &Path) -> Corrida {
+        let id = "corre-memo-ecc-test-1-2-0".to_string();
+        let dir = base.join(&id);
+        let repo = dir.join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        let estado = dir.join("claude-estado");
+        fs::create_dir_all(&estado).expect("estado");
+        fs::write(estado.join(".credentials.json"), "TOKEN_FALSO_SENAL").expect("copia");
+        Corrida {
+            id,
+            dir,
+            repo,
+            tarea: "memo".into(),
+            config: "ecc-test".into(),
+            commit: String::new(),
+        }
+    }
+
+    fn copia_de_prueba(corrida: &Corrida) -> PathBuf {
+        corrida.dir.join("claude-estado").join(".credentials.json")
+    }
+
+    /// Programa falso de podman: `ps` imprime `nombres`, y cada llamada se anota en el log de `base`.
+    fn podman_falso(base: &Path, nombres: &[String]) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = base.join("podman.log");
+        let ps: String = nombres.iter().map(|n| format!("echo {n}\n")).collect();
+        let cuerpo = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\n{ps}fi\n",
+            log.display()
+        );
+        let ruta = base.join("podman-falso");
+        fs::write(&ruta, cuerpo).expect("script");
+        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+        (ruta, log)
+    }
+
+    #[test]
+    fn senal_sigterm_quita_la_copia_y_sale_con_143() {
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        let codigo = Cell::new(None);
+        al_recibir_senal(&corrida, SIGTERM, podman.to_str().expect("ruta"), |c| {
+            codigo.set(Some(c));
+        });
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "la copia se borra al recibir SIGTERM"
+        );
+        assert_eq!(codigo.get(), Some(143));
+    }
+
+    #[test]
+    fn senal_sigint_quita_la_copia_y_sale_con_130() {
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        let codigo = Cell::new(None);
+        al_recibir_senal(&corrida, SIGINT, podman.to_str().expect("ruta"), |c| {
+            codigo.set(Some(c));
+        });
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "la copia se borra al recibir SIGINT"
+        );
+        assert_eq!(codigo.get(), Some(130));
+    }
+
+    #[test]
+    fn senal_con_la_copia_ya_borrada_no_falla_y_sale() {
+        // Carrera: `cerrar` ya borró la copia cuando llega la señal. Debe salir igual, sin error.
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        fs::remove_file(copia_de_prueba(&corrida)).expect("quita la copia");
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        let codigo = Cell::new(None);
+        al_recibir_senal(&corrida, SIGINT, podman.to_str().expect("ruta"), |c| {
+            codigo.set(Some(c));
+        });
+        assert_eq!(codigo.get(), Some(130));
+    }
+
+    #[test]
+    fn senal_quita_los_contenedores_de_este_proceso_por_nombre() {
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let pid = std::process::id();
+        let nombres = [
+            format!("root-builder-{pid}-0"),
+            format!("root-builder-{pid}-1"),
+            "root-builder-1-0".to_string(),
+        ];
+        let (podman, log) = podman_falso(tmp.path(), &nombres);
+        al_recibir_senal(&corrida, SIGTERM, podman.to_str().expect("ruta"), |_| {});
+        let anotado = fs::read_to_string(&log).expect("log");
+        assert!(
+            anotado.contains(&format!(
+                "rm -f -t 0 root-builder-{pid}-0 root-builder-{pid}-1"
+            )),
+            "{anotado}"
+        );
+        assert!(!anotado.contains("root-builder-1-0"), "{anotado}");
+    }
+
+    #[test]
+    fn vigia_de_senales_se_suelta_al_salir_sin_colgarse() {
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let vigia = VigilaSenales::iniciar(&corrida).expect("registra");
+        drop(vigia);
     }
 }

@@ -1,9 +1,11 @@
 //! Barrido de copias de credencial de corridas muertas. Al arrancar una corrida, quita la copia
-//! `.credentials.json` de las carpetas de corridas cuyo proceso ya no vive. Deja un `Gate` por cada
-//! copia barrida. El `Gate` nunca lleva el contenido de la copia.
+//! `.credentials.json` de las carpetas de corridas cuyo proceso ya no vive o no es `r00t`. Deja un
+//! `Gate` por cada copia barrida. El `Gate` nunca lleva el contenido de la copia.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use serde_json::{Map, json};
@@ -22,11 +24,22 @@ const PREFIJO: &str = "corre-";
 const FASE_BARRIDO: &str = "barrido";
 /// Carpeta donde Linux muestra los procesos vivos.
 const PROCESOS: &str = "/proc";
+/// Nombre del programa `r00t`. Su proceso es el único que puede dejar una corrida viva.
+const NOMBRE_R00T: &str = "r00t";
 
 /// Recorre las carpetas de corridas de `raiz_corridas` y barre las copias de corridas muertas.
 /// Si la raíz no existe, no hace nada. Una corrida que no se puede borrar deja un `Gate` y no corta
 /// el barrido de las demás.
 pub fn barrer(raiz_corridas: &Path, ruta_eventos: &Path) -> Result<(), ErrorCorre> {
+    barrer_con_proc(raiz_corridas, ruta_eventos, Path::new(PROCESOS))
+}
+
+/// Igual que `barrer`, con la raíz de `/proc` inyectable. Los tests arman una raíz falsa.
+pub fn barrer_con_proc(
+    raiz_corridas: &Path,
+    ruta_eventos: &Path,
+    raiz_proc: &Path,
+) -> Result<(), ErrorCorre> {
     let entradas = match fs::read_dir(raiz_corridas) {
         Ok(entradas) => entradas,
         Err(fuente) if fuente.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -70,7 +83,7 @@ pub fn barrer(raiz_corridas: &Path, ruta_eventos: &Path) -> Result<(), ErrorCorr
                 continue;
             }
         }
-        let Some(por_que) = motivo_de_muerte(id) else {
+        let Some(por_que) = motivo_de_muerte(id, raiz_proc) else {
             continue;
         };
         let motivo = match borrado::borrar_archivo_dentro(&carpeta, &copia) {
@@ -82,14 +95,35 @@ pub fn barrer(raiz_corridas: &Path, ruta_eventos: &Path) -> Result<(), ErrorCorr
     Ok(())
 }
 
-/// Por qué la corrida `id` está muerta. `None` si su proceso vive, incluido el propio.
-fn motivo_de_muerte(id: &str) -> Option<String> {
-    match pid_de(id) {
-        Some(pid) if pid == std::process::id() => None,
-        Some(pid) if Path::new(PROCESOS).join(pid.to_string()).exists() => None,
-        Some(pid) => Some(format!("el pid {pid} no vive")),
-        None => Some("el id no tiene pid legible".to_string()),
+/// Por qué la corrida `id` está muerta. `None` si su proceso vive y es `r00t`.
+/// Un pid sin carpeta en `raiz_proc` no vive. Uno cuyo cmdline no es de `r00t` está muerto: el pid
+/// se reusó. Un cmdline que no se puede leer por permisos cuenta como vivo.
+fn motivo_de_muerte(id: &str, raiz_proc: &Path) -> Option<String> {
+    let Some(pid) = pid_de(id) else {
+        return Some("el id no tiene pid legible".to_string());
+    };
+    let carpeta = raiz_proc.join(pid.to_string());
+    if !carpeta.exists() {
+        return Some(format!("el pid {pid} no vive"));
     }
+    match fs::read(carpeta.join("cmdline")) {
+        Ok(cmdline) if es_r00t(&cmdline) => None,
+        Ok(_) => Some(format!("el pid {pid} no es r00t")),
+        Err(fuente) if fuente.kind() == io::ErrorKind::PermissionDenied => None,
+        Err(fuente) if fuente.kind() == io::ErrorKind::NotFound => {
+            Some(format!("el pid {pid} no vive"))
+        }
+        Err(_) => Some(format!("el pid {pid} no es r00t")),
+    }
+}
+
+/// Dice si el cmdline (argumentos separados por NUL) empieza con un programa `r00t`. Mira solo el
+/// primer argumento, por su nombre base. Un cmdline vacío no es `r00t`.
+fn es_r00t(cmdline: &[u8]) -> bool {
+    let primero = cmdline.split(|byte| *byte == 0).next().unwrap_or_default();
+    Path::new(OsStr::from_bytes(primero))
+        .file_name()
+        .is_some_and(|nombre| nombre == NOMBRE_R00T)
 }
 
 /// El pid de un id `corre-<tarea>-<config>-<segundos>-<pid>-<contador>`. Se toma desde el final,
@@ -207,14 +241,90 @@ mod tests {
         assert!(sin_token(&e.eventos), "el Gate no lleva el contenido");
     }
 
+    /// Test que cambió de valor: antes el pid propio contaba como vivo. Ahora la regla es el cmdline:
+    /// el proceso de test no es `r00t`, así que su corrida se barre.
     #[test]
-    fn corrida_con_pid_vivo_no_se_toca() {
+    fn corrida_con_pid_del_proceso_de_test_no_r00t_se_barre() {
         let e = escenario();
         let id = format!("corre-memo-ecc-test-100-{}-0", std::process::id());
         let copia = corrida_con_copia(&e.raiz, &id);
         barrer(&e.raiz, &e.eventos).expect("barre");
-        assert!(copia.is_file(), "el pid propio vive: la copia queda");
+        assert!(
+            fs::symlink_metadata(&copia).is_err(),
+            "el proceso de test no es r00t: la copia se barre"
+        );
+        let gates = gates_de_barrido(&e.eventos);
+        assert_eq!(gates.len(), 1, "un Gate de barrido");
+        assert!(motivo(&gates[0]).contains("no es r00t"), "motivo nuevo");
+        assert!(sin_token(&e.eventos));
+    }
+
+    /// Crea `<raiz_proc>/<pid>/cmdline` con `cmdline`: un proceso falso para `barrer_con_proc`.
+    fn proceso_falso(raiz_proc: &Path, pid: u32, cmdline: &[u8]) {
+        let carpeta = raiz_proc.join(pid.to_string());
+        fs::create_dir_all(&carpeta).expect("proceso");
+        fs::write(carpeta.join("cmdline"), cmdline).expect("cmdline");
+    }
+
+    #[test]
+    fn corrida_de_r00t_viva_no_se_barre() {
+        let e = escenario();
+        let pid = 4000123;
+        let raiz_proc = e.base.join("proc");
+        proceso_falso(&raiz_proc, pid, b"/usr/bin/r00t\0corre\0--tarea\0memo\0");
+        let id = format!("corre-memo-ecc-test-100-{pid}-0");
+        let copia = corrida_con_copia(&e.raiz, &id);
+        barrer_con_proc(&e.raiz, &e.eventos, &raiz_proc).expect("barre");
+        assert!(copia.is_file(), "el pid es de r00t: la copia queda");
         assert!(gates_de_barrido(&e.eventos).is_empty(), "sin Gate");
+    }
+
+    #[test]
+    fn pid_reciclado_por_otro_proceso_se_barre() {
+        let e = escenario();
+        let raiz_proc = e.base.join("proc");
+        // Otro programa, un argumento `r00t` que no es el primero, un nombre que solo contiene r00t,
+        // y un cmdline vacío (proceso zombi): ninguno es r00t.
+        let casos: [(u32, &[u8]); 4] = [
+            (4000201, b"/usr/bin/bash\0"),
+            (4000202, b"sh\0r00t\0corre\0"),
+            (4000203, b"/usr/bin/xr00t\0corre\0"),
+            (4000204, b""),
+        ];
+        let mut copias = Vec::new();
+        for (pid, cmdline) in casos {
+            proceso_falso(&raiz_proc, pid, cmdline);
+            let id = format!("corre-memo-ecc-test-100-{pid}-0");
+            copias.push(corrida_con_copia(&e.raiz, &id));
+        }
+        barrer_con_proc(&e.raiz, &e.eventos, &raiz_proc).expect("barre");
+        for copia in &copias {
+            assert!(
+                fs::symlink_metadata(copia).is_err(),
+                "no es r00t: {}",
+                copia.display()
+            );
+        }
+        let gates = gates_de_barrido(&e.eventos);
+        assert_eq!(gates.len(), 4, "un Gate por corrida");
+        assert!(gates.iter().all(|ev| motivo(ev).contains("no es r00t")));
+    }
+
+    #[test]
+    fn pid_sin_carpeta_en_proc_dice_que_no_vive() {
+        let e = escenario();
+        let raiz_proc = e.base.join("proc");
+        fs::create_dir_all(&raiz_proc).expect("proc");
+        let id = format!("corre-memo-ecc-test-100-{PID_MUERTO}-0");
+        corrida_con_copia(&e.raiz, &id);
+        barrer_con_proc(&e.raiz, &e.eventos, &raiz_proc).expect("barre");
+        let gates = gates_de_barrido(&e.eventos);
+        assert_eq!(gates.len(), 1);
+        assert!(
+            motivo(&gates[0]).contains("no vive"),
+            "{}",
+            motivo(&gates[0])
+        );
     }
 
     #[test]
