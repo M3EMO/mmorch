@@ -20,6 +20,8 @@ const COLA_BYTES: usize = COLA * 4 + 4;
 /// Bytes de la cola de stdout y stderr de `podman` que se conservan (build, inspect, rm). Es 1 MiB.
 /// El build necesita la salida entera para clasificar el fallo. El recorte a `COLA` va después.
 const TOPE_SALIDA_PODMAN: usize = 1024 * 1024;
+/// Bytes de una línea de stdout que el lector guarda para reconocer un `STEP`. Lo que pasa de aquí se descarta.
+const TOPE_LINEA_STEP: usize = 64 * 1024;
 /// Bytes de stdout del builder que se guardan completos. El builder necesita su salida entera para
 /// leer costos y sesión. Pasado el tope, el proceso corre igual, pero la corrida falla.
 pub(crate) const TOPE_SALIDA_BUILDER: usize = 64 * 1024 * 1024;
@@ -263,7 +265,7 @@ fn correr_comando(
     let salida = hijo
         .stdout
         .take()
-        .map(|f| leer_cola_en_hilo_con(f, TOPE_SALIDA_PODMAN));
+        .map(|f| leer_salida_en_hilo(f, TOPE_SALIDA_PODMAN));
     let error = hijo
         .stderr
         .take()
@@ -287,7 +289,7 @@ fn correr_comando(
     };
     Ok(SalidaPodman {
         codigo,
-        stdout: recoger(salida),
+        stdout: recoger_salida(salida),
         stderr: recoger(error),
     })
 }
@@ -417,36 +419,133 @@ pub(crate) fn leer_cola_en_hilo<R: Read + Send + 'static>(flujo: R) -> JoinHandl
 
 /// Lee un flujo en otro hilo y conserva solo los últimos `tope` bytes. El búfer nunca pasa de `2 * tope`.
 pub(crate) fn leer_cola_en_hilo_con<R: Read + Send + 'static>(
-    mut flujo: R,
+    flujo: R,
     tope: usize,
 ) -> JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut cola = Vec::new();
-        let mut trozo = [0u8; 8192];
-        loop {
-            match flujo.read(&mut trozo) {
-                Ok(0) => break,
-                Ok(n) => {
-                    cola.extend_from_slice(&trozo[..n]);
-                    // Se recorta al pasar el doble: el recorte cuesta lo mismo que la entrada leída.
-                    if cola.len() > 2 * tope {
-                        cola.drain(..cola.len() - tope);
-                    }
+    thread::spawn(move || leer_cola_con(flujo, tope, |_| {}))
+}
+
+/// Lee un flujo hasta EOF y conserva los últimos `tope` bytes. `al_leer` ve cada trozo antes de que se recorte.
+fn leer_cola_con<R: Read>(mut flujo: R, tope: usize, mut al_leer: impl FnMut(&[u8])) -> Vec<u8> {
+    let mut cola = Vec::new();
+    let mut trozo = [0u8; 8192];
+    loop {
+        match flujo.read(&mut trozo) {
+            Ok(0) => break,
+            Ok(n) => {
+                al_leer(&trozo[..n]);
+                cola.extend_from_slice(&trozo[..n]);
+                // Se recorta al pasar el doble: el recorte cuesta lo mismo que la entrada leída.
+                if cola.len() > 2 * tope {
+                    cola.drain(..cola.len() - tope);
                 }
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => break,
             }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
         }
-        if cola.len() > tope {
-            cola.drain(..cola.len() - tope);
+    }
+    if cola.len() > tope {
+        cola.drain(..cola.len() - tope);
+    }
+    cola
+}
+
+/// Lee el stdout de `podman` en otro hilo. Da la cola y la última línea `STEP` vista, si hubo una.
+fn leer_salida_en_hilo(
+    flujo: impl Read + Send + 'static,
+    tope: usize,
+) -> JoinHandle<(Vec<u8>, Option<String>)> {
+    thread::spawn(move || leer_salida_con_step(flujo, tope))
+}
+
+/// Lee un flujo hasta EOF. Da la cola de `tope` bytes y la última línea completa `STEP` que vio.
+pub(crate) fn leer_salida_con_step<R: Read>(flujo: R, tope: usize) -> (Vec<u8>, Option<String>) {
+    let mut rastreo = RastreoStep::default();
+    let cola = leer_cola_con(flujo, tope, |trozo| rastreo.alimentar(trozo));
+    (cola, rastreo.cerrar())
+}
+
+/// Arma las líneas de un flujo entre trozos. Guarda solo la última línea `STEP` completa.
+#[derive(Default)]
+struct RastreoStep {
+    /// Bytes de la línea en curso. No pasa de `TOPE_LINEA_STEP`.
+    linea: Vec<u8>,
+    ultimo: Option<String>,
+}
+
+impl RastreoStep {
+    fn alimentar(&mut self, trozo: &[u8]) {
+        for (k, parte) in trozo.split(|&b| b == b'\n').enumerate() {
+            if k > 0 {
+                self.cerrar_linea();
+            }
+            let libre = TOPE_LINEA_STEP - self.linea.len();
+            self.linea
+                .extend_from_slice(&parte[..parte.len().min(libre)]);
         }
-        cola
-    })
+    }
+
+    fn cerrar_linea(&mut self) {
+        let texto = String::from_utf8_lossy(&self.linea);
+        if es_linea_step(&texto) {
+            self.ultimo = Some(texto.trim_end_matches('\r').to_string());
+        }
+        self.linea.clear();
+    }
+
+    fn cerrar(mut self) -> Option<String> {
+        self.cerrar_linea();
+        self.ultimo
+    }
 }
 
 pub(crate) fn recoger(hilo: Option<JoinHandle<Vec<u8>>>) -> String {
     let bytes = hilo.and_then(|h| h.join().ok()).unwrap_or_default();
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Da el stdout de `podman` con la línea `STEP` que la cola perdió, si hubo una.
+///
+/// `clasificar_fallo` busca el último `STEP` de la salida. Un build con más de 1 MiB después de su
+/// `STEP` deja la cola sin ese `STEP`. Sin la línea, el fallo parecería un arranque de podman fallido.
+/// Por eso se antepone la línea guardada. Si la cola ya trae un `STEP`, no se toca.
+fn recoger_salida(hilo: Option<JoinHandle<(Vec<u8>, Option<String>)>>) -> String {
+    let (bytes, step) = hilo.and_then(|h| h.join().ok()).unwrap_or_default();
+    anteponer_step(String::from_utf8_lossy(&bytes).into_owned(), step)
+}
+
+/// Antepone `step` seguido de `\n` a `cola`, solo si `cola` no tiene ninguna línea `STEP`.
+fn anteponer_step(cola: String, step: Option<String>) -> String {
+    match step {
+        Some(linea) if !cola.lines().any(es_linea_step) => format!("{linea}\n{cola}"),
+        _ => cola,
+    }
+}
+
+/// Parte de una línea `STEP k/n: texto`. Da el texto sin normalizar, o `None` si la línea no es un paso.
+/// Acepta espacios iniciales y el prefijo `[k/m] ` de varias etapas.
+fn texto_del_step(linea: &str) -> Option<&str> {
+    let limpia = linea.trim_start();
+    let limpia = match limpia.strip_prefix('[') {
+        Some(resto) => resto.split_once("] ")?.1,
+        None => limpia,
+    };
+    let resto = limpia.strip_prefix("STEP ")?;
+    let (numeros, texto) = resto.split_once(": ")?;
+    let (paso, total) = numeros.split_once('/')?;
+    paso.trim().parse::<usize>().ok()?;
+    total.trim().parse::<usize>().ok()?;
+    Some(texto)
+}
+
+/// Verdadero si la línea es un paso `STEP k/n: texto` de `podman build`.
+fn es_linea_step(linea: &str) -> bool {
+    texto_del_step(linea).is_some()
+}
+
+/// Texto del paso de una línea `STEP k/n: texto`, con los espacios colapsados a uno. Da `None` si no es un paso.
+pub(crate) fn texto_de_linea_step(linea: &str) -> Option<String> {
+    texto_del_step(linea).map(|texto| texto.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 /// Espera al proceso hasta `limite`. Da `None` si venció el plazo.
@@ -966,6 +1065,123 @@ mod tests {
         let lectura = leer_con_tope(flujo, 10, Modo::Inicio);
         assert_eq!(lectura.bytes, b"ok".to_vec());
         assert!(!lectura.recortada);
+    }
+
+    /// Flujo que entrega los datos en trozos fijos. Así se prueba una línea partida entre dos lecturas.
+    struct PorTrozos {
+        trozos: Vec<Vec<u8>>,
+    }
+
+    impl io::Read for PorTrozos {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.trozos.is_empty() {
+                return Ok(0);
+            }
+            let trozo = self.trozos.remove(0);
+            buf[..trozo.len()].copy_from_slice(&trozo);
+            Ok(trozo.len())
+        }
+    }
+
+    #[test]
+    fn es_linea_step_reconoce_el_paso_con_y_sin_prefijo_de_etapa() {
+        assert!(es_linea_step("STEP 1/3: FROM x"));
+        assert!(es_linea_step("   STEP 2/2: RUN a"));
+        assert!(es_linea_step("[2/2] STEP 3/3: RUN wget y"));
+        assert!(!es_linea_step("Error: building at STEP \"RUN b\""));
+        assert!(!es_linea_step("STEP x/3: RUN a"));
+        assert!(!es_linea_step("STEP 1/3 RUN a"));
+    }
+
+    #[test]
+    fn texto_de_linea_step_normaliza_los_espacios() {
+        assert_eq!(
+            texto_de_linea_step("STEP 3/3: RUN  b ").as_deref(),
+            Some("RUN b")
+        );
+        assert_eq!(
+            texto_de_linea_step("[2/2] STEP 3/3: WORKDIR /srv").as_deref(),
+            Some("WORKDIR /srv")
+        );
+        assert_eq!(texto_de_linea_step("sin paso"), None);
+    }
+
+    #[test]
+    fn lector_step_une_una_linea_partida_entre_dos_lecturas() {
+        let flujo = PorTrozos {
+            trozos: vec![b"a\nSTEP 3/3: R".to_vec(), b"UN x\nfin\n".to_vec()],
+        };
+        let (cola, step) = leer_salida_con_step(flujo, MIB);
+        assert_eq!(cola, b"a\nSTEP 3/3: RUN x\nfin\n".to_vec());
+        assert_eq!(step.as_deref(), Some("STEP 3/3: RUN x"));
+    }
+
+    #[test]
+    fn lector_step_recuerda_la_ultima_linea_que_la_cola_ya_perdio() {
+        let mut stream = b"STEP 1/2: FROM x\nSTEP 2/2: RUN a\n".to_vec();
+        stream.extend(vec![b'y'; 3 * MIB]);
+        stream.push(b'\n');
+        let (cola, step) = leer_salida_con_step(&stream[..], MIB);
+        assert_eq!(cola.len(), MIB);
+        assert!(!String::from_utf8_lossy(&cola).contains("STEP"));
+        assert_eq!(step.as_deref(), Some("STEP 2/2: RUN a"));
+    }
+
+    #[test]
+    fn lector_step_con_linea_mas_larga_que_el_tope_la_guarda_recortada() {
+        let mut stream = b"STEP 2/2: RUN ".to_vec();
+        stream.extend(vec![b'z'; 100 * 1024]);
+        stream.extend(b"\nfin\n");
+        let (_, step) = leer_salida_con_step(&stream[..], MIB);
+        let step = step.expect("guarda el STEP");
+        assert!(step.starts_with("STEP 2/2: RUN "));
+        assert_eq!(step.len(), TOPE_LINEA_STEP);
+    }
+
+    #[test]
+    fn lector_step_sin_step_no_guarda_nada() {
+        let (cola, step) = leer_salida_con_step(&b"hola\nmundo\n"[..], MIB);
+        assert_eq!(cola, b"hola\nmundo\n".to_vec());
+        assert_eq!(step, None);
+    }
+
+    #[test]
+    fn anteponer_step_agrega_la_linea_si_la_cola_no_la_trae() {
+        let salida = anteponer_step("yyy\n".to_string(), Some("STEP 3/3: RUN x".into()));
+        assert_eq!(salida, "STEP 3/3: RUN x\nyyy\n");
+    }
+
+    #[test]
+    fn anteponer_step_no_agrega_nada_si_la_cola_ya_trae_un_step() {
+        let cola = "STEP 1/1: RUN x\nerror\n".to_string();
+        let salida = anteponer_step(cola.clone(), Some("STEP 1/1: RUN x".into()));
+        assert_eq!(salida, cola);
+    }
+
+    #[test]
+    fn anteponer_step_sin_step_guardado_deja_la_cola() {
+        assert_eq!(anteponer_step("hola\n".to_string(), None), "hola\n");
+    }
+
+    #[test]
+    fn contenedor_correr_comando_antepone_el_step_que_la_cola_perdio() {
+        let mut comando = Command::new("sh");
+        comando.args([
+            "-c",
+            "printf 'STEP 3/3: RUN x\\n'; head -c 2500000 /dev/zero | tr '\\0' y; echo",
+        ]);
+        let salida = correr_comando(comando, "sh", Duration::from_secs(30)).expect("corre");
+        let prefijo = "STEP 3/3: RUN x\n";
+        assert!(salida.stdout.starts_with(prefijo));
+        assert_eq!(salida.stdout.len(), MIB + prefijo.len());
+    }
+
+    #[test]
+    fn contenedor_correr_comando_salida_chica_con_step_no_lo_duplica() {
+        let mut comando = Command::new("sh");
+        comando.args(["-c", "printf 'STEP 1/1: RUN x\\nerror\\n'"]);
+        let salida = correr_comando(comando, "sh", Duration::from_secs(30)).expect("corre");
+        assert_eq!(salida.stdout, "STEP 1/1: RUN x\nerror\n");
     }
 
     #[test]

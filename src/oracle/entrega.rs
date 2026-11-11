@@ -19,7 +19,7 @@ use crate::oracle::ErrorOraculo;
 use crate::oracle::configs::{self, Instruccion, instrucciones, palabra_clave};
 use crate::oracle::contenedor::{
     PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman, correr_podman as correr_podman_crudo,
-    correr_programa,
+    correr_programa, texto_de_linea_step,
 };
 use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
 use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
@@ -691,19 +691,7 @@ fn clasificar_fallo(
 /// Texto del paso que falló: el de la última línea `STEP k/n: <texto>` de la salida de `podman build`,
 /// con los espacios normalizados. Con varias etapas, buildah antepone `[k/m] `.
 fn texto_paso_fallido(salida: &str) -> Option<String> {
-    salida.lines().rev().find_map(|linea| {
-        let limpia = linea.trim_start();
-        let limpia = match limpia.strip_prefix('[') {
-            Some(resto) => resto.split_once("] ")?.1,
-            None => limpia,
-        };
-        let resto = limpia.strip_prefix("STEP ")?;
-        let (numeros, texto) = resto.split_once(": ")?;
-        let (paso, total) = numeros.split_once('/')?;
-        paso.trim().parse::<usize>().ok()?;
-        total.trim().parse::<usize>().ok()?;
-        Some(normalizar_texto(texto))
-    })
+    salida.lines().rev().find_map(texto_de_linea_step)
 }
 
 /// Texto con los espacios en blanco colapsados a uno. Así se compara lo que imprime buildah con el Dockerfile.
@@ -3471,6 +3459,23 @@ pub(crate) mod tests {
         assert!(salida.stdout.ends_with("FIN"));
         assert_eq!(salida.stderr.len(), COLA);
         assert!(salida.stderr.ends_with("ERR"));
+    }
+
+    #[test]
+    fn entrega_build_con_step_seguido_de_mas_de_1_mib_da_la_imagen_no_construye() {
+        // Los STEP van por stdout y luego siguen más de 2 MiB de salida. La cola de 1 MiB pierde el STEP.
+        let script = "printf 'STEP 1/3: FROM x\\nSTEP 2/3: RUN a\\nSTEP 3/5: RUN x\\n'; \
+                      head -c 2500000 /dev/zero | tr '\\0' y; echo; exit 1";
+        let salida = correr_podman_build("sh", &["-c", script], PLAZO_BUILD).expect("corre");
+        let texto = "FROM x\nRUN a\nRUN x\n";
+        match clasifica(&salida, texto) {
+            Desenlace::Hallazgo(h) => assert!(
+                h.detalle.contains("la imagen no construye: línea 3"),
+                "{}",
+                h.detalle
+            ),
+            otro => panic!("debía dar hallazgo, no {}", nombre(&otro)),
+        }
     }
 
     #[test]
