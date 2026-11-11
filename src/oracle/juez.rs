@@ -1233,6 +1233,7 @@ fn evidencia_valida(
         fuente: cx.fuente(),
         id: String::new(),
         impacto: Vec::new(),
+        previo: false,
     };
     if matches!(verificar_hallazgo(cx.repo, &h), Verificacion::Valido) {
         Ok(format!("{}:{}", h.archivo, h.linea))
@@ -1632,6 +1633,7 @@ mod tests {
             fuente: Fuente::Sonda(SONDA_ARQUITECTURA.into()),
             id: String::new(),
             impacto: vec!["R1".into()],
+            previo: false,
         }
     }
 
@@ -3168,6 +3170,7 @@ mod tests {
             fuente: Fuente::Sonda(sonda.into()),
             id: String::new(),
             impacto: Vec::new(),
+            previo: false,
         }
     }
 

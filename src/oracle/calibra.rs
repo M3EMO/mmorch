@@ -2588,6 +2588,7 @@ mod tests {
             fuente: Fuente::Sonda("test".into()),
             id: id.into(),
             impacto: vec![],
+            previo: false,
         }
     }
 
@@ -6161,6 +6162,7 @@ mod tests {
             },
             id: id.into(),
             impacto: vec![],
+            previo: false,
         }
     }
 
@@ -6883,6 +6885,7 @@ mod tests {
             fuente: Fuente::Sonda("mutacion".into()),
             id: format!("vivo-{archivo}-{nombre}"),
             impacto: vec![],
+            previo: false,
         }
     }
 
@@ -8625,6 +8628,7 @@ mod tests {
             fuente: Fuente::Sonda("test".into()),
             id: id.into(),
             impacto: vec![],
+            previo: false,
         }
     }
 

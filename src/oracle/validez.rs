@@ -1642,6 +1642,7 @@ anclas = [
             fuente: Fuente::Sonda("fixture".into()),
             id: String::new(),
             impacto: Vec::new(),
+            previo: false,
         }
     }
 

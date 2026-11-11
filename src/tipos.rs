@@ -220,6 +220,9 @@ pub struct Hallazgo {
     /// Ids de los requisitos que afecta.
     #[serde(default)]
     pub impacto: Vec<String>,
+    /// Estaba en el estado inicial de la tarea. Un veredicto viejo lee false.
+    #[serde(default)]
+    pub previo: bool,
 }
 
 /// Hallazgo del juez que se descartó: no tiene requisito afectado o no pasó el gate de citas. No puntúa.
@@ -681,6 +684,7 @@ mod tests {
                 fuente: Fuente::Sonda("bandit".into()),
                 id: "h-1".into(),
                 impacto: vec!["req.login".into()],
+                previo: false,
             }],
             global: Some(0.95),
             estado: Estado::Verde,
@@ -866,7 +870,26 @@ mod tests {
             },
             id: "h-7".into(),
             impacto: vec!["req.almacen".into()],
+            previo: false,
         });
+    }
+
+    #[test]
+    fn tipos_hallazgo_viejo_sin_previo_lee_false() {
+        // Un veredicto guardado antes de Tarea 103 no trae `previo`: se lee como nuevo.
+        let viejo = json!({
+            "dimension": "seguridad",
+            "severidad": 3,
+            "archivo": "Cargo.lock",
+            "linea": 16,
+            "cita": "time 0.1.43",
+            "detalle": "vulnerable",
+            "fuente": {"Sonda": "cargo-audit"},
+            "id": "h-9",
+            "impacto": []
+        });
+        let h: Hallazgo = serde_json::from_value(viejo).expect("deserializa");
+        assert!(!h.previo);
     }
 
     #[test]

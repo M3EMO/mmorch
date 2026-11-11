@@ -2486,6 +2486,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "format": "uint32",
           "minimum": 0
         },
+        "previo": {
+          "description": "Estaba en el estado inicial de la tarea. Un veredicto viejo lee false.",
+          "type": "boolean",
+          "default": false
+        },
         "severidad": {
           "type": "integer",
           "format": "uint8",
@@ -3087,6 +3092,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "type": "integer",
       "format": "uint32",
       "minimum": 0
+    },
+    "previo": {
+      "description": "Estaba en el estado inicial de la tarea. Un veredicto viejo lee false.",
+      "type": "boolean",
+      "default": false
     },
     "severidad": {
       "type": "integer",
@@ -6026,6 +6036,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "previo": {
+          "description": "Estaba en el estado inicial de la tarea. Un veredicto viejo lee false.",
+          "type": "boolean",
+          "default": false
         },
         "severidad": {
           "type": "integer",

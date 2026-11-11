@@ -276,6 +276,7 @@ fn hallazgo_en(
         fuente: Fuente::Sonda("descarga".into()),
         id,
         impacto: Vec::new(),
+        previo: false,
     }
 }
 

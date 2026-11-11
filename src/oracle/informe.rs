@@ -1310,6 +1310,7 @@ modulos = ["config"]
             fuente: Fuente::Sonda("estructura".into()),
             id: id.into(),
             impacto: impacto.iter().map(|s| s.to_string()).collect(),
+            previo: false,
         }
     }
 

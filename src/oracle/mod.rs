@@ -19,6 +19,7 @@ pub mod memo;
 pub mod mutacion;
 pub mod pendientes;
 pub mod perfiles;
+pub mod previos;
 pub mod requisitos;
 pub mod rubrica;
 pub mod tarea;
@@ -4924,6 +4925,7 @@ mod tests {
             },
             id: String::new(),
             impacto: vec!["R1".into()],
+            previo: false,
         };
         let salida = descartados_del_gate(vec![(h, evidencia::Motivo::CitaAusente)]);
         assert_eq!(salida.len(), 1, "{salida:?}");
@@ -4970,6 +4972,7 @@ mod tests {
             fuente: crate::tipos::Fuente::Sonda("x".into()),
             id: String::new(),
             impacto: Vec::new(),
+            previo: false,
         });
         v.hallazgos.push(Hallazgo {
             dimension: crate::tipos::Dimension::Seguridad,
@@ -4981,6 +4984,7 @@ mod tests {
             fuente: crate::tipos::Fuente::Sonda("x".into()),
             id: String::new(),
             impacto: Vec::new(),
+            previo: false,
         });
         let r = redactar_para_mcp(v);
         let texto = serde_json::to_string(&r).expect("json");
@@ -9923,6 +9927,7 @@ mod tests {
             fuente: crate::tipos::Fuente::Sonda("descarga".into()),
             id: String::new(),
             impacto: Vec::new(),
+            previo: false,
         }
     }
 
