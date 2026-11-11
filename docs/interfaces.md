@@ -758,6 +758,16 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 0,
           "minimum": 0
         },
+        "plazo_mutantes": {
+          "description": "Plazo fijo en segundos que usaron los casos de mutación. Sale de la duración de la base.\n`None` si la base no trajo duración. Una fila sin el campo vale `None`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
         "reemplazos": {
           "description": "Inyecciones inválidas reemplazadas en la calibración, incluidas las del caso agotado.",
           "type": "integer",

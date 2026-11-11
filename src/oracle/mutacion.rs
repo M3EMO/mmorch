@@ -41,6 +41,49 @@ pub struct ResultadoMutacion {
     /// Mutantes de la muestra, en orden, con su estado. El puntaje no cambia: `Vencido` cuenta como muerto.
     #[serde(default)]
     pub mutantes: Vec<MutanteEstado>,
+    /// Duración de la fase Test del Baseline, en segundos. `None` si el reporte no la trae o es una sonda sin reporte.
+    #[serde(default)]
+    pub base_segundos: Option<f64>,
+}
+
+/// Multiplicador del plazo por mutante sobre la duración de la fase Test de la base. Cita de cargo-mutants:
+/// el plazo automático es 5 veces la duración de la base (https://mutants.rs/timeouts.html).
+pub(crate) const MULTIPLICADOR_PLAZO: f64 = 5.0;
+/// Plazo mínimo por mutante, en segundos. También de https://mutants.rs/timeouts.html.
+pub(crate) const MINIMO_PLAZO_SEGUNDOS: u64 = 20;
+
+/// Plazo por mutante en segundos: `MULTIPLICADOR_PLAZO` veces la duración de la base, con piso
+/// `MINIMO_PLAZO_SEGUNDOS`. Redondea hacia arriba.
+pub(crate) fn plazo_de_base(duracion_test_segundos: f64) -> u64 {
+    let calculado = (MULTIPLICADOR_PLAZO * duracion_test_segundos).ceil() as u64;
+    calculado.max(MINIMO_PLAZO_SEGUNDOS)
+}
+
+thread_local! {
+    /// Duración de la fase Test de la base que midió la última `sonda_mutacion` de este hilo.
+    static ULTIMA_BASE_SEGUNDOS: RefCell<Option<f64>> = const { RefCell::new(None) };
+    /// Plazo fijo por mutante que usa `comando_de_corrida` en este hilo. `None`: plazo automático.
+    static PLAZO_FIJO: RefCell<Option<u64>> = const { RefCell::new(None) };
+}
+
+/// Saca la duración de la base de la última `sonda_mutacion` de este hilo. Deja el valor vacío.
+pub(crate) fn tomar_base_segundos() -> Option<f64> {
+    ULTIMA_BASE_SEGUNDOS.with(|u| u.borrow_mut().take())
+}
+
+/// Corre `f` con el plazo fijo `segundos` en la corrida de mutación. Sin plazo, la corrida usa el automático.
+pub(crate) fn con_plazo_fijo<T>(segundos: Option<u64>, f: impl FnOnce() -> T) -> T {
+    /// Devuelve el plazo anterior al salir del ámbito.
+    struct Restaura(Option<u64>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = self.0.take();
+            PLAZO_FIJO.with(|p| *p.borrow_mut() = anterior);
+        }
+    }
+    let anterior = PLAZO_FIJO.with(|p| p.replace(segundos));
+    let _restaura = Restaura(anterior);
+    f()
 }
 
 /// Estado de un mutante de la muestra. `Vencido` es un `Timeout`: cuenta como muerto en el puntaje.
@@ -115,6 +158,28 @@ struct Resultado {
     /// Ruta del log del mutante dentro de `log/`. `null` si no hay log.
     #[serde(default)]
     log_path: Option<String>,
+    /// Fases de la corrida (`Build`, `Test`) con su duración. Sin la clave vale vacía.
+    #[serde(default)]
+    phase_results: Vec<FaseResultado>,
+}
+
+/// Una fase de la corrida. Solo se leen `phase` y `duration`, en segundos.
+#[derive(Deserialize)]
+struct FaseResultado {
+    #[serde(default)]
+    phase: String,
+    /// Sin el campo, o si no es número, vale `None`: la fase no da duración.
+    #[serde(default)]
+    duration: Option<f64>,
+}
+
+/// Duración de la fase `Test` de una corrida, en segundos. `None` si falta o no es finita.
+fn duracion_de_test(fases: &[FaseResultado]) -> Option<f64> {
+    fases
+        .iter()
+        .find(|f| f.phase == "Test")
+        .and_then(|f| f.duration)
+        .filter(|d| d.is_finite())
 }
 
 /// `"Baseline"` o `{"Mutant": {...}}`: forma externa de serde.
@@ -160,10 +225,11 @@ struct Viable {
     timeout: bool,
 }
 
-/// Lectura del reporte: los viables en orden del archivo, o el motivo por el que no hay muestra.
+/// Lectura del reporte: los viables en orden del archivo y la duración de la base, o el motivo por el que
+/// no hay muestra.
 enum Lectura {
     Sin(String),
-    Medible(Vec<Viable>),
+    Medible(Vec<Viable>, Option<f64>),
 }
 
 /// Valida el reporte y lista sus viables. `Unviable` no compila: no cuenta. Es la base de la muestra
@@ -182,6 +248,7 @@ fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
     let mut viables: Vec<Viable> = Vec::new();
     // `Baseline` es la marca de fin: sin él, la lista no prueba que la corrida terminó.
     let mut hay_baseline = false;
+    let mut base_segundos = None;
     for resultado in &resultados {
         let de = |m: &Mutante, estado: EstadoMutante| Viable {
             archivo: m.file.clone(),
@@ -194,7 +261,10 @@ fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
         };
         match &resultado.scenario {
             Escenario::Baseline => match resultado.summary.as_str() {
-                "Success" => hay_baseline = true,
+                "Success" => {
+                    hay_baseline = true;
+                    base_segundos = duracion_de_test(&resultado.phase_results);
+                }
                 "Failure" => {
                     return Ok(Lectura::Sin(
                         "los tests del proyecto fallan sin mutaciones".into(),
@@ -235,7 +305,7 @@ fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
             informe.total_mutants
         )));
     }
-    Ok(Lectura::Medible(viables))
+    Ok(Lectura::Medible(viables, base_segundos))
 }
 
 /// Primeros `mutantes_max` viables, en el orden del archivo. El `-F` ya filtra la muestra de la sonda.
@@ -252,17 +322,20 @@ pub fn parsear_outcomes(
     if mutantes_max == 0 {
         return Err(ErrorOraculo::Infra("mutantes_max debe ser 1 o más".into()));
     }
-    let viables = match leer_viables(json)? {
+    let (viables, base_segundos) = match leer_viables(json)? {
         Lectura::Sin(motivo) => return Ok(desde_sonda(sin_veredicto(DIMENSION, motivo))),
-        Lectura::Medible(viables) => viables,
+        Lectura::Medible(viables, base_segundos) => (viables, base_segundos),
     };
     if viables.is_empty() {
-        return Ok(desde_sonda(ResultadoSonda {
-            dimension: DIMENSION,
-            valor: None,
-            motivo: Some("sin mutantes para medir: ningún mutante es viable".into()),
-            hallazgos: Vec::new(),
-        }));
+        return Ok(ResultadoMutacion {
+            base_segundos,
+            ..desde_sonda(ResultadoSonda {
+                dimension: DIMENSION,
+                valor: None,
+                motivo: Some("sin mutantes para medir: ningún mutante es viable".into()),
+                hallazgos: Vec::new(),
+            })
+        });
     }
     let total = u32::try_from(viables.len())
         .map_err(|_| ErrorOraculo::Infra("demasiados mutantes".into()))?;
@@ -305,6 +378,7 @@ pub fn parsear_outcomes(
                 estado: v.estado,
             })
             .collect(),
+        base_segundos,
     })
 }
 
@@ -347,7 +421,7 @@ pub fn mutantes_muertos(json: &str, mutantes_max: u32, tests_fallidos: &str) -> 
     if mutantes_max == 0 {
         return Vec::new();
     }
-    let Ok(Lectura::Medible(viables)) = leer_viables(json) else {
+    let Ok(Lectura::Medible(viables, _)) = leer_viables(json) else {
         return Vec::new();
     };
     let por_log = leer_tests_fallidos(tests_fallidos);
@@ -445,9 +519,13 @@ fn comando_de_corrida(tarea: &Tarea, filtro: &str) -> String {
         .as_ref()
         .map_or(MINUTOS_MAX_DEFECTO, |p| p.minutos_max);
     let segundos = u64::from(minutos) * 60;
+    // Con plazo fijo (la calibración), cada mutante corre con ese `--timeout`. Sin él, el automático.
+    let plazo = PLAZO_FIJO
+        .with(|p| *p.borrow())
+        .map_or(String::new(), |s| format!(" --timeout {s}"));
     format!(
         "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
-         CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle --jobs 1 \
+         CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle --jobs 1{plazo} \
          --output /salida/mutants{filtro} -- --offline; \
          (cd /salida/mutants/mutants.out && grep -H '^test .* \\.\\.\\. FAILED$' log/*.log) \
          > /salida/{ARCHIVO_TESTS_FALLIDOS} 2>/dev/null; \
@@ -509,6 +587,7 @@ fn desde_sonda(sonda: ResultadoSonda) -> ResultadoMutacion {
         total_conocido: None,
         truncado: false,
         mutantes: Vec::new(),
+        base_segundos: None,
     }
 }
 
@@ -516,6 +595,7 @@ fn desde_sonda(sonda: ResultadoSonda) -> ResultadoMutacion {
 pub fn sonda_mutacion(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoMutacion {
     let resultado = medir_mutantes(ej, tarea);
     ULTIMA_MUESTRA.with(|u| *u.borrow_mut() = resultado.mutantes.clone());
+    ULTIMA_BASE_SEGUNDOS.with(|u| *u.borrow_mut() = resultado.base_segundos);
     resultado
 }
 
@@ -1538,5 +1618,70 @@ mod tests {
         let r = parsear_outcomes(SIN_ASSERTS, 60, &[]).expect("parsea");
         assert_eq!((r.muertos, r.vivos, r.muestra), (2, 7, 9));
         assert!((r.sonda.valor.expect("valor") - 2.0 / 9.0).abs() < 1e-6);
+    }
+
+    /// Reporte con Baseline de fases Build 3.0 y Test 12.5, y un mutante cazado.
+    const BASE_CON_FASES: &str = r#"{"total_mutants":1,"outcomes":[
+        {"scenario":"Baseline","summary":"Success","phase_results":[
+            {"phase":"Build","duration":3.0,"summary":"Success"},
+            {"phase":"Test","duration":12.5,"summary":"Success"}]},
+        {"scenario":{"Mutant":{"name":"a1","file":"src/a.rs","span":{"start":{"line":1}}}},"summary":"CaughtMutant"}]}"#;
+
+    #[test]
+    fn mutacion_plazo_de_base_multiplica_con_piso_y_redondea_hacia_arriba() {
+        assert_eq!(plazo_de_base(10.0), 50);
+        assert_eq!(plazo_de_base(1.0), 20, "el mínimo de 20 segundos");
+        assert_eq!(plazo_de_base(4.2), 21, "5 por 4,2 da 21 y no pasa de ahí");
+    }
+
+    #[test]
+    fn mutacion_parsear_outcomes_lee_la_duracion_de_test_del_baseline() {
+        let r = parsear_outcomes(BASE_CON_FASES, 60, &[]).expect("parsea");
+        assert_eq!(r.base_segundos, Some(12.5));
+        let sin_fases = parsear_outcomes(MUERTOS_MIXTOS, 60, &[]).expect("parsea");
+        assert_eq!(
+            sin_fases.base_segundos, None,
+            "sin phase_results no hay duración"
+        );
+    }
+
+    #[test]
+    fn mutacion_sonda_deja_la_duracion_de_base_y_tomar_la_saca() {
+        let _ = sonda_mutacion(&con_reporte(BASE_CON_FASES), &tarea_pruebas(60));
+        assert_eq!(tomar_base_segundos(), Some(12.5));
+        assert_eq!(tomar_base_segundos(), None, "tras tomarla queda vacía");
+        let _ = sonda_mutacion(&con_reporte(BASE_CON_FASES), &tarea_pruebas(60));
+        let _ = sonda_mutacion(&falta_la_herramienta(), &tarea_pruebas(60));
+        assert_eq!(tomar_base_segundos(), None, "la sonda sin reporte la vacía");
+    }
+
+    #[test]
+    fn mutacion_con_plazo_fijo_el_comando_lleva_timeout_antes_de_output() {
+        let cmd = con_plazo_fijo(Some(75), || comando_de_corrida(&tarea_pruebas(5), ""));
+        assert!(
+            cmd.contains("--jobs 1 --timeout 75 --output /salida/mutants"),
+            "{cmd}"
+        );
+        assert!(es_comando_de_mutacion(&cmd), "{cmd}");
+    }
+
+    #[test]
+    fn mutacion_sin_plazo_fijo_el_comando_no_lleva_timeout() {
+        let t = tarea_pruebas(5);
+        assert!(!comando_de_corrida(&t, "").contains("--timeout"));
+        let dentro = con_plazo_fijo(Some(75), || comando_de_corrida(&t, ""));
+        assert!(dentro.contains("--timeout 75"), "{dentro}");
+        assert!(
+            !comando_de_corrida(&t, "").contains("--timeout"),
+            "tras salir vuelve al plazo automático"
+        );
+        let panico = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            con_plazo_fijo(Some(75), || panic!("a propósito"));
+        }));
+        assert!(panico.is_err());
+        assert!(
+            !comando_de_corrida(&t, "").contains("--timeout"),
+            "tras un pánico también vuelve"
+        );
     }
 }

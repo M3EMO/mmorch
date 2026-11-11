@@ -122,6 +122,10 @@ pub struct Fila {
     /// la base. Una fila sin el campo vale vacía.
     #[serde(default)]
     pub extractos_base: Vec<Vec<ExtractoGuardado>>,
+    /// Plazo fijo en segundos que usaron los casos de mutación. Sale de la duración de la base.
+    /// `None` si la base no trajo duración. Una fila sin el campo vale `None`.
+    #[serde(default)]
+    pub plazo_mutantes: Option<u64>,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -713,6 +717,8 @@ struct Ronda<'a> {
     compartidos: Option<&'a Compartidos>,
     /// Muestra de mutación de la base. Cada caso la compara para ver qué mutantes cambiaron.
     mutantes_base: &'a [MutanteEstado],
+    /// Plazo fijo por mutante de los casos, de la duración de la base. `None`: la base no trajo duración.
+    plazo_mutantes: Option<u64>,
 }
 
 impl Ronda<'_> {
@@ -775,8 +781,11 @@ fn evaluar_copia(
     let id = r.id_de(i);
     // Vacía la muestra de una evaluación anterior: lo que quede en el hilo es de esta evaluación.
     let _ = super::mutacion::tomar_muestra();
+    // Los casos corren con el plazo de la base: un plazo automático cambiaría con los tests que se apagan.
     let veredicto = con_caso(&id, || {
-        en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+        super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
+            en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+        })
     })?;
     let mutantes = super::mutacion::tomar_muestra();
     let frio = veredicto
@@ -1023,6 +1032,7 @@ fn calibrar_medida_con_hilos(
     let destino_target = tmp.path().join(NOMBRE_TARGET_BASE);
     // Vacía la muestra de mutación del hilo: lo que quede después es de la base.
     let _ = super::mutacion::tomar_muestra();
+    let _ = super::mutacion::tomar_base_segundos();
     // La base corre con el límite activo: su juez también cuenta. Una base rechazada no mide nada.
     let base = en_limite(tope, || {
         evaluador(
@@ -1033,6 +1043,8 @@ fn calibrar_medida_con_hilos(
     });
     // Los casos comparan su muestra con la de la base. Las bases repetidas no la pisan.
     let mutantes_base = super::mutacion::tomar_muestra();
+    // Plazo de los casos: el de la base, sin tocar. La base y las repetidas corren con el automático.
+    let plazo_mutantes = super::mutacion::tomar_base_segundos().map(super::mutacion::plazo_de_base);
     let base = match (base, detencion_de_rechazo(tope)) {
         (_, Some(detencion)) => return Ok(medida_detenida(detencion)),
         (Err(error), None) => return Err(error),
@@ -1139,6 +1151,7 @@ fn calibrar_medida_con_hilos(
         ),
         compartidos,
         mutantes_base: &mutantes_base,
+        plazo_mutantes,
     };
     let hilos = hilos.max(1);
     let (tx, rx) = mpsc::channel::<(usize, Result<Medido, ErrorOraculo>)>();
@@ -1236,6 +1249,7 @@ fn calibrar_medida_con_hilos(
     } else {
         Some(Fila {
             reemplazos,
+            plazo_mutantes,
             ruidosos: ruidosos.into_iter().collect(),
             inestables: inestables.iter().cloned().collect(),
             extractos_base,
@@ -1346,6 +1360,7 @@ fn fila_de(
         inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
+        plazo_mutantes: None,
     }
 }
 
@@ -1649,6 +1664,7 @@ fn fila_no_aplica(
         inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
+        plazo_mutantes: None,
     }
 }
 
@@ -2359,6 +2375,7 @@ mod tests {
     fn fila(tarea: &str, dimension: Dimension, ts: f64, exactitud: Option<f32>) -> Fila {
         Fila {
             tarea_hash: None,
+            plazo_mutantes: None,
             tarea: tarea.into(),
             dimension,
             n: 20,
@@ -8615,5 +8632,104 @@ mod tests {
             .remove("casos_ruidosos");
         let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
         assert_eq!(leida.casos_ruidosos, 0);
+    }
+
+    /// Base con fase Test de 10 segundos: su plazo de mutantes sale de aquí (5 por 10 da 50).
+    const BASE_CON_DURACION: &str = r#"{"total_mutants":2,"outcomes":[{"scenario":"Baseline","summary":"Success","phase_results":[{"phase":"Build","duration":3.0,"summary":"Success"},{"phase":"Test","duration":10.0,"summary":"Success"}]},{"scenario":{"Mutant":{"name":"src/a.rs:1:1: replace x -> u8 with 0","file":"src/a.rs","span":{"start":{"line":1}}}},"summary":"CaughtMutant"},{"scenario":{"Mutant":{"name":"src/a.rs:2:1: replace y -> u8 with 1","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"MissedMutant"}]}"#;
+
+    /// Ejecutor de cargo-mutants que anota cada corrida de mutación con la etiqueta de su caso.
+    struct MutacionAnotada<'a> {
+        outcomes: &'static str,
+        etiqueta: String,
+        cmds: &'a Mutex<Vec<(String, String)>>,
+    }
+
+    impl EjecutorHerramienta for MutacionAnotada<'_> {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            let mut salida = SalidaHerramienta::default();
+            if cmd.contains("--list") {
+                salida
+                    .archivos
+                    .insert("listado.json".into(), LISTADO_DOS.into());
+            } else if !cmd.starts_with("command -v") {
+                if crate::oracle::mutacion::es_comando_de_mutacion(cmd) {
+                    self.cmds
+                        .lock()
+                        .expect("lock")
+                        .push((self.etiqueta.clone(), cmd.to_string()));
+                }
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), self.outcomes.into());
+            }
+            Ok(salida)
+        }
+    }
+
+    #[test]
+    fn calibra_casos_corren_con_plazo_fijo_y_la_base_sin_el() {
+        let (_t, tarea) = tarea_prueba();
+        let cmds: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let outcomes = match tipo {
+                TipoCaso::Base | TipoCaso::BaseRepetida => BASE_CON_DURACION,
+                _ => MUTANTES_DEFECTO,
+            };
+            let ej = MutacionAnotada {
+                outcomes,
+                etiqueta: format!("{tipo:?}"),
+                cmds: &cmds,
+            };
+            let _ = crate::oracle::mutacion::sonda_mutacion(&ej, &tarea);
+            Ok(diseno_con(&[(ITEM_MODULARIDAD, 3), (ITEM_ROBUSTEZ, 3)]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            4,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(fila.plazo_mutantes, Some(50));
+        let cmds = cmds.into_inner().expect("sin envenenar");
+        let base: Vec<&String> = cmds
+            .iter()
+            .filter(|(e, _)| e == "Base" || e == "BaseRepetida")
+            .map(|(_, c)| c)
+            .collect();
+        assert!(!base.is_empty(), "la base corrió su sonda");
+        for cmd in base {
+            assert!(!cmd.contains("--timeout"), "la base sin plazo: {cmd}");
+        }
+        let casos: Vec<&String> = cmds
+            .iter()
+            .filter(|(e, _)| e.starts_with("Limpio") || e.starts_with("Defecto"))
+            .map(|(_, c)| c)
+            .collect();
+        assert!(!casos.is_empty(), "los casos corrieron su sonda");
+        for cmd in casos {
+            assert!(cmd.contains(" --timeout 50 "), "caso con plazo 50: {cmd}");
+        }
+    }
+
+    #[test]
+    fn calibra_fila_vieja_sin_plazo_mutantes_lee_none() {
+        let fila = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        vieja
+            .as_object_mut()
+            .expect("objeto")
+            .remove("plazo_mutantes");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!(leida.plazo_mutantes, None);
     }
 }
