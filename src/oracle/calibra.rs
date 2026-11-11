@@ -18,7 +18,7 @@ use serde_json::{Map, json};
 
 use super::juez::{ExtractoGuardado, huella_del_prompt};
 use super::memo::{Alcance, MemoSondas, ReusoSondas};
-use super::mutacion::{MutanteEstado, MutanteMuerto};
+use super::mutacion::{EstadoMutante, MutanteEstado, MutanteMuerto};
 use super::rubrica::{Mide, Rubrica, cargar_embebidas};
 use super::tarea::Tarea;
 use super::{
@@ -510,9 +510,14 @@ pub struct CasoGuardado {
     /// Estado de cada mutante de la muestra del caso, en orden. Vacío si el caso no midió mutación.
     #[serde(default)]
     pub mutantes: Vec<MutanteEstado>,
-    /// Mutantes de la muestra cuyo estado cambió frente a la base, sin el mutante elegido. Vacío si no cambió ninguno.
+    /// Mutantes de la muestra cuyo estado cambió frente a la base y no lo explica el defecto: es ruido. Sin el
+    /// mutante elegido. Vacío si no cambió ninguno.
     #[serde(default)]
     pub mutantes_cambiados: Vec<String>,
+    /// Cambios de muerto a vivo que explican los tests que el defecto apagó. No son ruido. Vacío si no hubo.
+    /// Una fila o un caso viejo lo lee vacío.
+    #[serde(default)]
+    pub mutantes_explicados: Vec<String>,
     /// `true` si `mutantes_cambiados` no está vacío: el caso movió mutantes que no son su defecto.
     #[serde(default)]
     pub ruidoso: bool,
@@ -811,6 +816,50 @@ fn evaluar_copia(
     })
 }
 
+/// Separa los mutantes que cambiaron frente a la base en ruido y explicados, en orden de `caso`. Sin `elegido`,
+/// el mutante del defecto no entra. Un cambio de muerto a vivo se explica si todos sus asesinos de la base
+/// están en `apagados`. Cualquier otro cambio es ruido, también uno de vivo a muerto.
+fn separar_cambios(
+    base: &[MutanteEstado],
+    caso: &[MutanteEstado],
+    elegido: Option<&str>,
+    muertos: &[MutanteMuerto],
+    apagados: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut ruido = Vec::new();
+    let mut explicados = Vec::new();
+    for nombre in super::mutacion::mutantes_cambiados(base, caso, elegido) {
+        if explicado_por_apagados(base, caso, &nombre, muertos, apagados) {
+            explicados.push(nombre);
+        } else {
+            ruido.push(nombre);
+        }
+    }
+    (ruido, explicados)
+}
+
+/// Si `nombre` pasa de muerto a vivo y todos los tests que lo mataban en la base están en `apagados`.
+/// Sin asesinos conocidos en `muertos`, no se explica: no hay prueba de que el defecto lo causó.
+fn explicado_por_apagados(
+    base: &[MutanteEstado],
+    caso: &[MutanteEstado],
+    nombre: &str,
+    muertos: &[MutanteMuerto],
+    apagados: &[String],
+) -> bool {
+    let estado_en =
+        |lista: &[MutanteEstado]| lista.iter().find(|m| m.nombre == nombre).map(|m| m.estado);
+    if estado_en(base) != Some(EstadoMutante::Muerto)
+        || estado_en(caso) != Some(EstadoMutante::Vivo)
+    {
+        return false;
+    }
+    let Some(muerto) = muertos.iter().find(|m| m.nombre == nombre) else {
+        return false;
+    };
+    !muerto.tests.is_empty() && muerto.tests.iter().all(|t| apagados.contains(t))
+}
+
 /// Mide el caso `i`. Los pares llevan un defecto: el de `defectos[(i / 2) % len]`, la misma rotación de los
 /// casos en serie. Los impares son limpios. Un defecto sin candidato medible da un caso no aplicable.
 fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
@@ -847,13 +896,14 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         if let Some(c) = compartido {
             c.guardar(i as u32, &veredicto)?;
         }
-        // Un limpio no tiene mutante elegido: cuenta cualquier mutante que cambió.
-        let mutantes_cambiados =
-            super::mutacion::mutantes_cambiados(r.mutantes_base, &mutantes, None);
+        // Un limpio no tiene mutante elegido ni tests apagados: cualquier mutante que cambió es ruido.
+        let (mutantes_cambiados, mutantes_explicados) =
+            separar_cambios(r.mutantes_base, &mutantes, None, r.muertos, &[]);
         let caso = Caso {
             target_reusado: reusado,
             mutantes,
             mutantes_cambiados,
+            mutantes_explicados,
             filtro,
             ..Caso::nuevo(i as u32, None, veredicto)
         };
@@ -957,17 +1007,20 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             }),
         });
     };
-    // El mutante elegido por `AssertBorrado` no cuenta: es el defecto, no un efecto colateral.
-    let mutantes_cambiados = super::mutacion::mutantes_cambiados(
+    // El mutante elegido por `AssertBorrado` no cuenta: es el defecto. Los tests que apagó explican sus muertos.
+    let (mutantes_cambiados, mutantes_explicados) = separar_cambios(
         r.mutantes_base,
         &mutantes,
         inyeccion.mutante.as_deref(),
+        r.muertos,
+        &inyeccion.tests_apagados,
     );
     let caso = Caso {
         reemplazos: invalidos,
         target_reusado: reusado,
         mutantes,
         mutantes_cambiados,
+        mutantes_explicados,
         filtro,
         ..Caso::nuevo(i as u32, Some(inyeccion), veredicto)
     };
@@ -1807,8 +1860,10 @@ struct Caso {
     extractos: Vec<ExtractoGuardado>,
     /// Estado de cada mutante de la muestra de este caso. Vacío si el caso no midió mutación.
     mutantes: Vec<MutanteEstado>,
-    /// Mutantes cuyo estado cambió frente a la base, sin el mutante elegido. Vacío en un caso reusado.
+    /// Mutantes cuyo estado cambió frente a la base y no lo explica el defecto, sin el mutante elegido. Vacío en un caso reusado.
     mutantes_cambiados: Vec<String>,
+    /// Cambios de muerto a vivo explicados por los tests que el defecto apagó. Vacío en un caso reusado.
+    mutantes_explicados: Vec<String>,
     /// `-F` de cargo-mutants que midió el caso. Vacío si el caso no midió mutación.
     filtro: String,
 }
@@ -1840,6 +1895,7 @@ impl Caso {
             omitidos: Vec::new(),
             mutantes: Vec::new(),
             mutantes_cambiados: Vec::new(),
+            mutantes_explicados: Vec::new(),
             filtro: String::new(),
         }
     }
@@ -1884,6 +1940,7 @@ impl CasoGuardado {
             operador: caso.inyeccion.as_ref().and_then(|i| i.operador.clone()),
             mutantes: caso.mutantes.clone(),
             mutantes_cambiados: caso.mutantes_cambiados.clone(),
+            mutantes_explicados: caso.mutantes_explicados.clone(),
             ruidoso: !caso.mutantes_cambiados.is_empty(),
             filtro: caso.filtro.clone(),
         }
@@ -1919,6 +1976,7 @@ impl CasoGuardado {
             operador: None,
             mutantes: Vec::new(),
             mutantes_cambiados: Vec::new(),
+            mutantes_explicados: Vec::new(),
             ruidoso: false,
             filtro: String::new(),
         }
@@ -5323,6 +5381,92 @@ mod tests {
             &veredicto,
             Dimension::Estructura
         ));
+    }
+
+    fn mutante_estado(nombre: &str, estado: EstadoMutante) -> MutanteEstado {
+        MutanteEstado {
+            nombre: nombre.into(),
+            estado,
+        }
+    }
+
+    fn mutante_muerto(nombre: &str, tests: &[&str]) -> MutanteMuerto {
+        MutanteMuerto {
+            archivo: "src/lib.rs".into(),
+            linea: 1,
+            nombre: nombre.into(),
+            tests: tests.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    /// Tarea 101, A2: un mutante que pasa de muerto a vivo, con todos sus asesinos apagados, es explicado.
+    #[test]
+    fn separar_cambios_muerto_a_vivo_con_asesinos_apagados_no_es_ruido() {
+        let base = [mutante_estado("x", EstadoMutante::Muerto)];
+        let caso = [mutante_estado("x", EstadoMutante::Vivo)];
+        let muertos = [mutante_muerto("x", &["t::a", "t::b"])];
+        let apagados = ["t::a".to_string(), "t::b".to_string()];
+        let (ruido, explicados) = separar_cambios(&base, &caso, None, &muertos, &apagados);
+        assert!(ruido.is_empty(), "{ruido:?}");
+        assert_eq!(explicados, vec!["x".to_string()]);
+    }
+
+    /// Tarea 101, A2: con un asesino activo, el mismo cambio de muerto a vivo sigue siendo ruido.
+    #[test]
+    fn separar_cambios_muerto_a_vivo_con_asesino_activo_es_ruido() {
+        let base = [mutante_estado("x", EstadoMutante::Muerto)];
+        let caso = [mutante_estado("x", EstadoMutante::Vivo)];
+        let muertos = [mutante_muerto("x", &["t::a", "t::b"])];
+        let apagados = ["t::a".to_string()];
+        let (ruido, explicados) = separar_cambios(&base, &caso, None, &muertos, &apagados);
+        assert_eq!(ruido, vec!["x".to_string()]);
+        assert!(explicados.is_empty(), "{explicados:?}");
+    }
+
+    /// Tarea 101, A2: un mutante que pasa de vivo a muerto es ruido, aunque sus tests estén apagados.
+    #[test]
+    fn separar_cambios_vivo_a_muerto_es_ruido_siempre() {
+        let base = [mutante_estado("x", EstadoMutante::Vivo)];
+        let caso = [mutante_estado("x", EstadoMutante::Muerto)];
+        let muertos = [mutante_muerto("x", &["t::a"])];
+        let apagados = ["t::a".to_string()];
+        let (ruido, explicados) = separar_cambios(&base, &caso, None, &muertos, &apagados);
+        assert_eq!(ruido, vec!["x".to_string()]);
+        assert!(explicados.is_empty(), "{explicados:?}");
+    }
+
+    /// Tarea 101, A2: sin tests apagados (un caso limpio o de otro defecto), todo cambio es ruido.
+    #[test]
+    fn separar_cambios_sin_tests_apagados_todo_cambio_es_ruido() {
+        let base = [mutante_estado("x", EstadoMutante::Muerto)];
+        let caso = [mutante_estado("x", EstadoMutante::Vivo)];
+        let muertos = [mutante_muerto("x", &["t::a"])];
+        let (ruido, explicados) = separar_cambios(&base, &caso, None, &muertos, &[]);
+        assert_eq!(ruido, vec!["x".to_string()]);
+        assert!(explicados.is_empty(), "{explicados:?}");
+    }
+
+    /// Tarea 101, A2: un mutante muerto sin asesinos conocidos no se explica: no hay prueba de que el defecto lo causó.
+    #[test]
+    fn separar_cambios_sin_asesinos_conocidos_es_ruido() {
+        let base = [mutante_estado("x", EstadoMutante::Muerto)];
+        let caso = [mutante_estado("x", EstadoMutante::Vivo)];
+        let muertos = [mutante_muerto("x", &[])];
+        let apagados = ["t::a".to_string()];
+        let (ruido, explicados) = separar_cambios(&base, &caso, None, &muertos, &apagados);
+        assert_eq!(ruido, vec!["x".to_string()]);
+        assert!(explicados.is_empty(), "{explicados:?}");
+    }
+
+    /// Tarea 101, A2: el mutante elegido por el defecto no entra ni como ruido ni como explicado.
+    #[test]
+    fn separar_cambios_el_elegido_no_cuenta() {
+        let base = [mutante_estado("e", EstadoMutante::Muerto)];
+        let caso = [mutante_estado("e", EstadoMutante::Vivo)];
+        let muertos = [mutante_muerto("e", &["t::a"])];
+        let apagados = ["t::a".to_string()];
+        let (ruido, explicados) = separar_cambios(&base, &caso, Some("e"), &muertos, &apagados);
+        assert!(ruido.is_empty() && explicados.is_empty());
     }
 
     #[test]
@@ -8756,12 +8900,18 @@ mod tests {
         let caso = Caso::nuevo(0, None, Veredicto::default());
         let mut vieja = serde_json::to_value(CasoGuardado::de(&caso)).expect("serializa");
         let objeto = vieja.as_object_mut().expect("objeto");
-        for clave in ["mutantes", "mutantes_cambiados", "ruidoso"] {
+        for clave in [
+            "mutantes",
+            "mutantes_cambiados",
+            "mutantes_explicados",
+            "ruidoso",
+        ] {
             objeto.remove(clave);
         }
         let leido: CasoGuardado = serde_json::from_value(vieja).expect("un JSON viejo parsea");
         assert!(leido.mutantes.is_empty());
         assert!(leido.mutantes_cambiados.is_empty());
+        assert!(leido.mutantes_explicados.is_empty());
         assert!(!leido.ruidoso);
     }
 

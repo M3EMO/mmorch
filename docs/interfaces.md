@@ -930,7 +930,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       }
     },
     "mutantes_cambiados": {
-      "description": "Mutantes de la muestra cuyo estado cambió frente a la base, sin el mutante elegido. Vacío si no cambió ninguno.",
+      "description": "Mutantes de la muestra cuyo estado cambió frente a la base y no lo explica el defecto: es ruido. Sin el\nmutante elegido. Vacío si no cambió ninguno.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "mutantes_explicados": {
+      "description": "Cambios de muerto a vivo que explican los tests que el defecto apagó. No son ruido. Vacío si no hubo.\nUna fila o un caso viejo lo lee vacío.",
       "type": "array",
       "default": [],
       "items": {
