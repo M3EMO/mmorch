@@ -182,8 +182,10 @@ impl EjecutorContenedorBuilder {
 
 impl EjecutorBuilder for EjecutorContenedorBuilder {
     fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+        // El cerrojo entra aquí y llega hasta el registro del hijo. Una señal espera en él: no borra antes.
+        let cerrojo = estado_hijo();
         // Con el ejecutor terminando no se crea copia ni se lanza nada.
-        if terminando() {
+        if cerrojo.terminando {
             return Err(ErrorCorre::Ejecutor(
                 "no se lanza el builder: el ejecutor está terminando".into(),
             ));
@@ -214,6 +216,8 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
             contexto: format!("crear el estado de claude en {}", estado.display()),
             fuente,
         })?;
+        #[cfg(test)]
+        llamar_costura(&COSTURA_ENTRE_TERMINANDO_Y_COPIA);
         // El builder no ve la credencial del usuario: monta una copia sin `mcpOAuth`.
         let copia = self.preparar_credencial(&estado)?;
 
@@ -230,9 +234,9 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
         let nombre = nombre_unico();
         let args = args_podman_builder(&real, &self.imagen, &credencial, &estado, &nombre);
 
-        // El plazo de este rol no supera el tope del ejecutor.
+        // El plazo de este rol no supera el tope del ejecutor. El spawn y el registro van bajo el cerrojo.
         let plazo = l.plazo.min(self.timeout);
-        match correr_proceso("podman", &args, plazo)? {
+        match correr_registrado(cerrojo, "podman", &args, plazo, TOPE_SALIDA_BUILDER)? {
             Fin::Termino(salida) => clasificar_salida(salida),
             Fin::Vencio { stdout, .. } => {
                 // Venció: se pide borrar el contenedor por nombre. Un fallo al borrar no tapa el aviso.
@@ -309,17 +313,17 @@ fn revisar_plugin(plugin: &Path) -> Result<(), ErrorCorre> {
     }
 }
 
-/// Estado del hijo que corre `correr_hijo`. Va bajo un solo cerrojo: el spawn y el registro del pid
-/// ocurren juntos frente a `terminar_hijo_en_curso`.
+/// Estado del hijo en curso. Va bajo un solo cerrojo: el spawn, el registro y la espera miran el mismo
+/// estado frente a `terminar_por_senal`.
 struct EstadoHijo {
-    /// Pid del hijo en curso. Sin valor si no hay hijo registrado.
-    pid: Option<u32>,
-    /// Lo pone `terminar_hijo_en_curso`. Un spawn pedido después no lanza nada.
+    /// El `Child` del `podman run` en curso. Sin valor si no hay hijo. Quien lo recoge lo saca de aquí.
+    hijo: Option<Child>,
+    /// Lo pone `terminar_por_senal`. Un lanzamiento pedido después no lanza nada.
     terminando: bool,
 }
 
 static ESTADO_HIJO: Mutex<EstadoHijo> = Mutex::new(EstadoHijo {
-    pid: None,
+    hijo: None,
     terminando: false,
 });
 
@@ -328,54 +332,53 @@ fn estado_hijo() -> MutexGuard<'static, EstadoHijo> {
     ESTADO_HIJO.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Dice si el ejecutor está terminando por una señal. Un lanzamiento nuevo no debe empezar.
-pub(crate) fn terminando() -> bool {
-    estado_hijo().terminando
-}
+/// Pausa entre dos consultas del hijo registrado. Igual que el sondeo de `oracle::contenedor`.
+const SONDEO_HIJO: Duration = Duration::from_millis(20);
 
-/// Registro del pid de un hijo mientras vive. Quien lo tiene lo suelta justo después del `wait`.
-/// Si se sale antes por error, el `Drop` también lo borra.
-struct HijoRegistrado {
-    pid: u32,
-}
-
-impl Drop for HijoRegistrado {
-    fn drop(&mut self) {
-        let mut estado = estado_hijo();
-        if estado.pid == Some(self.pid) {
-            estado.pid = None;
-        }
-    }
-}
-
-/// Termina con SIGKILL el hijo en curso, si lo hay. Marca `terminando` antes de leer el pid.
-/// Sin hijo, no mata nada. El cerrojo sigue tomado mientras corre `kill`.
-pub fn terminar_hijo_en_curso() -> Result<(), ErrorCorre> {
+/// Termina el ejecutor por una señal. Toma el cerrojo, marca `terminando` y mata el hijo en curso, si
+/// lo hay. Con el cerrojo tomado, corre `limpieza` con el resultado de matar. Un hijo ya esperado no
+/// está en el estado: nunca se manda `kill` a un pid ajeno. Un lanzamiento que espera el cerrojo no
+/// empieza. Si `limpieza` sale del proceso, no vuelve.
+pub fn terminar_por_senal(limpieza: impl FnOnce(Result<(), ErrorCorre>)) {
     let mut estado = estado_hijo();
     estado.terminando = true;
-    let Some(pid) = estado.pid else {
-        return Ok(());
+    let resultado = match estado.hijo.take() {
+        Some(mut hijo) => matar_y_recoger(&mut hijo).map_err(|e| {
+            ErrorCorre::Ejecutor(format!("no se pudo terminar el hijo {}: {e}", hijo.id()))
+        }),
+        None => Ok(()),
     };
-    let salida_kill = Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| ErrorCorre::Ejecutor(format!("no se pudo correr kill: {e}")))?;
-    if salida_kill.success() {
-        Ok(())
-    } else {
-        Err(ErrorCorre::Ejecutor(format!(
-            "no se pudo terminar el hijo {pid}"
-        )))
-    }
+    limpieza(resultado);
+}
+
+/// Mata con SIGKILL un hijo que aún no se esperó y lo recoge. Devuelve el resultado del `kill`.
+fn matar_y_recoger(hijo: &mut Child) -> io::Result<()> {
+    #[cfg(test)]
+    KILLS_DE_PRUEBA.fetch_add(1, Ordering::Relaxed);
+    let muerto = hijo.kill();
+    let _ = hijo.wait();
+    muerto
 }
 
 /// Pid del hijo en curso, para los tests.
 #[cfg(test)]
 pub(crate) fn pid_en_curso() -> Option<u32> {
-    estado_hijo().pid
+    estado_hijo().hijo.as_ref().map(Child::id)
 }
+
+/// Cuántos `kill` mandó el ejecutor en el test. Un pid ya esperado no debe sumar.
+#[cfg(test)]
+pub(crate) static KILLS_DE_PRUEBA: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Si vale `true`, la siguiente consulta de la espera del hijo da error.
+#[cfg(test)]
+pub(crate) static FALLO_DE_ESPERA: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Costura entre el chequeo de `terminando` y la copia de la credencial. Corre con el cerrojo tomado.
+#[cfg(test)]
+pub(crate) static COSTURA_ENTRE_TERMINANDO_Y_COPIA: Mutex<Option<Costura>> = Mutex::new(None);
 
 /// Función que corre en un punto de `correr_proceso_con_tope`, solo en tests.
 #[cfg(test)]
@@ -385,7 +388,8 @@ type Costura = Box<dyn Fn() + Send + Sync>;
 #[cfg(test)]
 static COSTURA_ENTRE_SPAWN_Y_REGISTRO: Mutex<Option<Costura>> = Mutex::new(None);
 
-/// Costura tras la espera del hijo. Corre después de matarlo y recogerlo, si hace falta.
+/// Costura tras la espera del hijo registrado. Corre bajo el cerrojo, con el hijo ya esperado y antes de
+/// sacarlo del registro.
 #[cfg(test)]
 static COSTURA_TRAS_ESPERA: Mutex<Option<Costura>> = Mutex::new(None);
 
@@ -425,9 +429,15 @@ impl Drop for SeriePruebas {
 #[cfg(test)]
 fn reiniciar_estado_de_pruebas() {
     estado_hijo().terminando = false;
-    for costura in [&COSTURA_ENTRE_SPAWN_Y_REGISTRO, &COSTURA_TRAS_ESPERA] {
+    for costura in [
+        &COSTURA_ENTRE_SPAWN_Y_REGISTRO,
+        &COSTURA_TRAS_ESPERA,
+        &COSTURA_ENTRE_TERMINANDO_Y_COPIA,
+    ] {
         *costura.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
+    KILLS_DE_PRUEBA.store(0, Ordering::Relaxed);
+    FALLO_DE_ESPERA.store(false, Ordering::Relaxed);
 }
 
 /// Quita los contenedores del builder que lanzó este proceso: los que llevan `root-builder-<pid>-` en
@@ -504,6 +514,8 @@ pub(crate) enum Fin {
 const GRACIA_LECTURA: Duration = Duration::from_secs(2);
 
 /// Corre `programa` con `args` y espera hasta `plazo`, con el tope del builder. Ver `correr_proceso_con_tope`.
+/// Solo los tests lo usan: el builder llama a `correr_registrado` con el cerrojo ya tomado.
+#[cfg(test)]
 pub(crate) fn correr_proceso(
     programa: &str,
     args: &[String],
@@ -516,6 +528,7 @@ pub(crate) fn correr_proceso(
 /// ahí. Un fallo al lanzar o al esperar es `Ejecutor`. El código de salida lo decide el llamador.
 /// Si el proceso termina y su stdout pasa `tope`, falla: el builder necesita la salida entera.
 /// Un stderr recortado no falla. Solo se trunca.
+#[cfg(test)]
 fn correr_proceso_con_tope(
     programa: &str,
     args: &[String],
@@ -525,9 +538,9 @@ fn correr_proceso_con_tope(
     correr_hijo(programa, args, plazo, tope, true)
 }
 
-/// Corre `programa` como `correr_proceso_con_tope`. Con `registrar`, el pid queda en el registro de
-/// `terminar_hijo_en_curso`, y no lanza nada si el ejecutor ya termina. Sin `registrar`, no toca el
-/// registro ni lo frena `terminando`: lo usan los comandos que corre la señal.
+/// Corre `programa` como `correr_proceso_con_tope`. Con `registrar`, el hijo queda en el registro de
+/// `terminar_por_senal` y no lanza nada si el ejecutor ya termina. Sin `registrar`, no toca el registro
+/// ni lo frena `terminando`: lo usan los comandos que corre la señal.
 fn correr_hijo(
     programa: &str,
     args: &[String],
@@ -535,14 +548,61 @@ fn correr_hijo(
     tope: usize,
     registrar: bool,
 ) -> Result<Fin, ErrorCorre> {
-    let (mut hijo, registro) = lanzar_hijo(programa, args, registrar)?;
+    if registrar {
+        return correr_registrado(estado_hijo(), programa, args, plazo, tope);
+    }
+    let mut hijo = spawn_hijo(programa, args)?;
+    let pipes = tomar_pipes(&mut hijo, tope);
+    let espera = esperar_o_matar(&mut hijo, plazo);
+    fin_de_espera(programa, espera, pipes, tope)
+}
+
+/// Flujos de salida de un hijo, leídos cada uno en su hilo. Sin flujo, `None`.
+type Pipes = (Option<JoinHandle<Lectura>>, Option<JoinHandle<Lectura>>);
+
+/// Toma las pipes de `hijo` y arranca un hilo que lee cada una. Va antes de guardar el hijo en el registro.
+fn tomar_pipes(hijo: &mut Child, tope: usize) -> Pipes {
     let salida = hijo.stdout.take().map(|f| leer_en_hilo_con(f, tope));
     let error = hijo.stderr.take().map(|f| leer_en_hilo_con(f, tope));
-    let espera = esperar_o_matar(&mut hijo, plazo);
-    // El pid se borra apenas el hijo queda recogido. Así la señal nunca mata un pid reciclado.
-    drop(registro);
+    (salida, error)
+}
+
+/// Lanza `programa` y lo registra como hijo en curso. El cerrojo entra tomado: el spawn y el registro
+/// van bajo él, y lo suelta antes de esperar. Con `terminando` o con otro hijo registrado, no lanza nada.
+fn correr_registrado(
+    mut estado: MutexGuard<'static, EstadoHijo>,
+    programa: &str,
+    args: &[String],
+    plazo: Duration,
+    tope: usize,
+) -> Result<Fin, ErrorCorre> {
+    if estado.terminando {
+        return Err(ErrorCorre::Ejecutor(format!(
+            "no se lanza {programa}: el ejecutor está terminando"
+        )));
+    }
+    if estado.hijo.is_some() {
+        return Err(ErrorCorre::Ejecutor(format!(
+            "no se lanza {programa}: ya hay un hijo en curso"
+        )));
+    }
+    let mut hijo = spawn_hijo(programa, args)?;
+    let pipes = tomar_pipes(&mut hijo, tope);
     #[cfg(test)]
-    llamar_costura(&COSTURA_TRAS_ESPERA);
+    llamar_costura(&COSTURA_ENTRE_SPAWN_Y_REGISTRO);
+    estado.hijo = Some(hijo);
+    drop(estado);
+    let espera = esperar_registrado(plazo);
+    fin_de_espera(programa, espera, pipes, tope)
+}
+
+/// Arma el `Fin` de un hijo esperado o vencido. Un error de la espera pasa sin cambios.
+fn fin_de_espera(
+    programa: &str,
+    espera: Result<Option<ExitStatus>, ErrorCorre>,
+    (salida, error): Pipes,
+    tope: usize,
+) -> Result<Fin, ErrorCorre> {
     let Some(estado) = espera? else {
         return Ok(Fin::Vencio {
             stdout: lectura_tras_corte(salida).bytes,
@@ -568,28 +628,57 @@ fn correr_hijo(
     }))
 }
 
-/// Lanza el hijo. Con `registrar`, el spawn y el registro del pid van juntos bajo el cerrojo.
-/// Con `terminando` puesto, no lanza nada y da error.
-fn lanzar_hijo(
-    programa: &str,
-    args: &[String],
-    registrar: bool,
-) -> Result<(Child, Option<HijoRegistrado>), ErrorCorre> {
-    if !registrar {
-        return Ok((spawn_hijo(programa, args)?, None));
+/// Espera al hijo registrado hasta `plazo`. En cada vuelta toma el cerrojo, mira el registro y lo suelta
+/// durante la pausa. Si el hijo ya no está en el registro, lo recogió la señal.
+/// Si la espera da error o vence el plazo, mata el hijo y lo recoge antes de devolver.
+fn esperar_registrado(plazo: Duration) -> Result<Option<ExitStatus>, ErrorCorre> {
+    let limite = Instant::now() + plazo;
+    loop {
+        let mut estado = estado_hijo();
+        let consulta = match estado.hijo.as_mut() {
+            Some(hijo) => consultar(hijo),
+            None => {
+                return Err(ErrorCorre::Ejecutor(
+                    "el hijo fue terminado por una señal".into(),
+                ));
+            }
+        };
+        match consulta {
+            Ok(Some(status)) => {
+                // Ya esperado: sale del registro en el mismo cerrojo. Nunca quedará un `kill` para él.
+                #[cfg(test)]
+                llamar_costura(&COSTURA_TRAS_ESPERA);
+                estado.hijo = None;
+                return Ok(Some(status));
+            }
+            Ok(None) if Instant::now() < limite => {}
+            Ok(None) => {
+                if let Some(mut hijo) = estado.hijo.take() {
+                    let _ = matar_y_recoger(&mut hijo);
+                }
+                return Ok(None);
+            }
+            Err(e) => {
+                if let Some(mut hijo) = estado.hijo.take() {
+                    let _ = matar_y_recoger(&mut hijo);
+                }
+                return Err(ErrorCorre::Ejecutor(format!(
+                    "no se pudo consultar el hijo: {e}"
+                )));
+            }
+        }
+        drop(estado);
+        std::thread::sleep(SONDEO_HIJO);
     }
-    let mut estado = estado_hijo();
-    if estado.terminando {
-        return Err(ErrorCorre::Ejecutor(format!(
-            "no se lanza {programa}: el ejecutor está terminando"
-        )));
-    }
-    let hijo = spawn_hijo(programa, args)?;
-    let pid = hijo.id();
+}
+
+/// Consulta si el hijo ya salió, sin esperarlo. En tests, puede forzar un error.
+fn consultar(hijo: &mut Child) -> io::Result<Option<ExitStatus>> {
     #[cfg(test)]
-    llamar_costura(&COSTURA_ENTRE_SPAWN_Y_REGISTRO);
-    estado.pid = Some(pid);
-    Ok((hijo, Some(HijoRegistrado { pid })))
+    if FALLO_DE_ESPERA.load(Ordering::Relaxed) {
+        return Err(io::Error::other("fallo forzado de la espera"));
+    }
+    hijo.try_wait()
 }
 
 /// Lanza `programa` con sus flujos de salida en pipe. Sin registro ni cerrojo.
@@ -607,17 +696,20 @@ fn spawn_hijo(programa: &str, args: &[String]) -> Result<Child, ErrorCorre> {
         })
 }
 
-/// Espera al hijo hasta `plazo`. Si vence, lo mata y lo recoge. Da `None` si venció.
+/// Espera al hijo sin registro hasta `plazo`. Si vence o la espera falla, lo mata y lo recoge. Da `None` si venció.
 fn esperar_o_matar(hijo: &mut Child, plazo: Duration) -> Result<Option<ExitStatus>, ErrorCorre> {
-    let estado = esperar(hijo, plazo).map_err(|e| {
-        ErrorCorre::Ejecutor(match e {
-            ErrorOraculo::Infra(m) => m,
-            otro => otro.to_string(),
-        })
-    })?;
+    let estado = match esperar(hijo, plazo) {
+        Ok(estado) => estado,
+        Err(e) => {
+            let _ = matar_y_recoger(hijo);
+            return Err(ErrorCorre::Ejecutor(match e {
+                ErrorOraculo::Infra(m) => m,
+                otro => otro.to_string(),
+            }));
+        }
+    };
     if estado.is_none() {
-        let _ = hijo.kill();
-        let _ = hijo.wait();
+        let _ = matar_y_recoger(hijo);
     }
     Ok(estado)
 }
@@ -795,6 +887,9 @@ mod tests {
     use crate::observe::transcript::leer_transcript;
     use std::fs;
     use tempfile::TempDir;
+
+    /// Resultado de una señal en otro hilo, guardado por una costura para que el test lo espere.
+    type SenalGuardada = std::sync::Arc<Mutex<Option<JoinHandle<Option<Result<(), ErrorCorre>>>>>>;
 
     fn lanzamiento(repo: PathBuf, env: Vec<(String, String)>) -> Lanzamiento {
         Lanzamiento {
@@ -1328,7 +1423,9 @@ mod tests {
     #[test]
     fn terminar_hijo_sin_hijo_en_curso_no_hace_nada() {
         let _serie = serie_de_pruebas();
-        assert!(terminar_hijo_en_curso().is_ok());
+        let mut resultado = None;
+        terminar_por_senal(|r| resultado = Some(r));
+        assert!(matches!(resultado, Some(Ok(()))), "{resultado:?}");
         assert_eq!(pid_en_curso(), None);
     }
 
@@ -1338,7 +1435,7 @@ mod tests {
         let hilo = lanzar_hijo_en_curso();
         esperar_hijo_registrado();
         let inicio = Instant::now();
-        terminar_hijo_en_curso().expect("termina el hijo");
+        terminar_por_senal(|_| {});
         let murio_con_error = hilo.join().expect("hilo del hijo");
         assert!(
             murio_con_error,
@@ -1364,13 +1461,15 @@ mod tests {
             avisado
                 .recv_timeout(Duration::from_secs(5))
                 .expect("la costura avisa el spawn");
-            terminar_hijo_en_curso()
+            let mut recibido = None;
+            terminar_por_senal(|r| recibido = Some(r));
+            recibido
         });
         let args = vec!["-c".to_string(), "exec sleep 30".to_string()];
         let inicio = Instant::now();
         let resultado = correr_proceso("sh", &args, Duration::from_secs(10));
         assert!(
-            senal.join().expect("hilo de la señal").is_ok(),
+            matches!(senal.join().expect("hilo de la señal"), Some(Ok(()))),
             "la señal termina sin error"
         );
         assert!(
@@ -1388,7 +1487,7 @@ mod tests {
         let _serie = serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
         let marcador = tmp.path().join("lanzado.txt");
-        terminar_hijo_en_curso().expect("marca terminando");
+        terminar_por_senal(|_| {});
         let args = vec![
             "-c".to_string(),
             format!("echo x > '{}'", marcador.display()),
@@ -1412,7 +1511,7 @@ mod tests {
             imagen: String::new(),
             ..ejecutor
         };
-        terminar_hijo_en_curso().expect("marca terminando");
+        terminar_por_senal(|_| {});
         let repo = tmp.path().join("usuario/.cache/root/corridas/corre-1/repo");
         let error = ejecutor
             .lanzar(&lanzamiento(repo, Vec::new()))
@@ -1438,7 +1537,7 @@ mod tests {
         );
         let despues = pid_en_curso();
         // Limpieza antes de los asserts: el hijo de la prueba no debe quedar vivo si uno falla.
-        terminar_hijo_en_curso().expect("termina el hijo de la prueba");
+        terminar_por_senal(|_| {});
         let _ = hilo.join();
         assert!(resultado.is_ok(), "quitar sin nombres no falla");
         assert_eq!(
@@ -1447,28 +1546,198 @@ mod tests {
         );
     }
 
+    /// La costura corre bajo el cerrojo, así que no puede llamar a `pid_en_curso`. El test mira el registro
+    /// después de que `correr_proceso` vuelve. Un hijo que sale solo y otro que vence el plazo: los dos
+    /// caminos del wait.
     #[test]
     fn registro_del_hijo_se_borra_al_recoger_el_wait() {
         let _serie = serie_de_pruebas();
-        // Un hijo que sale solo y otro que vence el plazo: los dos caminos del wait.
-        let vistos = std::sync::Arc::new(Mutex::new(Vec::new()));
-        let copia = std::sync::Arc::clone(&vistos);
-        *COSTURA_TRAS_ESPERA.lock().expect("costura") = Some(Box::new(move || {
-            copia.lock().expect("vistos").push(pid_en_curso());
-        }));
         for (script, plazo) in [
             ("exit 0", Duration::from_secs(20)),
             ("exec sleep 5", Duration::from_millis(100)),
         ] {
-            vistos.lock().expect("vistos").clear();
             let args = vec!["-c".to_string(), script.to_string()];
             correr_proceso("sh", &args, plazo).expect("corre");
-            let registros = vistos.lock().expect("vistos").clone();
             assert_eq!(
-                registros,
-                vec![None],
+                pid_en_curso(),
+                None,
                 "tras el wait no debe quedar pid registrado: {script}"
             );
         }
+    }
+
+    /// Señal en otro hilo: corre `terminar_por_senal` y devuelve lo que recibió su limpieza.
+    fn senal_en_hilo() -> JoinHandle<Option<Result<(), ErrorCorre>>> {
+        std::thread::spawn(|| {
+            let mut recibido = None;
+            terminar_por_senal(|r| recibido = Some(r));
+            recibido
+        })
+    }
+
+    #[test]
+    fn senal_tras_el_try_wait_no_mata_el_pid_ya_esperado() {
+        let _serie = serie_de_pruebas();
+        // La costura cae entre el `try_wait` que vio la salida y el borrado del registro.
+        let guardada: SenalGuardada = std::sync::Arc::new(Mutex::new(None));
+        let para_costura = std::sync::Arc::clone(&guardada);
+        *COSTURA_TRAS_ESPERA.lock().expect("costura") = Some(Box::new(move || {
+            *para_costura.lock().expect("guardada") = Some(senal_en_hilo());
+            std::thread::sleep(Duration::from_millis(100));
+        }));
+        let args = vec!["-c".to_string(), "exit 0".to_string()];
+        let resultado = correr_proceso("sh", &args, Duration::from_secs(20));
+        let hilo = guardada
+            .lock()
+            .expect("guardada")
+            .take()
+            .expect("la costura lanzó la señal");
+        let senal = hilo.join().expect("hilo de la señal");
+        assert!(
+            matches!(resultado, Ok(Fin::Termino(ref s)) if s.codigo == 0),
+            "el hijo sale solo: {resultado:?}"
+        );
+        assert!(
+            matches!(senal, Some(Ok(()))),
+            "la señal no falla: {senal:?}"
+        );
+        assert_eq!(
+            KILLS_DE_PRUEBA.load(Ordering::Relaxed),
+            0,
+            "no se manda kill a un pid ya esperado"
+        );
+    }
+
+    #[test]
+    fn error_de_la_espera_termina_al_hijo_antes_de_devolver_el_error() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let pidfile = tmp.path().join("hijo.pid");
+        let args = vec![
+            "-c".to_string(),
+            format!("echo $$ > '{}'; exec sleep 30", pidfile.display()),
+        ];
+        let hilo = std::thread::spawn(move || correr_proceso("sh", &args, Duration::from_secs(3)));
+        let limite = Instant::now() + Duration::from_secs(5);
+        while !pidfile.exists() {
+            assert!(Instant::now() < limite, "el hijo no escribió su pid");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        FALLO_DE_ESPERA.store(true, Ordering::Relaxed);
+        let resultado = hilo.join().expect("hilo del hijo");
+        let pid = fs::read_to_string(&pidfile).expect("pid");
+        let pid = pid.trim().to_string();
+        let vive = Path::new(&format!("/proc/{pid}")).exists();
+        // Limpieza antes de los asserts: el hijo de la prueba no debe quedar vivo si uno falla.
+        if vive {
+            let _ = Command::new("kill").args(["-KILL", &pid]).status();
+        }
+        assert!(
+            matches!(resultado, Err(ErrorCorre::Ejecutor(_))),
+            "un error de la espera sale por Err: {resultado:?}"
+        );
+        assert!(
+            !vive,
+            "tras el error de la espera el hijo debe estar terminado"
+        );
+    }
+
+    #[test]
+    fn segundo_registro_con_hijo_en_curso_da_error_y_no_lanza() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let marcador = tmp.path().join("lanzado.txt");
+        let hilo = lanzar_hijo_en_curso();
+        esperar_hijo_registrado();
+        let args = vec![
+            "-c".to_string(),
+            format!("echo x > '{}'", marcador.display()),
+        ];
+        let resultado = correr_proceso("sh", &args, Duration::from_secs(10));
+        // Limpieza antes de los asserts: el hijo en curso no debe quedar vivo si uno falla.
+        terminar_por_senal(|_| {});
+        let _ = hilo.join();
+        assert!(
+            matches!(resultado, Err(ErrorCorre::Ejecutor(_))),
+            "un segundo registro da error: {resultado:?}"
+        );
+        assert!(!marcador.exists(), "el segundo hijo no debe correr");
+    }
+
+    #[test]
+    fn senal_en_la_ventana_entre_terminando_y_la_copia_no_deja_copia() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, credencial) = ejecutor_real(&tmp, false);
+        escribir_credencial(&credencial, &credencial_con_mcp(VENCE_LEJOS_MS));
+        // Imagen vacía: podman falla sin bajar nada.
+        let ejecutor = EjecutorContenedorBuilder {
+            imagen: String::new(),
+            ..ejecutor
+        };
+        let repo = tmp.path().join("usuario/.cache/root/corridas/corre-1/repo");
+        let estado = tmp
+            .path()
+            .join("usuario/.cache/root/corridas/corre-1/claude-estado");
+        let copia = estado.join(".credentials.json");
+        let guardada: SenalGuardada = std::sync::Arc::new(Mutex::new(None));
+        let para_costura = std::sync::Arc::clone(&guardada);
+        let (estado_senal, copia_senal) = (estado.clone(), copia.clone());
+        *COSTURA_ENTRE_TERMINANDO_Y_COPIA.lock().expect("costura") = Some(Box::new(move || {
+            let (estado, copia) = (estado_senal.clone(), copia_senal.clone());
+            // La señal corre en otro hilo: con el cerrojo tomado, debe esperar a `lanzar`.
+            let hilo = std::thread::spawn(move || {
+                let mut recibido = None;
+                terminar_por_senal(|r| {
+                    recibido = Some(r);
+                    let _ = crate::borrado::borrar_archivo_dentro(&estado, &copia);
+                });
+                recibido
+            });
+            *para_costura.lock().expect("guardada") = Some(hilo);
+            std::thread::sleep(Duration::from_millis(100));
+        }));
+        let _ = ejecutor.lanzar(&lanzamiento(repo, Vec::new()));
+        let hilo = guardada
+            .lock()
+            .expect("guardada")
+            .take()
+            .expect("la costura lanzó la señal");
+        let senal = hilo.join().expect("hilo de la señal");
+        assert!(
+            matches!(senal, Some(Ok(()))),
+            "la señal no falla: {senal:?}"
+        );
+        assert!(
+            fs::symlink_metadata(&copia).is_err(),
+            "la señal no debe dejar copia de la credencial"
+        );
+    }
+
+    #[test]
+    fn limpieza_de_la_senal_corre_sin_tomar_el_cerrojo() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let pid = std::process::id();
+        let cuerpo = format!("if [ \"$1\" = ps ]; then echo root-builder-{pid}-0; fi\nexit 0");
+        let programa = programa_falso(tmp.path(), &cuerpo);
+        let programa = programa.to_str().expect("ruta").to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut quitado = None;
+            terminar_por_senal(|_| {
+                quitado = Some(quitar_builders_de_este_proceso(
+                    &programa,
+                    Duration::from_secs(10),
+                ));
+            });
+            let _ = tx.send(quitado);
+        });
+        // Si la limpieza tomara el cerrojo ya tomado, este recv vencería.
+        let quitado = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("la limpieza no debe trabarse con el cerrojo");
+        assert!(matches!(quitado, Some(Ok(()))), "{quitado:?}");
+        assert_eq!(pid_en_curso(), None, "la limpieza no registra ningún hijo");
     }
 }

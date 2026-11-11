@@ -795,23 +795,26 @@ impl Drop for VigilaSenales {
 /// Luego llama a `salir` con el código de la señal.
 /// Si la copia ya no existe, no es error: la carrera con `GuardiaCredencial::cerrar` es normal.
 fn al_recibir_senal(corrida: &Corrida, senal: i32, programa: &str, salir: impl Fn(i32)) {
+    // Todo va bajo el cerrojo del ejecutor: ningún lanzamiento nuevo entra mientras se limpia.
     // El contenedor primero: la copia va montada en el builder vivo, y borrarla no la quita de ahí.
-    if let Err(error) = ejecutor::terminar_hijo_en_curso() {
-        eprintln!(
-            "r00t corre: al recibir una señal no se pudo terminar el builder en curso: {error}"
-        );
-    }
-    if let Err(error) = ejecutor::quitar_builders_de_este_proceso(programa, PLAZO_AL_SENAL) {
-        eprintln!(
-            "r00t corre: al recibir una señal no se pudieron quitar los contenedores del builder: {error}"
-        );
-    }
-    if let Err(error) = quitar_credencial(corrida) {
-        eprintln!(
-            "r00t corre: al recibir una señal no se pudo borrar la copia de la credencial: {error}"
-        );
-    }
-    salir(codigo_de_senal(senal));
+    ejecutor::terminar_por_senal(|resultado_de_matar| {
+        if let Err(error) = resultado_de_matar {
+            eprintln!(
+                "r00t corre: al recibir una señal no se pudo terminar el builder en curso: {error}"
+            );
+        }
+        if let Err(error) = ejecutor::quitar_builders_de_este_proceso(programa, PLAZO_AL_SENAL) {
+            eprintln!(
+                "r00t corre: al recibir una señal no se pudieron quitar los contenedores del builder: {error}"
+            );
+        }
+        if let Err(error) = quitar_credencial(corrida) {
+            eprintln!(
+                "r00t corre: al recibir una señal no se pudo borrar la copia de la credencial: {error}"
+            );
+        }
+        salir(codigo_de_senal(senal));
+    });
 }
 
 /// Código de salida de una señal que mata el proceso: 128 más su número. SIGINT da 130 y SIGTERM, 143.
