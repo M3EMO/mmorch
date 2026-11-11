@@ -3,10 +3,11 @@
 //! lo lee: una dimensión queda `calibrada` si su exactitud balanceada llega a 0,9, y solo esas entran a
 //! `global`. Además exige muestra mínima: 5 defectos aplicados y 5 casos limpios.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,17 +16,17 @@ use serde::{Deserialize, Serialize};
 
 use serde_json::{Map, json};
 
-use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES, cota_bytes_de_prompt, huella_del_prompt};
+use super::juez::{ExtractoGuardado, MAX_ENTRADA_JUEZ_BYTES, huella_del_prompt};
 use super::memo::{Alcance, MemoSondas, ReusoSondas};
 use super::mutacion::MutanteMuerto;
 use super::rubrica::{Mide, Rubrica, cargar_embebidas};
 use super::tarea::Tarea;
 use super::{AVISO_TARGET_FRIO, ErrorOraculo, OpcionesOraculo, Partes, Target, partes_de};
 use crate::borrado;
-use crate::config::{Config, Precio};
+use crate::config::Config;
 use crate::goal::calcular_hash;
 use crate::observe;
-use crate::proveedores::{INTENTOS_MAX, MAX_TOKENS_JUEZ, con_caso, costo_peor_caso};
+use crate::proveedores::{LimiteCalibracion, con_caso, con_limite, rechazo_en_este_hilo};
 use crate::tipos::{Dimension, Eleccion, Evento, Hallazgo, Puntaje, Veredicto};
 
 /// Nombre del archivo de calibración dentro de `ROOT_HOME`.
@@ -93,6 +94,14 @@ pub struct Fila {
     /// Una fila sin el campo vale `None`. Con ítems del juez, `None` cuenta como vieja y no calibra.
     #[serde(default)]
     pub huella: Option<String>,
+    /// Ítems del juez que variaron entre los tres juicios de la base, en orden. No entran a la medición de la
+    /// dimensión. Una fila sin el campo vale vacía.
+    #[serde(default)]
+    pub inestables: Vec<String>,
+    /// Extractos que leyó el juez en cada juicio de la base, en orden. Una sola lista si la dimensión no repite
+    /// la base. Una fila sin el campo vale vacía.
+    #[serde(default)]
+    pub extractos_base: Vec<Vec<ExtractoGuardado>>,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -167,6 +176,12 @@ impl Calibraciones {
         }
     }
 
+    /// Ítems inestables de la fila más reciente de `dimension`. Vacía si la tarea no tiene fila.
+    pub fn inestables_de(&self, tarea: &str, dimension: Dimension) -> &[String] {
+        self.de(tarea, dimension)
+            .map_or(&[], |fila| fila.inestables.as_slice())
+    }
+
     /// Motivo por el que la fila más reciente de `dimension` no calibra por su huella: es de otro juez.
     /// `None` si no hay fila con muestra suficiente, o si su huella es la actual.
     pub fn motivo_sin_calibrar(&self, tarea: &str, dimension: Dimension) -> Option<&'static str> {
@@ -179,6 +194,26 @@ impl Calibraciones {
 
 /// Motivo de un puntaje cuya fila tiene otra huella: la calibración sale de otro juez.
 const MOTIVO_OTRO_JUEZ: &str = "calibración de otro juez";
+
+/// `true` si los ítems `inestables` de `dimension` dejan menos de la mitad de su peso estable (Tarea 83, punto 2).
+pub fn dimension_inestable(
+    rubricas: &[Rubrica],
+    dimension: Dimension,
+    inestables: &[String],
+) -> bool {
+    let de_la_dimension: Vec<Rubrica> = rubricas
+        .iter()
+        .filter(|r| Dimension::desde_clave(&r.id) == Some(dimension))
+        .cloned()
+        .collect();
+    let excluidos: BTreeSet<String> = inestables.iter().cloned().collect();
+    inestables::dimension_inestable(&inestables::pesos_de(&de_la_dimension), &excluidos)
+}
+
+/// Motivo de una dimensión inestable que nombra sus ítems.
+pub fn motivo_inestable(inestables: &[String]) -> String {
+    inestables::motivo(&inestables.iter().cloned().collect())
+}
 
 /// Media de los `valor` de las dimensiones calibradas y con veredicto, con pesos iguales. `None` si ninguna.
 pub fn global_de(puntajes: &[Puntaje]) -> Option<f32> {
@@ -240,6 +275,7 @@ use inyectar::{Defecto, Inyeccion};
 
 mod compartidos;
 mod estables;
+mod inestables;
 mod regla;
 mod sonda;
 mod target;
@@ -341,6 +377,9 @@ pub struct CasoGuardado {
     /// Valor de la dimensión calibrada en este caso. `None` si el caso no tiene puntaje de la dimensión.
     #[serde(default)]
     pub valor: Option<f32>,
+    /// Los extractos que leyó el juez en este caso (archivo, primera línea, última línea y motivo).
+    #[serde(default)]
+    pub extractos: Vec<ExtractoGuardado>,
     /// Motivo por el que el caso no aplica. Solo en el renglón de un caso no aplicable.
     #[serde(default)]
     pub no_aplicable: Option<String>,
@@ -378,7 +417,7 @@ struct NoAplicable {
     motivo: String,
 }
 
-/// Por qué el tope detuvo una calibración: el tope, el gasto medido, el peor caso que no entró y los
+/// Por qué el tope detuvo una calibración: el tope, el gasto medido, la cota del intento que no entró y los
 /// casos medidos (decisión 48).
 #[derive(Clone)]
 struct Detencion {
@@ -388,41 +427,49 @@ struct Detencion {
     casos: u32,
 }
 
-/// Tope ya resuelto para una medición: el peor caso de un caso, el inicio de la calibración y el medidor.
-/// El medidor es `Sync`: los reemplazos lo miran desde los hilos de los casos.
-struct Tope<'a> {
-    usd: f64,
-    peor_caso: f64,
-    inicio: f64,
-    gasto_desde: &'a (dyn Fn(f64) -> Result<f64, ErrorOraculo> + Sync),
-    /// Ids de los casos con reserva de API abierta desde el inicio. Un caso en vuelo con reserva ya cuenta en `gasto_desde`.
-    casos_con_reserva: &'a (dyn Fn(f64) -> Result<HashSet<String>, ErrorOraculo> + Sync),
+/// Tope de una medición: su límite de gasto. Los casos lo activan en su hilo, y el coordinador lo mira antes
+/// de lanzar cada caso. El límite es `Sync`: sus casos corren en hilos distintos.
+struct Tope {
+    limite: Arc<LimiteCalibracion>,
 }
 
-/// Gasto comprometido: el gasto medido más el peor caso de cada caso en vuelo sin reserva escrita.
-/// Un caso con reserva ya cuenta en `gasto`, así que no suma su peor caso otra vez.
-fn gasto_comprometido(gasto: f64, peor_caso: f64, en_vuelo: usize, con_reserva: usize) -> f64 {
-    gasto + en_vuelo.saturating_sub(con_reserva) as f64 * peor_caso
+/// Detención del límite de la medición, si ya recibió un rechazo. Sin tope o sin rechazo, `None`.
+fn detencion_de_rechazo(tope: Option<&Tope>) -> Option<Detencion> {
+    let limite = &tope?.limite;
+    let rechazo = limite.rechazo()?;
+    Some(Detencion {
+        tope_usd: limite.usd,
+        gasto_usd: rechazo.gasto_usd,
+        peor_caso_usd: rechazo.cota_usd,
+        casos: 0,
+    })
 }
 
-/// Si el gasto desde el inicio más el peor caso de un caso pasa el tope, la detención. Sin tope, nunca.
-fn detencion_si_no_entra(
-    tope: Option<&Tope>,
-    casos: usize,
-) -> Result<Option<Detencion>, ErrorOraculo> {
-    let Some(tope) = tope else {
-        return Ok(None);
-    };
-    let gasto = (tope.gasto_desde)(tope.inicio)?;
-    if gasto + tope.peor_caso > tope.usd {
-        return Ok(Some(Detencion {
-            tope_usd: tope.usd,
-            gasto_usd: gasto,
-            peor_caso_usd: tope.peor_caso,
-            casos: casos as u32,
-        }));
+/// Detención si el juez de este hilo recibió un rechazo del límite. Su caso no es un caso medido.
+fn juez_rechazado(tope: Option<&Tope>) -> Option<Detencion> {
+    if rechazo_en_este_hilo() {
+        detencion_de_rechazo(tope)
+    } else {
+        None
     }
-    Ok(None)
+}
+
+/// Corre `f` con el límite del tope activo en este hilo. Sin tope, corre `f` tal cual.
+fn en_limite<R>(tope: Option<&Tope>, f: impl FnOnce() -> R) -> R {
+    match tope {
+        Some(tope) => con_limite(&tope.limite, f),
+        None => f(),
+    }
+}
+
+/// Medida que la detención corta: sin fila y sin casos.
+fn medida_detenida(detencion: Detencion) -> Medida {
+    Medida {
+        fila: None,
+        detencion: Some(detencion),
+        casos: Vec::new(),
+        no_aplicables: Vec::new(),
+    }
 }
 
 /// Qué caso evalúa el evaluador de `calibrar_medida`. Un caso con defecto lleva la dimensión calibrada: de
@@ -430,6 +477,8 @@ fn detencion_si_no_entra(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TipoCaso {
     Base,
+    /// Juicio extra de la base (Tarea 83, punto 2). Reusa las sondas deterministas de la base y no guarda `target`.
+    BaseRepetida,
     Defecto(Dimension),
     Limpio,
 }
@@ -441,7 +490,7 @@ enum TipoCaso {
 fn reuso_de(tipo: TipoCaso, memo: &std::sync::Arc<MemoSondas>) -> Option<ReusoSondas> {
     let alcance = match tipo {
         TipoCaso::Base => return None,
-        TipoCaso::Limpio => Alcance::Deterministas,
+        TipoCaso::BaseRepetida | TipoCaso::Limpio => Alcance::Deterministas,
         TipoCaso::Defecto(dimension) => {
             let reusa_mutacion = matches!(
                 dimension,
@@ -468,9 +517,9 @@ fn reuso_de(tipo: TipoCaso, memo: &std::sync::Arc<MemoSondas>) -> Option<ReusoSo
 /// `podman` toma el turno de `contenedor::turno_de_contenedor`.
 pub const CASOS_EN_PARALELO: usize = 4;
 
-/// La medición de `calibrar_con` y de `calibrar_tarea_con`. Antes de la línea base y de cada caso, si hay
-/// tope, compara el gasto más el peor caso con él. Si no entra, para: la fila queda con los casos hechos y
-/// marcada `incompleta`. Sin casos hechos, no hay fila. `muertos_de_la_base` se llama una vez, después de la
+/// La medición de `calibrar_con` y de `calibrar_tarea_con`. Con tope, cada intento de juez lo revisa en
+/// `reservar`. Si el límite rechaza uno, para: la fila queda con los casos hechos y marcada `incompleta`.
+/// Sin casos hechos, no hay fila. `muertos_de_la_base` se llama una vez, después de la
 /// base, y solo si la dimensión tiene `AssertBorrado`: sus muertos son los de todos los casos. Los casos
 /// corren de a `CASOS_EN_PARALELO` hilos.
 #[allow(clippy::too_many_arguments)]
@@ -515,7 +564,7 @@ struct Ronda<'a> {
     base: &'a Veredicto,
     evaluador: &'a (dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
     /// Tope de la medición. Cada reemplazo lo revisa antes de correr.
-    tope: Option<&'a Tope<'a>>,
+    tope: Option<&'a Tope>,
     /// `target` de la base (Tarea 59): `Some` solo si la base dejó una carpeta. Los casos solo la leen.
     target_base: Option<PathBuf>,
     /// Digest de la imagen tras la base. Un caso que lo cambia compila en frío.
@@ -545,6 +594,18 @@ struct Medido {
     no_aplicable: Option<NoAplicable>,
 }
 
+impl Medido {
+    /// Un caso que el límite detuvo: no mide nada y la detención lo dice.
+    fn detenido(reemplazos: u32, detencion: Detencion) -> Medido {
+        Medido {
+            reemplazos,
+            caso: None,
+            detencion: Some(detencion),
+            no_aplicable: None,
+        }
+    }
+}
+
 /// Evalúa la copia `copia` del caso `i` como `tipo`. Reusa el `target` de la base si `puede_reusar` lo permite.
 /// Devuelve el veredicto y si el caso reusó: un aviso de `target` frío cuenta como compilación en frío.
 /// La llamada corre con el id del caso fijado, para que sus reservas lo lleven.
@@ -567,7 +628,9 @@ fn evaluar_copia(
         _ => Target::Ninguno,
     };
     let id = r.id_de(i);
-    let veredicto = con_caso(&id, || (r.evaluador)(copia, tipo, target))?;
+    let veredicto = con_caso(&id, || {
+        en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+    })?;
     let frio = veredicto
         .avisos
         .iter()
@@ -599,6 +662,10 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Limpio, i)?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
+        // Un juez rechazado por el límite no mide: su veredicto no se guarda ni cuenta.
+        if let Some(detencion) = juez_rechazado(r.tope) {
+            return Ok(Medido::detenido(0, detencion));
+        }
         if let Some(c) = compartido {
             c.guardar(i as u32, &veredicto)?;
         }
@@ -631,16 +698,12 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     let mut motivo_sin_caso = MOTIVO_AGOTADAS;
     let mut ultimo_descarte_sonda = false;
     for k in 0..=MAX_REEMPLAZOS {
-        // Antes de cada reemplazo (no antes de la primera inyección) se mira el tope. Si no entra, no se gasta.
+        // Antes de cada reemplazo (no antes de la primera inyección) se mira el límite. Si un juez ya lo
+        // rechazó, no se gasta más.
         if k > 0
-            && let Some(detencion) = detencion_si_no_entra(r.tope, 0)?
+            && let Some(detencion) = detencion_de_rechazo(r.tope)
         {
-            return Ok(Medido {
-                reemplazos: invalidos,
-                caso: None,
-                detencion: Some(detencion),
-                no_aplicable: None,
-            });
+            return Ok(Medido::detenido(invalidos, detencion));
         }
         let semilla_k = semilla_caso.wrapping_add(u64::from(k) * 1_000_003);
         let copia = r.tmp.join(format!("caso-{i}"));
@@ -664,6 +727,9 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         })?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
+        if let Some(detencion) = juez_rechazado(r.tope) {
+            return Ok(Medido::detenido(invalidos, detencion));
+        }
         if rompe_la_compilacion(r.base, &veredicto, r.dimension) {
             invalidos += 1;
             motivo_sin_caso = MOTIVO_AGOTADAS;
@@ -673,11 +739,17 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         // Un comportamiento roto que no cambia nada frente a la base puede caer fuera de lo que la suite ejecuta.
         let sin_cambio = defecto == Defecto::ComportamientoRoto
             && motivo_de_deteccion(r.base, &veredicto, r.dimension, &BTreeSet::new()).is_none();
-        if sin_cambio && la_suite_no_la_ejecuta(r, i, &inyeccion)? {
-            invalidos += 1;
-            motivo_sin_caso = MOTIVO_SIN_EJECUTAR;
-            ultimo_descarte_sonda = true;
-            continue;
+        if sin_cambio {
+            let sin_efecto = la_suite_no_la_ejecuta(r, i, &inyeccion)?;
+            if let Some(detencion) = juez_rechazado(r.tope) {
+                return Ok(Medido::detenido(invalidos, detencion));
+            }
+            if sin_efecto {
+                invalidos += 1;
+                motivo_sin_caso = MOTIVO_SIN_EJECUTAR;
+                ultimo_descarte_sonda = true;
+                continue;
+            }
         }
         medido = Some((inyeccion, veredicto, reusado));
         break;
@@ -731,12 +803,10 @@ fn la_suite_no_la_ejecuta(
 }
 
 /// Como `calibrar_medida`, con `hilos` casos a la vez (1 corre en serie). Un coordinador lanza los casos en
-/// orden. Antes de cada lanzamiento compara el gasto comprometido más un peor caso con el tope, sin contar dos veces
-/// los casos con reserva escrita: si no entra y
-/// hay casos en vuelo, espera a uno; si no entra y no hay ninguno, para. Antes de cada reemplazo de una
-/// inyección inválida, un caso revisa el tope y, si no entra, la medición se detiene. Un error de caso deja de lanzar y
-/// espera a los que están en vuelo; devuelve el error del índice más bajo. Los casos se ordenan por índice
-/// antes de armar la fila, así el resultado no depende del orden de término.
+/// orden. Antes de cada lanzamiento mira el límite: si un juez ya lo rechazó, para y los casos en vuelo terminan.
+/// Antes de cada reemplazo de una inyección inválida, un caso hace lo mismo. Un juez rechazado no mide su caso.
+/// Un error de caso deja de lanzar y espera a los que están en vuelo; devuelve el error del índice más bajo.
+/// Los casos se ordenan por índice antes de armar la fila, así el resultado no depende del orden de término.
 #[allow(clippy::too_many_arguments)]
 fn calibrar_medida_con_hilos(
     tarea: &Tarea,
@@ -763,24 +833,23 @@ fn calibrar_medida_con_hilos(
             "oraculo calibrar necesita n de 1 o más".into(),
         ));
     }
-    // La línea base cuenta como un caso: el tope se mira antes de ella, con cero casos hechos.
-    if let Some(detencion) = detencion_si_no_entra(tope, 0)? {
-        return Ok(Medida {
-            fila: None,
-            detencion: Some(detencion),
-            casos: Vec::new(),
-            no_aplicables: Vec::new(),
-        });
-    }
     // La carpeta temporal va antes de la base: la base deja ahí su `target` (Tarea 59).
     let tmp = tempfile::tempdir().map_err(|e| super::infra("carpeta temporal", e))?;
     let destino_target = tmp.path().join(NOMBRE_TARGET_BASE);
+    // La base corre con el límite activo: su juez también cuenta. Una base rechazada no mide nada.
+    let base = en_limite(tope, || {
+        evaluador(
+            repo_bueno,
+            TipoCaso::Base,
+            Target::Guardar(destino_target.clone()),
+        )
+    });
+    let base = match (base, detencion_de_rechazo(tope)) {
+        (_, Some(detencion)) => return Ok(medida_detenida(detencion)),
+        (Err(error), None) => return Err(error),
+        (Ok(veredicto), None) => veredicto,
+    };
     // Una línea base sin veredicto no mide nada: los defectos no tienen contra qué compararse.
-    let base = evaluador(
-        repo_bueno,
-        TipoCaso::Base,
-        Target::Guardar(destino_target.clone()),
-    )?;
     let motivo_de_la_base = match puntaje_de(&base, dimension) {
         Some(puntaje) => puntaje.sin_veredicto.clone(),
         None => Some("la dimensión no figura en el veredicto de la base".into()),
@@ -791,6 +860,41 @@ fn calibrar_medida_con_hilos(
             dimension.clave()
         )));
     }
+    // Base repetida (Tarea 83, punto 2): las dimensiones con ítems del juez juzgan la base dos veces más. Las
+    // sondas no se repiten: `BaseRepetida` reusa las deterministas de la base.
+    let pesos = inestables::pesos_de(&rubricas_de(dimension));
+    let mut juicios = vec![base];
+    if tiene_items_de_juez(dimension) {
+        for _ in 0..inestables::JUICIOS_EXTRA {
+            let repetida = en_limite(tope, || {
+                evaluador(repo_bueno, TipoCaso::BaseRepetida, Target::Ninguno)
+            });
+            match (repetida, detencion_de_rechazo(tope)) {
+                (_, Some(detencion)) => return Ok(medida_detenida(detencion)),
+                (Err(error), None) => return Err(error),
+                (Ok(veredicto), None) => juicios.push(veredicto),
+            }
+        }
+    }
+    let extractos_base: Vec<Vec<ExtractoGuardado>> =
+        juicios.iter().map(|j| j.extractos.clone()).collect();
+    let refs: Vec<&Veredicto> = juicios.iter().collect();
+    let inestables = inestables::inestables_de(&refs, dimension, &pesos.del_juez);
+    // Una dimensión cuyos ítems estables pesan menos de la mitad no mide casos: ahorra el gasto del juez.
+    if inestables::dimension_inestable(&pesos, &inestables) {
+        let fila = Fila {
+            inestables: inestables.iter().cloned().collect(),
+            extractos_base,
+            ..fila_no_aplica(tarea, dimension, semilla, &inestables::motivo(&inestables))
+        };
+        return Ok(Medida {
+            fila: Some(fila),
+            detencion: None,
+            casos: Vec::new(),
+            no_aplicables: Vec::new(),
+        });
+    }
+    let base = inestables::base_efectiva(&juicios[0], &refs, dimension, &inestables, &pesos.todos);
     // Sin carpeta, la base no dejó `target`: ningún caso reusa nada.
     let target_base = destino_target.is_dir().then_some(destino_target);
     let digest_base = leer_digest();
@@ -800,7 +904,11 @@ fn calibrar_medida_con_hilos(
         Vec::new()
     };
     let items: BTreeSet<&'static str> = defectos.iter().map(|d| d.item()).collect();
-    let items: Vec<&'static str> = items.into_iter().collect();
+    // Los ítems inestables no entran a las métricas por ítem.
+    let items: Vec<&'static str> = items
+        .into_iter()
+        .filter(|i| !inestables.contains(*i))
+        .collect();
     let capas: &[Vec<String>] = tarea
         .arquitectura
         .as_ref()
@@ -841,45 +949,29 @@ fn calibrar_medida_con_hilos(
     let mut detencion = None;
     let mut siguiente = 0usize;
     let mut en_vuelo = 0usize;
-    // Índices de los casos en vuelo. Con sus ids, cuentan cuáles ya tienen reserva escrita.
-    let mut vuelo: BTreeSet<usize> = BTreeSet::new();
     std::thread::scope(|s| -> Result<(), ErrorOraculo> {
         let ronda = &ronda;
         loop {
             while error.is_none() && siguiente < n && en_vuelo < hilos && detencion.is_none() {
-                if let Some(t) = tope {
-                    // Primero los ids con reserva, luego el gasto. Una reserva nueva entre las dos lecturas
-                    // cuenta dos veces: sobra, nunca falta.
-                    let con_reserva = (t.casos_con_reserva)(t.inicio)?;
-                    let gasto = (t.gasto_desde)(t.inicio)?;
-                    let vuelo_con_reserva = vuelo
-                        .iter()
-                        .filter(|j| con_reserva.contains(&ronda.id_de(**j)))
-                        .count();
-                    let comprometido =
-                        gasto_comprometido(gasto, t.peor_caso, en_vuelo, vuelo_con_reserva);
-                    if comprometido + t.peor_caso > t.usd {
-                        if en_vuelo == 0 {
-                            // El conteo de casos medidos lo pone el final, cuando todos terminaron.
-                            detencion = Some(Detencion {
-                                tope_usd: t.usd,
-                                gasto_usd: gasto,
-                                peor_caso_usd: t.peor_caso,
-                                casos: 0,
-                            });
-                        }
-                        break;
-                    }
+                // Con el límite rechazado, no se lanza otro caso. Los que están en vuelo terminan.
+                if let Some(d) = detencion_de_rechazo(tope) {
+                    detencion = Some(d);
+                    break;
                 }
                 let i = siguiente;
                 siguiente += 1;
                 en_vuelo += 1;
-                vuelo.insert(i);
                 let envio = tx_abierto
                     .clone()
                     .expect("hay canal mientras se lanzan casos");
                 s.spawn(move || {
-                    let _ = envio.send((i, medir_caso(ronda, i)));
+                    // Un error de un caso cuyo juez fue rechazado no es un error: el caso no se mide.
+                    let resultado =
+                        medir_caso(ronda, i).or_else(|error| match juez_rechazado(ronda.tope) {
+                            Some(detencion) => Ok(Medido::detenido(0, detencion)),
+                            None => Err(error),
+                        });
+                    let _ = envio.send((i, resultado));
                 });
             }
             if siguiente == n || error.is_some() || detencion.is_some() {
@@ -892,7 +984,6 @@ fn calibrar_medida_con_hilos(
                 ErrorOraculo::Infra("un caso de calibración terminó sin resultado".into())
             })?;
             en_vuelo -= 1;
-            vuelo.remove(&i);
             match resultado {
                 Ok(medido) => {
                     // Un reemplazo que no entró en el tope detiene los lanzamientos. Los casos en vuelo terminan.
@@ -906,6 +997,10 @@ fn calibrar_medida_con_hilos(
                         error = Some((i, e));
                     }
                 }
+            }
+            // Un rechazo de cualquier caso detiene la medición, también si este caso terminó bien.
+            if detencion.is_none() {
+                detencion = detencion_de_rechazo(tope);
             }
         }
         Ok(())
@@ -925,6 +1020,10 @@ fn calibrar_medida_con_hilos(
             (None, None) => {}
         }
     }
+    // Los ítems inestables salen de los veredictos de los casos antes de detectar, puntuar y cubrir.
+    for caso in &mut casos {
+        inestables::sin_inestables(&mut caso.veredicto, dimension, &inestables, &pesos.todos);
+    }
     // La detección se decide después de medir todos los casos, en orden de índice (Tarea 63, puntos 2 a 4).
     let ruidosos = finalizar_casos(&base, dimension, &items, &muertos, &mut casos);
     if let Some(d) = detencion.as_mut() {
@@ -937,6 +1036,8 @@ fn calibrar_medida_con_hilos(
         Some(Fila {
             reemplazos,
             ruidosos: ruidosos.into_iter().collect(),
+            inestables: inestables.iter().cloned().collect(),
+            extractos_base,
             ..fila_de(
                 tarea,
                 dimension,
@@ -1029,7 +1130,9 @@ fn fila_de(
         no_aplica: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
+        inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
+        extractos_base: Vec::new(),
     }
 }
 
@@ -1050,15 +1153,13 @@ pub fn calibrar_tarea(
     .map(|calibrada| calibrada.fila)
 }
 
-/// Tope de gasto de una calibración (decisión 48). Antes de la línea base y de cada caso, se detiene si el
-/// gasto de API desde el inicio más el peor caso de un caso pasa `usd`.
+/// Tope de gasto de una calibración (decisión 48). Cada intento de juez se reserva con su cota: si el gasto
+/// desde el inicio más la cota pasa `usd`, el intento no se envía y la calibración se detiene.
 pub struct Presupuesto<'a> {
     /// Tope en USD. Debe ser finito y mayor que 0.
     pub usd: f64,
-    /// Peor caso en USD de un caso con estas partes. Un modelo sin precio da un error.
-    pub peor_caso: &'a dyn Fn(&Partes) -> Result<f64, ErrorOraculo>,
-    /// Gasto de API desde un instante (epoch en segundos): llamadas y reservas abiertas. Es `Sync`: los
-    /// reemplazos lo miran desde los hilos de los casos.
+    /// Gasto de API desde un instante (epoch en segundos): llamadas y reservas abiertas. Es `Sync`. El límite
+    /// cuenta su propio gasto en `reservar`, así que `calibrar_tarea_con` no lee este campo.
     pub gasto_desde: &'a (dyn Fn(f64) -> Result<f64, ErrorOraculo> + Sync),
 }
 
@@ -1080,92 +1181,34 @@ const CORRIDA_CALIBRACION: &str = "oraculo-calibracion";
 /// Fase del `Gate` de tope de una calibración.
 const FASE_TOPE_CALIBRACION: &str = "calibracion-tope";
 
-/// Pedidos por juicio del juez de config (decisión 30). Su `juzgar_config` no reintenta: un pedido.
-const PEDIDOS_POR_JUICIO_CONFIG: u32 = 1;
-
-/// Una llamada de juez que un caso puede hacer: su elección, sus tokens de salida, la entrada máxima de cada
-/// pedido en bytes y cuántos pedidos hace por juicio.
-struct LlamadaJuez<'a> {
-    eleccion: &'a Eleccion,
-    max_tokens: u32,
-    entrada_bytes: u64,
-    pedidos: u32,
-}
-
-/// Llamadas de juez que un caso puede hacer con sus partes. `entrada_diseno` rige solo para el juez de diseño;
-/// el de config usa `MAX_ENTRADA_JUEZ_BYTES`.
-fn llamadas_del_caso<'a>(
-    jueces: &JuecesCaso<'a>,
-    partes: &Partes,
-    entrada_diseno: u64,
-) -> Vec<LlamadaJuez<'a>> {
-    let mut llamadas = Vec::new();
+/// Elecciones de juez que un caso llama: las que `partes` pide y `jueces` arma.
+fn elecciones_de_jueces<'a>(jueces: &JuecesCaso<'a>, partes: &Partes) -> Vec<&'a Eleccion> {
+    let mut elecciones = Vec::new();
     if partes.juez_diseno
         && let Some(eleccion) = jueces.diseno
     {
-        llamadas.push(LlamadaJuez {
-            eleccion,
-            max_tokens: LimitesPrompt::default().max_tokens,
-            entrada_bytes: entrada_diseno,
-            pedidos: PEDIDOS_POR_JUICIO_DISENO,
-        });
+        elecciones.push(eleccion);
     }
     if partes.juez_config
         && let Some(eleccion) = jueces.config
     {
-        llamadas.push(LlamadaJuez {
-            eleccion,
-            max_tokens: MAX_TOKENS_JUEZ,
-            entrada_bytes: MAX_ENTRADA_JUEZ_BYTES,
-            pedidos: PEDIDOS_POR_JUICIO_CONFIG,
-        });
+        elecciones.push(eleccion);
     }
-    llamadas
+    elecciones
 }
 
-/// Precio del modelo de una elección, si `cfg` lo tiene.
-fn precio_de_eleccion<'a>(cfg: &'a Config, eleccion: &Eleccion) -> Option<&'a Precio> {
-    cfg.precios.get(eleccion.modelo.as_deref()?)
-}
-
-/// Peor caso en USD de un caso con `partes`: cada llamada de juez que las partes piden. Cada pedido lleva su
-/// entrada máxima y todo `max_tokens`, al precio de su modelo. Cada pedido cuenta hasta `INTENTOS_MAX`
-/// intentos, como `llamar_con`. Sin precio para el modelo, el peor caso es infinito. Sin llamadas, vale 0.
-pub fn peor_caso_de_caso(cfg: &Config, jueces: &JuecesCaso, partes: &Partes) -> f64 {
-    peor_caso_de_caso_con_entrada(cfg, jueces, partes, MAX_ENTRADA_JUEZ_BYTES)
-}
-
-/// Como `peor_caso_de_caso`, con la entrada del juez de diseño en `entrada_diseno_bytes` (la cota de su spec).
-/// Se acota a `MAX_ENTRADA_JUEZ_BYTES`: el juez no envía más que eso.
-pub fn peor_caso_de_caso_con_entrada(
-    cfg: &Config,
-    jueces: &JuecesCaso,
-    partes: &Partes,
-    entrada_diseno_bytes: u64,
-) -> f64 {
-    let entrada_diseno = entrada_diseno_bytes.min(MAX_ENTRADA_JUEZ_BYTES);
-    llamadas_del_caso(jueces, partes, entrada_diseno)
-        .into_iter()
-        .fold(0.0, |total, llamada| {
-            let costo = match precio_de_eleccion(cfg, llamada.eleccion) {
-                Some(precio) => {
-                    f64::from(llamada.pedidos * INTENTOS_MAX)
-                        * costo_peor_caso(precio, llamada.entrada_bytes, llamada.max_tokens)
-                }
-                None => f64::INFINITY,
-            };
-            total + costo
-        })
-}
-
-/// Modelos de las llamadas que el caso puede hacer y no tienen precio en `cfg`.
+/// Modelos de los jueces que `partes` pide y que no tienen precio en `cfg`.
 pub fn modelos_sin_precio(cfg: &Config, jueces: &JuecesCaso, partes: &Partes) -> Vec<String> {
-    llamadas_del_caso(jueces, partes, MAX_ENTRADA_JUEZ_BYTES)
+    elecciones_de_jueces(jueces, partes)
         .into_iter()
-        .filter(|llamada| precio_de_eleccion(cfg, llamada.eleccion).is_none())
-        .map(|llamada| {
-            llamada
-                .eleccion
+        .filter(|eleccion| {
+            eleccion
+                .modelo
+                .as_deref()
+                .is_none_or(|modelo| !cfg.precios.contains_key(modelo))
+        })
+        .map(|eleccion| {
+            eleccion
                 .modelo
                 .clone()
                 .unwrap_or_else(|| "(sin modelo)".into())
@@ -1173,52 +1216,27 @@ pub fn modelos_sin_precio(cfg: &Config, jueces: &JuecesCaso, partes: &Partes) ->
         .collect()
 }
 
-/// Como `peor_caso_de_caso`, pero un modelo sin precio es un error de configuración que nombra el modelo:
-/// la calibración con tope no arranca.
-pub fn peor_caso_con_jueces(
+/// Un modelo de juez sin precio es error de configuración: sin precio no hay cota de cada intento, y el
+/// límite no puede contar el gasto. La calibración con tope no arranca. Sale con 2.
+fn validar_precios_de_jueces(
     cfg: &Config,
     jueces: &JuecesCaso,
     partes: &Partes,
-) -> Result<f64, ErrorOraculo> {
-    peor_caso_con_jueces_entrada(cfg, jueces, partes, MAX_ENTRADA_JUEZ_BYTES)
-}
-
-/// Como `peor_caso_con_jueces`, con la entrada del juez de diseño de `peor_caso_de_caso_con_entrada`.
-fn peor_caso_con_jueces_entrada(
-    cfg: &Config,
-    jueces: &JuecesCaso,
-    partes: &Partes,
-    entrada_diseno_bytes: u64,
-) -> Result<f64, ErrorOraculo> {
+) -> Result<(), ErrorOraculo> {
     let sin_precio = modelos_sin_precio(cfg, jueces, partes);
-    if !sin_precio.is_empty() {
-        return Err(ErrorOraculo::Eleccion(format!(
-            "sin precio en root.toml para {}: el peor caso del juez es infinito y la calibración con --tope-usd no arranca. Agregá [precios.<modelo>]",
-            sin_precio.join(", ")
-        )));
+    if sin_precio.is_empty() {
+        return Ok(());
     }
-    Ok(peor_caso_de_caso_con_entrada(
-        cfg,
-        jueces,
-        partes,
-        entrada_diseno_bytes,
-    ))
+    Err(ErrorOraculo::Eleccion(format!(
+        "sin precio en root.toml para {}: no se puede estimar el costo de un intento y la calibración con --tope-usd no arranca. Agregá [precios.<modelo>]",
+        sin_precio.join(", ")
+    )))
 }
 
-/// Peor caso en USD de un caso con `partes` en `home`: los jueces que `evaluar` armaría con el `root.toml` y
-/// las rutas de `home`. Sin partes de juez, vale 0 sin leer nada (decisión 48).
-pub fn peor_caso_de_home(home: &Path, partes: &Partes) -> Result<f64, ErrorOraculo> {
-    peor_caso_de_home_con_entrada(home, partes, MAX_ENTRADA_JUEZ_BYTES)
-}
-
-/// Como `peor_caso_de_home`, con la entrada del juez de diseño en `entrada_diseno_bytes`.
-fn peor_caso_de_home_con_entrada(
-    home: &Path,
-    partes: &Partes,
-    entrada_diseno_bytes: u64,
-) -> Result<f64, ErrorOraculo> {
+/// Valida los precios de los jueces que `partes` pide, con el `root.toml` de `home`. Sin jueces, no lee nada.
+fn validar_precios_de_home(home: &Path, partes: &Partes) -> Result<(), ErrorOraculo> {
     if !partes.juez_diseno && !partes.juez_config {
-        return Ok(0.0);
+        return Ok(());
     }
     let cfg = Config::cargar(&home.join("root.toml"))
         .map_err(|e| ErrorOraculo::Configuracion(e.codigo_de_salida(), e.to_string()))?;
@@ -1235,39 +1253,12 @@ fn peor_caso_de_home_con_entrada(
         diseno: diseno.as_ref().map(|juez| &juez.eleccion),
         config: config.as_ref().map(|juez| &juez.eleccion),
     };
-    peor_caso_con_jueces_entrada(&cfg, &jueces, partes, entrada_diseno_bytes)
+    validar_precios_de_jueces(&cfg, &jueces, partes)
 }
-
-/// Como `peor_caso_de_home`, con la entrada del juez de diseño acotada por la cota de la spec de `tarea`.
-/// Sin juez de diseño en `partes`, no lee la spec.
-pub fn peor_caso_de_home_con_tarea(
-    home: &Path,
-    tarea: &Tarea,
-    partes: &Partes,
-) -> Result<f64, ErrorOraculo> {
-    if !partes.juez_diseno {
-        return peor_caso_de_home_con_entrada(home, partes, MAX_ENTRADA_JUEZ_BYTES);
-    }
-    // El juez de diseño lee la spec del directorio de la tarea, como `juzgar_diseno`.
-    let spec = fs::read_to_string(tarea.dir.join(&tarea.spec))
-        .map_err(|e| super::infra("leer la spec del juez", e))?;
-    let rubricas =
-        cargar_embebidas().map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
-    let cota = cota_bytes_de_prompt(
-        &spec,
-        &tarea.requisito,
-        &rubricas,
-        &LimitesPrompt::default(),
-    );
-    peor_caso_de_home_con_entrada(home, partes, cota)
-}
-
-/// Pedidos por juicio del juez de diseño: el primero y el reintento.
-const PEDIDOS_POR_JUICIO_DISENO: u32 = 2;
 
 /// `oraculo calibrar` con tope opcional (decisión 48): como `calibrar_tarea`, con las dependencias
-/// inyectables. Con `presupuesto`, antes de la línea base y de cada caso compara el gasto más el peor caso
-/// con el tope. Si no entra, registra un `Gate` `calibracion-tope`, agrega la fila de los casos hechos
+/// inyectables. Con `presupuesto`, cada intento de juez se reserva con su cota: si el gasto más la cota no
+/// entra en el tope, el intento no se envía. Si no entra, registra un `Gate` `calibracion-tope`, agrega la fila de los casos hechos
 /// marcada `incompleta` (si hubo alguno) y sale con código 3. `evaluador` es `Sync` (Tarea 48, parte 2): los
 /// casos corren de a `CASOS_EN_PARALELO` hilos.
 #[allow(clippy::too_many_arguments)]
@@ -1327,12 +1318,9 @@ pub fn calibrar_tarea_con(
         };
         evaluador(&tarea, ruta, &opciones_de_caso)
     };
-    // El tope se resuelve antes de la base: un peor caso sin precio no deja arrancar.
+    // El límite se fija antes de la base: su gasto se cuenta desde `inicio`. Un modelo sin precio no deja
+    // arrancar: sin precio no hay cota, y el límite no puede contar el gasto.
     let inicio = ahora();
-    let casos_con_reserva = |desde: f64| {
-        observe::uso::casos_con_reserva_abierta_en(&observe::ruta_eventos_en(home), desde)
-            .map_err(|e| ErrorOraculo::Infra(format!("leer las reservas de la calibración: {e}")))
-    };
     let tope = match presupuesto {
         Some(p) => {
             if !p.usd.is_finite() || p.usd <= 0.0 {
@@ -1341,19 +1329,9 @@ pub fn calibrar_tarea_con(
                     p.usd
                 )));
             }
-            let peor_caso = (p.peor_caso)(&partes)?;
-            if !peor_caso.is_finite() {
-                return Err(ErrorOraculo::Eleccion(
-                    "el peor caso de un caso es infinito: la calibración con tope no arranca"
-                        .into(),
-                ));
-            }
+            validar_precios_de_home(home, &partes)?;
             Some(Tope {
-                usd: p.usd,
-                peor_caso,
-                inicio,
-                gasto_desde: p.gasto_desde,
-                casos_con_reserva: &casos_con_reserva,
+                limite: LimiteCalibracion::nuevo(p.usd, inicio),
             })
         }
         None => None,
@@ -1399,7 +1377,7 @@ pub fn calibrar_tarea_con(
         let archivo =
             casos.map_or_else(|| "ninguno".to_string(), |ruta| ruta.display().to_string());
         return Err(ErrorOraculo::Tope(format!(
-            "calibración de {}/{} detenida por el tope de {:.2} USD: gasto de API {:.2} USD y el peor caso de un caso es {:.2} USD. Casos medidos: {}. Archivo de casos: {}.",
+            "calibración de {}/{} detenida por el tope de {:.2} USD: gasto de API {:.2} USD y el intento siguiente cuesta como máximo {:.2} USD (cota). Casos medidos: {}. Archivo de casos: {}.",
             tarea.nombre,
             dim.clave(),
             detencion.tope_usd,
@@ -1443,7 +1421,9 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64, motivo: &st
         no_aplica: Some(motivo.into()),
         reemplazos: 0,
         ruidosos: Vec::new(),
+        inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
+        extractos_base: Vec::new(),
     }
 }
 
@@ -1560,12 +1540,15 @@ struct Caso {
     valor_base: Option<f32>,
     /// Valor de la dimensión calibrada en este caso. `None` si el caso no tiene puntaje de la dimensión.
     valor: Option<f32>,
+    /// Extractos que leyó el juez en este caso. Vacío mientras el veredicto no los lleve.
+    extractos: Vec<ExtractoGuardado>,
 }
 
 impl Caso {
     /// Un caso medido con su veredicto. Lo derivado (`detectado`, `motivo`, niveles, `items`) lo calcula
     /// `finalizar_casos` sobre todos los casos. Aquí queda en su valor neutro.
     fn nuevo(indice: u32, inyeccion: Option<Inyeccion>, veredicto: Veredicto) -> Caso {
+        let extractos = veredicto.extractos.clone();
         Caso {
             indice,
             es_defecto: inyeccion.is_some(),
@@ -1580,6 +1563,7 @@ impl Caso {
             niveles: BTreeMap::new(),
             valor_base: None,
             valor: None,
+            extractos,
             reemplazos: 0,
             target_reusado: false,
             limpio_reusado: false,
@@ -1612,6 +1596,7 @@ impl CasoGuardado {
             niveles: caso.niveles.clone(),
             valor_base: caso.valor_base,
             valor: caso.valor,
+            extractos: caso.extractos.clone(),
             no_aplicable: None,
             mutante: caso.inyeccion.as_ref().and_then(|i| i.mutante.clone()),
             tests_apagados: caso
@@ -1642,6 +1627,7 @@ impl CasoGuardado {
             niveles: BTreeMap::new(),
             valor_base: None,
             valor: None,
+            extractos: Vec::new(),
             no_aplicable: Some(no.motivo.clone()),
             mutante: None,
             tests_apagados: Vec::new(),
@@ -2066,13 +2052,14 @@ mod defectos;
 mod tests {
     use super::inyectar::pruebas::{FIXTURE, arbol, copia_fixture, tarea_en};
     use super::*;
+    use crate::config::Precio;
     use crate::oracle::mutacion::{ARCHIVO_OUTCOMES, construir_comando};
     use crate::oracle::perfiles::herramientas::{
         COMANDO_CARGO_AUDIT, COMANDO_GITLEAKS, EjecutorHerramienta, SalidaHerramienta,
         comando_clippy,
     };
+    use crate::proveedores::RechazoLimite;
     use crate::tipos::{Fuente, Hallazgo, ItemFaltante, NivelItem};
-    use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
@@ -2097,7 +2084,9 @@ mod tests {
             no_aplica: None,
             reemplazos: 0,
             ruidosos: Vec::new(),
+            inestables: Vec::new(),
             huella: None,
+            extractos_base: Vec::new(),
         }
     }
 
@@ -2105,6 +2094,7 @@ mod tests {
     fn veredicto_base() -> Veredicto {
         Veredicto {
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Seguridad,
                 valor: 1.0,
@@ -2508,6 +2498,7 @@ mod tests {
             .expect("borra el Dockerfile");
         let base = Veredicto {
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Entrega,
                 valor: 1.0,
@@ -2537,6 +2528,7 @@ mod tests {
         let dir = copia_fixture();
         let base = Veredicto {
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Eficiencia,
                 valor: 1.0,
@@ -2567,6 +2559,7 @@ mod tests {
         let dir = copia_fixture();
         let base = Veredicto {
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Eficiencia,
                 valor: 1.0,
@@ -2776,6 +2769,7 @@ mod tests {
     fn veredicto_de_pruebas() -> Veredicto {
         Veredicto {
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Pruebas,
                 valor: 1.0,
@@ -3259,8 +3253,8 @@ mod tests {
             .count();
         assert_eq!(
             llamadas.len(),
-            medidos + 1,
-            "la base y cada caso llaman al evaluador"
+            medidos + 1 + inestables::JUICIOS_EXTRA,
+            "la base (tres juicios) y cada caso llaman al evaluador"
         );
         assert!(llamadas[0].base, "la primera llamada es la base");
         assert_eq!(
@@ -3292,7 +3286,7 @@ mod tests {
                 l.cmds
             );
         }
-        let limpios: Vec<&Llamada> = llamadas[1..]
+        let limpios: Vec<&Llamada> = llamadas[1 + inestables::JUICIOS_EXTRA..]
             .iter()
             .filter(|l| l.alcance == Some(Alcance::Deterministas))
             .collect();
@@ -3392,8 +3386,8 @@ mod tests {
             .count();
         assert_eq!(
             llamadas.len(),
-            medidos + 1,
-            "la base y cada caso llaman al evaluador"
+            medidos + 1 + inestables::JUICIOS_EXTRA,
+            "la base (tres juicios) y cada caso llaman al evaluador"
         );
         assert!(
             llamadas.iter().all(|l| l.juez == 1),
@@ -3418,7 +3412,7 @@ mod tests {
             1,
             "la base corre la mutación"
         );
-        let limpios: Vec<&Llamada> = llamadas[1..]
+        let limpios: Vec<&Llamada> = llamadas[1 + inestables::JUICIOS_EXTRA..]
             .iter()
             .filter(|l| l.alcance == Some(Alcance::Deterministas))
             .collect();
@@ -3543,16 +3537,23 @@ mod tests {
         limpios: &'a AtomicUsize,
         veredicto: fn(bool) -> Veredicto,
     ) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + 'a {
-        move |_: &Tarea, _: &Path, o: &OpcionesOraculo| {
+        move |_: &Tarea, ruta: &Path, o: &OpcionesOraculo| {
             let es_limpio = o
                 .reuso
                 .as_ref()
-                .is_some_and(|r| r.alcance == Alcance::Deterministas);
+                .is_some_and(|r| r.alcance == Alcance::Deterministas)
+                && es_copia_de_caso(ruta);
             if es_limpio {
                 limpios.fetch_add(1, Ordering::SeqCst);
             }
             Ok(veredicto(es_limpio))
         }
+    }
+
+    /// Si `ruta` es una copia de un caso. Las repeticiones de la base evalúan el repo bueno, no una copia.
+    fn es_copia_de_caso(ruta: &Path) -> bool {
+        ruta.file_name()
+            .is_some_and(|nombre| nombre.to_string_lossy().starts_with("caso-"))
     }
 
     /// Archivos de `home/calibracion/limpios/`. Falla si la carpeta no existe.
@@ -4142,6 +4143,7 @@ mod tests {
 
     pub(super) fn puntaje(dimension: Dimension, valor: f32) -> Puntaje {
         Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension,
             valor,
@@ -4312,8 +4314,30 @@ mod tests {
     }
 
     #[test]
+    fn inestables_de_da_los_de_la_fila_mas_reciente() {
+        let vieja = Fila {
+            inestables: vec!["diseno.errores".into()],
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let nueva = Fila {
+            inestables: vec!["diseno.ciclos".into()],
+            ..fila("memora", Dimension::Diseno, 2.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![nueva, vieja],
+        };
+        assert_eq!(
+            c.inestables_de("memora", Dimension::Diseno),
+            ["diseno.ciclos".to_string()]
+        );
+        assert!(c.inestables_de("otra", Dimension::Diseno).is_empty());
+    }
+
+    #[test]
     fn dimension_solo_de_sondas_con_huella_distinta_no_calibra() {
         let otra = Fila {
+            inestables: Vec::new(),
             huella: Some("vieja".into()),
             ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
         };
@@ -4490,180 +4514,7 @@ mod tests {
     const MODELO_JUEZ: &str = "claude-sonnet-5-5";
 
     #[test]
-    fn calibra_peor_caso_sin_llamadas_es_cero() {
-        let cfg = Config::default();
-        let eleccion = eleccion_juez(MODELO_JUEZ);
-        let jueces = JuecesCaso {
-            diseno: Some(&eleccion),
-            config: Some(&eleccion),
-        };
-        let partes = Partes {
-            dimension: Some(Dimension::Seguridad),
-            nativas: true,
-            gitleaks: true,
-            ..Partes::default()
-        };
-        assert_eq!(peor_caso_de_caso(&cfg, &jueces, &partes), 0.0);
-    }
-
-    #[test]
-    fn calibra_peor_caso_de_juez_no_armado_es_cero() {
-        let cfg = Config::default();
-        let partes = Partes {
-            dimension: Some(Dimension::Entrega),
-            juez_config: true,
-            juez_diseno: true,
-            ..Partes::default()
-        };
-        let sin_jueces = JuecesCaso::default();
-        assert_eq!(peor_caso_de_caso(&cfg, &sin_jueces, &partes), 0.0);
-    }
-
-    #[test]
-    fn calibra_peor_caso_suma_el_juez_de_diseno_y_el_de_config_por_todos_los_intentos() {
-        let cfg = Config::default();
-        let eleccion = eleccion_juez(MODELO_JUEZ);
-        let jueces = JuecesCaso {
-            diseno: Some(&eleccion),
-            config: Some(&eleccion),
-        };
-        let partes = Partes {
-            dimension: Some(Dimension::Entrega),
-            juez_config: true,
-            juez_diseno: true,
-            ..Partes::default()
-        };
-        // Sonnet cuesta 2 USD por millón de entrada y 10 por millón de salida. Cada pedido: la entrada
-        // estimada más todo `max_tokens`, por cada intento posible. Diseño hace 2 pedidos (reintento) y
-        // config hace 1: en total 3 pedidos de 3 intentos cada uno.
-        let por_intento = (MAX_ENTRADA_JUEZ_BYTES as f64 * 2.0
-            + f64::from(crate::proveedores::MAX_TOKENS_JUEZ) * 10.0)
-            / 1_000_000.0;
-        let esperado = (2.0 + 1.0) * f64::from(crate::proveedores::INTENTOS_MAX) * por_intento;
-        let peor = peor_caso_de_caso(&cfg, &jueces, &partes);
-        assert!((peor - esperado).abs() < 1e-9, "{peor} != {esperado}");
-    }
-
-    /// Costo de un intento con `entrada` bytes de entrada y todo `MAX_TOKENS_JUEZ` de salida, en Sonnet.
-    fn costo_por_intento(entrada: f64) -> f64 {
-        (entrada * 2.0 + f64::from(MAX_TOKENS_JUEZ) * 10.0) / 1_000_000.0
-    }
-
-    #[test]
-    fn calibra_peor_caso_de_juez_de_diseno_cuenta_sus_dos_pedidos() {
-        let cfg = Config::default();
-        let eleccion = eleccion_juez(MODELO_JUEZ);
-        let jueces = JuecesCaso {
-            diseno: Some(&eleccion),
-            config: None,
-        };
-        let partes = Partes {
-            dimension: Some(Dimension::Diseno),
-            juez_diseno: true,
-            ..Partes::default()
-        };
-        // El juez de diseño reintenta: 2 pedidos, cada uno con hasta INTENTOS_MAX intentos.
-        let esperado =
-            2.0 * f64::from(INTENTOS_MAX) * costo_por_intento(MAX_ENTRADA_JUEZ_BYTES as f64);
-        let peor = peor_caso_de_caso(&cfg, &jueces, &partes);
-        assert!((peor - esperado).abs() < 1e-9, "{peor} != {esperado}");
-    }
-
-    #[test]
-    fn calibra_peor_caso_del_juez_de_config_cuenta_un_pedido() {
-        let cfg = Config::default();
-        let eleccion = eleccion_juez(MODELO_JUEZ);
-        let jueces = JuecesCaso {
-            diseno: None,
-            config: Some(&eleccion),
-        };
-        let partes = Partes {
-            dimension: Some(Dimension::Entrega),
-            juez_config: true,
-            ..Partes::default()
-        };
-        // El juez de config no reintenta: 1 pedido con hasta INTENTOS_MAX intentos.
-        let esperado = f64::from(INTENTOS_MAX) * costo_por_intento(MAX_ENTRADA_JUEZ_BYTES as f64);
-        let peor = peor_caso_de_caso(&cfg, &jueces, &partes);
-        assert!((peor - esperado).abs() < 1e-9, "{peor} != {esperado}");
-    }
-
-    #[test]
-    fn calibra_peor_caso_con_entrada_chica_baja_y_crece_hasta_el_maximo() {
-        let cfg = Config::default();
-        let eleccion = eleccion_juez(MODELO_JUEZ);
-        let jueces = JuecesCaso {
-            diseno: Some(&eleccion),
-            config: None,
-        };
-        let partes = Partes {
-            dimension: Some(Dimension::Diseno),
-            juez_diseno: true,
-            ..Partes::default()
-        };
-        let chica = peor_caso_de_caso_con_entrada(&cfg, &jueces, &partes, 10_000);
-        let media = peor_caso_de_caso_con_entrada(&cfg, &jueces, &partes, 100_000);
-        let maximo = peor_caso_de_caso(&cfg, &jueces, &partes);
-        assert!(chica < media && media < maximo, "{chica} {media} {maximo}");
-        // Una entrada por encima del máximo no se envía: la cuenta se queda en el máximo.
-        let exceso = peor_caso_de_caso_con_entrada(&cfg, &jueces, &partes, u64::MAX);
-        assert_eq!(exceso, maximo);
-    }
-
-    #[test]
-    fn calibra_peor_caso_de_home_con_tarea_sin_juez_no_lee_la_spec() {
-        let home = tempfile::tempdir().expect("home");
-        let (_t, tarea) = tarea_prueba();
-        let seguridad = Partes {
-            dimension: Some(Dimension::Seguridad),
-            nativas: true,
-            ..Partes::default()
-        };
-        let peor =
-            peor_caso_de_home_con_tarea(home.path(), &tarea, &seguridad).expect("sin jueces");
-        assert_eq!(peor, 0.0);
-    }
-
-    #[test]
-    fn calibra_peor_caso_de_home_con_tarea_sin_spec_da_error_de_infra() {
-        let home = tempfile::tempdir().expect("home");
-        // `tarea_en` declara una spec que el directorio no tiene.
-        let (_t, tarea) = tarea_prueba();
-        let diseno = Partes {
-            dimension: Some(Dimension::Diseno),
-            juez_diseno: true,
-            ..Partes::default()
-        };
-        let error =
-            peor_caso_de_home_con_tarea(home.path(), &tarea, &diseno).expect_err("sin spec");
-        assert!(matches!(error, ErrorOraculo::Infra(_)), "{error:?}");
-    }
-
-    /// Imprime la cota nueva y la vieja del juez de diseño sobre la spec de T1 de S2 (mineria). Sin API.
-    /// Corre con `tools/test-seguro.sh calibra_cota_de_t1_de_s2_sin_api -- --ignored --nocapture`.
-    #[test]
-    #[ignore = "lee la spec real de mineria/s2/t1 y solo imprime"]
-    fn calibra_cota_de_t1_de_s2_sin_api() {
-        let home = std::env::var("HOME").expect("HOME");
-        let ruta = Path::new(&home).join(".cache/root-wt/mineria/s2/t1/SPEC.md");
-        let spec = fs::read_to_string(&ruta)
-            .unwrap_or_else(|e| panic!("no se lee {}: {e}", ruta.display()));
-        let rubricas = cargar_embebidas().expect("rúbricas embebidas");
-        let limites = LimitesPrompt::default();
-        // Sin requisitos: tarea.toml no se lee en este test.
-        let nueva = cota_bytes_de_prompt(&spec, &[], &rubricas, &limites);
-        let intentos_nuevos = PEDIDOS_POR_JUICIO_DISENO * INTENTOS_MAX;
-        println!("spec: {} ({} bytes)", ruta.display(), spec.len());
-        println!("cota NUEVA: {nueva} bytes de entrada por intento");
-        println!("tokens de salida por intento: {}", limites.max_tokens);
-        println!("intentos por caso (juez de diseño): {intentos_nuevos}");
-        println!("cota VIEJA: {MAX_ENTRADA_JUEZ_BYTES} bytes de entrada por intento");
-        println!("tokens de salida por intento: {}", limites.max_tokens);
-        println!("intentos por caso (juez de diseño): {INTENTOS_MAX}");
-    }
-
-    #[test]
-    fn calibra_peor_caso_sin_precio_del_juez_es_infinito() {
+    fn calibra_validar_precios_sin_precio_nombra_el_modelo_y_sale_con_2() {
         let mut cfg = Config::default();
         cfg.precios.remove(MODELO_JUEZ);
         let eleccion = eleccion_juez(MODELO_JUEZ);
@@ -4676,25 +4527,7 @@ mod tests {
             juez_diseno: true,
             ..Partes::default()
         };
-        let peor = peor_caso_de_caso(&cfg, &jueces, &partes);
-        assert!(peor.is_infinite() && peor > 0.0, "{peor}");
-    }
-
-    #[test]
-    fn calibra_peor_caso_con_jueces_sin_precio_nombra_el_modelo_y_sale_con_2() {
-        let mut cfg = Config::default();
-        cfg.precios.remove(MODELO_JUEZ);
-        let eleccion = eleccion_juez(MODELO_JUEZ);
-        let jueces = JuecesCaso {
-            diseno: Some(&eleccion),
-            config: None,
-        };
-        let partes = Partes {
-            dimension: Some(Dimension::Diseno),
-            juez_diseno: true,
-            ..Partes::default()
-        };
-        let error = peor_caso_con_jueces(&cfg, &jueces, &partes).expect_err("sin precio");
+        let error = validar_precios_de_jueces(&cfg, &jueces, &partes).expect_err("sin precio");
         assert_eq!(error.codigo_de_salida(), 2);
         let texto = error.to_string();
         assert!(texto.contains(MODELO_JUEZ), "{texto}");
@@ -5932,8 +5765,8 @@ mod tests {
 
     #[test]
     fn calibra_el_tope_se_revisa_antes_de_cada_reemplazo() {
-        // La base no cuesta. La primera inyección cuesta 1 y es inválida. Con tope 1,5 y peor caso 1, el
-        // reemplazo no entra: la calibración se detiene sin gastarlo.
+        // La base no cuesta. La primera inyección es inválida, y su juez deja el límite rechazado: el
+        // reemplazo no corre y la calibración se detiene.
         let base = veredicto_de(Dimension::Estructura, 1.0, None);
         let primera = Mutex::new(true);
         let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
@@ -5945,22 +5778,20 @@ mod tests {
                 bajada(base)
             }
         });
-        let gastado = Mutex::new(0.0f64);
+        let limite = LimiteCalibracion::nuevo(1.5, 0.0);
         let llamadas = AtomicUsize::new(0);
-        let evaluar = |ruta: &Path, tipo: TipoCaso, _: Target| {
-            llamadas.fetch_add(1, Ordering::SeqCst);
-            if tipo != TipoCaso::Base {
-                *gastado.lock().expect("gasto") += 1.0;
+        let evaluar = |ruta: &Path, _: TipoCaso, _: Target| {
+            // La llamada 1 es la base; la 2, la primera inyección.
+            if llamadas.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                limite.anota(RechazoLimite {
+                    gasto_usd: 1.0,
+                    cota_usd: 1.0,
+                });
             }
             ev(ruta)
         };
-        let gasto = |_: f64| -> Result<f64, ErrorOraculo> { Ok(*gastado.lock().expect("gasto")) };
         let tope = Tope {
-            usd: 1.5,
-            peor_caso: 1.0,
-            inicio: 0.0,
-            gasto_desde: &gasto,
-            casos_con_reserva: &sin_reservas,
+            limite: limite.clone(),
         };
         let (_t, tarea) = tarea_prueba();
         let medida = calibrar_medida_con_hilos(
@@ -6048,11 +5879,6 @@ mod tests {
 
     // ---- Tarea 48, parte 2, punto 3: el juez en paralelo, de a 4 ----
 
-    /// Medidor de reservas para los tests que no las usan: ningún caso tiene reserva abierta.
-    fn sin_reservas(_: f64) -> Result<HashSet<String>, ErrorOraculo> {
-        Ok(HashSet::new())
-    }
-
     /// Un caso que llama al juez: cuenta cuántos corren a la vez y espera 50 ms, como una llamada de red.
     fn llamada_de_juez(en_vuelo: &AtomicUsize, maximo: &AtomicUsize) {
         let dentro = en_vuelo.fetch_add(1, Ordering::SeqCst) + 1;
@@ -6085,133 +5911,89 @@ mod tests {
         assert!(pico >= 2, "sin paralelismo real: {pico}");
     }
 
+    /// Modelo de juez de prueba, con precio propio. Su URL es un puerto cerrado: si el límite dejara
+    /// pasar un intento, la llamada fallaría por red y no saldría a internet.
+    const MODELO_JUEZ_LIMITE: &str = "modelo-juez-limite";
+
+    /// Pide un juicio al juez de prueba con el límite activo del hilo. Si el límite rechaza el intento, no se
+    /// envía y la llamada da error. Sin límite, el intento iría a la red y fallaría al conectar.
+    fn pedir_juicio_limitado(home: &Path) -> Result<(), crate::proveedores::ErrorProveedor> {
+        use crate::proveedores::{Breaker, Clave, Claves, Contexto, Plazos, Prompt, llamar_con};
+        use crate::tipos::{Proveedor, Rol, Via};
+        let mut cfg = Config::default();
+        cfg.proveedores.deepseek_url = "http://127.0.0.1:9".into();
+        cfg.precios.insert(
+            MODELO_JUEZ_LIMITE.into(),
+            Precio {
+                usd_entrada: 1.74,
+                usd_salida: 3.48,
+                umbral_entrada: None,
+                usd_entrada_alto: None,
+                usd_salida_alto: None,
+            },
+        );
+        let eleccion = Eleccion {
+            via: Via::Api,
+            proveedor: Some(Proveedor::Deepseek),
+            modelo: Some(MODELO_JUEZ_LIMITE.into()),
+            razonamiento: true,
+            motivo: "prueba".into(),
+            rol: Some(Rol::Juzga),
+        };
+        // Cota: 4 bytes de entrada y 32 000 de salida, unos 0,11 USD.
+        let prompt = Prompt {
+            sistema: None,
+            usuario: "hola".into(),
+            max_tokens: 32_000,
+            fase: "fase-prueba".into(),
+            reintento_juez: false,
+        };
+        let claves = Claves {
+            deepseek: Some(Clave::nueva("clave-falsa-de-prueba")),
+            anthropic: None,
+        };
+        let breaker = Breaker::new();
+        let reloj = Instant::now;
+        let ctx = Contexto {
+            cfg: &cfg,
+            home,
+            breaker: &breaker,
+            claves: &claves,
+            reloj: &reloj,
+            plazos: Plazos::default(),
+        };
+        llamar_con(&ctx, &eleccion, &prompt, "c-calibra-limite").map(|_| ())
+    }
+
     #[test]
-    fn calibra_el_tope_no_se_pasa_con_cuatro_llamadas_en_paralelo() {
+    fn calibra_juez_rechazado_por_el_limite_deja_la_detencion_y_el_caso_fuera() {
+        let home = tempfile::tempdir().expect("home");
         let base = veredicto_base();
         let (_t, tarea) = tarea_prueba();
         let falso_de_seguridad = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
             if limpia { base.clone() } else { hundido(base) }
         });
-        let peor = 1.0;
-        let gastado = Mutex::new(0.0f64);
-        let (en_vuelo, maximo) = (AtomicUsize::new(0), AtomicUsize::new(0));
-        // Cada caso cobra un peor caso al terminar. La línea base no cobra.
-        let evaluar = |ruta: &Path, tipo: TipoCaso, _: Target| {
-            if tipo != TipoCaso::Base {
-                llamada_de_juez(&en_vuelo, &maximo);
-                *gastado.lock().expect("gasto") += peor;
-            }
-            falso_de_seguridad(ruta)
-        };
-        let gasto = |_: f64| -> Result<f64, ErrorOraculo> { Ok(*gastado.lock().expect("gasto")) };
-        let tope = Tope {
-            usd: 2.5 * peor,
-            peor_caso: peor,
-            inicio: 0.0,
-            gasto_desde: &gasto,
-            casos_con_reserva: &sin_reservas,
-        };
-        let medida = calibrar_medida_con_hilos(
-            &tarea,
-            Dimension::Seguridad,
-            8,
-            42,
-            Path::new(FIXTURE),
-            &evaluar,
-            Some(&tope),
-            &Vec::new,
-            &|| None,
-            CASOS_EN_PARALELO,
-            None,
-        )
-        .expect("calibra");
-        assert!(
-            maximo.load(Ordering::SeqCst) <= 2,
-            "más de 2 casos en vuelo"
-        );
-        let gastado = *gastado.lock().expect("gasto");
-        assert!(gastado <= 2.5 * peor, "el gasto {gastado} pasó el tope");
-        assert!(medida.detencion.is_some(), "el tope debe detener la medida");
-        let fila = medida.fila.expect("hay casos terminados");
-        assert!(fila.incompleta, "la fila queda incompleta");
-        assert_eq!(fila.n as usize, medida.casos.len());
-        assert_eq!(
-            medida.casos.len(),
-            2,
-            "se detiene tras los 2 casos que entraron"
-        );
-    }
-
-    #[test]
-    fn calibra_gasto_comprometido_cuatro_reservas_de_cuatro_casos_cuentan_cuatro() {
-        assert_eq!(gasto_comprometido(4.0, 1.0, 4, 4), 4.0);
-    }
-
-    #[test]
-    fn calibra_gasto_comprometido_dos_reservas_de_cuatro_casos_suma_dos_peores() {
-        assert_eq!(gasto_comprometido(2.0, 1.0, 4, 2), 2.0 + 2.0 * 1.0);
-    }
-
-    /// Cuatro casos en vuelo, cada uno con su reserva escrita: el coordinador no cuenta dos veces su
-    /// peor caso. Cada reserva abierta cobra 1,0 y cada caso que termina cobra 1,0 como costo real.
-    #[test]
-    fn calibra_cuatro_hilos_los_casos_con_reserva_no_suman_dos_veces() {
-        let base = veredicto_base();
-        let falso_de_seguridad = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
-            if limpia { base.clone() } else { hundido(base) }
-        });
-        // Ids de los casos con reserva abierta. Un caso la abre al empezar y la cierra al terminar.
-        let abiertas: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
-        let cerrados = AtomicUsize::new(0);
-        let pico_gasto = Mutex::new(0.0f64);
-        let (en_vuelo, maximo) = (AtomicUsize::new(0), AtomicUsize::new(0));
-        let evaluar = |ruta: &Path, tipo: TipoCaso, _: Target| {
+        // Cada copia pide un juicio con el límite activo. Si el límite lo rechaza, el veredicto queda sin
+        // juicio, como lo deja `juzgar`. La base no pide juicio.
+        let evaluar = |ruta: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let veredicto = falso_de_seguridad(ruta)?;
             if tipo == TipoCaso::Base {
-                return falso_de_seguridad(ruta);
+                return Ok(veredicto);
             }
-            let id = crate::proveedores::caso_actual().expect("cada caso corre con su id");
-            let dentro = en_vuelo.fetch_add(1, Ordering::SeqCst) + 1;
-            maximo.fetch_max(dentro, Ordering::SeqCst);
-            abiertas.lock().expect("lock").insert(id.clone());
-            {
-                let mut pico = pico_gasto.lock().expect("pico");
-                let gasto = abiertas.lock().expect("lock").len() + cerrados.load(Ordering::SeqCst);
-                *pico = pico.max(gasto as f64);
-            }
-            // Solo el primer lote espera a sus hermanos. Si el conteo viejo frena, espera el plazo.
-            let llegada = Instant::now();
-            while cerrados.load(Ordering::SeqCst) == 0
-                && abiertas.lock().expect("lock").len() < CASOS_EN_PARALELO
-                && llegada.elapsed() < Duration::from_secs(20)
-            {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            let resultado = falso_de_seguridad(ruta);
-            abiertas.lock().expect("lock").remove(&id);
-            cerrados.fetch_add(1, Ordering::SeqCst);
-            en_vuelo.fetch_sub(1, Ordering::SeqCst);
-            resultado
+            Ok(if pedir_juicio_limitado(home.path()).is_err() {
+                sin(&veredicto)
+            } else {
+                veredicto
+            })
         };
-        let gasto = |_: f64| -> Result<f64, ErrorOraculo> {
-            // Sin pausa: `gasto` y `con_reserva` leen la misma foto de reservas, sin hueco entre ellas.
-            let abiertas = abiertas.lock().expect("lock").len();
-            Ok((abiertas + cerrados.load(Ordering::SeqCst)) as f64)
-        };
-        let con_reserva = |_: f64| -> Result<HashSet<String>, ErrorOraculo> {
-            Ok(abiertas.lock().expect("lock").clone())
-        };
+        let limite = LimiteCalibracion::nuevo(0.05, 0.0);
         let tope = Tope {
-            usd: 5.5,
-            peor_caso: 1.0,
-            inicio: 0.0,
-            gasto_desde: &gasto,
-            casos_con_reserva: &con_reserva,
+            limite: limite.clone(),
         };
-        let (_t, tarea) = tarea_prueba();
         let medida = calibrar_medida_con_hilos(
             &tarea,
             Dimension::Seguridad,
-            8,
+            4,
             42,
             Path::new(FIXTURE),
             &evaluar,
@@ -6222,19 +6004,61 @@ mod tests {
             None,
         )
         .expect("calibra");
-        assert_eq!(
-            maximo.load(Ordering::SeqCst),
-            CASOS_EN_PARALELO,
-            "con cuatro reservas escritas, llegan cuatro casos a la vez"
+        assert!(medida.detencion.is_some(), "el límite detiene la medida");
+        assert!(
+            medida.casos.is_empty(),
+            "el caso del juez rechazado no es un caso medido"
         );
-        let pico = *pico_gasto.lock().expect("pico");
-        assert!(pico <= 5.5, "el gasto {pico} pasó el tope");
-        assert!(medida.detencion.is_some(), "el tope detiene la medida");
+        assert!(medida.fila.is_none(), "sin casos medidos no hay fila");
+        assert!(limite.rechazo().is_some(), "el límite anota el rechazo");
     }
 
     #[test]
-    fn calibra_tope_nombra_el_archivo_de_casos_en_el_error() {
-        // Base y casos cuestan 0,25. El peor caso es 0,5 y el tope 1,0: se miden dos casos y se detiene.
+    fn calibra_tras_un_rechazo_no_se_lanza_otro_caso() {
+        let home = tempfile::tempdir().expect("home");
+        let base = veredicto_base();
+        let (_t, tarea) = tarea_prueba();
+        let falso_de_seguridad = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia { base.clone() } else { hundido(base) }
+        });
+        let copias = AtomicUsize::new(0);
+        let evaluar = |ruta: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let veredicto = falso_de_seguridad(ruta)?;
+            if tipo == TipoCaso::Base {
+                return Ok(veredicto);
+            }
+            copias.fetch_add(1, Ordering::SeqCst);
+            Ok(if pedir_juicio_limitado(home.path()).is_err() {
+                sin(&veredicto)
+            } else {
+                veredicto
+            })
+        };
+        let limite = LimiteCalibracion::nuevo(0.05, 0.0);
+        let tope = Tope { limite };
+        // Un caso a la vez: tras el primer rechazo, el coordinador no lanza el siguiente.
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Seguridad,
+            8,
+            42,
+            Path::new(FIXTURE),
+            &evaluar,
+            Some(&tope),
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("calibra");
+        assert_eq!(copias.load(Ordering::SeqCst), 1, "un solo caso corre");
+        assert!(medida.detencion.is_some(), "el rechazo detiene la medida");
+        assert!(medida.casos.is_empty(), "el caso rechazado no se mide");
+    }
+
+    #[test]
+    fn calibra_tope_sin_casos_medidos_nombra_ninguno_en_el_error() {
+        // La base pide un juicio y el límite de 0,05 USD lo rechaza: no hay casos, ni archivo de casos.
         let home = tempfile::tempdir().expect("home");
         let carpeta = home.path().join("oraculos").join("calibra-fixture");
         fs::create_dir_all(&carpeta).expect("carpeta");
@@ -6242,16 +6066,13 @@ mod tests {
         fs::create_dir_all(&repo).expect("repo");
         super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
         let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
-        let gastado = Mutex::new(0.0f64);
-        let peor = |_: &Partes| Ok::<f64, ErrorOraculo>(0.5);
-        let gasto = |_: f64| -> Result<f64, ErrorOraculo> { Ok(*gastado.lock().expect("gasto")) };
+        let gasto = |_: f64| -> Result<f64, ErrorOraculo> { Ok(0.0) };
         let presupuesto = Presupuesto {
-            usd: 1.0,
-            peor_caso: &peor,
+            usd: 0.05,
             gasto_desde: &gasto,
         };
         let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
-            *gastado.lock().expect("gasto") += 0.25;
+            let _ = pedir_juicio_limitado(home.path());
             Ok(veredicto_base())
         };
         let error = calibrar_tarea_con(
@@ -6266,21 +6087,12 @@ mod tests {
         )
         .expect_err("el tope detiene la calibración");
         let texto = error.to_string();
-        let archivos: Vec<String> = fs::read_dir(home.path().join(CARPETA_CASOS))
-            .expect("carpeta de casos")
-            .map(|e| {
-                e.expect("entrada")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .filter(|n| n.ends_with(".casos.jsonl"))
-            .collect();
-        assert_eq!(archivos.len(), 1, "un archivo de casos de la corrida");
+        assert!(texto.contains("Casos medidos: 0"), "{texto}");
+        assert!(texto.contains("Archivo de casos: ninguno"), "{texto}");
+        assert!(texto.contains("cuesta como máximo"), "{texto}");
         assert!(
-            texto.contains(&archivos[0]),
-            "el error nombra {}: {texto}",
-            archivos[0]
+            !home.path().join(CARPETA_CASOS).exists(),
+            "sin casos no hay carpeta de casos"
         );
     }
 
@@ -6620,6 +6432,154 @@ mod tests {
         assert_eq!(ida.target_reusado, Some(true));
     }
 
+    /// Un caso con defecto guarda los extractos que leyó el juez. El rango de uno cubre la línea del defecto.
+    #[test]
+    fn caso_con_defecto_guarda_sus_extractos_y_el_rango_cubre_la_linea() {
+        let base = veredicto_de(Dimension::Seguridad, 0.9, None);
+        let mut caso = Caso::nuevo(1, Some(inyeccion_modulo()), base);
+        caso.extractos = vec![ExtractoGuardado {
+            archivo: "src/lib.rs".into(),
+            desde: 1,
+            hasta: 10,
+            motivo: "cambio".into(),
+        }];
+        let guardado = CasoGuardado::de(&caso);
+        assert_eq!(guardado.extractos.len(), 1, "{:?}", guardado.extractos);
+        let linea = guardado.linea.expect("el defecto tiene línea");
+        let extracto = &guardado.extractos[0];
+        assert_eq!(extracto.archivo, "src/lib.rs");
+        assert!((extracto.desde..=extracto.hasta).contains(&linea));
+    }
+
+    /// Los extractos llegan al archivo `.casos.jsonl` y vuelven a leerse igual.
+    #[test]
+    fn escribir_casos_guarda_los_extractos_en_el_renglon() {
+        let base = veredicto_de(Dimension::Seguridad, 0.9, None);
+        let mut caso = Caso::nuevo(1, Some(inyeccion_modulo()), base);
+        let esperados = vec![ExtractoGuardado {
+            archivo: "src/lib.rs".into(),
+            desde: 1,
+            hasta: 10,
+            motivo: "cambio".into(),
+        }];
+        caso.extractos = esperados.clone();
+        let home = tempfile::tempdir().expect("home");
+        let fila = fila("t", Dimension::Seguridad, 1.0, None);
+        let ruta = escribir_casos(home.path(), "t", Dimension::Seguridad, &fila, &[caso], &[])
+            .expect("escribe")
+            .expect("hay casos");
+        let texto = fs::read_to_string(ruta).expect("lee");
+        let leido: CasoGuardado = serde_json::from_str(texto.trim()).expect("caso");
+        assert_eq!(leido.extractos, esperados);
+    }
+
+    /// Un renglón de `.casos.jsonl` sin el campo `extractos` se lee con lista vacía.
+    #[test]
+    fn caso_guardado_viejo_sin_extractos_lee_lista_vacia() {
+        let viejo = r#"{"caso":3,"es_defecto":true,"detectado":true}"#;
+        let caso: CasoGuardado = serde_json::from_str(viejo).expect("renglón de antes");
+        assert!(caso.extractos.is_empty(), "{:?}", caso.extractos);
+    }
+
+    /// Un caso con defecto toma los extractos de su veredicto. El rango del archivo del defecto cubre su línea.
+    #[test]
+    fn caso_con_defecto_toma_los_extractos_de_su_veredicto() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let evaluador = |ruta: &Path, _: TipoCaso, _: Target| {
+            let extractos = arbol(ruta)
+                .into_keys()
+                .map(|archivo| ExtractoGuardado {
+                    archivo,
+                    desde: 1,
+                    hasta: u32::MAX,
+                    motivo: "cambio".into(),
+                })
+                .collect();
+            Ok(Veredicto {
+                extractos,
+                ..base.clone()
+            })
+        };
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("calibra");
+        let caso = medida
+            .casos
+            .iter()
+            .find(|c| c.es_defecto)
+            .expect("hay un caso con defecto");
+        let guardado = CasoGuardado::de(caso);
+        assert!(!guardado.extractos.is_empty(), "{:?}", guardado.extractos);
+        let linea = guardado.linea.expect("el defecto tiene línea");
+        let archivo = guardado.archivo.clone().expect("el defecto tiene archivo");
+        let extracto = guardado
+            .extractos
+            .iter()
+            .find(|e| e.archivo == archivo)
+            .expect("hay un extracto del archivo del defecto");
+        assert!((extracto.desde..=extracto.hasta).contains(&linea));
+    }
+
+    /// La base de una dimensión con juez guarda un extracto por cada uno de sus tres juicios.
+    #[test]
+    fn base_con_juez_guarda_una_lista_de_extractos_por_juicio() {
+        let mut base = veredicto_de(Dimension::Estructura, 1.0, None);
+        base.extractos = vec![ExtractoGuardado {
+            archivo: "src/lib.rs".into(),
+            desde: 1,
+            hasta: 10,
+            motivo: "grande".into(),
+        }];
+        let evaluador = |_: &Path, _: TipoCaso, _: Target| Ok(base.clone());
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("calibra");
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(fila.extractos_base.len(), 3, "{:?}", fila.extractos_base);
+        assert!(fila.extractos_base.iter().all(|e| e.len() == 1));
+    }
+
+    /// Una fila de antes de `extractos_base` se lee con lista vacía.
+    #[test]
+    fn fila_vieja_sin_extractos_base_lee_lista_vacia() {
+        let mut texto =
+            serde_json::to_value(fila("t", Dimension::Estructura, 1.0, None)).expect("json");
+        texto
+            .as_object_mut()
+            .expect("objeto")
+            .remove("extractos_base");
+        let leida: Fila = serde_json::from_value(texto).expect("fila vieja");
+        assert!(
+            leida.extractos_base.is_empty(),
+            "{:?}",
+            leida.extractos_base
+        );
+    }
+
     // Punto 3: calibración de punta a punta con el evaluador real (`evaluar_con`), sin podman ni contenedores.
 
     /// Juez falso `Sync`: responde `texto` y cuenta sus llamadas.
@@ -6789,21 +6749,26 @@ mod tests {
                 ..o.clone()
             };
             let veredicto = crate::oracle::evaluar_con(repo, tarea, &con_home, deps)?;
-            let limpio = o
+            let deterministas = o
                 .reuso
                 .as_ref()
                 .is_some_and(|r| r.alcance == Alcance::Deterministas);
-            let cuenta = if limpio {
-                &cuentas.limpios
+            // Una repetición de la base no cuenta: no es un caso ni la base única.
+            let cuenta = if deterministas && es_copia_de_caso(repo) {
+                Some(&cuentas.limpios)
             } else if o.memo.is_some() {
-                &cuentas.base
+                Some(&cuentas.base)
+            } else if deterministas {
+                None
             } else {
-                &cuentas.defectos
+                Some(&cuentas.defectos)
             };
-            cuenta.evaluaciones.fetch_add(1, Ordering::SeqCst);
-            cuenta
-                .juez
-                .fetch_add(juez.llamadas.load(Ordering::SeqCst), Ordering::SeqCst);
+            if let Some(cuenta) = cuenta {
+                cuenta.evaluaciones.fetch_add(1, Ordering::SeqCst);
+                cuenta
+                    .juez
+                    .fetch_add(juez.llamadas.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
             Ok(veredicto)
         }
     }
@@ -7369,5 +7334,193 @@ mod tests {
                 .as_deref(),
             Some("hallazgo_nuevo:t::nuevo"),
         );
+    }
+
+    const ITEM_MODULARIDAD: &str = "diseno.modularidad";
+    const ITEM_ROBUSTEZ: &str = "diseno.robustez";
+    const ITEM_ERRORES: &str = "diseno.errores";
+
+    /// Veredicto de Diseño con `items` del juez y valor 1.
+    fn diseno_con(items: &[(&str, u8)]) -> Veredicto {
+        Veredicto {
+            puntajes: vec![Puntaje {
+                items: items
+                    .iter()
+                    .map(|(item, nivel)| NivelItem {
+                        item: (*item).into(),
+                        nivel: *nivel,
+                        evidencia: vec![],
+                        fuente: Fuente::Juez {
+                            modelo: "deepseek-reasoner".into(),
+                        },
+                    })
+                    .collect(),
+                ..puntaje(Dimension::Diseno, 1.0)
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Nivel alterno de la base: el juicio `k` pone `bajo` si `k` es par y `alto` si es impar.
+    fn alterno(k: usize, bajo: u8, alto: u8) -> u8 {
+        if k.is_multiple_of(2) { bajo } else { alto }
+    }
+
+    #[test]
+    fn calibra_item_del_juez_que_alterna_en_la_base_queda_inestable_y_fuera_de_la_medicion() {
+        let (_t, tarea) = tarea_prueba();
+        let juicios = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            if matches!(tipo, TipoCaso::Base | TipoCaso::BaseRepetida) {
+                let k = juicios.fetch_add(1, Ordering::SeqCst);
+                let nivel = alterno(k, 0, 2);
+                return Ok(diseno_con(&[(ITEM_MODULARIDAD, nivel), (ITEM_ROBUSTEZ, 3)]));
+            }
+            Ok(diseno_con(&[(ITEM_MODULARIDAD, 0), (ITEM_ROBUSTEZ, 3)]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            6,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("mide");
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(fila.inestables, vec![ITEM_MODULARIDAD.to_string()]);
+        assert!(!medida.casos.is_empty(), "hay casos medidos");
+        for caso in &medida.casos {
+            assert!(
+                !caso.niveles_base.contains_key(ITEM_MODULARIDAD),
+                "caso {}",
+                caso.indice
+            );
+        }
+    }
+
+    #[test]
+    fn calibra_dimension_inestable_no_mide_casos_y_no_califica() {
+        let (_t, tarea) = tarea_prueba();
+        let llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let k = llamadas.fetch_add(1, Ordering::SeqCst);
+            let nivel = alterno(k, 0, 2);
+            Ok(diseno_con(&[
+                (ITEM_MODULARIDAD, nivel),
+                (ITEM_ROBUSTEZ, nivel),
+                (ITEM_ERRORES, nivel),
+            ]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            6,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("mide");
+        // Tres juicios de la base y ningún caso: los ítems inestables pesan 8 de 13.
+        assert_eq!(llamadas.load(Ordering::SeqCst), 3);
+        assert!(medida.casos.is_empty());
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(fila.n, 0);
+        assert_eq!(
+            fila.inestables,
+            vec![
+                ITEM_ERRORES.to_string(),
+                ITEM_MODULARIDAD.to_string(),
+                ITEM_ROBUSTEZ.to_string()
+            ]
+        );
+        let motivo = fila.no_aplica.clone().expect("motivo");
+        assert!(motivo.starts_with("inestable en esta tarea"), "{motivo}");
+        assert!(motivo.contains(ITEM_MODULARIDAD), "{motivo}");
+        assert!(!muestra_suficiente(&fila), "no califica");
+    }
+
+    #[test]
+    fn calibra_limpio_que_baja_dos_niveles_en_item_inestable_no_es_falsa_alarma() {
+        let (_t, tarea) = tarea_prueba();
+        let juicios = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            if matches!(tipo, TipoCaso::Base | TipoCaso::BaseRepetida) {
+                let k = juicios.fetch_add(1, Ordering::SeqCst);
+                let nivel = alterno(k, 2, 0);
+                return Ok(diseno_con(&[(ITEM_MODULARIDAD, nivel), (ITEM_ROBUSTEZ, 3)]));
+            }
+            // Las copias bajan el ítem inestable de 2 a 0, respecto del primer juicio.
+            Ok(diseno_con(&[(ITEM_MODULARIDAD, 0), (ITEM_ROBUSTEZ, 3)]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            6,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("mide");
+        let limpios: Vec<&Caso> = medida.casos.iter().filter(|c| !c.es_defecto).collect();
+        assert!(!limpios.is_empty(), "hay limpios medidos");
+        for caso in limpios {
+            assert!(!caso.detectado, "caso {}: no es falsa alarma", caso.indice);
+            assert!(
+                !caso.niveles_base.contains_key(ITEM_MODULARIDAD),
+                "caso {}",
+                caso.indice
+            );
+        }
+    }
+
+    #[test]
+    fn calibra_dimension_solo_de_sondas_mide_la_base_una_vez() {
+        let (_t, tarea) = tarea_prueba();
+        let base_llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            if matches!(tipo, TipoCaso::Base | TipoCaso::BaseRepetida) {
+                base_llamadas.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(veredicto_base())
+        };
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Seguridad,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("mide");
+        assert_eq!(base_llamadas.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn fila_sin_inestables_en_el_json_se_lee_vacia() {
+        let mut json = serde_json::to_value(fila_de_prueba("t", 1.0)).expect("serializa");
+        json.as_object_mut().expect("objeto").remove("inestables");
+        let fila: Fila = serde_json::from_value(json).expect("lee");
+        assert!(fila.inestables.is_empty());
     }
 }

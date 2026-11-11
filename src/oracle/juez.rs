@@ -213,7 +213,7 @@ pub struct ResultadoJuez {
 }
 
 /// Una ventana del prompt del juez, sin su texto. `motivo` es `cambio`, `grande` o `sonda`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExtractoGuardado {
     pub archivo: String,
     pub desde: u32,
@@ -420,6 +420,7 @@ pub(crate) fn extractos(e: &EntradaJuez, limites: &LimitesPrompt) -> Vec<Extract
             usize::MAX,
             restante.min(limites.extracto_max),
             &omitidas,
+            limites.extracto_max,
         );
         if texto.is_empty() {
             continue;
@@ -478,9 +479,16 @@ fn extractos_de_cambios(
                 break;
             }
             let presupuesto = *restante - separador;
-            let filas = largo_filas(&lineas, desde, hasta, &omitidas);
+            let filas = largo_filas(&lineas, desde, hasta, &omitidas, limites.extracto_max);
             let limite = limite_de_emision(filas, presupuesto);
-            let (texto, ultima) = numerar_rango(&contenido, desde, hasta, limite, &omitidas);
+            let (texto, ultima) = numerar_rango(
+                &contenido,
+                desde,
+                hasta,
+                limite,
+                &omitidas,
+                limites.extracto_max,
+            );
             if texto.is_empty() {
                 continue;
             }
@@ -532,7 +540,7 @@ fn ventanas(
         while contexto > 0
             && !partes
                 .iter()
-                .all(|&(d, h)| largo_filas(lineas, d, h, omitidas) <= limite)
+                .all(|&(d, h)| largo_filas(lineas, d, h, omitidas, limite) <= limite)
         {
             contexto -= 1;
             partes = expandir_y_unir(&del_bloque, total, contexto);
@@ -567,8 +575,8 @@ fn expandir_y_unir(rangos: &[(u32, u32)], total: usize, contexto: usize) -> Vec<
     unidas
 }
 
-/// Parte `desde..=hasta` en ventanas consecutivas que entran en `limite`. Una línea que sola no entra se
-/// deja fuera.
+/// Parte `desde..=hasta` en ventanas consecutivas que entran en `limite`. Una línea que sola pasa `limite`
+/// entra como su marca de largo. Solo si ni la marca entra, la línea se deja fuera.
 fn partir(
     desde: usize,
     hasta: usize,
@@ -582,7 +590,7 @@ fn partir(
         let mut fin = inicio - 1;
         let mut usados = 0;
         while fin < hasta {
-            let largo = largo_filas(lineas, fin + 1, fin + 1, omitidas);
+            let largo = largo_filas(lineas, fin + 1, fin + 1, omitidas, limite);
             if usados + largo > limite {
                 break;
             }
@@ -599,17 +607,31 @@ fn partir(
     salida
 }
 
-/// Caracteres de las filas `desde..=hasta` como las escribe `numerar_rango`, sin marca. Acotadas al archivo.
-fn largo_filas(lineas: &[&str], desde: usize, hasta: usize, omitidas: &BTreeSet<u32>) -> usize {
+/// Fila de la línea `numero` (1-based): `NN: texto\n`, como la escribe `numerar_rango`. Una línea de
+/// `omitidas` sale con `LINEA_OMITIDA`. Una línea que sola pasa `max` caracteres sale con su marca de largo.
+fn fila_de(numero: usize, lineas: &[&str], omitidas: &BTreeSet<u32>, max: usize) -> String {
+    if omitidas.contains(&(numero as u32)) {
+        return format!("{numero}: {LINEA_OMITIDA}\n");
+    }
+    let fila = format!("{numero}: {}\n", lineas[numero - 1]);
+    if fila.chars().count() <= max {
+        fila
+    } else {
+        format!("{numero}: [línea {numero} omitida por largo]\n")
+    }
+}
+
+/// Caracteres de las filas `desde..=hasta` como las escribe `numerar_rango`, sin marca de recorte. Acotadas
+/// al archivo.
+fn largo_filas(
+    lineas: &[&str],
+    desde: usize,
+    hasta: usize,
+    omitidas: &BTreeSet<u32>,
+    max: usize,
+) -> usize {
     (desde..=hasta.min(lineas.len()))
-        .map(|numero| {
-            let texto = if omitidas.contains(&(numero as u32)) {
-                LINEA_OMITIDA
-            } else {
-                lineas[numero - 1]
-            };
-            format!("{numero}: {texto}\n").chars().count()
-        })
+        .map(|numero| fila_de(numero, lineas, omitidas, max).chars().count())
         .sum()
 }
 
@@ -643,15 +665,16 @@ fn lineas_con_secreto(hallazgos: &[Hallazgo]) -> BTreeMap<&str, BTreeSet<u32>> {
     secretos
 }
 
-/// Líneas `desde..=hasta` (1-based, acotadas al archivo) con su número real (`NN: `). Las de `omitidas`
-/// salen como `LINEA_OMITIDA`. El texto, con la marca de recorte, no pasa `limite` caracteres. Vacío si ni
-/// una línea cabe: así no sale una ventana con solo la marca. Devuelve también la última línea escrita.
+/// Líneas `desde..=hasta` (1-based, acotadas al archivo) con su número real (`NN: `), como `fila_de`. El
+/// texto, con la marca de recorte, no pasa `limite` caracteres. Vacío si ni una fila cabe: así no sale una
+/// ventana con solo la marca. Devuelve también la última línea escrita.
 fn numerar_rango(
     contenido: &str,
     desde: usize,
     hasta: usize,
     limite: usize,
     omitidas: &BTreeSet<u32>,
+    max: usize,
 ) -> (String, usize) {
     let lineas: Vec<&str> = contenido.lines().collect();
     let marca = format!("{MARCA_RECORTE}\n");
@@ -660,12 +683,7 @@ fn numerar_rango(
     let mut usados = 0;
     let mut ultima = 0;
     for numero in desde..=hasta.min(lineas.len()) {
-        let texto = if omitidas.contains(&(numero as u32)) {
-            LINEA_OMITIDA
-        } else {
-            lineas[numero - 1]
-        };
-        let fila = format!("{numero}: {texto}\n");
+        let fila = fila_de(numero, &lineas, omitidas, max);
         let largo = fila.chars().count();
         if usados + largo > tope {
             if salida.is_empty() {
@@ -2966,6 +2984,194 @@ mod tests {
             "{seccion}"
         );
         assert!(seccion.contains(&format!("{MARCA_RECORTE}\n")), "{seccion}");
+    }
+
+    #[test]
+    fn juez_linea_mas_larga_que_el_maximo_deja_marca_con_su_numero() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(repo.path().join("src")).expect("crea src");
+        let texto = format!(
+            "fn f1() {{}}\nfn f2() {{}}\n{}\nfn f4() {{}}\nfn f5() {{}}\n",
+            "l".repeat(7000)
+        );
+        fs::write(repo.path().join("src/larga.rs"), texto).expect("escribe");
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            ..c.entrada()
+        };
+        let limites = LimitesPrompt {
+            extracto_max: 6000,
+            ..LimitesPrompt::default()
+        };
+        let salida = extractos(&entrada, &limites);
+        let e = salida
+            .iter()
+            .find(|e| e.archivo == "src/larga.rs")
+            .expect("hay extracto");
+        assert!(e.texto.contains("1: fn f1() {}\n"), "{}", e.texto);
+        assert!(e.texto.contains("2: fn f2() {}\n"), "{}", e.texto);
+        assert!(
+            e.texto.contains("3: [línea 3 omitida por largo]\n"),
+            "{}",
+            e.texto
+        );
+        assert!(e.texto.contains("4: fn f4() {}\n"), "{}", e.texto);
+        assert!(e.texto.contains("5: fn f5() {}\n"), "{}", e.texto);
+        assert!(!e.texto.contains("lll"), "{}", e.texto);
+        assert!(e.texto.chars().count() <= 6000);
+        assert_eq!(e.hasta, 5);
+    }
+
+    #[test]
+    fn juez_marca_de_largo_cuenta_en_el_maximo_y_en_el_total() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(repo.path().join("src")).expect("crea src");
+        let texto: String = (1..=60)
+            .map(|k| {
+                if k == 2 {
+                    format!("2{}\n", "y".repeat(500))
+                } else {
+                    format!("fn f{k}() {{}}\n")
+                }
+            })
+            .collect();
+        fs::write(repo.path().join("src/a.rs"), &texto).expect("escribe");
+        fs::write(repo.path().join("src/b.rs"), &texto).expect("escribe");
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            ..c.entrada()
+        };
+        let limites = LimitesPrompt {
+            extractos_total: 700,
+            extracto_max: 300,
+            ..LimitesPrompt::default()
+        };
+        let salida = extractos(&entrada, &limites);
+        assert!(salida.len() >= 2, "{salida:?}");
+        for e in &salida {
+            assert!(
+                e.texto.chars().count() <= limites.extracto_max,
+                "{}",
+                e.texto.chars().count()
+            );
+        }
+        let suma: usize = salida.iter().map(|e| e.texto.chars().count()).sum();
+        assert!(suma <= limites.extractos_total, "{suma}");
+        let a = salida
+            .iter()
+            .find(|e| e.archivo == "src/a.rs")
+            .expect("hay extracto de a.rs");
+        assert!(
+            a.texto.contains("2: [línea 2 omitida por largo]\n"),
+            "{}",
+            a.texto
+        );
+    }
+
+    #[test]
+    fn juez_linea_larga_cambiada_deja_marca_en_la_ventana_de_cambio() {
+        let nuevo: String = (1..=40)
+            .map(|k| {
+                if k == 20 {
+                    format!("fn cambio_20() {{ \"{}\" }}\n", "c".repeat(7000))
+                } else {
+                    format!("fn f{k}() {{}}\n")
+                }
+            })
+            .collect();
+        let viejo: String = (1..=40).map(|k| format!("fn f{k}() {{}}\n")).collect();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let ini = tempfile::tempdir().expect("tempdir");
+        for (dir, texto) in [(repo.path(), &nuevo), (ini.path(), &viejo)] {
+            fs::create_dir(dir.join("src")).expect("crea src");
+            fs::write(dir.join("src/cambio_larga.rs"), texto).expect("escribe");
+        }
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            inicial: Some(ini.path()),
+            ..c.entrada()
+        };
+        let limites = LimitesPrompt::default();
+        let salida = extractos(&entrada, &limites);
+        let cambios: Vec<&Extracto> = salida
+            .iter()
+            .filter(|e| e.archivo == "src/cambio_larga.rs" && e.motivo == Motivo::Cambio)
+            .collect();
+        assert!(
+            cambios
+                .iter()
+                .any(|e| e.texto.contains("20: [línea 20 omitida por largo]\n")),
+            "{salida:?}"
+        );
+        for e in &cambios {
+            assert!(e.texto.chars().count() <= limites.extracto_max);
+        }
+        let p = construir_prompt(&entrada, &limites);
+        let seccion = seccion_extractos_de(&p.usuario);
+        assert!(
+            chars_sin_encabezados(seccion) <= limites.extractos_total,
+            "{seccion}"
+        );
+    }
+
+    #[test]
+    fn juez_archivo_que_empieza_con_linea_larguisima_no_se_salta() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(repo.path().join("src")).expect("crea src");
+        let resto: String = (2..=300).map(|k| format!("fn f{k}() {{}}\n")).collect();
+        let texto = format!("{}\n{resto}", "z".repeat(9000));
+        fs::write(repo.path().join("src/primera.rs"), texto).expect("escribe");
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            ..c.entrada()
+        };
+        let salida = extractos(&entrada, &LimitesPrompt::default());
+        let e = salida
+            .iter()
+            .find(|e| e.archivo == "src/primera.rs")
+            .expect("el archivo no se salta");
+        assert!(
+            e.texto.starts_with("1: [línea 1 omitida por largo]\n"),
+            "{}",
+            e.texto
+        );
+        assert!(e.texto.contains("2: fn f2() {}\n"), "{}", e.texto);
+    }
+
+    #[test]
+    fn juez_largo_de_filas_coincide_con_lo_que_escribe_numerar_rango() {
+        let contenido = format!("corta\n{}\n{}\nfin\n", "a".repeat(80), "b".repeat(10));
+        let lineas: Vec<&str> = contenido.lines().collect();
+        let omitidas: BTreeSet<u32> = [4].into_iter().collect();
+        for (desde, hasta) in [(1, 4), (2, 3), (3, 4)] {
+            let (texto, _) = numerar_rango(&contenido, desde, hasta, usize::MAX, &omitidas, 40);
+            assert_eq!(
+                largo_filas(&lineas, desde, hasta, &omitidas, 40),
+                texto.chars().count(),
+                "{texto}"
+            );
+        }
+        let (texto, _) = numerar_rango(&contenido, 1, 4, usize::MAX, &omitidas, 40);
+        assert!(
+            texto.contains("2: [línea 2 omitida por largo]\n"),
+            "{texto}"
+        );
+        assert!(
+            texto.contains("4: [línea con un secreto omitida]\n"),
+            "{texto}"
+        );
     }
 
     #[test]

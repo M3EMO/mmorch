@@ -25,6 +25,7 @@ impl ResultadoSonda {
     /// Puntaje de la dimensión. `None` si la sonda no tiene veredicto.
     pub fn a_puntaje(&self) -> Option<Puntaje> {
         self.valor.map(|valor| Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension: self.dimension,
             valor,

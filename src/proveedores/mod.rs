@@ -4,11 +4,12 @@ pub mod anthropic;
 pub mod deepseek;
 mod sse;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
@@ -529,22 +530,107 @@ fn precio_de(ctx: &Contexto, modelo: &str, corrida: &str) -> Result<Precio, Erro
     Ok(precio.clone())
 }
 
+/// Límite de gasto de una calibración. Un intento que se reserva en un hilo con este límite activo
+/// no entra si el gasto desde `inicio` más su peor caso pasa `usd`. Lo comparten los hilos de los
+/// casos, por eso va detrás de un `Arc`.
+pub struct LimiteCalibracion {
+    /// Tope en USD de la calibración.
+    pub usd: f64,
+    /// Inicio de la calibración (epoch en segundos). El gasto se cuenta desde aquí.
+    pub inicio: f64,
+    /// Primer rechazo del límite. Quien llama lo lee para detener la calibración.
+    rechazo: Mutex<Option<RechazoLimite>>,
+}
+
+/// Lo que rechazó el límite: el gasto desde su inicio y la cota del intento que no entró.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RechazoLimite {
+    pub gasto_usd: f64,
+    pub cota_usd: f64,
+}
+
+impl LimiteCalibracion {
+    pub fn nuevo(usd: f64, inicio: f64) -> Arc<Self> {
+        Arc::new(LimiteCalibracion {
+            usd,
+            inicio,
+            rechazo: Mutex::new(None),
+        })
+    }
+
+    /// El primer rechazo del límite, si hubo alguno.
+    pub fn rechazo(&self) -> Option<RechazoLimite> {
+        *self.rechazo.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Anota el rechazo, salvo que ya haya uno anterior.
+    pub(crate) fn anota(&self, rechazo: RechazoLimite) {
+        let mut guarda = self.rechazo.lock().unwrap_or_else(PoisonError::into_inner);
+        guarda.get_or_insert(rechazo);
+    }
+}
+
+thread_local! {
+    /// Límite de la calibración que corre en este hilo. Las reservas que escribe lo revisan.
+    static LIMITE_ACTUAL: RefCell<Option<Arc<LimiteCalibracion>>> = const { RefCell::new(None) };
+    /// `true` si una reserva de este hilo rechazó el límite desde que `con_limite` lo fijó.
+    static RECHAZO_EN_HILO: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Corre `f` con `limite` activo en este hilo. Al salir, también si `f` entra en pánico, vuelve el anterior.
+/// Al entrar, borra el rechazo del hilo: `rechazo_en_este_hilo` mira solo lo que pasa dentro de `f`.
+pub fn con_limite<R>(limite: &Arc<LimiteCalibracion>, f: impl FnOnce() -> R) -> R {
+    /// Devuelve el límite anterior al salir del ámbito.
+    struct Restaura(Option<Arc<LimiteCalibracion>>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = self.0.take();
+            LIMITE_ACTUAL.with(|actual| *actual.borrow_mut() = anterior);
+        }
+    }
+    RECHAZO_EN_HILO.with(|rechazo| rechazo.set(false));
+    let anterior = LIMITE_ACTUAL.with(|actual| actual.replace(Some(Arc::clone(limite))));
+    let _restaura = Restaura(anterior);
+    f()
+}
+
+/// El límite que `con_limite` fijó en este hilo, si hay uno.
+pub(crate) fn limite_actual() -> Option<Arc<LimiteCalibracion>> {
+    LIMITE_ACTUAL.with(|actual| actual.borrow().clone())
+}
+
+/// `true` si una reserva de este hilo rechazó el límite desde que `con_limite` lo fijó. Así un caso
+/// sabe si su propio juez quedó sin lugar, aunque otro hilo también haya rechazado.
+pub fn rechazo_en_este_hilo() -> bool {
+    RECHAZO_EN_HILO.with(Cell::get)
+}
+
 /// Decisión del chequeo de tope de un intento.
 enum Decision {
     Reservada,
-    Rechazada { margen: f64 },
+    Rechazada {
+        margen: f64,
+    },
+    /// El límite de calibración no deja pasar el intento. `gasto` es el gasto desde su inicio.
+    RechazadaPorLimite {
+        gasto: f64,
+        margen: f64,
+        usd: f64,
+    },
 }
 
 /// Chequeo de tope de un intento y su reserva, en un solo tramo con el lock de `eventos.jsonl`:
-/// lee el gasto, compara el peor caso con el margen y, si entra, escribe la reserva. Un rechazo
-/// registra un `Gate` y devuelve `Tope`. Si el log no se puede leer ni escribir, también rechaza:
-/// sin gasto conocido no hay margen que probar.
+/// lee el gasto, compara el peor caso con el margen y, si entra, escribe la reserva. Si hay un
+/// límite de calibración activo, lo revisa en el mismo tramo. Un rechazo registra un `Gate` y
+/// devuelve `Tope`. Si el log no se puede leer ni escribir, también rechaza: sin gasto conocido no
+/// hay margen que probar.
 fn reservar(ctx: &Contexto, llamada: &mut Llamada) -> Result<(), ErrorProveedor> {
     let tope = ctx.cfg.balance.api.tope_usd;
     let offset = uso::offset_local();
     let bloque = ctx.cfg.balance.cupo.bloque_horas;
     let id = nueva_reserva_id(llamada.corrida);
     let ruta = ctx.home.join(ARCHIVO_EVENTOS);
+    let limite = limite_actual();
     let decision = uso::con_eventos_bloqueados(&ruta, |eventos, log| {
         // El reloj se lee con el lock tomado: una reserva que otro proceso escribió mientras este
         // esperaba tiene un `ts` posterior, y `calcular_uso` ignora los eventos del futuro.
@@ -552,6 +638,16 @@ fn reservar(ctx: &Contexto, llamada: &mut Llamada) -> Result<(), ErrorProveedor>
         let margen = tope - uso::calcular_uso(eventos, ahora, offset, bloque).api_mes_usd;
         if llamada.peor_caso > margen {
             return Ok(Decision::Rechazada { margen });
+        }
+        if let Some(limite) = &limite {
+            let gasto = uso::gasto_api_desde(eventos, limite.inicio);
+            if gasto + llamada.peor_caso > limite.usd {
+                return Ok(Decision::RechazadaPorLimite {
+                    gasto,
+                    margen: limite.usd - gasto,
+                    usd: limite.usd,
+                });
+            }
         }
         let linea =
             serde_json::to_string(&evento_reserva(llamada, &id)).map_err(io::Error::other)?;
@@ -580,6 +676,27 @@ fn reservar(ctx: &Contexto, llamada: &mut Llamada) -> Result<(), ErrorProveedor>
                 llamada.modelo,
                 Some(margen),
                 Some(estimado),
+                mensaje,
+            ))
+        }
+        Decision::RechazadaPorLimite { gasto, margen, usd } => {
+            let cota = llamada.peor_caso;
+            if let Some(limite) = &limite {
+                limite.anota(RechazoLimite {
+                    gasto_usd: gasto,
+                    cota_usd: cota,
+                });
+                RECHAZO_EN_HILO.with(|rechazo| rechazo.set(true));
+            }
+            let mensaje = format!(
+                "llamada rechazada antes de enviarla: el intento siguiente cuesta como máximo {cota:.6} USD (cota) y la calibración tiene {margen:.6} USD de margen en su tope de {usd:.2} USD"
+            );
+            Err(rechazo_tope(
+                ctx,
+                llamada.corrida,
+                llamada.modelo,
+                Some(margen),
+                Some(cota),
                 mensaje,
             ))
         }
@@ -1185,5 +1302,197 @@ mod tests {
             assert_eq!(caso_actual().as_deref(), Some("externo"));
         });
         assert_eq!(caso_actual(), None);
+    }
+
+    // ---- Límite de calibración por intento ----
+
+    const MODELO_LIMITE: &str = "modelo-limite";
+
+    /// Precio de prueba: 1,74 USD por millón de entrada y 3,48 de salida.
+    fn precio_de_limite() -> Precio {
+        Precio {
+            usd_entrada: 1.74,
+            usd_salida: 3.48,
+            umbral_entrada: None,
+            usd_entrada_alto: None,
+            usd_salida_alto: None,
+        }
+    }
+
+    /// Prompt de `bytes` de usuario y 32 000 tokens de salida. Su cota es 0,285 USD con el precio de prueba.
+    fn prompt_de_limite(bytes: usize) -> Prompt {
+        Prompt {
+            sistema: None,
+            usuario: "a".repeat(bytes),
+            max_tokens: 32_000,
+            fase: "fase-limite".into(),
+            reintento_juez: false,
+        }
+    }
+
+    /// Llamada de prueba con el peor caso de un intento de `prompt`, como lo arma `llamar_con`.
+    fn llamada_de_limite(prompt: &Prompt) -> Llamada<'_> {
+        let precio = precio_de_limite();
+        Llamada {
+            proveedor: Proveedor::Deepseek,
+            modelo: MODELO_LIMITE,
+            prompt,
+            corrida: "c-limite",
+            razonamiento: true,
+            inactividad: INACTIVIDAD,
+            total: Duration::from_secs(60),
+            peor_caso: costo_peor_caso(
+                &precio,
+                tokens_entrada_estimados(prompt),
+                prompt.max_tokens,
+            ),
+            precio,
+            intentos: 0,
+            reservas: Vec::new(),
+            cost_usd: 0.0,
+            costo_estimado: false,
+        }
+    }
+
+    /// Corre `reservar` de `llamada` en `home`, con `limite` activo en este hilo si lo hay.
+    fn reservar_opcional(
+        home: &Path,
+        llamada: &mut Llamada,
+        limite: Option<&Arc<LimiteCalibracion>>,
+    ) -> Result<(), ErrorProveedor> {
+        let cfg = Config::default();
+        let breaker = Breaker::new();
+        let claves = Claves {
+            deepseek: None,
+            anthropic: None,
+        };
+        let reloj = Instant::now;
+        let ctx = Contexto {
+            cfg: &cfg,
+            home,
+            breaker: &breaker,
+            claves: &claves,
+            reloj: &reloj,
+            plazos: Plazos::default(),
+        };
+        match limite {
+            Some(limite) => con_limite(limite, || reservar(&ctx, llamada)),
+            None => reservar(&ctx, llamada),
+        }
+    }
+
+    /// Cierra la reserva `id` con un evento `Llamada` de `costo` USD, como lo hace `cerrar`.
+    fn cerrar_reserva(home: &Path, id: &str, costo: f64) {
+        let mut ev = observe::evento_manual("c-limite", TipoEvento::Llamada, None);
+        ev.via = Some(Via::Api);
+        ev.modelo = Some(MODELO_LIMITE.into());
+        ev.cost_usd = costo;
+        ev.extra.insert("reservas".into(), json!([id]));
+        observe::registrar_en(&home.join(ARCHIVO_EVENTOS), &ev).expect("cierra la reserva");
+    }
+
+    #[test]
+    fn proveedores_limite_rechaza_el_intento_que_con_el_costo_real_pasa_el_limite() {
+        let home = tempfile::tempdir().expect("home");
+        let prompt = prompt_de_limite(100_000);
+        let limite = LimiteCalibracion::nuevo(0.30, 0.0);
+        let mut primera = llamada_de_limite(&prompt);
+        reservar_opcional(home.path(), &mut primera, Some(&limite))
+            .expect("el primer intento entra");
+        assert_eq!(primera.reservas.len(), 1);
+        cerrar_reserva(home.path(), &primera.reservas[0], 0.07);
+        let mut segunda = llamada_de_limite(&prompt);
+        let error = reservar_opcional(home.path(), &mut segunda, Some(&limite))
+            .expect_err("0,07 más 0,285 pasa 0,30");
+        assert!(matches!(error, ErrorProveedor::Tope(_)), "{error:?}");
+        let rechazo = limite.rechazo().expect("el límite anota el rechazo");
+        assert!((rechazo.gasto_usd - 0.07).abs() < 1e-9, "{rechazo:?}");
+        assert!((rechazo.cota_usd - 0.285_36).abs() < 1e-6, "{rechazo:?}");
+        assert!(segunda.reservas.is_empty());
+    }
+
+    #[test]
+    fn proveedores_limite_dos_hilos_con_lugar_para_uno_salen_uno_solo() {
+        let home = tempfile::tempdir().expect("home");
+        let prompt = prompt_de_limite(100_000);
+        let cota = costo_peor_caso(&precio_de_limite(), 100_000, 32_000);
+        // Lugar para una cota y media: la segunda reserva no entra.
+        let limite = LimiteCalibracion::nuevo(1.5 * cota, 0.0);
+        let resultados: Vec<Result<(), ErrorProveedor>> = std::thread::scope(|s| {
+            let hilos: Vec<_> = (0..2)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut llamada = llamada_de_limite(&prompt);
+                        reservar_opcional(home.path(), &mut llamada, Some(&limite))
+                    })
+                })
+                .collect();
+            hilos
+                .into_iter()
+                .map(|h| h.join().expect("el hilo no entra en pánico"))
+                .collect()
+        });
+        let salen = resultados.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(salen, 1, "{resultados:?}");
+        assert!(
+            resultados
+                .iter()
+                .any(|r| matches!(r, Err(ErrorProveedor::Tope(_)))),
+            "{resultados:?}"
+        );
+    }
+
+    #[test]
+    fn proveedores_limite_el_reintento_del_juez_pasa_por_el_mismo_control() {
+        let home = tempfile::tempdir().expect("home");
+        let mut prompt = prompt_de_limite(100_000);
+        prompt.reintento_juez = true;
+        // Lugar para un intento. El segundo `reservar` de la misma llamada suma la reserva abierta.
+        let limite = LimiteCalibracion::nuevo(0.40, 0.0);
+        let mut llamada = llamada_de_limite(&prompt);
+        reservar_opcional(home.path(), &mut llamada, Some(&limite))
+            .expect("el primer intento entra");
+        let error = reservar_opcional(home.path(), &mut llamada, Some(&limite))
+            .expect_err("el reintento no entra: 0,285 más 0,285 pasa 0,40");
+        assert!(matches!(error, ErrorProveedor::Tope(_)), "{error:?}");
+        assert_eq!(llamada.reservas.len(), 1);
+    }
+
+    #[test]
+    fn proveedores_limite_el_costo_real_libera_el_lugar_que_sobra() {
+        let home = tempfile::tempdir().expect("home");
+        let prompt = prompt_de_limite(100_000);
+        // Sin cerrar, dos cotas (0,57) no entran en 0,50. Cerrada con 0,07, la segunda sí entra.
+        let limite = LimiteCalibracion::nuevo(0.50, 0.0);
+        let mut primera = llamada_de_limite(&prompt);
+        reservar_opcional(home.path(), &mut primera, Some(&limite))
+            .expect("el primer intento entra");
+        cerrar_reserva(home.path(), &primera.reservas[0], 0.07);
+        let mut segunda = llamada_de_limite(&prompt);
+        reservar_opcional(home.path(), &mut segunda, Some(&limite))
+            .expect("0,07 más 0,285 cabe en 0,50");
+        assert!(limite.rechazo().is_none());
+    }
+
+    #[test]
+    fn proveedores_sin_limite_reservar_no_mira_la_calibracion() {
+        let home = tempfile::tempdir().expect("home");
+        let prompt = prompt_de_limite(100_000);
+        // Sin límite activo, solo cuenta el tope mensual de 100 USD: dos cotas de 0,285 entran.
+        let mut llamada = llamada_de_limite(&prompt);
+        reservar_opcional(home.path(), &mut llamada, None).expect("primer intento");
+        reservar_opcional(home.path(), &mut llamada, None).expect("segundo intento");
+        assert_eq!(llamada.reservas.len(), 2);
+    }
+
+    #[test]
+    fn proveedores_con_limite_tras_panic_restaura_el_anterior() {
+        assert!(limite_actual().is_none());
+        let limite = LimiteCalibracion::nuevo(1.0, 0.0);
+        let panico = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            con_limite(&limite, || panic!("falla a propósito"));
+        }));
+        assert!(panico.is_err());
+        assert!(limite_actual().is_none());
     }
 }

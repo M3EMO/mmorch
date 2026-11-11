@@ -7,6 +7,8 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::oracle::juez::ExtractoGuardado;
+
 /// Versión del formato de las líneas JSONL y de los objetos persistidos.
 pub const VERSION: u32 = 1;
 
@@ -261,6 +263,10 @@ pub struct Puntaje {
     /// `None` si está calibrado o si no hay fila con muestra suficiente.
     #[serde(default)]
     pub motivo_sin_calibrar: Option<String>,
+    /// Ítems del juez que `evaluar` dejó fuera por inestables. No entran al `valor` ni a la cobertura.
+    /// Un puntaje sin el campo vale vacía.
+    #[serde(default)]
+    pub inestables: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -348,6 +354,9 @@ pub struct Confianza {
     /// Motivo de cada dimensión de `sin_calibrar` que no calibra por su huella. Clave: la dimensión.
     #[serde(default)]
     pub motivos_sin_calibrar: BTreeMap<Dimension, String>,
+    /// Ítems del juez que `evaluar` excluyó por inestables, por dimensión. Un informe viejo lee vacío.
+    #[serde(default)]
+    pub items_inestables: BTreeMap<Dimension, Vec<String>>,
     /// Dimensiones sin veredicto, con su motivo.
     #[serde(default)]
     pub sin_veredicto: Vec<ParteSinVeredicto>,
@@ -434,6 +443,9 @@ pub struct Veredicto {
     /// Un veredicto viejo lee vacío.
     #[serde(default)]
     pub hallazgos_descartados: Vec<HallazgoDescartado>,
+    /// Ventanas que leyó el juez de diseño, sin su texto. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub extractos: Vec<ExtractoGuardado>,
 }
 
 impl Default for Veredicto {
@@ -465,6 +477,7 @@ impl Default for Veredicto {
             ambiguedades: Vec::new(),
             contrato_fallidos: Vec::new(),
             hallazgos_descartados: Vec::new(),
+            extractos: Vec::new(),
         }
     }
 }
@@ -644,6 +657,7 @@ mod tests {
                 total: 48,
             },
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Seguridad,
                 valor: 0.95,
@@ -682,6 +696,7 @@ mod tests {
             ambiguedades: Vec::new(),
             contrato_fallidos: Vec::new(),
             hallazgos_descartados: Vec::new(),
+            extractos: Vec::new(),
         }
     }
 
@@ -824,6 +839,7 @@ mod tests {
             total: 16,
         });
         ida_y_vuelta(&Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension: Dimension::Eficiencia,
             valor: 0.5,
@@ -984,6 +1000,14 @@ mod tests {
     }
 
     #[test]
+    fn tipos_puntaje_viejo_sin_inestables_se_lee_vacia() {
+        let texto = r#"{"dimension":"diseno","valor":0.5,"calibrada":false,
+            "exactitud_balanceada":0.7,"items":[],"sin_veredicto":null,"faltantes":[]}"#;
+        let p: Puntaje = serde_json::from_str(texto).expect("un puntaje viejo se acepta");
+        assert!(p.inestables.is_empty(), "{:?}", p.inestables);
+    }
+
+    #[test]
     fn tipos_puntaje_viejo_sin_motivo_sin_calibrar_se_lee_none() {
         let texto = r#"{"dimension":"diseno","valor":0.5,"calibrada":false,
             "exactitud_balanceada":0.7,"items":[],"sin_veredicto":null,"faltantes":[]}"#;
@@ -994,6 +1018,7 @@ mod tests {
     #[test]
     fn tipos_ida_y_vuelta_de_puntaje_con_motivo_sin_calibrar() {
         ida_y_vuelta(&Puntaje {
+            inestables: Vec::new(),
             dimension: Dimension::Diseno,
             valor: 0.5,
             calibrada: false,
@@ -1008,6 +1033,7 @@ mod tests {
     #[test]
     fn tipos_ida_y_vuelta_de_puntaje_sin_veredicto() {
         ida_y_vuelta(&Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension: Dimension::Diseno,
             valor: 0.0,
@@ -1069,6 +1095,24 @@ mod tests {
             .remove("contrato_fallidos");
         let viejo: Veredicto = serde_json::from_value(json).expect("lee");
         assert!(viejo.contrato_fallidos.is_empty());
+    }
+
+    #[test]
+    fn veredicto_viejo_sin_extractos_lee_lista_vacia() {
+        // Un veredicto anterior al campo `extractos` lo lee con lista vacía.
+        let v = Veredicto {
+            extractos: vec![ExtractoGuardado {
+                archivo: "src/lib.rs".into(),
+                desde: 1,
+                hasta: 10,
+                motivo: "cambio".into(),
+            }],
+            ..Veredicto::default()
+        };
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        json.as_object_mut().expect("objeto").remove("extractos");
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee");
+        assert!(viejo.extractos.is_empty(), "{:?}", viejo.extractos);
     }
 
     #[test]

@@ -833,6 +833,12 @@ fn aporta_medida(estado: &EstadoRequisito, referencia: &str) -> bool {
 /// Datos para decidir: lo que el veredicto no mide del todo.
 fn confianza(v: &Veredicto, tarea: &Tarea) -> Confianza {
     Confianza {
+        items_inestables: v
+            .puntajes
+            .iter()
+            .filter(|p| !p.inestables.is_empty())
+            .map(|p| (p.dimension, p.inestables.clone()))
+            .collect(),
         repeticiones: v.repeticiones,
         inestables: v.tasas.clone(),
         corridas_acumuladas: v.corridas_acumuladas.clone(),
@@ -1030,6 +1036,13 @@ pub fn markdown(tarea: &str, informe: &Informe) -> String {
             })
             .collect();
         datos.push(format!("- Sin calibrar: {}", unir(&nombres)));
+    }
+    for (dimension, items) in &c.items_inestables {
+        datos.push(format!(
+            "- Ítems inestables {}: {}",
+            nombre_dimension(*dimension),
+            items.join(", ")
+        ));
     }
     for parte in &c.sin_veredicto {
         datos.push(format!(
@@ -1278,6 +1291,7 @@ modulos = ["config"]
             .iter()
             .map(|&dimension| match (dimension, completitud) {
                 (Dimension::Completitud, Some(valor)) => Puntaje {
+                    inestables: Vec::new(),
                     motivo_sin_calibrar: None,
                     dimension,
                     valor,
@@ -1288,6 +1302,7 @@ modulos = ["config"]
                     faltantes: Vec::new(),
                 },
                 (Dimension::Completitud, None) => Puntaje {
+                    inestables: Vec::new(),
                     motivo_sin_calibrar: None,
                     dimension,
                     valor: 0.0,
@@ -1298,6 +1313,7 @@ modulos = ["config"]
                     faltantes: Vec::new(),
                 },
                 _ => Puntaje {
+                    inestables: Vec::new(),
                     motivo_sin_calibrar: None,
                     dimension,
                     valor: 1.0,
@@ -2300,6 +2316,22 @@ modulos = ["config"]
         let md = markdown("memora", &informe_de(&v));
         assert!(
             md.contains("- Sin calibrar: Diseño (calibración de otro juez)"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn informe_nombra_los_items_inestables_de_cada_dimension() {
+        let mut v = ecc();
+        let diseno = v
+            .puntajes
+            .iter_mut()
+            .find(|p| p.dimension == Dimension::Diseno)
+            .expect("ecc tiene Diseño");
+        diseno.inestables = vec!["diseno.errores".into(), "diseno.modularidad".into()];
+        let md = markdown("memora", &informe_de(&v));
+        assert!(
+            md.contains("- Ítems inestables Diseño: diseno.errores, diseno.modularidad"),
             "{md}"
         );
     }
