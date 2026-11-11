@@ -7681,3 +7681,66 @@ Brief: `docs/builds/brief-local-94.md`, con base 89ee1f6 y rama `laptop/tarea-94
 Los puntos 1 y 2 corren en paralelo. El punto 3 va al final.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
+
+## Vuelta del 2026-11-11 (17): calibración sin API en t1, y Tarea 95
+
+**Estado.** Las mezclas de la 84 a la 94 y P95 a P101 esperan al usuario.
+
+**Lo que salió bien.**
+- Pruebas: 1 de 1, y el limpio bien.
+- Seguridad, con n = 10 en t1 a t3: 15 de 15 y 15 de 15, sin API. Solo hay dos tipos de defecto: `secreto_en_codigo` y `panico_en_entrada`. Igual que en Diseño, la exactitud de Seguridad dice "detecta esos dos", no más.
+- Estructura frenó antes de gastar, con una cota de 0,22 USD contra un tope de 0,0001. El control por llamada de la Tarea 83 funciona con datos reales.
+
+## 1. Una mutación que ningún test ejecuta
+
+**Lo que pasa.** `comportamiento` (`src/oracle/calibra/inyectar.rs:848`) elige una línea con `==` en cualquier archivo de `src/`. En t1 cayó en `src/verb/verb_store.rs:667`. Ni los 4 tests ocultos ni los 43 del contrato pasan por esa línea. El valor quedó en 1,0, igual que la base.
+
+**Por qué pasa en repos reales y no pasaba en memora y brasa.** En memora y brasa, la suite cubre casi todo el repo. En una tarea minada, los tests ocultos cubren el cambio del commit, y el contrato cubre lo que el repo ya probaba. Una línea al azar de broot casi nunca cae en ninguno de los dos.
+
+**t2 y t3.** No tienen calibración de Funciona. Espero lo mismo, por la misma razón: sus tests ocultos son 5 y 1.
+
+**Qué mide hoy ese caso.** Mide si la suite de la tarea cubre una línea al azar del repo. Eso es una propiedad de la tarea, no de Root. Un Funciona que no detecta ahí no está fallando.
+
+**Decisión: Funciona y Completitud inyectan dentro del cambio de la tarea.**
+1. Si la tarea trae estado inicial (`bootstrap/`), los candidatos son las líneas que cambiaron entre el estado inicial y el repo bueno. Root ya las calcula con `cambios::rangos_cambiados` (Tarea 81).
+2. `comportamiento` elige una línea con `==` dentro de esos rangos.
+3. `modulo_borrado` elige un módulo que el cambio tocó.
+4. Si no hay ningún candidato dentro del cambio, el defecto no aplica en esa tarea, con su motivo. No cae a una línea al azar.
+5. Sin `bootstrap/`, como en memora y brasa, nada cambia.
+6. El caso guarda `en_cambio: bool`, para que se vea qué se midió.
+
+**Por qué no elegir mutantes que la suite ya mata.** `Contexto.muertos` ya trae los mutantes muertos de la base, y los usa `AssertBorrado`. Elegir esos mutantes para Funciona daría una detección segura por construcción, y no mediría nada. Dentro del cambio, una mutación puede escapar: eso es un dato real sobre la tarea.
+
+**Otras dimensiones.** Pruebas usa los mutantes muertos, así que no tiene este problema. Las dimensiones de juez leen el cambio desde la Tarea 81. Seguridad detecta por sondas, que miran todo el repo.
+
+## 2. La suite oculta que no compila
+
+**Lo que pasa.** `modulo_borrado` rompe la compilación. nextest sale con 101, y el junit no trae fallos. `juzgar_junit` (`src/oracle/mod.rs:2341`) ve que el código no cuadra con el junit, y da "sin veredicto". Un repo que no compila debería dar rojo.
+
+**El código 101 de nextest es específico.** nextest documenta sus códigos de salida: 100 es tests que fallaron, y 101 es un build que falló. Ese código llega por el proceso que Root lanzó (regla 1).
+
+**Decisión, solo con `runner = "nextest"`:**
+1. Código 101: la suite no compila. Cada test esperado cuenta como fallo, sin leer el junit. El motivo es "la suite no compila".
+2. Funciona y Completitud quedan con veredicto y en rojo.
+3. Cualquier otro código sigue con el cruce de hoy.
+4. Con otro runner, nada cambia. `cargo test` usa 101 tanto para un fallo de test como para un build roto, así que ahí el código no alcanza.
+
+**¿Abre una falsificación? No.**
+- La regla solo convierte "sin veredicto" en rojo. Nunca convierte nada en verde.
+- El producto puede romper su build a propósito, pero solo se perjudica.
+- El producto no puede cambiar el código de salida de nextest, porque es el proceso que lanzó Root. Desde la Tarea 93, el contenedor de evaluación corre sin root. La suite corre en un contenedor nuevo con `--rm`.
+
+**Un riesgo de rojo falso, que se acepta.** Si una dependencia nueva no está en la caché sin red, el build también falla con 101. Eso es un defecto del producto: agregó una dependencia que la tarea no puede bajar. La fase de descarga corre antes, sobre el mismo `Cargo.lock`.
+
+## 3. Tarea 95
+
+Brief: `docs/builds/brief-local-95.md`, con base 03308b9 y rama `laptop/tarea-95`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Funciona y Completitud inyectan dentro del cambio | `src/oracle/calibra/inyectar.rs`, `src/oracle/calibra.rs`, `docs/interfaces.md` |
+| 2 | nextest con 101: la suite no compila, y da rojo | `src/oracle/mod.rs` |
+
+Los dos puntos no comparten archivos, y corren en paralelo.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
