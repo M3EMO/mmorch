@@ -1235,9 +1235,10 @@ fn ediciones_de_valor(limpia: &str) -> Vec<Edicion> {
     salida
 }
 
-/// Cambios de la condición de un `if`, `while` o `else if` de la línea limpia: quita el `!` que tiene o agrega uno.
-/// `if let` queda fuera.
-fn ediciones_de_condicion(limpia: &str) -> Vec<Edicion> {
+/// Cambios de la condición de un `if`, `while` o `else if`: quita el `!` que tiene, o la envuelve en `!( ... )`.
+/// La condición acaba en la primera `{` de la línea limpia, la que abre el bloque. Sin esa `{`, la condición
+/// sigue en otra línea y no hay envoltorio. `if let` queda fuera.
+fn ediciones_de_condicion(linea: &str, limpia: &str) -> Vec<Edicion> {
     let inicio_codigo = limpia.len() - limpia.trim_start().len();
     let resto = &limpia[inicio_codigo..];
     let Some(prefijo) = PREFIJOS_DE_CONDICION
@@ -1252,10 +1253,18 @@ fn ediciones_de_condicion(limpia: &str) -> Vec<Edicion> {
         return Vec::new();
     }
     if condicion.starts_with('!') && !condicion.starts_with("!=") {
-        vec![cambio(c, c + 1, "", "if: quitar !".to_string())]
-    } else {
-        vec![cambio(c, c, "!", "if: agregar !".to_string())]
+        return vec![cambio(c, c + 1, "", "if: quitar !".to_string())];
     }
+    let Some(llave) = condicion.find('{') else {
+        return Vec::new();
+    };
+    let fin = c + condicion[..llave].trim_end().len();
+    if fin == c {
+        return Vec::new();
+    }
+    // La línea limpia y la original tienen las mismas posiciones en bytes: `linea_limpia` no las mueve.
+    let nuevo = format!("!({})", &linea[c..fin]);
+    vec![cambio(c, fin, &nuevo, "if: agregar !".to_string())]
 }
 
 /// Todos los cambios posibles de `ComportamientoRoto` en una línea de producción. Vacío en comentarios.
@@ -1266,7 +1275,7 @@ fn candidatos_de_linea(linea: &str) -> Vec<Edicion> {
     let limpia = linea_limpia(linea);
     let mut salida = ediciones_de_operador(&limpia);
     salida.extend(ediciones_de_valor(&limpia));
-    salida.extend(ediciones_de_condicion(&limpia));
+    salida.extend(ediciones_de_condicion(linea, &limpia));
     salida
 }
 
@@ -2922,9 +2931,19 @@ pub fn dos(x: u32) -> bool {
             vistas,
             BTreeSet::from([
                 "    if x || y { 1 } else { 0 }".to_string(),
-                "    if !x && y { 1 } else { 0 }".to_string(),
+                "    if !(x && y) { 1 } else { 0 }".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn agregar_negacion_envuelve_la_condicion_con_parentesis() {
+        let linea = "    if x == 1 {";
+        let agregar = candidatos_de_linea(linea)
+            .into_iter()
+            .find(|e| e.operador == "if: agregar !")
+            .expect("ofrece agregar !");
+        assert_eq!(agregar.aplicar(linea), "    if !(x == 1) {");
     }
 
     #[test]
