@@ -561,6 +561,7 @@ mod tests {
     fn sin_decision(config: &str) -> Fila {
         let mut f = fila("memora", config, Estado::Verde);
         f.veredicto.informe = Some(Informe {
+            avisos_previos: Vec::new(),
             decision: Decision::SinDecision,
             motivo: String::new(),
             requisitos: Vec::new(),

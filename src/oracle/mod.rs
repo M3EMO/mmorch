@@ -6218,6 +6218,7 @@ mod tests {
     #[test]
     fn oraculo_redaccion_mcp_quita_los_ids_de_ocultos_fallidos() {
         let informe = crate::tipos::Informe {
+            avisos_previos: Vec::new(),
             decision: crate::tipos::Decision::NoListo,
             motivo: "test_oculto_fuera_de_requisitos: test_b::t9".into(),
             requisitos: Vec::new(),
@@ -6293,6 +6294,7 @@ mod tests {
             nivel: Some(1),
         };
         let informe = Informe {
+            avisos_previos: Vec::new(),
             decision: Decision::NoListo,
             motivo: String::new(),
             requisitos: vec![requisito.clone()],
@@ -6361,6 +6363,7 @@ mod tests {
         // El informe ya quitaba los ocultos sin prefijo; el `contrato:` con un id oculto en el motivo se
         // filtraba: esa es la fuga que este test fija.
         let informe = Informe {
+            avisos_previos: Vec::new(),
             decision: Decision::NoListo,
             motivo: String::new(),
             requisitos: Vec::new(),
@@ -10076,6 +10079,7 @@ mod tests {
         v.corridas_acumuladas
             .insert("contrato:test_c::t9".into(), 3);
         v.informe = Some(Informe {
+            avisos_previos: Vec::new(),
             decision: Decision::NoListo,
             motivo: "motivo".into(),
             requisitos: Vec::new(),

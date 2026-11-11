@@ -308,6 +308,22 @@ pub struct Informe {
     /// Datos para decidir. Un informe viejo lee `Confianza` vacía.
     #[serde(default)]
     pub confianza: Confianza,
+    /// Avisos de Seguridad que ya estaban en el estado inicial. No bloquean. Un informe viejo lee vacío.
+    #[serde(default)]
+    pub avisos_previos: Vec<AvisoPrevio>,
+}
+
+/// Aviso de Seguridad que ya estaba en el estado inicial de la tarea. No bloquea.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AvisoPrevio {
+    /// Nombre de la sonda, como `cargo-audit`.
+    pub fuente: String,
+    /// El id del aviso, como `RUSTSEC-2024-0001`, o la regla.
+    pub aviso: String,
+    /// El crate y su versión, o el archivo.
+    pub objeto: String,
+    /// Severidad del hallazgo original, de 1 a 3.
+    pub severidad: u8,
 }
 
 /// Tasa de aprobación de un test inestable, con la cota inferior de Wilson al 90%.
@@ -962,6 +978,7 @@ mod tests {
 
     fn informe() -> Informe {
         Informe {
+            avisos_previos: Vec::new(),
             decision: Decision::NoListo,
             motivo: "hay un bloqueante".into(),
             requisitos: vec![EstadoRequisito {

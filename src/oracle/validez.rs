@@ -1576,6 +1576,7 @@ anclas = [
 
     fn informe(decision: Decision) -> Informe {
         Informe {
+            avisos_previos: Vec::new(),
             decision,
             motivo: String::new(),
             requisitos: Vec::new(),

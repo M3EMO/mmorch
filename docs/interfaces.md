@@ -2057,6 +2057,37 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "refs"
       ]
     },
+    "AvisoPrevio": {
+      "description": "Aviso de Seguridad que ya estaba en el estado inicial de la tarea. No bloquea.",
+      "type": "object",
+      "properties": {
+        "aviso": {
+          "description": "El id del aviso, como `RUSTSEC-2024-0001`, o la regla.",
+          "type": "string"
+        },
+        "fuente": {
+          "description": "Nombre de la sonda, como `cargo-audit`.",
+          "type": "string"
+        },
+        "objeto": {
+          "description": "El crate y su versión, o el archivo.",
+          "type": "string"
+        },
+        "severidad": {
+          "description": "Severidad del hallazgo original, de 1 a 3.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "fuente",
+        "aviso",
+        "objeto",
+        "severidad"
+      ]
+    },
     "Confianza": {
       "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del\n`Veredicto`, salvo `evidencia_visible`, que también lee la tarea.",
       "type": "object",
@@ -2543,6 +2574,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "`riesgos` y `proximos_pasos` tienen como máximo 5 entradas.",
       "type": "object",
       "properties": {
+        "avisos_previos": {
+          "description": "Avisos de Seguridad que ya estaban en el estado inicial. No bloquean. Un informe viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AvisoPrevio"
+          }
+        },
         "bloqueantes": {
           "description": "Ids de hallazgos.",
           "type": "array",
@@ -3180,6 +3219,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
   "description": "`riesgos` y `proximos_pasos` tienen como máximo 5 entradas.",
   "type": "object",
   "properties": {
+    "avisos_previos": {
+      "description": "Avisos de Seguridad que ya estaban en el estado inicial. No bloquean. Un informe viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AvisoPrevio"
+      }
+    },
     "bloqueantes": {
       "description": "Ids de hallazgos.",
       "type": "array",
@@ -3269,6 +3316,37 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "prioridad",
         "texto",
         "refs"
+      ]
+    },
+    "AvisoPrevio": {
+      "description": "Aviso de Seguridad que ya estaba en el estado inicial de la tarea. No bloquea.",
+      "type": "object",
+      "properties": {
+        "aviso": {
+          "description": "El id del aviso, como `RUSTSEC-2024-0001`, o la regla.",
+          "type": "string"
+        },
+        "fuente": {
+          "description": "Nombre de la sonda, como `cargo-audit`.",
+          "type": "string"
+        },
+        "objeto": {
+          "description": "El crate y su versión, o el archivo.",
+          "type": "string"
+        },
+        "severidad": {
+          "description": "Severidad del hallazgo original, de 1 a 3.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "fuente",
+        "aviso",
+        "objeto",
+        "severidad"
       ]
     },
     "Confianza": {
@@ -5631,6 +5709,37 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "refs"
       ]
     },
+    "AvisoPrevio": {
+      "description": "Aviso de Seguridad que ya estaba en el estado inicial de la tarea. No bloquea.",
+      "type": "object",
+      "properties": {
+        "aviso": {
+          "description": "El id del aviso, como `RUSTSEC-2024-0001`, o la regla.",
+          "type": "string"
+        },
+        "fuente": {
+          "description": "Nombre de la sonda, como `cargo-audit`.",
+          "type": "string"
+        },
+        "objeto": {
+          "description": "El crate y su versión, o el archivo.",
+          "type": "string"
+        },
+        "severidad": {
+          "description": "Severidad del hallazgo original, de 1 a 3.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "fuente",
+        "aviso",
+        "objeto",
+        "severidad"
+      ]
+    },
     "Confianza": {
       "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del\n`Veredicto`, salvo `evidencia_visible`, que también lee la tarea.",
       "type": "object",
@@ -6094,6 +6203,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "`riesgos` y `proximos_pasos` tienen como máximo 5 entradas.",
       "type": "object",
       "properties": {
+        "avisos_previos": {
+          "description": "Avisos de Seguridad que ya estaban en el estado inicial. No bloquean. Un informe viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AvisoPrevio"
+          }
+        },
         "bloqueantes": {
           "description": "Ids de hallazgos.",
           "type": "array",

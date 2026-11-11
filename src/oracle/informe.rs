@@ -17,8 +17,8 @@ use super::tarea::Tarea;
 use crate::config::ReglasDecision;
 use crate::proveedores::{self, Prompt, causa_tope_alcanzado};
 use crate::tipos::{
-    Accion, Confianza, Cumplimiento, Decision, Dimension, Eleccion, Estado, EstadoRequisito,
-    Fuente, Hallazgo, Informe, ParteSinVeredicto, Veredicto,
+    Accion, AvisoPrevio, Confianza, Cumplimiento, Decision, Dimension, Eleccion, Estado,
+    EstadoRequisito, Fuente, Hallazgo, Informe, ParteSinVeredicto, Veredicto,
 };
 
 /// Máximo de riesgos y de próximos pasos.
@@ -183,6 +183,7 @@ pub fn informar_con(
         Vec::new()
     };
     let mut informe = Informe {
+        avisos_previos: avisos_previos(v),
         decision: decidido.decision,
         motivo,
         requisitos: v.requisitos.clone(),
@@ -204,7 +205,68 @@ pub fn informar_con(
             )),
         }
     }
+    // Después de la redacción: el redactor no reescribe esta línea, que no cita ids.
+    if let Some(linea) = linea_avisos_previos(&informe.avisos_previos) {
+        informe.resumen = format!("{} {linea}", informe.resumen);
+    }
     Ok(informe)
+}
+
+/// Sonda de cargo-audit. Su `cita` es el crate y la versión.
+const SONDA_CARGO_AUDIT: &str = "cargo-audit";
+
+/// Avisos de Seguridad previos que no son secretos, en orden del veredicto. Un secreto va con los bloqueos.
+fn avisos_previos(v: &Veredicto) -> Vec<AvisoPrevio> {
+    v.hallazgos
+        .iter()
+        .filter(|h| h.dimension == Dimension::Seguridad && h.previo && !es_secreto(h))
+        .map(|h| {
+            let objeto = match &h.fuente {
+                Fuente::Sonda(nombre) if nombre == SONDA_CARGO_AUDIT => h.cita.clone(),
+                _ => h.archivo.clone(),
+            };
+            AvisoPrevio {
+                fuente: nombre_fuente(&h.fuente),
+                aviso: aviso_de(&h.detalle),
+                objeto,
+                severidad: h.severidad,
+            }
+        })
+        .collect()
+}
+
+/// Nombre de quien produjo el hallazgo: la sonda, o el juez con su modelo.
+fn nombre_fuente(fuente: &Fuente) -> String {
+    match fuente {
+        Fuente::Sonda(nombre) => nombre.clone(),
+        Fuente::Juez { modelo } => format!("juez {modelo}"),
+    }
+}
+
+/// El aviso de un detalle: el id RUSTSEC si lo trae. Si no, la primera frase.
+fn aviso_de(detalle: &str) -> String {
+    let rustsec = detalle
+        .split_whitespace()
+        .map(|t| t.trim_end_matches(':'))
+        .find(|t| t.starts_with("RUSTSEC-"));
+    match rustsec {
+        Some(id) => id.to_string(),
+        None => detalle
+            .split(". ")
+            .next()
+            .unwrap_or(detalle)
+            .trim_end_matches('.')
+            .to_string(),
+    }
+}
+
+/// Frase del resumen con los avisos previos. `None` si no hay ninguno.
+fn linea_avisos_previos(avisos: &[AvisoPrevio]) -> Option<String> {
+    match avisos.len() {
+        0 => None,
+        1 => Some("1 aviso previo de Seguridad, no bloquea.".into()),
+        n => Some(format!("{n} avisos previos de Seguridad, no bloquean.")),
+    }
 }
 
 /// Un disparo de regla: el texto del motivo, la frase del resumen y, si bloquea por un hallazgo, su id.
@@ -1047,6 +1109,21 @@ pub fn markdown(tarea: &str, informe: &Informe) -> String {
         .map(|a| format!("- {}", a.texto))
         .collect();
     lista(&mut md, &riesgos, "Sin riesgos registrados.");
+    if !informe.avisos_previos.is_empty() {
+        md.push_str("\n## Avisos previos\n\n");
+        let avisos: Vec<String> = informe
+            .avisos_previos
+            .iter()
+            .map(|a| {
+                format!(
+                    "- {}: {} en {} (severidad {})",
+                    a.fuente, a.aviso, a.objeto, a.severidad
+                )
+            })
+            .collect();
+        lista(&mut md, &avisos, "Sin avisos previos.");
+        md.push_str("\nEstaban en el estado inicial; no bloquean.\n");
+    }
     md.push_str("\n## Confianza\n\n");
     md.push_str(&format!(
         "- Repeticiones del oculto: {}.\n",
@@ -1221,8 +1298,8 @@ mod tests {
     use crate::oracle::rubrica::{ItemRubrica, Mide, Rubrica};
     use crate::oracle::tarea::Tarea;
     use crate::tipos::{
-        Cumplimiento, Decision, Dimension, Estado, EstadoRequisito, Fuente, Hallazgo, Informe,
-        ItemFaltante, NivelItem, Pendiente, Puntaje, TasaTest, Veredicto,
+        AvisoPrevio, Cumplimiento, Decision, Dimension, Estado, EstadoRequisito, Fuente, Hallazgo,
+        Informe, ItemFaltante, NivelItem, Pendiente, Puntaje, TasaTest, Veredicto,
     };
     use std::cell::RefCell;
     use std::fs;
@@ -2752,6 +2829,90 @@ modulos = ["config"]
         json.as_object_mut().expect("objeto").remove("confianza");
         let i: Informe = serde_json::from_value(json).expect("lee");
         assert_eq!(i.confianza, Confianza::default());
+    }
+
+    /// Aviso previo de cargo-audit sobre `time 0.1.43`, con el id `RUSTSEC-2024-000<n>`.
+    fn aviso_previo_de(n: u32) -> Hallazgo {
+        Hallazgo {
+            archivo: "Cargo.lock".into(),
+            cita: "time 0.1.43".into(),
+            detalle: format!("RUSTSEC-2024-000{n}: time vulnerable"),
+            ..seguridad_de(&format!("h-audit-{n}"), "cargo-audit", true)
+        }
+    }
+
+    #[test]
+    fn informe_avisos_previos_llena_la_lista_el_markdown_y_el_resumen() {
+        let mut v = ecc();
+        v.hallazgos.push(aviso_previo_de(1));
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+        assert_eq!(
+            i.avisos_previos,
+            vec![AvisoPrevio {
+                fuente: "cargo-audit".into(),
+                aviso: "RUSTSEC-2024-0001".into(),
+                objeto: "time 0.1.43".into(),
+                severidad: 3,
+            }]
+        );
+        let md = markdown("memora", &i);
+        assert!(md.contains("## Avisos previos"), "{md}");
+        assert!(md.contains("RUSTSEC-2024-0001"), "{md}");
+        assert!(
+            md.contains("Estaban en el estado inicial; no bloquean."),
+            "{md}"
+        );
+        assert!(
+            i.resumen
+                .ends_with("1 aviso previo de Seguridad, no bloquea."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_resumen_con_siete_avisos_previos_va_en_plural() {
+        let mut v = ecc();
+        v.hallazgos.extend((1..=7u32).map(aviso_previo_de));
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .ends_with("7 avisos previos de Seguridad, no bloquean."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_sin_previos_no_tiene_seccion_ni_linea() {
+        let i = informe_de(&ecc());
+        assert!(i.avisos_previos.is_empty());
+        let md = markdown("memora", &i);
+        assert!(!md.contains("Avisos previos"), "{md}");
+        assert!(!i.resumen.contains("previo"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_secreto_previo_no_aparece_en_avisos_previos() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto", "gitleaks", true));
+        let i = informe_de(&v);
+        assert!(i.avisos_previos.is_empty(), "{:?}", i.avisos_previos);
+        let md = markdown("memora", &i);
+        assert!(!md.contains("Avisos previos"), "{md}");
+    }
+
+    #[test]
+    fn informe_viejo_sin_avisos_previos_lee_vacio() {
+        let mut json = serde_json::to_value(informe_de(&ecc())).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("avisos_previos")
+            .expect("el campo existe al serializar");
+        let i: Informe = serde_json::from_value(json).expect("lee");
+        assert!(i.avisos_previos.is_empty());
     }
 
     /// Informe de `ecc()` con la tarea `t` y sin redactor.

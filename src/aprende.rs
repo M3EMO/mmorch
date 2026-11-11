@@ -743,6 +743,7 @@ mod tests {
 
     fn con_informe(mut f: Fila, decision: Decision) -> Fila {
         f.veredicto.informe = Some(Informe {
+            avisos_previos: Vec::new(),
             decision,
             motivo: String::new(),
             requisitos: Vec::new(),

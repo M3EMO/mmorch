@@ -1279,6 +1279,7 @@ mod tests {
 
     fn informe() -> Informe {
         Informe {
+            avisos_previos: Vec::new(),
             decision: Decision::Listo,
             motivo: "prueba".into(),
             requisitos: Vec::new(),
