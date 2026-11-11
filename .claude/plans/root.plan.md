@@ -7638,3 +7638,46 @@ Brief: `docs/builds/brief-local-93.md`, con base 1ab1ac5 y rama `laptop/tarea-93
 Los dos puntos no comparten archivos, y corren en paralelo.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
+
+## Vuelta del 2026-11-11 (16): Tarea 93 y Tarea 94
+
+**Estado.** La Tarea 93 está en `laptop/tarea-93` (89ee1f6), con 3085, 0 y 4 con podman. El commit 10a58b7 no daba ningún motivo para "sin `--user`". Con keep-id, `/salida`, la carpeta de trabajo, la caché y `/tmp` siguen escribibles, según lo comprobó el organizador con podman real. Las mezclas de la 84 a la 93 y P95 a P101 esperan al usuario.
+
+## 1. Las 5 preguntas de la Tarea 93
+
+1. **Los escenarios en la imagen construida siguen como root: se acepta, y keep-id no ayuda.**
+   - Esa imagen la construye el producto con su propio `Dockerfile`. Su `/bin/sh` y su `timeout` son del producto desde el principio. No hace falta que `instalar` los reemplace.
+   - Correr como otro usuario no cambia eso. Además, una imagen con su propio `USER` puede romperse con keep-id, como dice el organizador.
+   - **El límite queda escrito.** Un escenario que corre en la imagen del producto mide al producto con las herramientas del producto. Ese resultado vale lo que vale la imagen.
+   - Cerrarlo pide correr los escenarios desde un contenedor de Root que hable con el del producto por red. Es un rediseño de Entrega. Ninguna tarea de hoy declara escenarios, así que no lo hago ahora.
+2. **Todo error del ruteo nuevo frena la corrida:** acepto. Falla cerrado.
+3. **El ruteo nuevo va después de esperar el login:** acepto.
+4. **Los roles terminados de una corrida reanudada no se rutean otra vez:** acepto.
+5. **La fila guarda los modelos del ruteo inicial: cambia.** El banco de medición necesita saber qué modelo corrió de verdad. La fila guarda el modelo de cada lanzamiento. Va a la Tarea 94.
+
+**Puntos incompletos del informe:**
+- **El `Gate` de cupo no dice la causa** si la vía pasa a API sin `SinPresupuesto`. Va a la 94: el `Gate` nombra la vía y el motivo del ruteo.
+- **Clippy no corrió.** La 94 lo corre sobre su punta, y arregla los avisos de la 93.
+- **La carpeta `~/.cache/exp93-VEq5`** queda para el orquestador. Está fuera del worktree.
+
+## 2. `calibra` en `/tmp`
+
+**Lo que encontré.** `calibrar_medida` crea su carpeta temporal con `tempfile::tempdir()` (`src/oracle/calibra.rs:947`). Ahí guarda el `target` de la base (Tarea 59). En Fedora, `/tmp` vive en memoria. El `target` de un repo como broot pesa varios gigas. Una calibración de D4 sobre broot puede llenar la RAM o fallar sin espacio.
+
+**Decisión.** La carpeta va bajo `ROOT_HOME/tmp`, con la misma función `temporal` que ya usan colab, descarga y la evaluación. Se borra igual al terminar.
+
+## 3. Tarea 94: sí vale
+
+Son tres puntos chicos. El de `/tmp` evita que D4 falle en repos grandes. Los otros dos dejan datos del banco que hoy son falsos o mudos.
+
+Brief: `docs/builds/brief-local-94.md`, con base 89ee1f6 y rama `laptop/tarea-94`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Carpeta temporal de `calibra` bajo `ROOT_HOME/tmp` | `src/oracle/calibra.rs` |
+| 2 | La fila guarda el modelo de cada lanzamiento, y el `Gate` de cupo dice su causa | `src/corre/corrida.rs`, `docs/interfaces.md` |
+| 3 | Clippy limpio sobre la punta | los archivos que señale clippy, dentro de los de la 93 |
+
+Los puntos 1 y 2 corren en paralelo. El punto 3 va al final.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
