@@ -2073,6 +2073,10 @@ fn limpiar_temporales(tmp: &Path, ahora: SystemTime) {
 /// esperado cuenta como fallado.
 const MOTIVO_NO_COMPILA: &str = "la suite no compila";
 
+/// Motivo de una suite nextest que sale con 100 y no deja junit: la suite falló sin reporte. Todo test
+/// esperado cuenta como fallado, igual que con `MOTIVO_NO_COMPILA`.
+const MOTIVO_SUITE_SIN_JUNIT: &str = "la suite falló y no dejó junit";
+
 /// Corre una suite `repeticiones` veces. Después corre solo sus tests inestables,
 /// hasta `repeticiones_inestable` corridas en total. Una suite de pytest lista antes lo que pytest
 /// recolecta: su junit vale solo si trae exactamente eso y su código cuadra con las fallas (A5).
@@ -2149,16 +2153,21 @@ fn es_nextest(cmd: &str) -> bool {
     cmd.contains("cargo nextest")
 }
 
-/// Suite cuya corrida dio `motivo`. Si el motivo es `MOTIVO_NO_COMPILA`, cada test esperado cuenta como
-/// fallado: un repo que no compila nunca da verde ni queda sin veredicto. Sin esperados, queda sin veredicto.
-/// No escribe historial: no hay evidencia válida.
+/// Si el motivo es de una suite nextest que falló sin dar veredicto: no compila, o sale con 100 sin junit.
+fn es_suite_fallida(motivo: &str) -> bool {
+    motivo == MOTIVO_NO_COMPILA || motivo == MOTIVO_SUITE_SIN_JUNIT
+}
+
+/// Suite cuya corrida dio `motivo`. Si `es_suite_fallida`, cada test esperado cuenta como fallado: una
+/// suite nextest rota nunca da verde ni queda sin veredicto. Sin esperados, queda sin veredicto.
+/// El aviso es el mismo motivo. No escribe historial: no hay evidencia válida.
 fn sin_veredicto_o_no_compila(
     c: &Corrida,
     suite: &str,
     excluidos: &BTreeSet<String>,
     motivo: String,
 ) -> Suite {
-    if motivo != MOTIVO_NO_COMPILA {
+    if !es_suite_fallida(&motivo) {
         return Suite::SinVeredicto(motivo);
     }
     let esperados = esperados_de_requisitos(c.tarea, suite, excluidos);
@@ -2172,7 +2181,7 @@ fn sin_veredicto_o_no_compila(
             .map(|id| (id, ResultadoTest::Falla))
             .collect(),
         conteo: Conteo { pasa: 0, total },
-        avisos: vec![MOTIVO_NO_COMPILA.into()],
+        avisos: vec![motivo],
         ..Clasificacion::default()
     })
 }
@@ -2352,7 +2361,8 @@ fn borrar_xml(salida: &Path, xml: &str) -> Result<(), ErrorOraculo> {
 }
 
 /// Una corrida de la suite en un contenedor nuevo. `Ok(Err(motivo))` si el junit no vale (A5).
-/// Nextest con código 101 da `MOTIVO_NO_COMPILA` sin mirar el junit, ni aunque falte.
+/// Con nextest, el código 101 da `MOTIVO_NO_COMPILA` sin mirar el junit, ni aunque falte. Con 100 y
+/// sin junit da `MOTIVO_SUITE_SIN_JUNIT`. Con junit presente, 100 se juzga como cualquier código.
 /// `Err` solo si la infraestructura falla o si no hay junit (A2: ahí el stderr va a `registros/`).
 /// Con `pytest`, el código de salida debe cuadrar con las fallas, y con `esperados` (si hay) el junit
 /// trae exactamente esas claves. Fuera de pytest, el junit no puede estar vacío y el código debe
@@ -2378,6 +2388,13 @@ fn correr_una(
         // Nextest sale con 101 cuando el build falla. No hay junit que leer, ni falta de junit que contar.
         if es_nextest(cmd) && resultado.codigo == 101 {
             return Ok(Err(MOTIVO_NO_COMPILA.into()));
+        }
+        // Nextest sale con 100 cuando algún test falla. Sin junit, la suite falló sin reporte.
+        if es_nextest(cmd)
+            && resultado.codigo == 100
+            && junit::leer_de_salida(&c.salida.join(&xml_corrida)).is_none()
+        {
+            return Ok(Err(MOTIVO_SUITE_SIN_JUNIT.into()));
         }
         juzgar_junit(c, &xml_corrida, &resultado, pytest, esperados)
     });
@@ -3629,10 +3646,10 @@ mod tests {
         assert!(matches!(s, Suite::SinVeredicto(_)), "{s:?}");
     }
 
-    /// Comando de nextest de la suite `xml` sin `.xml`: el texto de `ficha::cmd_nextest`.
+    /// Comando de nextest de la suite `suite`: borra el junit viejo y copia el nuevo sin fallar si no hay.
     fn cmd_nextest_de_prueba(suite: &str) -> String {
         format!(
-            "CARGO_TARGET_DIR=/salida/target cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/{suite}.xml || exit 1; exit $s"
+            "rm -f /salida/target/nextest/ci/junit.xml; CARGO_TARGET_DIR=/salida/target cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/{suite}.xml 2>/dev/null; exit $s"
         )
     }
 
@@ -3683,6 +3700,11 @@ mod tests {
 
     /// Afirma que la suite no compila: cada test esperado cuenta como Falla, con el aviso y sin veredicto verde.
     fn assert_no_compila(s: &Suite, esperados: &[&str]) {
+        assert_fallida_con_aviso(s, esperados, MOTIVO_NO_COMPILA);
+    }
+
+    /// Afirma que la suite falló con `aviso`: cada test esperado cuenta como Falla y no hay veredicto verde.
+    fn assert_fallida_con_aviso(s: &Suite, esperados: &[&str], aviso: &str) {
         let Suite::Clasificada(c) = s else {
             panic!("debía dar Clasificada: {s:?}");
         };
@@ -3697,7 +3719,7 @@ mod tests {
                 total: esperados.len() as u32
             }
         );
-        assert!(c.avisos.contains(&MOTIVO_NO_COMPILA.to_string()), "{c:?}");
+        assert!(c.avisos.contains(&aviso.to_string()), "{c:?}");
     }
 
     const JUNIT_VERDE_NEXTEST: &str = r#"<testsuite>
@@ -3750,6 +3772,84 @@ mod tests {
         )
         .expect("sin error de infra: no compila no es falta de junit");
         assert_no_compila(&s, &["test_a::t1", "test_a::t2"]);
+    }
+
+    #[test]
+    fn nextest_con_codigo_100_sin_junit_da_rojo_en_los_esperados() {
+        // La suite falló y no dejó junit: cada test esperado cuenta como fallado, con su aviso.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_nextest_de_prueba(
+            base.path(),
+            vec![requisito_de_prueba(
+                &["test_a::t1", "test_a::t2"],
+                &["test_a::t3"],
+            )],
+        );
+        let correr = ejecutor_nextest(100, None, XML_OCULTO);
+        let s = correr_suite_en(
+            base.path(),
+            &tarea,
+            &tarea.oculto,
+            DIR_OCULTO,
+            XML_OCULTO,
+            "oculto",
+            &BTreeSet::new(),
+            &correr,
+        )
+        .expect("sin error de infra: 100 sin junit es una suite fallida");
+        assert_fallida_con_aviso(
+            &s,
+            &["test_a::t1", "test_a::t2", "test_a::t3"],
+            MOTIVO_SUITE_SIN_JUNIT,
+        );
+    }
+
+    #[test]
+    fn nextest_con_codigo_0_sin_junit_es_infra() {
+        // Guarda: código 0 sin junit no es una suite fallida; es falta de junit, o sea infraestructura.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_nextest_de_prueba(
+            base.path(),
+            vec![requisito_de_prueba(&["test_a::t1", "test_a::t2"], &[])],
+        );
+        let correr = ejecutor_nextest(0, None, XML_OCULTO);
+        let s = correr_suite_en(
+            base.path(),
+            &tarea,
+            &tarea.oculto,
+            DIR_OCULTO,
+            XML_OCULTO,
+            "oculto",
+            &BTreeSet::new(),
+            &correr,
+        );
+        assert!(
+            matches!(&s, Err(ErrorOraculo::Infra(m)) if m.contains("no produjo /salida/")),
+            "{s:?}"
+        );
+    }
+
+    #[test]
+    fn nextest_con_codigo_100_sin_junit_sin_esperados_no_da_verde() {
+        // Sin tests esperados no hay nada que marcar como fallado: queda sin veredicto con su motivo.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_nextest_de_prueba(base.path(), Vec::new());
+        let correr = ejecutor_nextest(100, None, XML_OCULTO);
+        let s = correr_suite_en(
+            base.path(),
+            &tarea,
+            &tarea.oculto,
+            DIR_OCULTO,
+            XML_OCULTO,
+            "oculto",
+            &BTreeSet::new(),
+            &correr,
+        )
+        .expect("sin infra");
+        assert!(
+            matches!(&s, Suite::SinVeredicto(m) if m == MOTIVO_SUITE_SIN_JUNIT),
+            "{s:?}"
+        );
     }
 
     #[test]
@@ -3858,6 +3958,19 @@ mod tests {
         let correr = ejecutor_con(coleccion_de(1), Some(sin_falla), 101);
         let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
         assert!(matches!(s, Suite::SinVeredicto(_)), "{s:?}");
+    }
+
+    #[test]
+    fn pytest_sin_junit_con_codigo_1_es_infra() {
+        // Guarda: con pytest, la falta de junit sigue siendo infraestructura, como hoy.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_de_prueba(base.path());
+        let correr = ejecutor_con(coleccion_de(1), None, 1);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr);
+        assert!(
+            matches!(&s, Err(ErrorOraculo::Infra(m)) if m.contains("no produjo /salida/")),
+            "{s:?}"
+        );
     }
 
     #[test]
