@@ -6622,3 +6622,30 @@ P95, P96, P97 y P98 siguen abiertas, como están en las vueltas del 2026-11-09 (
 - **a)** La ficha declara la interfaz que usan los tests: nombre, firma y módulo de cada función nueva. La regla de fuga exime solo esos nombres. Una tarea con un nombre usado y no declarado se descarta. Recomendada: es lo que hace SWE-bench Pro, y conserva los tests reales del commit.
 - **b)** Sacar las tareas de función nueva del dataset. Quedan solo arreglos, y P94 a pierde efecto.
 - **c)** Un modelo reescribe los tests ocultos contra la API pública. Los tests dejan de ser los del commit, y su etiqueta deja de ser real.
+
+## Vuelta del 2026-11-10 (4): brief de la Tarea 81 y fuente de la interfaz
+
+**Estado.** La punta local es 6e995ae, sin push. La Tarea 80 está completa en `laptop/tarea-80` (89fe8f2), con 2808 verdes y 0 fallas. Su mezcla espera la orden del usuario. P95 a P99 siguen sin respuesta.
+
+**(f) confirmado con la librería real.** Con 1e361b8, t1 da 2 `oraculo_leido`. Con la rama de la Tarea 80, da 0 en t1, t2 y t3.
+
+**Brief escrito:** `docs/builds/brief-local-81.md`, con base 89fe8f2 y rama `laptop/tarea-81`.
+- **Punto 1, lectura guiada (c).** El estado inicial es `bootstrap/` de la tarea. Primero van los cambios con 40 líneas de contexto, y después la lectura de hoy. El total sigue en 40.000. Sin `bootstrap/`, nada cambia.
+- **Punto 2, extractos guardados** en `ResultadoJuez`, con rango y motivo.
+- **Punto 3, validación de (e).** Un hallazgo fuera de lo leído se descarta, con su motivo.
+- **Punto 4, huella en `Fila`.** En dimensiones con juez, una fila sin huella o con huella vieja no calibra.
+- **Paralelo.** Los puntos 1, 2 y 3 tocan `src/oracle/juez.rs` y van en serie. El punto 4 toca `src/oracle/calibra.rs` y corre en paralelo.
+
+**Decisiones técnicas mías:**
+- **Sin dependencias nuevas.** El diff de líneas se escribe en `cambios.rs`.
+- **Descartar, no dejar sin línea.** El gate de evidencia ya descarta citas malas. La regla de (e) sigue ese camino. Hoy no pierde ningún hallazgo: los 44 caen dentro.
+- **Efecto al mezclar la 81.** Las filas de memora y brasa en dimensiones de juez dejan de calibrar. Recalibrarlas cuesta API del hito 1, y quedan 0,17 USD. No se recalibran. El usuario lo ve al ordenar la mezcla.
+
+**Fuente de la interfaz para P99: acepto la regla del rojo, con una corrección.**
+- **Nombres:** salen de los errores de compilación del rojo. El cruce de identificadores solo avisa.
+- **Firmas:** salen de `diff.txt`, para cada nombre del rojo. El rojo da nombres, pero no siempre la firma completa. Un error de tipo aparece recién cuando el nombre existe.
+- **Visibilidad:** un E0624 entra a la interfaz como "hacer público". El caso de serie con `from_rgb` y `new` cae aquí.
+- **Chequeo de completitud mecánico.** Se arma el padre más un esbozo de cada firma con `todo!()`, y se aplica `tests.diff`. Si no compila, la interfaz está incompleta, y la tarea se descarta. Esto reemplaza el chequeo de completitud de la vuelta 73. Corre en contenedor, cuando se permita podman.
+- **P99 no cambia.** La opción a ya dice "nombre, firma y módulo". La regla del rojo es cómo se calcula.
+
+**Preguntas al usuario:** ninguna nueva.
