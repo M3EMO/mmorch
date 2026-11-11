@@ -6897,3 +6897,70 @@ Escribí `docs/builds/brief-local-83.md`, con base 5aa2dc6 y rama `laptop/tarea-
 - **Base 86f260c.** La Tarea 84 arranca sobre la 83 sin mezclar, igual que la 83 sobre la 82. Si una mezcla anterior se rechaza, la 84 se rebasa.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P100 siguen abiertas.
+
+## Vuelta del 2026-11-11 (6): informe de la Tarea 84 y Tarea 85
+
+**Estado.** La Tarea 84 está en `laptop/tarea-84` (1e68899). Su suite con podman corre ahora. La Tarea 83 dio 2884, 0 y 4 con podman. Las mezclas de la 82, la 83 y la 84 esperan la orden del usuario.
+
+## Pregunta 1: el orden se invierte
+
+**Hecho.** La credencial entra al contenedor como un archivo montado: `<copia>:/home/builder/.claude/.credentials.json:ro,Z` (`src/corre/contenedor.rs:268`). Un bind mount de un archivo apunta al inodo. Borrar la copia en el host quita el nombre, pero el inodo sigue vivo dentro del contenedor. El builder puede leer el token hasta que el contenedor muere.
+
+**Consecuencia.** Con el orden de hoy, borrar primero no protege nada mientras el contenedor vive. Solo matar el contenedor corta el acceso.
+
+**Decisión: primero el contenedor, después la copia.**
+1. Al recibir la señal, Root termina el proceso `podman run` hijo y quita los contenedores del builder por nombre, con `PLAZO_AL_SENAL`.
+2. Después borra la copia, aunque el paso 1 haya fallado o vencido su plazo.
+3. Un fallo del paso 1 se informa por stderr.
+4. Recién después sale con 130 o 143.
+
+**El error fue mío.** El brief pidió el orden al revés sin mirar cómo se monta la credencial.
+
+**Esto también cierra el hueco de la sección 3 del informe.** Si la señal llega antes de que podman registre el contenedor, quitarlo por nombre no alcanza. Terminar el hijo `podman run` sí alcanza.
+
+## Las otras 11 preguntas
+
+Todas son de diseño. Ninguna pide una pregunta nueva al usuario.
+
+2. **Salida 130 o 143 durante la evaluación:** acepto.
+3. **`src/corre/barrido.rs` fuera de la lista: se acepta.** El barrido ya existía, y el brief no lo sabía. El chequeo de `cmdline` solo cabe ahí.
+4. **Cola de colab a mitad de un carácter: se alinea.** Va junto con la pregunta 5, en la Tarea 85.
+5. **Lector de cola duplicado: se unifica en la Tarea 85.** Un solo lector de cola, alineado al borde de carácter, como `recortar_cola`.
+6. **`leer_en_hilo` con `#[cfg(test)]`:** acepto.
+7. **`STEP` antepuesto al stdout: cambia a un campo.** Mezclar texto reordenado en el stdout confunde al próximo lector. `SalidaPodman` suma `paso: Option<String>`, y `clasificar_fallo` lo usa. La Tarea 85 puede tocar los literales de `SalidaPodman`.
+8. **Tope de 64 KiB para la línea `STEP`:** acepto.
+9. **La base se repite solo si trae ítems del juez:** acepto. Es la misma señal, sin cambiar firmas.
+10. **`inestable` como texto y normalización al cargar:** acepto.
+11. **Prefijo duplicado: se unifica en la Tarea 85.**
+12. **`Presupuesto` con un solo campo:** se queda. Un struct con nombre explica más que un `Option<f64>`.
+
+**Dos huecos del barrido que también se cierran en la Tarea 85:**
+- **`cmdline` ilegible:** hoy cuenta como vivo. Un `cmdline` ilegible es de otro usuario, así que no es un `r00t` nuestro. Se barre.
+- **pid reusado por otro `r00t`:** el id de la corrida trae sus segundos de inicio. Si el proceso con ese pid empezó después, no es la misma corrida. Se barre.
+
+**El comentario de `MAX_ENTRADA_JUEZ_BYTES`** habla de la cota borrada. Se corrige en la Tarea 85.
+
+## Tarea 85
+
+Brief: `docs/builds/brief-local-85.md`, con base 1e68899 y rama `laptop/tarea-85`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Orden de la señal: contenedor primero, después la copia | `src/corre/corrida.rs`, `src/corre/ejecutor.rs` |
+| 2 | Barrido: `cmdline` ilegible y pid reusado | `src/corre/barrido.rs` |
+| 3 | Lector de cola único, alineado al carácter | `src/oracle/contenedor.rs`, `src/oracle/colab.rs` |
+| 4 | `SalidaPodman.paso` en vez del `STEP` antepuesto | `src/oracle/contenedor.rs`, `src/oracle/entrega.rs`, y los literales de `SalidaPodman` |
+| 5 | Prefijo único y comentario de `MAX_ENTRADA_JUEZ_BYTES` | `src/oracle/calibra.rs`, `src/oracle/calibra/inestables.rs`, `src/oracle/juez.rs` |
+
+- El punto 4 va después del 3: comparten `contenedor.rs`.
+- Los puntos 1, 2 y 5 corren en paralelo.
+
+## Qué sigue después de las mezclas
+
+1. **Calibrar Seguridad en t1.** Es solo de sondas: 0 USD de API. Verifica de punta a punta que la base se juzga una sola vez sin juez. El informe de la 84 dice que eso no se probó.
+2. **Calibrar Diseño y Arquitectura en t1,** con P80. Cuesta cerca de 0,45 USD, y quedan 2,56. Mide la regla de estabilidad y el control por llamada con datos reales.
+3. **Con esos datos,** reviso el escenario B de D4: cuántas dimensiones de juez quedan estables por tarea.
+4. **HIGH 3 de la revisión de cierre,** el repo que apaga sondas con `.gitleaks.toml` y otros archivos. Necesita probar las herramientas reales con podman. Va en una tarea aparte.
+5. **El dataset sigue frenado** por P97 y P99. El final, por P98.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P100 siguen abiertas.
