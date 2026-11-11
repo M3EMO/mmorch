@@ -1974,6 +1974,7 @@ mod tests {
                 (self.codigo, self.stdout.clone())
             };
             Ok(SalidaPodman {
+                paso: None,
                 codigo,
                 stdout,
                 stderr: String::new(),

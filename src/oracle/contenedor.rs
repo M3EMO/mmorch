@@ -221,6 +221,8 @@ pub(crate) struct SalidaPodman {
     pub(crate) codigo: i32,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
+    /// Última línea `STEP k/n:` del stdout, aunque la cola de 1 MiB ya la haya perdido.
+    pub(crate) paso: Option<String>,
 }
 
 /// Turno de los contenedores (Tarea 48, parte 2): un solo `podman` corre trabajo a la vez. Lo toma cada
@@ -287,10 +289,12 @@ fn correr_comando(
     let Some(codigo) = estado.code() else {
         return Err(ErrorOraculo::Infra("podman terminó por una señal".into()));
     };
+    let (stdout, paso) = recoger_salida(salida);
     Ok(SalidaPodman {
         codigo,
-        stdout: recoger_salida(salida),
+        stdout,
         stderr: recoger(error),
+        paso,
     })
 }
 
@@ -518,22 +522,13 @@ pub(crate) fn recoger(hilo: Option<JoinHandle<Vec<u8>>>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Da el stdout de `podman` con la línea `STEP` que la cola perdió, si hubo una.
+/// Da la cola del stdout de `podman` y la última línea `STEP` que vio el lector, si hubo una.
 ///
-/// `clasificar_fallo` busca el último `STEP` de la salida. Un build con más de 1 MiB después de su
-/// `STEP` deja la cola sin ese `STEP`. Sin la línea, el fallo parecería un arranque de podman fallido.
-/// Por eso se antepone la línea guardada. Si la cola ya trae un `STEP`, no se toca.
-fn recoger_salida(hilo: Option<JoinHandle<(Vec<u8>, Option<String>)>>) -> String {
-    let (bytes, step) = hilo.and_then(|h| h.join().ok()).unwrap_or_default();
-    anteponer_step(String::from_utf8_lossy(&bytes).into_owned(), step)
-}
-
-/// Antepone `step` seguido de `\n` a `cola`, solo si `cola` no tiene ninguna línea `STEP`.
-fn anteponer_step(cola: String, step: Option<String>) -> String {
-    match step {
-        Some(linea) if !cola.lines().any(es_linea_step) => format!("{linea}\n{cola}"),
-        _ => cola,
-    }
+/// La cola va cruda. Un build con más de 1 MiB después de su `STEP` deja la cola sin ese `STEP`.
+/// Esa línea viaja aparte, en `paso`. `clasificar_fallo` la usa si la cola no trae ningún `STEP`.
+fn recoger_salida(hilo: Option<JoinHandle<(Vec<u8>, Option<String>)>>) -> (String, Option<String>) {
+    let (bytes, paso) = hilo.and_then(|h| h.join().ok()).unwrap_or_default();
+    (String::from_utf8_lossy(&bytes).into_owned(), paso)
 }
 
 /// Parte de una línea `STEP k/n: texto`. Da el texto sin normalizar, o `None` si la línea no es un paso.
@@ -1183,34 +1178,16 @@ mod tests {
     }
 
     #[test]
-    fn anteponer_step_agrega_la_linea_si_la_cola_no_la_trae() {
-        let salida = anteponer_step("yyy\n".to_string(), Some("STEP 3/3: RUN x".into()));
-        assert_eq!(salida, "STEP 3/3: RUN x\nyyy\n");
-    }
-
-    #[test]
-    fn anteponer_step_no_agrega_nada_si_la_cola_ya_trae_un_step() {
-        let cola = "STEP 1/1: RUN x\nerror\n".to_string();
-        let salida = anteponer_step(cola.clone(), Some("STEP 1/1: RUN x".into()));
-        assert_eq!(salida, cola);
-    }
-
-    #[test]
-    fn anteponer_step_sin_step_guardado_deja_la_cola() {
-        assert_eq!(anteponer_step("hola\n".to_string(), None), "hola\n");
-    }
-
-    #[test]
-    fn contenedor_correr_comando_antepone_el_step_que_la_cola_perdio() {
+    fn contenedor_correr_comando_guarda_el_step_que_la_cola_perdio_en_paso() {
         let mut comando = Command::new("sh");
         comando.args([
             "-c",
-            "printf 'STEP 3/3: RUN x\\n'; head -c 2500000 /dev/zero | tr '\\0' y; echo",
+            "printf 'STEP 3/5: RUN x\\n'; head -c 2500000 /dev/zero | tr '\\0' y; echo",
         ]);
         let salida = correr_comando(comando, "sh", Duration::from_secs(30)).expect("corre");
-        let prefijo = "STEP 3/3: RUN x\n";
-        assert!(salida.stdout.starts_with(prefijo));
-        assert_eq!(salida.stdout.len(), MIB + prefijo.len());
+        assert_eq!(salida.paso.as_deref(), Some("STEP 3/5: RUN x"));
+        assert!(!salida.stdout.starts_with("STEP"));
+        assert_eq!(salida.stdout.len(), MIB);
     }
 
     #[test]

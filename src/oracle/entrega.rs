@@ -629,6 +629,7 @@ enum Desenlace {
 /// Separa un fallo de build en falta de red, imagen base ausente, o producto que no construye.
 /// Sin ningún `STEP` en la salida, podman no empezó: es infraestructura. Si el texto del paso que
 /// falló no está en una sola instrucción del Dockerfile, la construcción queda sin veredicto.
+/// Si la cola perdió el `STEP`, sirve el que guardó el lector en `paso`.
 fn clasificar_fallo(
     build: &SalidaPodman,
     archivo: &str,
@@ -636,7 +637,9 @@ fn clasificar_fallo(
     reqs: &[Requisito],
 ) -> Result<Desenlace, ErrorOraculo> {
     let salida = format!("{}\n{}", build.stdout, build.stderr);
-    let Some(paso) = texto_paso_fallido(&salida) else {
+    let ultimo_paso =
+        texto_paso_fallido(&salida).or_else(|| build.paso.as_deref().and_then(texto_de_linea_step));
+    let Some(paso) = ultimo_paso else {
         let ultima = build.stderr.lines().rev().find(|l| !l.trim().is_empty());
         let detalle = ultima.unwrap_or("sin salida de error").trim().to_string();
         return Err(ErrorOraculo::Infra(format!(
@@ -1062,6 +1065,7 @@ fn recortar_salida(salida: SalidaPodman) -> SalidaPodman {
         codigo: salida.codigo,
         stdout: recortar_cola(salida.stdout),
         stderr: recortar_cola(salida.stderr),
+        paso: salida.paso,
     }
 }
 
@@ -2035,6 +2039,7 @@ pub(crate) mod tests {
             .collect();
         let fallido = pasos.last().copied().unwrap_or("");
         SalidaPodman {
+            paso: None,
             codigo: 1,
             stdout,
             stderr: format!(
@@ -2153,11 +2158,49 @@ pub(crate) mod tests {
     #[test]
     fn entrega_sin_step_en_la_salida_es_infraestructura() {
         let salida = SalidaPodman {
+            paso: None,
             codigo: 125,
             stdout: String::new(),
             stderr: "Error: creating build container: x: image not known\n".into(),
         };
         assert!(clasificar_fallo(&salida, "Dockerfile", "FROM x\n", &[]).is_err());
+    }
+
+    #[test]
+    fn entrega_paso_guardado_clasifica_si_la_cola_perdio_el_step() {
+        // La cola de 1 MiB no trae ningún STEP: el último paso llega por `paso`.
+        let salida = SalidaPodman {
+            codigo: 1,
+            stdout: "yyy\n".into(),
+            stderr: "causa\n".into(),
+            paso: Some("STEP 2/2: RUN a".into()),
+        };
+        match clasifica(&salida, "FROM x\nRUN a\n") {
+            Desenlace::Hallazgo(h) => assert!(
+                h.detalle.contains("la imagen no construye: línea 2"),
+                "{}",
+                h.detalle
+            ),
+            otro => panic!("debía dar hallazgo, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_si_la_cola_trae_un_step_manda_la_cola_y_no_paso() {
+        let salida = SalidaPodman {
+            codigo: 1,
+            stdout: "STEP 3/3: RUN b\n".into(),
+            stderr: "causa\n".into(),
+            paso: Some("STEP 2/3: RUN a".into()),
+        };
+        match clasifica(&salida, "FROM x\nRUN a\nRUN b\n") {
+            Desenlace::Hallazgo(h) => assert!(
+                h.detalle.contains("la imagen no construye: línea 3"),
+                "{}",
+                h.detalle
+            ),
+            otro => panic!("debía dar hallazgo, no {}", nombre(&otro)),
+        }
     }
 
     fn nombre(d: &Desenlace) -> &'static str {
@@ -2342,6 +2385,7 @@ pub(crate) mod tests {
     /// Salida de `podman build` sin red: el `RUN` de la línea 2 falla por el DNS.
     pub(crate) fn salida_sin_red() -> SalidaPodman {
         SalidaPodman {
+            paso: None,
             codigo: 1,
             stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
             stderr: "Temporary failure in name resolution\n".into(),
@@ -2351,6 +2395,7 @@ pub(crate) mod tests {
     /// Salida de un comando que sale 0.
     pub(crate) fn salida_ok() -> SalidaPodman {
         SalidaPodman {
+            paso: None,
             codigo: 0,
             stdout: String::new(),
             stderr: String::new(),
@@ -2414,11 +2459,13 @@ pub(crate) mod tests {
             "build" if es_build_con_red(args) => con_red.clone(),
             "build" => sin_red.clone(),
             "run" if args.contains(&"id") => SalidaPodman {
+                paso: None,
                 codigo: 0,
                 stdout: "1000\n".into(),
                 stderr: String::new(),
             },
             "image" => SalidaPodman {
+                paso: None,
                 codigo: 0,
                 stdout: "app\n".into(),
                 stderr: String::new(),
@@ -2765,6 +2812,7 @@ pub(crate) mod tests {
         let repo = repo_con_archivos(&[("Dockerfile", DF)]);
         let home = tempfile::tempdir().expect("home");
         let sin_red = SalidaPodman {
+            paso: None,
             codigo: 1,
             stdout: "STEP 1/3: FROM debian:12\nSTEP 2/3: RUN echo listo\nSTEP 3/3: RUN apt-get install -y curl\n"
                 .into(),
@@ -2801,6 +2849,7 @@ pub(crate) mod tests {
         let home = tempfile::tempdir().expect("home");
         // El build con red falla por un error que no es de red: el `RUN` no construye.
         let con_red_falla = SalidaPodman {
+            paso: None,
             codigo: 1,
             stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
             stderr: "E: Unable to locate package curl\n".into(),
@@ -2835,6 +2884,7 @@ pub(crate) mod tests {
         )]);
         let home = tempfile::tempdir().expect("home");
         let sin_imagen = SalidaPodman {
+            paso: None,
             codigo: 1,
             stdout: "STEP 1/2: FROM localhost/no-existe:9\n".into(),
             stderr: "Error: creating build container: localhost/no-existe:9: image not known\n"
@@ -2897,6 +2947,7 @@ pub(crate) mod tests {
     /// Salida de `podman build` con red cuando podman no puede armar la red del `RUN` (sin `slirp4netns`).
     fn salida_red_no_configurada() -> SalidaPodman {
         SalidaPodman {
+            paso: None,
             codigo: 1,
             stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
             stderr: "Error: building at STEP \"RUN apt-get install -y curl\": setup network: could not find slirp4netns, the network namespace can't be configured: exec: \"slirp4netns\": executable file not found in $PATH\n".into(),
@@ -2945,6 +2996,7 @@ pub(crate) mod tests {
         let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
         let home = tempfile::tempdir().expect("home");
         let pasta_falla = SalidaPodman {
+            paso: None,
             codigo: 125,
             stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
             stderr: "Error: creating network: pasta: executable file not found in $PATH\n".into(),
@@ -2983,6 +3035,7 @@ pub(crate) mod tests {
         let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
         let home = tempfile::tempdir().expect("home");
         let error_paquetes = SalidaPodman {
+            paso: None,
             codigo: 1,
             stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
             stderr: "ERROR: unable to select packages:\n  curl (no such package)\n".into(),
@@ -3036,6 +3089,7 @@ pub(crate) mod tests {
         let home = tempfile::tempdir().expect("home");
         // Podman rechaza la opción de red: sale 125 sin ningún STEP.
         let rechazo = SalidaPodman {
+            paso: None,
             codigo: 125,
             stdout: String::new(),
             stderr: "Error: invalid network option\n".into(),
@@ -3110,6 +3164,7 @@ pub(crate) mod tests {
         const SALIDA_ADD: &str =
             "STEP 1/3: FROM debian:12\nSTEP 2/3: ADD https://ejemplo.com/x.tar.gz /x\n";
         let sin_red = SalidaPodman {
+            paso: None,
             codigo: 1,
             stdout: SALIDA_ADD.into(),
             stderr: "dial tcp: lookup ejemplo.com: Temporary failure in name resolution\n".into(),
@@ -3450,6 +3505,7 @@ pub(crate) mod tests {
     #[test]
     fn entrega_salida_de_podman_recorta_stdout_y_stderr() {
         let salida = recortar_salida(SalidaPodman {
+            paso: None,
             codigo: 1,
             stdout: format!("{}FIN", "o".repeat(2 * COLA)),
             stderr: format!("{}ERR", "e".repeat(2 * COLA)),

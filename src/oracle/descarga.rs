@@ -1306,6 +1306,7 @@ fn correr_podman_acotado(args: &[&str], plazo: Duration) -> Result<SalidaPodman,
         return Err(ErrorOraculo::Infra("podman terminó por una señal".into()));
     };
     Ok(SalidaPodman {
+        paso: None,
         codigo,
         stdout: contenedor::recoger(salida),
         stderr: contenedor::recoger(error),

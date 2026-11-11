@@ -6900,6 +6900,7 @@ mod tests {
     /// Salida de un `RUN false` que falla dentro de la imagen, con el paso 2 de 2.
     fn salida_run_falso() -> SalidaPodman {
         SalidaPodman {
+            paso: None,
             codigo: 1,
             stdout: "STEP 1/2: FROM scratch\nSTEP 2/2: RUN false\n".into(),
             stderr: "Error: building at STEP \"RUN false\": exit status 1\n".into(),
