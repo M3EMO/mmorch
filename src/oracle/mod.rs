@@ -3,6 +3,7 @@
 pub mod auditar;
 pub mod calibra;
 mod cambios;
+pub mod capas;
 pub mod colab;
 pub mod configs;
 pub mod contenedor;

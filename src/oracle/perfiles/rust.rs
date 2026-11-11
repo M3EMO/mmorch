@@ -143,11 +143,7 @@ pub fn arquitectura_nativa(
     let presentes = modulos_presentes(&archivos);
     let mut hallazgos = capas_sin_modulo(capas, &modulos, &presentes, requisitos);
     let aristas = aristas_de_capas(&archivos, &modulos);
-    // Los ciclos no cuentan las aristas hacia la raíz: usar un ítem de la raíz que declara el módulo es Rust normal.
-    let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (origen, destino) in aristas.keys().filter(|(_, d)| modulos.contains(d)) {
-        adj.entry(origen.clone()).or_default().push(destino.clone());
-    }
+    let adj = adyacencias(&aristas, &modulos);
     for modulo in &modulos {
         let Some(camino) = ciclo_de(modulo, &adj) else {
             continue;
@@ -213,7 +209,7 @@ pub(crate) fn modulos_presentes(archivos: &[Archivo]) -> BTreeSet<String> {
 }
 
 /// Los fuentes que una sonda necesita. Un error de lectura o un repo sin `.rs` no da veredicto (A9).
-fn fuentes_o_sin_veredicto(
+pub(crate) fn fuentes_o_sin_veredicto(
     repo: &Path,
     dimension: Dimension,
 ) -> Result<Vec<Archivo>, ResultadoSonda> {
@@ -515,7 +511,7 @@ pub(crate) fn aristas_entre_modulos(
 
 /// Aristas de la regla de capas: como `aristas_entre_modulos`, pero la raíz (`main`, `lib`) también es origen,
 /// y un `crate::X` con X que no es módulo es una arista hacia la raíz que declara el módulo de origen.
-fn aristas_de_capas(
+pub(crate) fn aristas_de_capas(
     archivos: &[Archivo],
     modulos: &BTreeSet<String>,
 ) -> BTreeMap<(String, String), Uso> {
@@ -620,8 +616,21 @@ fn ciclo_de(modulo: &str, adj: &BTreeMap<String, Vec<String>>) -> Option<Vec<Str
     camino_de_vuelta(modulo, adj, &miembros)
 }
 
+/// Grafo de módulos: `origen -> destinos`, solo con destinos que son módulos. Las aristas hacia la raíz no
+/// entran: usar un ítem de la raíz que declara el módulo es Rust normal.
+pub(crate) fn adyacencias(
+    aristas: &BTreeMap<(String, String), Uso>,
+    modulos: &BTreeSet<String>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (origen, destino) in aristas.keys().filter(|(_, d)| modulos.contains(d)) {
+        adj.entry(origen.clone()).or_default().push(destino.clone());
+    }
+    adj
+}
+
 /// Módulos que se alcanzan desde `desde` siguiendo al menos una arista.
-fn alcanzables(desde: &str, adj: &BTreeMap<String, Vec<String>>) -> BTreeSet<String> {
+pub(crate) fn alcanzables(desde: &str, adj: &BTreeMap<String, Vec<String>>) -> BTreeSet<String> {
     let mut visto = BTreeSet::new();
     let mut cola = VecDeque::from([desde.to_string()]);
     while let Some(x) = cola.pop_front() {

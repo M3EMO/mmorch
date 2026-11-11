@@ -47,6 +47,9 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
             accion: OraculoAccion::Informe { tarea, repo, md },
         } => oraculo_informe(tarea, repo, *md),
         Comando::Oraculo {
+            accion: OraculoAccion::Capas { repo, tarea },
+        } => oraculo_capas(cli.json, repo, tarea.as_deref()),
+        Comando::Oraculo {
             accion:
                 OraculoAccion::Calibrar {
                     tarea,
@@ -321,6 +324,34 @@ fn oraculo_informe(nombre: &str, repo: &Path, md: bool) -> Result<u8, Error> {
         println!("{}", serde_json::to_string_pretty(informe)?);
     }
     Ok(oracle::codigo_de_estado(veredicto.estado))
+}
+
+/// `oraculo capas`: sin `--tarea`, propone las capas del repo. Con `--tarea`, verifica las capas de la tarea:
+/// sale con 1 si no pasan. Las copias de prueba van a `ROOT_HOME/tmp` y se borran al terminar.
+fn oraculo_capas(json: bool, repo: &Path, tarea: Option<&str>) -> Result<u8, Error> {
+    let Some(nombre) = tarea else {
+        let propuesta = oracle::capas::proponer_capas(repo).map_err(Error::Uso)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&propuesta)?);
+        } else {
+            println!("{}", oracle::capas::linea_toml(&propuesta.capas));
+        }
+        return Ok(0);
+    };
+    let tarea = Tarea::cargar(nombre)?;
+    let capas = tarea.arquitectura.map(|a| a.capas).unwrap_or_default();
+    let trabajo = config::root_home().join("tmp");
+    let veredicto = oracle::capas::verificar_capas(repo, &capas, &trabajo);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&veredicto)?);
+    } else if veredicto.fallas.is_empty() {
+        println!("{nombre}: las capas pasan la verificación");
+    } else {
+        for falla in &veredicto.fallas {
+            println!("falla: {falla}");
+        }
+    }
+    Ok(if veredicto.fallas.is_empty() { 0 } else { 1 })
 }
 
 /// `oraculo auditar`: valida `--tope-usd`, audita el repo y muestra un resumen. Los errores de uso salen con 2.
