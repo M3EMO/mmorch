@@ -407,11 +407,18 @@ fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     salida
 }
 
-/// Reglas de no listo: un test oculto o del contrato que falla y ningún requisito prueba, la completitud con
-/// veredicto bajo su mínimo, y una dimensión calibrada bajo su mínimo de `[decision.minimo]`. Una completitud
-/// sin veredicto no dispara aquí: `sin_decision` la cubre si no hay evidencia.
+/// Reglas de no listo: un producto que no compila, un test oculto o del contrato que falla y ningún requisito
+/// prueba, la completitud con veredicto bajo su mínimo, y una dimensión calibrada bajo su mínimo de
+/// `[decision.minimo]`. Una completitud sin veredicto no dispara aquí: `sin_decision` la cubre si no hay evidencia.
 fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Disparo> {
     let mut salida = Vec::new();
+    if v.no_compila {
+        salida.push(Disparo {
+            regla: "el producto no compila".into(),
+            frase: "El producto no compila, así que no está listo.".into(),
+            hallazgo: None,
+        });
+    }
     for id in tests_fuera_de_requisitos(v, tarea) {
         salida.push(Disparo {
             regla: format!("test_oculto_fuera_de_requisitos: {id}"),
@@ -1939,6 +1946,58 @@ modulos = ["config"]
             "{}",
             i.motivo
         );
+    }
+
+    #[test]
+    fn informe_no_compila_sin_bloqueos_da_no_listo_con_su_disparo() {
+        let mut v = ecc();
+        v.no_compila = true;
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(i.motivo.contains("el producto no compila"), "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_no_compila_con_secreto_da_bloqueado() {
+        let mut v = ecc();
+        v.no_compila = true;
+        v.puntajes[1].items.push(NivelItem {
+            item: "seguridad.secretos".into(),
+            nivel: 0,
+            evidencia: Vec::new(),
+            fuente: Fuente::Sonda("rubrica".into()),
+        });
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_veredicto_viejo_sin_no_compila_lee_false_y_no_cambia_la_decision() {
+        let base = ecc();
+        let mut json = serde_json::to_value(&base).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("no_compila")
+            .expect("el campo existe al serializar");
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee un veredicto viejo");
+        assert!(!viejo.no_compila);
+        let decision_base = informe_de(&base).decision;
+        let decision_viejo = informe_de(&viejo).decision;
+        assert_eq!(decision_viejo, decision_base);
     }
 
     #[test]

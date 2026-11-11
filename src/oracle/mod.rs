@@ -875,6 +875,7 @@ fn evaluar_con(
         contrato_fallidos: fallidos_de(&contrato),
         hallazgos_descartados: medicion.hallazgos_descartados,
         extractos: medicion.extractos,
+        no_compila: false,
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
     let redactor_medido = deps

@@ -446,6 +446,9 @@ pub struct Veredicto {
     /// Ventanas que leyó el juez de diseño, sin su texto. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub extractos: Vec<ExtractoGuardado>,
+    /// El producto no compila: la suite del contrato salió con 101 bajo nextest. Un veredicto viejo lee false.
+    #[serde(default)]
+    pub no_compila: bool,
 }
 
 impl Default for Veredicto {
@@ -478,6 +481,7 @@ impl Default for Veredicto {
             contrato_fallidos: Vec::new(),
             hallazgos_descartados: Vec::new(),
             extractos: Vec::new(),
+            no_compila: false,
         }
     }
 }
@@ -697,6 +701,7 @@ mod tests {
             contrato_fallidos: Vec::new(),
             hallazgos_descartados: Vec::new(),
             extractos: Vec::new(),
+            no_compila: false,
         }
     }
 

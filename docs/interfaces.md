@@ -2927,6 +2927,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           ],
           "default": null
         },
+        "no_compila": {
+          "description": "El producto no compila: la suite del contrato salió con 101 bajo nextest. Un veredicto viejo lee false.",
+          "type": "boolean",
+          "default": false
+        },
         "oculto": {
           "$ref": "#/$defs/Conteo"
         },
@@ -5473,6 +5478,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         }
       ],
       "default": null
+    },
+    "no_compila": {
+      "description": "El producto no compila: la suite del contrato salió con 101 bajo nextest. Un veredicto viejo lee false.",
+      "type": "boolean",
+      "default": false
     },
     "oculto": {
       "$ref": "#/$defs/Conteo"
