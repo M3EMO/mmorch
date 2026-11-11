@@ -50,3 +50,42 @@ Los tests de detector perfecto y nulo no cambiaron.
 7. **¿El formato del texto es redundante?** La línea muestra "limpios n" y "limpios con veredicto k de n". Decisión: sin cambio.
 8. **¿`detecta_item` debe devolver `None` para un limpio sin veredicto?** Hoy devuelve `Some(false)`. Se filtró en `fila_de`. Decisión: sin cambio.
 9. **¿Qué pasa si todos los limpios no tienen veredicto?** `exactitud_balanceada` queda `None` y la dimensión no calibra. Es coherente con la regla. Decisión: sin cambio.
+
+## Punto 3 (respuestas 5 y 8 del planner)
+
+### Cambio
+
+- `muestra_suficiente` (`src/oracle/calibra.rs`) cuenta `limpios - limpios_sin_veredicto` contra `MIN_LIMPIOS`.
+- Usa `saturating_sub`: una fila con más sin veredicto que limpios no alcanza el mínimo.
+- Las filas guardadas no se recalculan.
+- Un solo subagente Haiku construyó el cambio. Yo revisé el diff y corrí la suite.
+
+| Parte | Tests vistos en rojo | Commit |
+|---|---|---|
+| `muestra_suficiente` | `muestra_suficiente_no_cuenta_limpios_sin_veredicto` (5 defectos, 5 limpios, 1 sin veredicto: no es suficiente) | ver `git log` |
+
+- Guarda: `muestra_suficiente_con_limpios_con_veredicto_suficientes` (6 limpios, 1 sin veredicto: sí es suficiente). Pasó en rojo y en verde.
+- Ningún test existente cambió de valor.
+
+### Llamadores de `detecta_item`
+
+- No hay índice de codegraph en este worktree (`CodeGraph not initialized`). Usé solo `grep -rnw detecta_item src tests`, como pide el brief.
+- Hay cuatro llamadores. Ningún cambio de código fue necesario.
+
+| Llamador | ¿Un limpio sin veredicto cuenta como negativo? | Resultado |
+|---|---|---|
+| `src/oracle/calibra.rs:1711` (llena `caso.items`) | Solo si `fila_de` lo deja pasar. `fila_de` filtra `c.sin_veredicto.is_none()` en los negativos por ítem. | Cubierto por el filtro del punto 2. |
+| `src/oracle/calibra/defectos.rs:257` | No. Pasa `es_defecto = true` sobre un defecto inyectado. | `Some(false)` sin veredicto hace fallar el assert: es correcto. |
+| `src/oracle/calibra/estables.rs:359` | No. Test con `es_defecto = true`. | Sin cambio. |
+| `src/oracle/calibra/estables.rs:384` | No. Test con `es_defecto = true`. | Sin cambio. |
+
+- Cobertura del filtro por ítem en `fila_de`: los tests de especificidad `calibra_un_limpio_sin_veredicto_deja_especificidad_none` y `calibra_limpio_sin_veredicto_mas_limpio_que_detecta_da_especificidad_0` miran la fila entera. No hay un test propio del ítem. No lo agregué: el planner no lo pidió.
+
+### Suite
+
+- `tools/test-seguro.sh` con `ROOT_SIN_PODMAN=1`: 2237 tests de la librería pasan, 0 fallan.
+- `cargo test` directo falla un test de `mcp` por falta de `ROOT_HOME`. No tiene relación con este cambio.
+
+### Preguntas para el planner
+
+- Ninguna nueva.

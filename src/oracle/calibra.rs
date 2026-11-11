@@ -1883,9 +1883,11 @@ fn proporcion(aciertos: u32, total: u32) -> Option<f32> {
     (total > 0).then(|| aciertos as f32 / total as f32)
 }
 
-/// Una fila calibra solo con muestra mínima: defectos y limpios por encima de sus mínimos.
+/// Una fila calibra solo con muestra mínima de defectos y de limpios CON veredicto.
+/// Los limpios sin veredicto no cuentan para el mínimo de limpios.
 fn muestra_suficiente(fila: &Fila) -> bool {
-    fila.defectos >= MIN_DEFECTOS_APLICABLES && fila.limpios >= MIN_LIMPIOS
+    fila.defectos >= MIN_DEFECTOS_APLICABLES
+        && fila.limpios.saturating_sub(fila.limpios_sin_veredicto) >= MIN_LIMPIOS
 }
 
 /// Media de sensibilidad y especificidad. `None` si cualquiera de las dos no tiene casos.
@@ -3850,6 +3852,28 @@ mod tests {
 
     fn fila_de_prueba(tarea: &str, ts: f64) -> Fila {
         fila(tarea, Dimension::Seguridad, ts, Some(0.95))
+    }
+
+    #[test]
+    fn muestra_suficiente_no_cuenta_limpios_sin_veredicto() {
+        let f = Fila {
+            defectos: MIN_DEFECTOS_APLICABLES,
+            limpios: 5,
+            limpios_sin_veredicto: 1,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        };
+        assert!(!muestra_suficiente(&f));
+    }
+
+    #[test]
+    fn muestra_suficiente_con_limpios_con_veredicto_suficientes() {
+        let f = Fila {
+            defectos: MIN_DEFECTOS_APLICABLES,
+            limpios: 6,
+            limpios_sin_veredicto: 1,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        };
+        assert!(muestra_suficiente(&f));
     }
 
     #[test]
