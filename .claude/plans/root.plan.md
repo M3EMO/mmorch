@@ -6523,3 +6523,102 @@ P95, P96 y P97 siguen abiertas, tal como están en la vuelta del 2026-11-09 (4).
 **Después de mezclar:** el orquestador corre la suite con podman, y la detección offline de (f) sobre el transcript de t1 con el binario nuevo.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-10 (3): preguntas de la Tarea 80, techo del juez y fichas de función nueva
+
+**Estado.** La punta local es 1e361b8, sin push. La Tarea 80 está en `laptop/tarea-80`, con la suite verde: 2806 verdes, 0 fallas. La mezcla espera la orden del usuario. P95, P96, P97 y P98 siguen sin respuesta.
+
+## 1. Las 9 preguntas de la Tarea 80
+
+1. **Aviso como `Gate` después del id de la corrida:** acepto.
+2. **El aviso se repite al reanudar:** acepto. Es ruido menor, y deduplicarlo no cambia ninguna medición.
+3. **Un `Gate` no invalida la corrida:** correcto. Una huella vacía no prueba que el builder leyó el oráculo. Solo dice que la detección quedó más débil.
+4. **Los nombres de archivo de `bootstrap/` cuentan como visibles:** acepto. Es la misma regla que en `contrato/`.
+5. **`muestra_suficiente` cuenta todos los limpios: cambia.** Hoy una fila calibra con 5 limpios, aunque uno no tenga veredicto. Eso contradice (g): un limpio sin veredicto no mide nada.
+   - **Arreglo:** `muestra_suficiente` (`src/oracle/calibra.rs:1887` en la rama) usa `limpios - limpios_sin_veredicto` contra `MIN_LIMPIOS`.
+   - **Test en rojo primero:** una fila con 5 defectos, 5 limpios y 1 sin veredicto no es suficiente. Con 6 limpios y 1 sin veredicto, sí.
+   - **Destino:** punto 3 de la Tarea 80, en la misma rama, antes de mezclar. Solo toca `src/oracle/calibra.rs`.
+   - Las filas guardadas no se recalculan.
+6. **`calibra::texto_especificidad`:** acepto. Está dentro de los archivos permitidos, y permite testear el texto.
+7. **"limpios n" junto a "k de n":** acepto. Lo redundante ayuda a leer la fila sola.
+8. **`detecta_item` devuelve `Some(false)` para un limpio sin veredicto: se revisa.**
+   - El filtro de `fila_de` cubre la especificidad por ítem.
+   - `detecta_item` tiene otros llamadores: `src/oracle/calibra/defectos.rs:257` y `src/oracle/calibra/estables.rs:359` y `:384`.
+   - **Pedido, en el mismo punto 3:** unir los llamadores de `codegraph callers detecta_item` y `grep -w detecta_item`. En cada uno, decir si un limpio sin veredicto cuenta como negativo. Si cuenta, un test en rojo y el mismo filtro. Si no cuenta, una línea en el informe.
+9. **Sin limpios con veredicto, la dimensión no calibra:** correcto.
+
+**Informe del punto 3:** una sección nueva en `docs/builds/informe-local-80.md`.
+
+## 2. El techo del juez y D4
+
+**Lo que mide el techo.**
+- Hoy, 4 de 24 defectos de Vd caen dentro de lo que lee el juez. El techo de recall del juez es 0,167.
+- Con el doble de lectura por archivo y el mismo total, sube a 8 de 24. Pero 7 de los 44 hallazgos del juez quedan afuera, porque otros archivos pierden lugar.
+- Con el doble por archivo y 80.000 caracteres en total, sube a 11 de 24: 0,458.
+- 6 defectos están en `hashes.rs` y `sets.rs`. Ningún extracto los incluye.
+- Los 44 hallazgos del juez caen dentro de un extracto. El juez no inventa líneas. (e) es solo un efecto de la ventana.
+
+**Conclusión: leer más del comienzo de los archivos no lleva al juez a 0,8.** Aun con el doble de costo de entrada, el techo queda debajo de 0,5.
+
+**Qué cambia.**
+1. **Se separan dos papeles.** El juez evalúa rúbricas de un cambio. El buscador de defectos es V3, archivo por archivo. D4 mide la curva de recall con V3, no con el juez.
+2. **El arreglo de (c) cambia.** Se descarta la lectura ampliada a 80.000. Queda la lectura guiada por el cambio, con el mismo total de 40.000. Primero los trozos cambiados con 40 líneas de contexto. Después, el comienzo de los archivos grandes.
+3. **Por qué la lectura guiada no es trampa en Root.** Root evalúa un cambio, y conoce su diff. En la medición del buscador sí sería trampa: el diff de un sembrado marca el defecto. Por eso el juez no mide recall de búsqueda.
+4. **El costo de D4 baja.** El escenario B queda en 29 USD, con banda de 24 a 35, sin el multiplicador de 1,4. Entra en los 38,4 USD que quedan.
+5. **La validación de (e) queda,** aunque hoy no tiene ningún caso. Cuesta poco, y cuida la lectura guiada.
+6. **El test de aceptación de (c) no cambia:** en t1, `calibrar` de Arquitectura y Diseño da línea base.
+
+**Tarea 81, hito 1b:** (c) con lectura guiada, los extractos guardados en el veredicto, la validación de (e) y la huella de prompt en `Fila`. No pide pregunta al usuario. Escribo el brief cuando el orquestador lo pida.
+
+## 3. El choque de las fichas de función nueva
+
+**El problema es real.** En las 6 tareas, los tests ocultos llaman funciones nuevas que la ficha no nombra. Un builder que sigue la ficha elige otros nombres, y el oculto no compila. La tarea mide suerte, no trabajo.
+
+**Las tres salidas que ves:**
+- **Declarar la interfaz en la ficha.** La ficha nombra cada función nueva que usan los tests, con su firma. La fuga exime solo esos nombres. Es lo que hace SWE-bench Pro: cada tarea trae requisitos y una interfaz.
+- **Solo tareas con API existente.** Por definición, una tarea de función nueva usa API nueva. Esta salida elimina las 6, y anula P94 a.
+- **Reescribir los tests contra la API pública.** Un modelo escribe el oráculo. El test deja de ser el del commit, y su etiqueta deja de ser real. Eso contradice "checkeable va a un oráculo".
+
+**Mi recomendación es la primera,** con estas reglas:
+1. La interfaz se calcula, no se escribe a mano. Son los identificadores nuevos de `diff.txt` que aparecen en `tests.diff`.
+2. La ficha trae una sección `### Interfaz` con nombre, firma y módulo de cada uno. Sin cuerpo y sin líneas copiadas del diff.
+3. La fuga exime exactamente ese conjunto. Cualquier otro identificador nuevo sigue prohibido.
+4. **Chequeo de completitud:** si un test oculto usa un identificador nuevo que la interfaz no declara, la tarea se descarta.
+5. Una firma revela parte del diseño. Es el precio de que el test compile.
+
+**Toca el método aprobado en P81.** El chequeo de fuga es parte de ese método. Por eso va al usuario en P99.
+
+## 4. Las fichas de S2
+
+**No tienen este problema.** Las 3 son arreglos. El criterio 1 de arreglo pide que el padre más los tests compile. Eso garantiza que los tests usan solo API que ya existe en el padre. Los 3 builders reales pasaron 4 de 4, 5 de 5 y 1 de 1.
+
+**Queda un riesgo menor.** En t2 y t3, los tests ocultos viven en módulos `#[cfg(test)]` dentro de `src/`. Esos tests pueden llamar funciones privadas del padre. Si un builder cambia una de esas firmas, el oculto no compila.
+- **Regla de D3:** el chequeo cuenta qué funciones privadas del padre llaman los tests ocultos, y lo informa por tarea.
+- No pido nada más hasta que un caso falle.
+
+## 5. Qué corre en paralelo mientras el usuario responde
+
+**Sin depender de ninguna respuesta:**
+1. **Punto 3 de la Tarea 80,** en `laptop/tarea-80`. Usa cupo, y no pide suite con podman.
+2. **Detección offline de (f)** sobre el transcript de t1, con el binario de esa rama. Es `cargo build` y un script, sin podman.
+3. **Interfaces de las 6 tareas,** calculadas con la regla 1 de la sección 3. Solo se guardan en `nf/<commit10>/interfaz.json`. Las fichas no se tocan hasta P99.
+4. **Tarea 81,** cuando escriba el brief. No pisa archivos de la Tarea 80, salvo `src/oracle/calibra.rs` por la huella en `Fila`. Por eso arranca después del punto 3.
+5. **Colab:** cuántas VM simultáneas da la cuenta, si no se midió todavía. Prepara P97 a.
+
+**Lo que espera:**
+- La mezcla de la Tarea 80 espera la orden del usuario.
+- El final sembrado espera P98.
+- Las fichas con interfaz esperan P99.
+- (a) espera P95, (b) espera P96 y la minería nueva espera P97.
+
+**Sin mezclar mediciones.** Nada de esta lista mide minutos.
+
+## Preguntas para el usuario (2026-11-10, 3)
+
+P95, P96, P97 y P98 siguen abiertas, como están en las vueltas del 2026-11-09 (4) y del 2026-11-10 (1).
+
+**P99: en las 6 tareas de función nueva, los tests ocultos llaman funciones que la ficha no nombra.** Un builder que sigue la ficha elige otros nombres, y el test no compila. El método que aprobaste en P81 prohíbe que la ficha cite identificadores nuevos del diff.
+
+- **a)** La ficha declara la interfaz que usan los tests: nombre, firma y módulo de cada función nueva. La regla de fuga exime solo esos nombres. Una tarea con un nombre usado y no declarado se descarta. Recomendada: es lo que hace SWE-bench Pro, y conserva los tests reales del commit.
+- **b)** Sacar las tareas de función nueva del dataset. Quedan solo arreglos, y P94 a pierde efecto.
+- **c)** Un modelo reescribe los tests ocultos contra la API pública. Los tests dejan de ser los del commit, y su etiqueta deja de ser real.
