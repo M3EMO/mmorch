@@ -190,11 +190,22 @@ pub fn global_de(puntajes: &[Puntaje]) -> Option<f32> {
     (!valores.is_empty()).then(|| valores.iter().sum::<f32>() / valores.len() as f32)
 }
 
-/// Huella de la calibración de `dimension`: el prompt del juez y las rúbricas de la dimensión.
-/// Cambiar uno cambia la huella. Las filas con otra huella no calibran si la dimensión tiene ítems del juez.
+/// Huella de la calibración de `dimension`. Con ítems del juez, cuenta el prompt del juez y las rúbricas.
+/// Sin ellos, cuentan solo las rúbricas. Cambiar lo que cuenta cambia la huella.
+/// Las filas con otra huella no calibran si la dimensión tiene ítems del juez.
 pub fn huella_de(dimension: Dimension) -> String {
+    huella_con_prompt(dimension, &huella_del_prompt())
+}
+
+/// Huella de `dimension` con `huella_prompt` como huella del juez. Sin ítems del juez, ignora `huella_prompt`.
+fn huella_con_prompt(dimension: Dimension, huella_prompt: &str) -> String {
     let juntas: String = rubricas_de(dimension).iter().map(Rubrica::hash).collect();
-    calcular_hash(format!("{}\n{juntas}", huella_del_prompt()).as_bytes())
+    let texto = if tiene_items_de_juez(dimension) {
+        format!("{huella_prompt}\n{juntas}")
+    } else {
+        juntas
+    };
+    calcular_hash(texto.as_bytes())
 }
 
 /// Rúbricas embebidas de `dimension`. Su id es la clave de la dimensión.
@@ -4242,6 +4253,32 @@ mod tests {
         vieja.as_object_mut().expect("objeto").remove("huella");
         let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
         assert_eq!(leida.huella, None);
+    }
+
+    #[test]
+    fn calibra_huella_de_seguridad_no_depende_del_prompt() {
+        assert_eq!(
+            huella_con_prompt(Dimension::Seguridad, "a"),
+            huella_con_prompt(Dimension::Seguridad, "b")
+        );
+    }
+
+    #[test]
+    fn calibra_huella_de_diseno_depende_del_prompt() {
+        assert_ne!(
+            huella_con_prompt(Dimension::Diseno, "a"),
+            huella_con_prompt(Dimension::Diseno, "b")
+        );
+    }
+
+    #[test]
+    fn calibra_huella_de_diseno_no_cambia_de_valor() {
+        let juntas: String = rubricas_de(Dimension::Diseno)
+            .iter()
+            .map(Rubrica::hash)
+            .collect();
+        let esperada = calcular_hash(format!("{}\n{juntas}", huella_del_prompt()).as_bytes());
+        assert_eq!(huella_de(Dimension::Diseno), esperada);
     }
 
     #[test]
