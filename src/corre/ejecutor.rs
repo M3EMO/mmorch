@@ -452,7 +452,8 @@ pub fn quitar_builders_de_este_proceso(programa: &str, plazo: Duration) -> Resul
         filtro.as_str(),
     ];
     let args_ps: Vec<String> = args_ps.iter().map(|a| a.to_string()).collect();
-    let salida = correr_paso_de_quitar(programa, &args_ps, plazo, "ps")?;
+    let descripcion_ps = format!("de los contenedores con prefijo {prefijo}");
+    let salida = correr_paso_de_quitar(programa, &args_ps, plazo, "ps", &descripcion_ps)?;
     let nombres: Vec<String> = String::from_utf8_lossy(&salida.stdout)
         .lines()
         .map(str::trim)
@@ -462,29 +463,32 @@ pub fn quitar_builders_de_este_proceso(programa: &str, plazo: Duration) -> Resul
     if nombres.is_empty() {
         return Ok(());
     }
+    let descripcion_rm = format!("de los contenedores {}", nombres.join(" "));
     let mut args_rm: Vec<String> = ["rm", "-f", "-t", "0"].map(String::from).into();
     args_rm.extend(nombres);
     let restante = plazo.saturating_sub(inicio.elapsed());
-    correr_paso_de_quitar(programa, &args_rm, restante, "rm")?;
+    correr_paso_de_quitar(programa, &args_rm, restante, "rm", &descripcion_rm)?;
     Ok(())
 }
 
 /// Corre un paso de `quitar_builders_de_este_proceso`. Solo sale bien si termina con código 0 dentro del plazo.
+/// `contenedores` nombra lo que toca el paso, p. ej. `del contenedor x`. Va en el mensaje de error.
 fn correr_paso_de_quitar(
     programa: &str,
     args: &[String],
     plazo: Duration,
     paso: &str,
+    contenedores: &str,
 ) -> Result<SalidaClaude, ErrorCorre> {
     match correr_hijo(programa, args, plazo, TOPE_SALIDA_BUILDER, false)? {
         Fin::Termino(salida) if salida.codigo == 0 => Ok(salida),
         Fin::Termino(salida) => Err(ErrorCorre::Ejecutor(format!(
-            "{paso} de los contenedores salió con código {}: {}",
+            "{paso} {contenedores} salió con código {}: {}",
             salida.codigo,
             String::from_utf8_lossy(&salida.stderr).trim()
         ))),
         Fin::Vencio { .. } => Err(ErrorCorre::Ejecutor(format!(
-            "{paso} de los contenedores venció el plazo"
+            "{paso} {contenedores} venció el plazo"
         ))),
     }
 }
@@ -496,7 +500,8 @@ pub(crate) const PLAZO_LIMPIEZA_RM: Duration = Duration::from_secs(10);
 /// Un rm que vence o sale con error da `Err`. El plazo corta la espera: no cuelga.
 fn borrar_contenedor(programa: &str, nombre: &str, plazo: Duration) -> Result<(), ErrorCorre> {
     let args: Vec<String> = ["rm", "-f", "-t", "0", nombre].map(String::from).into();
-    correr_paso_de_quitar(programa, &args, plazo, "rm").map(|_| ())
+    let descripcion = format!("del contenedor {nombre}");
+    correr_paso_de_quitar(programa, &args, plazo, "rm", &descripcion).map(|_| ())
 }
 
 /// Corta un builder que venció: pide borrar su contenedor y guarda el `stdout` que dio.
@@ -603,6 +608,7 @@ fn tomar_pipes(hijo: &mut Child, tope: usize) -> Pipes {
 /// Lanza `programa` y lo registra como hijo en curso. El cerrojo entra tomado: el spawn y el registro
 /// van bajo él, y lo suelta antes de esperar. Con `terminando` o con otro hijo registrado, no lanza nada.
 /// Si la espera falla, borra por nombre el contenedor `contenedor`, si lo hay, con `programa`.
+/// Si la señal ya terminó el ejecutor, no borra: su limpieza ya quitó los contenedores.
 fn correr_registrado(
     mut estado: MutexGuard<'static, EstadoHijo>,
     programa: &str,
@@ -629,10 +635,18 @@ fn correr_registrado(
     drop(estado);
     // Sin el cerrojo: el borrado puede tardar hasta su plazo.
     let espera = match (esperar_registrado(plazo), contenedor) {
-        (Err(error), Some(nombre)) => return Err(error_con_borrado(error, programa, nombre)),
+        (Err(error), Some(nombre)) if !senal_termino_el_ejecutor() => {
+            return Err(error_con_borrado(error, programa, nombre));
+        }
         (espera, _) => espera,
     };
     fin_de_espera(programa, espera, pipes, tope)
+}
+
+/// Dice si una señal ya terminó el ejecutor. Toma el cerrojo solo un instante.
+/// La señal marca `terminando` y corre su limpieza con el cerrojo tomado. Así, al ver `true`, la limpieza ya acabó.
+fn senal_termino_el_ejecutor() -> bool {
+    estado_hijo().terminando
 }
 
 /// Arma el `Fin` de un hijo esperado o vencido. Un error de la espera pasa sin cambios.
@@ -1445,6 +1459,45 @@ mod tests {
     }
 
     #[test]
+    fn error_de_quitar_con_rm_fallido_nombra_el_contenedor() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let pid = std::process::id();
+        let cuerpo = format!(
+            "if [ \"$1\" = ps ]; then echo root-builder-{pid}-0; exit 0; fi\necho boom >&2\nexit 1"
+        );
+        let programa = programa_falso(tmp.path(), &cuerpo);
+        let error = quitar_builders_de_este_proceso(
+            programa.to_str().expect("ruta"),
+            Duration::from_secs(10),
+        )
+        .expect_err("un rm fallido es un error");
+        let texto = error.to_string();
+        assert!(
+            texto.contains(&format!("root-builder-{pid}-0")),
+            "el error debe nombrar el contenedor: {texto}"
+        );
+    }
+
+    #[test]
+    fn error_de_quitar_con_ps_fallido_nombra_el_filtro() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let pid = std::process::id();
+        let programa = programa_falso(tmp.path(), "echo boom >&2\nexit 1");
+        let error = quitar_builders_de_este_proceso(
+            programa.to_str().expect("ruta"),
+            Duration::from_secs(10),
+        )
+        .expect_err("un ps fallido es un error");
+        let texto = error.to_string();
+        assert!(
+            texto.contains(&format!("root-builder-{pid}-")),
+            "el error debe nombrar el prefijo de los contenedores: {texto}"
+        );
+    }
+
+    #[test]
     fn error_de_la_espera_pide_borrar_el_contenedor_por_nombre() {
         let _serie = serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
@@ -1858,5 +1911,52 @@ mod tests {
             .expect("la limpieza no debe trabarse con el cerrojo");
         assert!(matches!(quitado, Some(Ok(()))), "{quitado:?}");
         assert_eq!(pid_en_curso(), None, "la limpieza no registra ningún hijo");
+    }
+
+    #[test]
+    fn hijo_terminado_por_la_senal_no_pide_otro_rm() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let log = tmp.path().join("podman.log");
+        // Programa falso: cada llamada se anota. `rm` sale bien. `run` queda vivo hasta la señal.
+        let cuerpo = format!(
+            "echo \"$*\" >> '{}'\nif [ \"$1\" = rm ]; then exit 0; fi\nexec sleep 30",
+            log.display()
+        );
+        let programa = programa_falso(tmp.path(), &cuerpo);
+        // La señal espera a que el hijo quede registrado y lo termina.
+        let senal = std::thread::spawn(|| {
+            let limite = Instant::now() + Duration::from_secs(5);
+            while pid_en_curso().is_none() {
+                assert!(Instant::now() < limite, "el hijo no quedó registrado");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let mut recibido = None;
+            terminar_por_senal(|r| recibido = Some(r));
+            recibido
+        });
+        let args = vec!["run".to_string()];
+        let resultado = correr_registrado(
+            estado_hijo(),
+            programa.to_str().expect("ruta"),
+            &args,
+            Duration::from_secs(20),
+            1000,
+            Some("root-builder-1-0"),
+        );
+        let recibido = senal.join().expect("hilo de la señal");
+        let anotado = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            matches!(resultado, Err(ErrorCorre::Ejecutor(_))),
+            "la espera da error al morir el hijo: {resultado:?}"
+        );
+        assert!(
+            matches!(recibido, Some(Ok(()))),
+            "la señal termina sin error: {recibido:?}"
+        );
+        assert!(
+            !anotado.contains("rm -f -t 0 root-builder-1-0"),
+            "la señal ya quitó el contenedor: no debe haber otro rm: {anotado}"
+        );
     }
 }
