@@ -8013,3 +8013,69 @@ Los dos puntos van en serie: el 2 llena el campo que define el 1.
 - **Orden de mezcla:** 97, 98 y 99. Si la 97 tocó `mod.rs`, la 99 se rebasa antes de mezclar.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P102 siguen abiertas.
+
+## Vuelta del 2026-11-11 (22): Pruebas con la 97, mutantes de más, y el próximo paso
+
+**Estado.** La Tarea 97 está en 7af9a54, con 3135, 0 y 4 con podman. La 98 y la 99 se construyen en paralelo desde 7af9a54. Las mezclas de la 84 a la 97 y P95 a P102 esperan al usuario.
+
+**Lo que funcionó.** El `--timeout` fijo y el estado por mutante andan con cargo-mutants real. Los limpios dieron 3 de 3, sin casos ruidosos.
+
+## 1. Mutantes de fuera del cambio en la muestra
+
+**Lo que leí** en `src/oracle/mutacion.rs` de la 97:
+- `medir_mutantes` filtra el listado con `dentro_del_cambio` (línea 614), arma la muestra, y corre cargo-mutants con un `-F` exacto: `^(?:a|b|...)$`, con cada nombre escapado (`filtro_de`).
+- `parsear_outcomes` lee todos los mutantes del `outcomes.json` que deja la corrida. No compara con la muestra pedida.
+- El caso no viene de una copia reusada: `limpio_reusado` es falso.
+
+**No encontré la causa leyendo el código.** Hay un dato que la acota: los 13 mutantes de afuera son todos del tipo "delete field X from struct Y expression". Ese tipo puede tener en cargo-mutants un nombre distinto entre `--list` y la corrida, o un `-F` que se aplica a otro texto. No lo sé, y no lo voy a adivinar.
+
+**Lo que sí sé:** Root confía en que el reporte trae solo la muestra pedida. Esa confianza no está comprobada. Si el reporte trae otros mutantes, el puntaje se calcula sobre un conjunto que Root no eligió. Esto también afecta a las tareas sin `bootstrap/`.
+
+**Decisión: Root lee solo los mutantes que pidió, y avisa los demás.**
+1. `parsear_outcomes` recibe la muestra pedida. Solo cuenta esos mutantes.
+2. Un mutante del reporte que no estaba en la muestra no cuenta, y queda en una lista `fuera_de_la_muestra`, con un aviso.
+3. Un mutante pedido que no aparece en el reporte deja la medición sin veredicto, con su nombre. Así nunca se mide menos de lo pedido sin saberlo.
+4. El caso guarda el filtro `-F` que se usó, para el diagnóstico.
+5. **Diagnóstico, sin API:** el builder corre el listado y una corrida con un solo nombre de la muestra de t1, sobre una copia de broot, y compara los nombres. Si encuentra la causa, la informa. No la arregla en esta tarea.
+
+## 2. Pruebas sin tests del producto sobre el cambio
+
+**El dato es verdadero.** En S2, el repo bueno es el padre más el diff de producción, sin los tests del commit. Los tests que quedan son los de broot de antes, y no cubren el cambio. Dentro del cambio, ningún mutante muere.
+
+**Decisión: para calibrar Pruebas, el repo bueno es el commit con sus tests.**
+- Pruebas mide los tests que entrega el producto. Un builder bueno entrega el cambio con sus tests. El commit real es justo eso.
+- La partición oculta existe para Funciona y Completitud, que miden si el producto cumple. Pruebas no usa la suite oculta.
+- No filtra nada a un builder: la calibración no se le muestra a nadie.
+
+**¿Da una detección segura? Casi, y ya está dicho.** `assert_borrado` apaga los tests que matan a un mutante. Si eran sus únicos asesinos, el mutante sobrevive, y el puntaje baja. Es lo de la vuelta (19): para Pruebas, la calibración prueba el camino de la medición y su ruido. Con P102 a, eso es justo lo que pide una dimensión de oráculo.
+
+**Cómo se hace, sin código.** El orquestador corre `calibrar --dimension pruebas` con `--repo` apuntando al commit de cada tarea.
+- En t1, el test oculto vive en `tests/`. El commit ya lo trae, y `oculto.cmd` lo copia encima sin cambio.
+- En t2 y t3, los tests viven dentro de `src/`. El parche oculto ya está aplicado en el commit, y `oculto.cmd` puede fallar al aplicarlo otra vez. Si la calibración de Pruebas corre la suite oculta y falla por eso, el orquestador lo informa. Lo arreglo en una vuelta propia.
+
+## 3. ¿Minar más tareas o seguir afinando los defectos?
+
+**Minar más.** Seguir afinando sobre 3 tareas ya no paga:
+- Los cambios de S2 tienen de 2 a 34 líneas. Con cualquier operador, cada tarea da uno o dos casos por dimensión.
+- Una cota de Wilson útil pide de 16 a 30 casos por dimensión de juez (vuelta 20). Con 3 tareas no se llega.
+- Las dimensiones de oráculo ya tienen su camino probado de punta a punta: Seguridad, Funciona en t2 y t3, el 101 de Completitud, y el plazo de Pruebas.
+
+**Después de la 98, la 99 y la 100, el trabajo que no depende del usuario se acaba.** El siguiente paso es el dataset de D3, y espera estas respuestas:
+- **P97:** de dónde salen más tareas.
+- **P99:** la interfaz en las fichas de función nueva.
+- **P102:** qué significa "calibrada", que fija cuántos casos hay que juntar.
+
+## 4. Tarea 100
+
+Brief: `docs/builds/brief-local-100.md`. Base: punta de la última tarea mezclable, que completa el orquestador. Hoy es 7af9a54, la de la 97. Rama `laptop/tarea-100`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Leer solo los mutantes pedidos, avisar los demás, y guardar el filtro | `src/oracle/mutacion.rs` |
+| 2 | Diagnóstico de los nombres de cargo-mutants, sin arreglo | ninguno, solo el informe |
+
+- No toca los archivos de la 98 (`inyectar.rs`) ni los de la 99 (`mod.rs`, `informe.rs`, `tipos.rs`).
+- Si guardar el filtro en el caso pide tocar `src/oracle/calibra.rs`, el builder lo toca lo mínimo y lo dice. Ese archivo ya no lo toca ninguna tarea en curso.
+- Puede correr en paralelo con la 98 y la 99.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P102 siguen abiertas.
