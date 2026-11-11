@@ -7118,3 +7118,87 @@ P95 a P100 siguen abiertas.
 - **a)** Subir el tope de S2 de 5 a 7 USD, y medir las dos. Recomendada: D4 cuesta cerca de 46 USD, y estas dos medidas dicen si conviene gastarlos.
 - **b)** Medir solo Diseño, dentro de lo que queda.
 - **c)** No medir ahora.
+
+## Vuelta del 2026-11-11 (9): Tarea 87, capas de S2 y Tarea 88
+
+**Estado.** La Tarea 87 está en `laptop/tarea-87` (dc4dfc7), con 2957, 0 y 4 con podman. Las mezclas de la 84 a la 87 esperan la orden del usuario. P101 sigue abierta.
+
+## 1. Las 9 preguntas de la Tarea 87
+
+Acepto las 9 decisiones del organizador. Todas son de diseño.
+
+1. El stdout parcial de un hijo matado por la señal no sirve, porque el proceso sale enseguida.
+2. La limpieza bajo el cerrojo puede tardar hasta 10 s. Es lo pedido: nada nuevo entra durante la limpieza.
+3. Una corrida en `barridas` y en `con_error` informa las dos verdades.
+4. El margen de 300 s no separa un `r00t` ajeno dentro de la ventana. Es casi imposible.
+5. `omisiones` suma sobre todos los casos.
+6. Un caso sin veredicto ya cuenta aparte.
+7. Un limpio no tiene ítem apuntado, así que no tiene `piso`.
+8. `piso` usa la base efectiva, la misma que usa `detecta_item`.
+9. Las líneas de stderr del barrido no llevan tope. Es un caso raro.
+
+## 2. La revisión de la señal sobre dc4dfc7
+
+| Hallazgo | Decisión |
+|---|---|
+| MEDIUM nuevo: si `try_wait` falla, se mata el cliente `podman run` sin `podman rm` por nombre | **Se cierra.** El contenedor queda vivo con la credencial montada. El camino del error hace la misma limpieza que el del vencimiento |
+| LOW: un pánico en la limpieza mata el hilo de la señal | **Se cierra.** La limpieza corre dentro de `catch_unwind`, y el hilo sale con el código de la señal igual |
+| LOW: el `podman rm` del vencimiento no tiene plazo | **Se cierra.** Usa el mismo plazo que la limpieza de la señal |
+| LOW: los contenedores del oráculo no pasan por `ESTADO_HIJO` | **Se acepta.** No montan la credencial |
+| Parcial: un salto de NTP de más de 300 s borra la copia de una corrida viva | **Se acepta.** El daño es que esa corrida falla. No expone el token |
+| Parcial: un error al leer la raíz corta el barrido | **Se acepta.** Sin raíz no hay nada que barrer, y la corrida nueva no arranca. Falla cerrado |
+
+## 3. Capas de t1, t2 y t3
+
+**Por qué importa.** El único inyector de Arquitectura es `CicloEntreCapas`. Necesita 2 capas o más (`src/oracle/calibra/inyectar.rs:409`). Con `capas = [["patron"]]` o con capas vacías, el defecto nunca aplica.
+
+**La regla de las capas.** La sonda marca severidad 3 cuando un módulo de una capa posterior usa uno de una capa anterior. Entonces una capa anterior puede usar una posterior, y al revés no.
+
+**Cómo se derivan, de forma mecánica:**
+1. Se arma el grafo de módulos del repo bueno con el mismo extractor de la sonda (`aristas_de_capas` en `src/oracle/perfiles/rust.rs`).
+2. Los módulos de un mismo ciclo van juntos.
+3. Cada grupo recibe su altura: 1 si no usa a nadie, y 1 más que el mayor de los que usa.
+4. Las capas van de mayor a menor altura. La primera capa es la de más arriba.
+5. Así, el repo bueno no tiene ningún uso hacia una capa anterior. El inyector agrega justo ese uso.
+
+**No propongo capas exactas para t1 en esta vuelta.** Hice una aproximación en Python sobre broot, en el commit de t1. Dio 36 módulos y solo 17 aristas, porque no lee los `use { crate::{...} }` anidados. Si las capas no salen del mismo extractor que usa la sonda, el chequeo C puede fallar por diferencias entre los dos lectores. Por eso, la derivación va como comando en la Tarea 88.
+
+**Chequeo C, sin API ni podman.** El comando nuevo `r00t oraculo capas` hace dos cosas:
+- **Proponer:** imprime la línea `capas = [...]` derivada del repo bueno.
+- **Verificar:** con las capas de un `tarea.toml`, corre la sonda nativa de Arquitectura sobre el repo bueno. Pasa si no hay ningún hallazgo "falta la capa" ni "capa anterior", si hay 2 capas o más, y si `CicloEntreCapas` aplica sobre una copia.
+
+**t2 y t3** salen del mismo repo, broot, en otros commits. Llevan el mismo procedimiento, cada uno sobre su repo bueno: el padre más el diff de producción.
+
+**Después de la mezcla de la 88,** el orquestador propone las capas de las tres tareas, las verifica, y las aplica en `~/.local/share/root/oraculos/s2-tN/tarea.toml`.
+
+## 4. Cambio mi recomendación de P101
+
+**Lo que vi al revisar el inyector.** Con capas derivadas así, el defecto de Arquitectura es un uso hacia una capa anterior. La sonda nativa lo detecta siempre, sin juez. Medir Arquitectura con n = 10 daría una sensibilidad cerca de 1,0 casi segura. Eso mide la sonda, no el juez.
+
+**Consecuencia.** La medición que sí dice algo nuevo es la de Diseño: la vía de la cita del juez, en repos reales. Esa medición entra en lo que queda de P80.
+
+**Mi recomendación pasa de la opción a a la opción b:** medir solo Diseño, dentro de lo que queda. La pregunta sigue abierta, y la decisión es del usuario.
+
+**Arquitectura igual se calibra en D4.** Los inyectores de Arquitectura para el juez serían trabajo del hito 1b, igual que los de Diseño.
+
+## 5. Tarea 88
+
+Brief: `docs/builds/brief-local-88.md`, con base dc4dfc7 y rama `laptop/tarea-88`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Error de `try_wait`: misma limpieza que el vencimiento, con plazo en el `podman rm` | `src/corre/ejecutor.rs` |
+| 2 | Pánico en la limpieza de la señal | `src/corre/corrida.rs` |
+| 3 | `r00t oraculo capas`: proponer y verificar | `src/oracle/capas.rs` (nuevo), `src/oracle/perfiles/rust.rs` (solo visibilidad), `src/oracle/mod.rs` (declaración), `src/lib.rs` (CLI) |
+
+Los tres puntos no comparten archivos, y corren en paralelo.
+
+## Preguntas para el usuario (2026-11-11, 9)
+
+P95 a P100 siguen abiertas. **P101 sigue abierta, con la recomendación cambiada.**
+
+**P101: para saber si D4 vale su costo, hace falta medir si Root detecta defectos reales.** Hoy no hay ni uno detectado en un repo real. Medir Diseño en t1, con 10 casos, cuesta cerca de 1,1 USD. Medir también Arquitectura suma otro 1,1 USD. Quedan 1,84 USD de los 5 de S2 (P80). La plata sale del presupuesto de 50 USD del dataset.
+
+- **a)** Subir el tope de S2 de 5 a 7 USD, y medir las dos.
+- **b)** Medir solo Diseño, dentro de lo que queda. Recomendada: en Arquitectura, la sonda detecta el defecto sin el juez, así que esa medición casi no informa.
+- **c)** No medir ahora.
