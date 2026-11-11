@@ -755,7 +755,13 @@ fn evaluar_con(
             )?
         };
         match suite {
-            Suite::Clasificada(c) => c,
+            Suite::Clasificada(c) => {
+                // Una oculta con build roto (nextest 101) marca el producto, igual que el contrato.
+                if c.avisos.iter().any(|a| a == MOTIVO_NO_COMPILA) {
+                    no_compila = true;
+                }
+                c
+            }
             Suite::NoCompila => clasificacion_fallida(
                 esperados_de_requisitos(tarea, "oculto", &excluidos),
                 MOTIVO_PRODUCTO_NO_COMPILA.into(),
@@ -4283,8 +4289,8 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_no_compila_oculta_101_con_contrato_compilado_no_es_no_compila() {
-        // Guarda: la oculta que no compila no marca el producto. Sigue la regla de la Tarea 95.
+    fn oraculo_no_compila_oculta_101_con_contrato_compilado_marca_no_compila() {
+        // La oculta con build roto marca el producto. Sigue la regla de la Tarea 95: sus esperados cuentan como fallados.
         let base = tempfile::tempdir().expect("base");
         let repo = repo_rust(base.path(), LOCK_SANO);
         let tarea = tarea_rust_nextest(base.path());
@@ -4296,9 +4302,33 @@ mod tests {
             &repo,
             deps_de(&correr, &herramientas(&[])),
         );
-        assert!(!v.no_compila);
+        assert!(v.no_compila);
         assert!(
             v.avisos.contains(&MOTIVO_NO_COMPILA.to_string()),
+            "{:?}",
+            v.avisos
+        );
+        assert_eq!(v.ocultos_fallidos, vec!["test_b::t3", "test_b::t4"]);
+        assert_eq!(ocultas.get(), 1);
+    }
+
+    #[test]
+    fn oraculo_no_compila_oculta_100_sin_junit_no_marca_no_compila() {
+        // Guarda: la oculta que falla sin junit (código 100) no es build roto. El producto no se marca.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust_nextest(base.path());
+        let ocultas = Cell::new(0);
+        let correr = ejecutor_suites_nextest(0, Some(JUNIT_CONTRATO), 100, None, &ocultas);
+        let v = evaluar_nextest(
+            base.path(),
+            &tarea,
+            &repo,
+            deps_de(&correr, &herramientas(&[])),
+        );
+        assert!(!v.no_compila);
+        assert!(
+            v.avisos.contains(&MOTIVO_SUITE_SIN_JUNIT.to_string()),
             "{:?}",
             v.avisos
         );
