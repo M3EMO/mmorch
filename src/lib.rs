@@ -177,15 +177,7 @@ fn oraculo_calibrar(
         )));
     }
     let home = config::root_home();
-    // El gasto sale de `home`: la calibración no mira otra carpeta (decisión 48).
-    let gasto = |inicio: f64| {
-        observe::uso::gasto_api_desde_en(&observe::ruta_eventos_en(&home), inicio)
-            .map_err(|e| oracle::ErrorOraculo::Infra(format!("leer el gasto de API: {e}")))
-    };
-    let presupuesto = tope_usd.map(|usd| oracle::calibra::Presupuesto {
-        usd,
-        gasto_desde: &gasto,
-    });
+    let presupuesto = tope_usd.map(|usd| oracle::calibra::Presupuesto { usd });
     let calibrada = oracle::calibra::calibrar_tarea_con(
         &home,
         nombre,
@@ -199,7 +191,7 @@ fn oraculo_calibrar(
     let fila = calibrada.fila;
     if json {
         println!("{}", serde_json::to_string_pretty(&fila)?);
-    } else if let Some(motivo) = &fila.no_aplica {
+    } else if let Some(motivo) = fila.inestable.as_ref().or(fila.no_aplica.as_ref()) {
         println!("{}/{}: {motivo}", fila.tarea, fila.dimension.clave());
     } else {
         println!(

@@ -5476,11 +5476,26 @@ mod tests {
         Rubrica::desde_toml(&texto).expect("carga")
     }
 
-    /// Calibración con una fila de `dimension` para `tarea` que lista `inestables`.
+    /// Calibración con una fila de `dimension` para `tarea` que lista `inestables`, con la huella actual.
     fn calibracion_con_inestables(
         tarea: &str,
         dimension: Dimension,
         inestables: &[&str],
+    ) -> Calibraciones {
+        calibracion_con_huella(
+            tarea,
+            dimension,
+            inestables,
+            Some(calibra::huella_de(dimension)),
+        )
+    }
+
+    /// Calibración con una fila de `dimension` para `tarea` que lista `inestables` y tiene `huella`.
+    fn calibracion_con_huella(
+        tarea: &str,
+        dimension: Dimension,
+        inestables: &[&str],
+        huella: Option<String>,
     ) -> Calibraciones {
         Calibraciones {
             v: calibra::VERSION,
@@ -5501,8 +5516,9 @@ mod tests {
                 ruidosos: Vec::new(),
                 incompleta: false,
                 no_aplica: None,
+                inestable: None,
                 reemplazos: 0,
-                huella: None,
+                huella,
                 inestables: inestables.iter().map(|i| (*i).into()).collect(),
                 extractos_base: Vec::new(),
             }],
@@ -5642,6 +5658,37 @@ mod tests {
         assert!(motivo.contains(CICLOS_ID), "{motivo}");
         assert_eq!(diseno.valor, 0.0, "{diseno:?}");
         assert_eq!(diseno.inestables.len(), 2, "{diseno:?}");
+    }
+
+    #[test]
+    fn oraculo_fila_con_huella_vieja_no_excluye_sus_inestables() {
+        // Misma base que la prueba de inestable, pero la fila es de otro juez: sus ítems no se excluyen.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let juez = juez_de_diseno(Some(3), Some(2), Some(0));
+        let rubricas = [rubrica_diseno_solo_juez()];
+        let calibracion = calibracion_con_huella(
+            "tarea-rust",
+            Dimension::Diseno,
+            &[MODULARIDAD_ID, CICLOS_ID],
+            Some("vieja".into()),
+        );
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                calibracion: &calibracion,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        assert!(diseno.inestables.is_empty(), "{diseno:?}");
+        let motivo = diseno.sin_veredicto.as_deref().unwrap_or_default();
+        assert!(!motivo.starts_with("inestable en esta tarea"), "{motivo}");
     }
 
     #[test]
@@ -6174,6 +6221,7 @@ mod tests {
             items: BTreeMap::new(),
             incompleta: false,
             no_aplica: None,
+            inestable: None,
             reemplazos: 0,
             ruidosos: Vec::new(),
             huella: None,

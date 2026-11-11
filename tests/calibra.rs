@@ -291,13 +291,6 @@ fn juicio(home: &Path, url: &str) -> Result<(), ErrorProveedor> {
     llamar_con(&ctx, &eleccion, &prompt, "c-calibra").map(|_| ())
 }
 
-fn medidor(home: &Path) -> impl Fn(f64) -> Result<f64, ErrorOraculo> + '_ {
-    move |inicio: f64| {
-        observe::uso::gasto_api_desde_en(&observe::ruta_eventos_en(home), inicio)
-            .map_err(|e| ErrorOraculo::Infra(e.to_string()))
-    }
-}
-
 /// Eventos `Gate` de `home` con la fase `calibracion-tope`.
 fn gates_de_tope(home: &Path) -> Vec<Evento> {
     observe::uso::leer_eventos(&observe::ruta_eventos_en(home))
@@ -313,11 +306,7 @@ fn calibra_tope_detiene_antes_del_caso_que_no_entra() {
     // juicio del siguiente no entra (0,90 + 0,30 > 1,00): se detiene, con la base y dos casos medidos.
     let home = home_con_tarea("");
     let servidor = Servidor::arranca(respuestas_de_juicio(8));
-    let gasto = medidor(home.path());
-    let presupuesto = Presupuesto {
-        usd: 1.0,
-        gasto_desde: &gasto,
-    };
+    let presupuesto = Presupuesto { usd: 1.0 };
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
         let _ = juicio(home.path(), &servidor.url);
         Ok(veredicto_plano())
@@ -360,11 +349,7 @@ fn calibra_tope_detiene_antes_del_caso_que_no_entra() {
 fn calibra_tope_suficiente_da_fila_completa_y_sin_gate() {
     let home = home_con_tarea("");
     let servidor = Servidor::arranca(respuestas_de_juicio(8));
-    let gasto = medidor(home.path());
-    let presupuesto = Presupuesto {
-        usd: 5.0,
-        gasto_desde: &gasto,
-    };
+    let presupuesto = Presupuesto { usd: 5.0 };
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
         let _ = juicio(home.path(), &servidor.url);
         Ok(veredicto_plano())
@@ -393,11 +378,7 @@ fn calibra_tope_con_la_base_rechazada_no_escribe_fila() {
     // El juicio de la base cuesta 0,30 de cota y el tope es 0,20: el límite lo rechaza y no sale al servidor.
     let home = home_con_tarea("");
     let servidor = Servidor::arranca(respuestas_de_juicio(8));
-    let gasto = medidor(home.path());
-    let presupuesto = Presupuesto {
-        usd: 0.20,
-        gasto_desde: &gasto,
-    };
+    let presupuesto = Presupuesto { usd: 0.20 };
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
         let _ = juicio(home.path(), &servidor.url);
         Ok(veredicto_plano())
@@ -424,11 +405,7 @@ fn calibra_tope_tras_la_base_sin_casos_no_escribe_fila() {
     // La base cuesta 0,30 y entra. Cada caso necesita 0,30 más: 0,30 + 0,30 > 0,50. Ningún caso medido: sin fila.
     let home = home_con_tarea("");
     let servidor = Servidor::arranca(respuestas_de_juicio(8));
-    let gasto = medidor(home.path());
-    let presupuesto = Presupuesto {
-        usd: 0.50,
-        gasto_desde: &gasto,
-    };
+    let presupuesto = Presupuesto { usd: 0.50 };
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
         let _ = juicio(home.path(), &servidor.url);
         Ok(veredicto_plano())
@@ -458,11 +435,7 @@ fn calibra_tope_incompleta_con_la_misma_semilla_se_repite() {
     let correr = || {
         let home = home_con_tarea("");
         let servidor = Servidor::arranca(respuestas_de_juicio(8));
-        let gasto = medidor(home.path());
-        let presupuesto = Presupuesto {
-            usd: 1.0,
-            gasto_desde: &gasto,
-        };
+        let presupuesto = Presupuesto { usd: 1.0 };
         let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
             let _ = juicio(home.path(), &servidor.url);
             Ok(veredicto_plano())
@@ -708,11 +681,7 @@ fn calibra_casos_detencion_por_tope_guarda_los_casos_hechos() {
     // Como `calibra_tope_detiene_antes_del_caso_que_no_entra`: la base y dos casos entran; el siguiente no.
     let home = home_con_tarea("");
     let servidor = Servidor::arranca(respuestas_de_juicio(8));
-    let gasto = medidor(home.path());
-    let presupuesto = Presupuesto {
-        usd: 1.0,
-        gasto_desde: &gasto,
-    };
+    let presupuesto = Presupuesto { usd: 1.0 };
     let evaluador = |tarea: &Tarea, ruta: &Path, opciones: &OpcionesOraculo| {
         let _ = juicio(home.path(), &servidor.url);
         evaluador_con_defectos(None)(tarea, ruta, opciones)
@@ -741,11 +710,7 @@ fn calibra_casos_sin_casos_medidos_no_escribe_archivo() {
     // El juicio de la base cuesta 0,30 de cota y el tope es 0,20: el límite lo rechaza y no hay casos.
     let home = home_con_tarea("");
     let servidor = Servidor::arranca(respuestas_de_juicio(8));
-    let gasto = medidor(home.path());
-    let presupuesto = Presupuesto {
-        usd: 0.20,
-        gasto_desde: &gasto,
-    };
+    let presupuesto = Presupuesto { usd: 0.20 };
     let base = evaluador_con_defectos(None);
     let evaluador = |tarea: &Tarea, ruta: &Path, opciones: &OpcionesOraculo| {
         let _ = juicio(home.path(), &servidor.url);
@@ -975,6 +940,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
         items: Default::default(),
         incompleta: false,
         no_aplica: None,
+        inestable: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
         huella: None,
@@ -1123,6 +1089,7 @@ fn fila_vieja_sin_no_aplica_se_lee() {
         items: Default::default(),
         incompleta: false,
         no_aplica: None,
+        inestable: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
         huella: None,
@@ -1156,6 +1123,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
         items: Default::default(),
         incompleta: false,
         no_aplica: None,
+        inestable: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
         huella: None,

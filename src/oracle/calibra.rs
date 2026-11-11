@@ -27,7 +27,7 @@ use crate::config::Config;
 use crate::goal::calcular_hash;
 use crate::observe;
 use crate::proveedores::{LimiteCalibracion, con_caso, con_limite, rechazo_en_este_hilo};
-use crate::tipos::{Dimension, Eleccion, Evento, Hallazgo, Puntaje, Veredicto};
+use crate::tipos::{Dimension, Eleccion, Evento, Fuente, Hallazgo, Puntaje, Veredicto};
 
 /// Nombre del archivo de calibración dentro de `ROOT_HOME`.
 pub const ARCHIVO: &str = "calibracion.json";
@@ -84,9 +84,13 @@ pub struct Fila {
     #[serde(default)]
     pub incompleta: bool,
     /// Motivo por el que la dimensión no se midió: la tarea no la aplica. Una fila así no tiene casos ni
-    /// métricas, y no calibra la dimensión. `None` en una medición real.
+    /// métricas, y no calibra la dimensión. `None` en una medición real. Una dimensión inestable va a `inestable`.
     #[serde(default)]
     pub no_aplica: Option<String>,
+    /// Motivo por el que la dimensión es inestable en la tarea: sus ítems del juez variaron entre juicios.
+    /// Una fila sin el campo vale `None`.
+    #[serde(default)]
+    pub inestable: Option<String>,
     /// Inyecciones inválidas reemplazadas en la calibración, incluidas las del caso agotado.
     #[serde(default)]
     pub reemplazos: u32,
@@ -133,7 +137,7 @@ impl Calibraciones {
                 return Err(ErrorOraculo::Infra(format!("leer {}: {e}", ruta.display())));
             }
         };
-        let calibracion: Calibraciones = serde_json::from_str(&texto).map_err(|e| {
+        let mut calibracion: Calibraciones = serde_json::from_str(&texto).map_err(|e| {
             ErrorOraculo::Infra(format!("calibración inválida en {}: {e}", ruta.display()))
         })?;
         if calibracion.v != VERSION {
@@ -142,6 +146,9 @@ impl Calibraciones {
                 calibracion.v,
                 ruta.display()
             )));
+        }
+        for fila in &mut calibracion.filas {
+            fila.normalizar_inestable();
         }
         Ok(calibracion)
     }
@@ -176,9 +183,11 @@ impl Calibraciones {
         }
     }
 
-    /// Ítems inestables de la fila más reciente de `dimension`. Vacía si la tarea no tiene fila.
+    /// Ítems inestables de la fila más reciente de `dimension`. Vacía si la tarea no tiene fila, o si la fila
+    /// tiene otra huella: sus ítems salen de otro juez (Tarea 83, punto 2).
     pub fn inestables_de(&self, tarea: &str, dimension: Dimension) -> &[String] {
         self.de(tarea, dimension)
+            .filter(|fila| huella_vigente(fila, dimension))
             .map_or(&[], |fila| fila.inestables.as_slice())
     }
 
@@ -194,6 +203,22 @@ impl Calibraciones {
 
 /// Motivo de un puntaje cuya fila tiene otra huella: la calibración sale de otro juez.
 const MOTIVO_OTRO_JUEZ: &str = "calibración de otro juez";
+
+/// Prefijo del motivo de una dimensión inestable. Las filas viejas lo guardaban en `no_aplica`.
+const PREFIJO_INESTABLE: &str = "inestable en esta tarea";
+
+impl Fila {
+    /// Pasa el motivo de inestable de una fila vieja de `no_aplica` a `inestable`. Una fila nueva no cambia.
+    fn normalizar_inestable(&mut self) {
+        let es_viejo = self
+            .no_aplica
+            .as_deref()
+            .is_some_and(|motivo| motivo.starts_with(PREFIJO_INESTABLE));
+        if es_viejo && self.inestable.is_none() {
+            self.inestable = self.no_aplica.take();
+        }
+    }
+}
 
 /// `true` si los ítems `inestables` de `dimension` dejan menos de la mitad de su peso estable (Tarea 83, punto 2).
 pub fn dimension_inestable(
@@ -258,6 +283,16 @@ fn tiene_items_de_juez(dimension: Dimension) -> bool {
         .iter()
         .flat_map(|r| r.item.iter())
         .any(|i| i.mide != Mide::Sonda)
+}
+
+/// `true` si `veredicto` trae ítems del juez en `dimension`. Sin modelo de juez, el juez no corre y no los trae.
+fn trae_juicio_del_juez(veredicto: &Veredicto, dimension: Dimension) -> bool {
+    veredicto
+        .puntajes
+        .iter()
+        .filter(|p| p.dimension == dimension)
+        .flat_map(|p| p.items.iter())
+        .any(|i| matches!(i.fuente, Fuente::Juez { .. }))
 }
 
 /// La fila sirve para `dimension` según su huella. Con huella, debe ser la actual. Sin huella, sirve solo si la
@@ -861,10 +896,12 @@ fn calibrar_medida_con_hilos(
         )));
     }
     // Base repetida (Tarea 83, punto 2): las dimensiones con ítems del juez juzgan la base dos veces más. Las
-    // sondas no se repiten: `BaseRepetida` reusa las deterministas de la base.
+    // sondas no se repiten: `BaseRepetida` reusa las deterministas de la base. Sin juez (sin modelo), la base
+    // no trae ítems del juez y no hay juicios que repetir.
     let pesos = inestables::pesos_de(&rubricas_de(dimension));
+    let juez_corre = tiene_items_de_juez(dimension) && trae_juicio_del_juez(&base, dimension);
     let mut juicios = vec![base];
-    if tiene_items_de_juez(dimension) {
+    if juez_corre {
         for _ in 0..inestables::JUICIOS_EXTRA {
             let repetida = en_limite(tope, || {
                 evaluador(repo_bueno, TipoCaso::BaseRepetida, Target::Ninguno)
@@ -882,10 +919,13 @@ fn calibrar_medida_con_hilos(
     let inestables = inestables::inestables_de(&refs, dimension, &pesos.del_juez);
     // Una dimensión cuyos ítems estables pesan menos de la mitad no mide casos: ahorra el gasto del juez.
     if inestables::dimension_inestable(&pesos, &inestables) {
+        let motivo = inestables::motivo(&inestables);
         let fila = Fila {
+            inestable: Some(motivo.clone()),
+            no_aplica: None,
             inestables: inestables.iter().cloned().collect(),
             extractos_base,
-            ..fila_no_aplica(tarea, dimension, semilla, &inestables::motivo(&inestables))
+            ..fila_no_aplica(tarea, dimension, semilla, &motivo)
         };
         return Ok(Medida {
             fila: Some(fila),
@@ -1128,6 +1168,7 @@ fn fila_de(
         items: items_medidos,
         incompleta,
         no_aplica: None,
+        inestable: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
         inestables: Vec::new(),
@@ -1155,12 +1196,9 @@ pub fn calibrar_tarea(
 
 /// Tope de gasto de una calibración (decisión 48). Cada intento de juez se reserva con su cota: si el gasto
 /// desde el inicio más la cota pasa `usd`, el intento no se envía y la calibración se detiene.
-pub struct Presupuesto<'a> {
+pub struct Presupuesto {
     /// Tope en USD. Debe ser finito y mayor que 0.
     pub usd: f64,
-    /// Gasto de API desde un instante (epoch en segundos): llamadas y reservas abiertas. Es `Sync`. El límite
-    /// cuenta su propio gasto en `reservar`, así que `calibrar_tarea_con` no lee este campo.
-    pub gasto_desde: &'a (dyn Fn(f64) -> Result<f64, ErrorOraculo> + Sync),
 }
 
 /// Elecciones de los jueces que un caso puede llamar. `None`: el juez no se arma y no llama.
@@ -1419,6 +1457,7 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64, motivo: &st
         items: BTreeMap::new(),
         incompleta: false,
         no_aplica: Some(motivo.into()),
+        inestable: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
         inestables: Vec::new(),
@@ -2082,6 +2121,7 @@ mod tests {
             items: BTreeMap::new(),
             incompleta: false,
             no_aplica: None,
+            inestable: None,
             reemplazos: 0,
             ruidosos: Vec::new(),
             inestables: Vec::new(),
@@ -3232,8 +3272,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         carpeta_con_repo_bueno(home.path());
         let llamadas = Mutex::new(Vec::<Llamada>::new());
-        let evaluador =
-            evaluador_con_registro(&llamadas, || veredicto_de(Dimension::Diseno, 1.0, None));
+        let evaluador = evaluador_con_registro(&llamadas, || diseno_con(&[(ITEM_MODULARIDAD, 2)]));
         let calibrada = calibrar_tarea_con(
             home.path(),
             "calibra-fixture",
@@ -3362,11 +3401,8 @@ mod tests {
         )
         .expect("Dockerfile");
         let llamadas = Mutex::new(Vec::<Llamada>::new());
-        let evaluador = evaluador_con_juez_y_tests(
-            &llamadas,
-            || veredicto_de(Dimension::Diseno, 1.0, None),
-            true,
-        );
+        let evaluador =
+            evaluador_con_juez_y_tests(&llamadas, || diseno_con(&[(ITEM_MODULARIDAD, 2)]), true);
         let calibrada = calibrar_tarea_con(
             home.path(),
             "calibra-fixture",
@@ -4317,10 +4353,12 @@ mod tests {
     fn inestables_de_da_los_de_la_fila_mas_reciente() {
         let vieja = Fila {
             inestables: vec!["diseno.errores".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
             ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
         };
         let nueva = Fila {
             inestables: vec!["diseno.ciclos".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
             ..fila("memora", Dimension::Diseno, 2.0, Some(1.0))
         };
         let c = Calibraciones {
@@ -4332,6 +4370,51 @@ mod tests {
             ["diseno.ciclos".to_string()]
         );
         assert!(c.inestables_de("otra", Dimension::Diseno).is_empty());
+    }
+
+    #[test]
+    fn inestables_de_con_huella_vieja_no_los_da() {
+        let vieja = Fila {
+            inestables: vec!["diseno.errores".into()],
+            huella: Some("vieja".into()),
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![vieja],
+        };
+        assert!(c.inestables_de("memora", Dimension::Diseno).is_empty());
+    }
+
+    #[test]
+    fn motivo_inestable_empieza_con_el_prefijo_que_lee_las_filas_viejas() {
+        // Guarda: el motivo nuevo y el prefijo de `normalizar_inestable` deben decir lo mismo.
+        let motivo = motivo_inestable(&["diseno.modularidad".to_string()]);
+        assert!(motivo.starts_with(PREFIJO_INESTABLE), "{motivo}");
+    }
+
+    #[test]
+    fn calibra_fila_vieja_con_motivo_inestable_en_no_aplica_se_lee_como_inestable() {
+        let texto = r#"{"v":1,"filas":[
+            {"tarea":"memora","dimension":"diseno","n":0,"semilla":42,"ts":1.0,
+             "no_aplica":"inestable en esta tarea: diseno.modularidad"},
+            {"tarea":"memora","dimension":"seguridad","n":0,"semilla":42,"ts":1.0,
+             "no_aplica":"no aplica: la tarea no define [entrega]"}
+        ]}"#;
+        let home = home_con(texto);
+        let leida = Calibraciones::cargar(home.path()).expect("carga");
+        let inestable = &leida.filas[0];
+        assert_eq!(
+            inestable.inestable.as_deref(),
+            Some("inestable en esta tarea: diseno.modularidad")
+        );
+        assert_eq!(inestable.no_aplica, None);
+        let no_aplica = &leida.filas[1];
+        assert_eq!(no_aplica.inestable, None);
+        assert_eq!(
+            no_aplica.no_aplica.as_deref(),
+            Some("no aplica: la tarea no define [entrega]")
+        );
     }
 
     #[test]
@@ -6066,11 +6149,7 @@ mod tests {
         fs::create_dir_all(&repo).expect("repo");
         super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
         let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
-        let gasto = |_: f64| -> Result<f64, ErrorOraculo> { Ok(0.0) };
-        let presupuesto = Presupuesto {
-            usd: 0.05,
-            gasto_desde: &gasto,
-        };
+        let presupuesto = Presupuesto { usd: 0.05 };
         let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
             let _ = pedir_juicio_limitado(home.path());
             Ok(veredicto_base())
@@ -6536,6 +6615,14 @@ mod tests {
     #[test]
     fn base_con_juez_guarda_una_lista_de_extractos_por_juicio() {
         let mut base = veredicto_de(Dimension::Estructura, 1.0, None);
+        base.puntajes[0].items = vec![NivelItem {
+            item: "estructura.legibilidad".into(),
+            nivel: 2,
+            evidencia: vec![],
+            fuente: Fuente::Juez {
+                modelo: "deepseek-reasoner".into(),
+            },
+        }];
         base.extractos = vec![ExtractoGuardado {
             archivo: "src/lib.rs".into(),
             desde: 1,
@@ -7444,10 +7531,84 @@ mod tests {
                 ITEM_ROBUSTEZ.to_string()
             ]
         );
-        let motivo = fila.no_aplica.clone().expect("motivo");
+        let motivo = fila.inestable.clone().expect("motivo");
+        assert_eq!(fila.no_aplica, None, "una inestable no va a no_aplica");
         assert!(motivo.starts_with("inestable en esta tarea"), "{motivo}");
         assert!(motivo.contains(ITEM_MODULARIDAD), "{motivo}");
         assert!(!muestra_suficiente(&fila), "no califica");
+    }
+
+    #[test]
+    fn calibra_dimension_inestable_va_a_inestable_y_no_a_no_aplica() {
+        let (_t, tarea) = tarea_prueba();
+        let llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let k = llamadas.fetch_add(1, Ordering::SeqCst);
+            let nivel = alterno(k, 0, 2);
+            Ok(diseno_con(&[
+                (ITEM_MODULARIDAD, nivel),
+                (ITEM_ROBUSTEZ, nivel),
+                (ITEM_ERRORES, nivel),
+            ]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            6,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("mide");
+        let fila = medida.fila.expect("hay fila");
+        let motivo = fila.inestable.as_deref().expect("la fila es inestable");
+        assert!(motivo.contains(ITEM_MODULARIDAD), "{motivo}");
+        assert_eq!(fila.no_aplica, None, "{fila:?}");
+    }
+
+    #[test]
+    fn calibra_base_sin_items_del_juez_se_juzga_una_sola_vez() {
+        // Sin modelo de juez, la base no trae ítems del juez: no hay juicios que repetir.
+        let (_t, tarea) = tarea_prueba();
+        let bases = AtomicUsize::new(0);
+        let repetidas = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            match tipo {
+                TipoCaso::Base => {
+                    bases.fetch_add(1, Ordering::SeqCst);
+                }
+                TipoCaso::BaseRepetida => {
+                    repetidas.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+            Ok(veredicto_de(Dimension::Diseno, 1.0, None))
+        };
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("mide");
+        assert_eq!(bases.load(Ordering::SeqCst), 1, "la base se juzga una vez");
+        assert_eq!(
+            repetidas.load(Ordering::SeqCst),
+            0,
+            "sin juez no hay repeticiones"
+        );
     }
 
     #[test]

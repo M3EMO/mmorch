@@ -475,7 +475,7 @@ Funciones que usa el código:
 | `observe::resumir(corrida)` | construido | Devuelve `Resumen`. |
 | `oracle::evaluar(repo, tarea, opciones)` | construido | `oracle::evaluar_por_nombre(nombre, repo)` lee la tarea desde `ROOT_HOME`. |
 | `oracle::calibra::calibrar_tarea(home, nombre, dimension, n, semilla, repo, evaluador)` | construido (Tarea 12) | Calibra y agrega la fila a `calibracion.json`. `calibrar_con` recibe la tarea y el repo ya resueltos. |
-| `oracle::calibra::calibrar_tarea_con(home, nombre, dimension, n, semilla, repo, presupuesto, evaluador)` | construido (decisión 48) | Como `calibrar_tarea`, con el tope opcional `Presupuesto`: gasto desde el inicio, peor caso de un caso y tope en USD. Cada caso en vuelo con reserva abierta cuenta una vez: su reserva ya está en el gasto. Las reservas llevan `extra.caso`. Si el tope detiene la calibración, escribe las filas hechas como `incompleta` y sale con `3`. |
+| `oracle::calibra::calibrar_tarea_con(home, nombre, dimension, n, semilla, repo, presupuesto, evaluador)` | construido (decisión 48) | Como `calibrar_tarea`, con el tope opcional `Presupuesto`, que es el tope en USD. El límite cuenta el gasto desde el inicio y el peor caso de cada intento. Cada caso en vuelo con reserva abierta cuenta una vez: su reserva ya está en el gasto. Las reservas llevan `extra.caso`. Si el tope detiene la calibración, escribe las filas hechas como `incompleta` y sale con `3`. |
 | `oracle::informe::informar(veredicto, tarea, reglas, redactor)` | construido (Tarea 13b) | El redactor es opcional. `informar_con` recibe además las rúbricas. |
 | `oracle::validez::validar(casos)` | construido (Tarea 12b) | `validar_con` recibe el evaluador. `preparar_ciego(casos, fuentes, semilla, home)` arma los paquetes a ciegas. Escribe las listas de rastros y `home/validez/rastros.json` en `home/validez/`. |
 | `track::agregar(fila)` | construido | |
@@ -673,6 +673,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "boolean",
           "default": false
         },
+        "inestable": {
+          "description": "Motivo por el que la dimensión es inestable en la tarea: sus ítems del juez variaron entre juicios.\nUna fila sin el campo vale `None`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "inestables": {
           "description": "Ítems del juez que variaron entre los tres juicios de la base, en orden. No entran a la medición de la\ndimensión. Una fila sin el campo vale vacía.",
           "type": "array",
@@ -711,7 +719,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "minimum": 0
         },
         "no_aplica": {
-          "description": "Motivo por el que la dimensión no se midió: la tarea no la aplica. Una fila así no tiene casos ni\nmétricas, y no calibra la dimensión. `None` en una medición real.",
+          "description": "Motivo por el que la dimensión no se midió: la tarea no la aplica. Una fila así no tiene casos ni\nmétricas, y no calibra la dimensión. `None` en una medición real. Una dimensión inestable va a `inestable`.",
           "type": [
             "string",
             "null"
