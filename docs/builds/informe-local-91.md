@@ -166,3 +166,19 @@ Codegraph y `grep -w` coinciden en todos.
 4. **`tarea.toml` existentes con escenarios que necesitan red.** Hoy dan fallo, no pendiente. Decisión: no los cambié. Hay que agregar `red = true` en cada tarea que los use.
 5. **Se perdió la regla "connection refused no es red".** Ya no existe ningún patrón de red. Decisión: es el diseño.
 6. **Cita del plazo.** Un escenario que supera 120 s ahora da código 124 y la cita es la última línea de su salida. Decisión: lo dejé así.
+
+## Corrección 91c: el PATH del sistema no tapa el venv de Root
+
+**Defecto.** El envoltorio de la 91b exportaba el PATH del sistema después de la activación. En `python:3.12-slim`, `python` resolvía en `/usr/local/bin` y `sys.prefix` valía `/usr/local`. Las dependencias del venv quedaban invisibles.
+
+**Arreglo.** `envoltorio_de` arma el PATH en un solo lugar. El export del sistema va antes de la activación. La activación antepone `/tmp/venv-eval/bin` o `/tmp/pydeps/bin`. El orden queda: Root, sistema, resto. `ACTIVAR_RUST` no agrega `/tmp/cargo-home/bin` al PATH, así que no cambia.
+
+**Tests.**
+- Nuevo `guarda_podman_envoltorio_el_venv_de_root_gana_al_python_del_sistema`. Con el envoltorio viejo da `/usr/local` (rojo). Con el arreglo da `/tmp/venv-eval` y `/tmp/venv-eval/bin/python`.
+- La guarda del `wget` falso sigue verde. El falso ahora vive en `/tmp/producto/bin`, un directorio que no es de Root y que va detrás del sistema.
+- Los envoltorios esperados de los tests unitarios y el test de orden se actualizaron.
+
+**Resultados con podman (sin `ROOT_SIN_PODMAN`).**
+- `cargo test --lib entrega`: 152 pasan, 0 fallan.
+- `cargo test --test entrega`: 48 pasan, 0 fallan.
+- Las dos guardas con podman real pasan.

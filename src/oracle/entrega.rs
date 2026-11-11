@@ -1272,10 +1272,12 @@ fn entorno_de_evaluacion(tarea: &Tarea) -> Entorno {
     }
 }
 
-/// PATH del sistema. Va primero en cada paso: un archivo del producto en `bin/` no tapa una herramienta del sistema.
+/// PATH del sistema. Va ANTES de la activación de Root en cada paso. Así los dirs de Root (venv, pydeps)
+/// quedan primero, luego el sistema, luego el resto. Un archivo del producto en `bin/` no tapa una
+/// herramienta del sistema, y el venv de Root sí tapa al `python` del sistema.
 const PATH_DEL_SISTEMA: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/// Línea de `sh` que envuelve cada paso: la activación (si hay), el PATH del sistema, el `cmd` como `$1`
+/// Línea de `sh` que envuelve cada paso: el PATH del sistema, la activación (si hay), el `cmd` como `$1`
 /// y el código de salida. No usa `exec`: el `sh` de afuera vive para leer `$?`.
 /// Con `con_timeout`, el `timeout 120` va DENTRO, antes del `sh` del `cmd`. Así el `sh` de afuera no
 /// se muere con el plazo y siempre llega a leer `$?`.
@@ -1292,7 +1294,7 @@ fn envoltorio_de(activar: &str, con_timeout: bool) -> String {
         String::new()
     };
     format!(
-        "{previa}export PATH={PATH_DEL_SISTEMA}:$PATH; {plazo}sh -c \"$1\"; s=$?; [ \"$s\" -eq {CODIGO_PODMAN} ] && s=1; exit \"$s\""
+        "export PATH={PATH_DEL_SISTEMA}:$PATH; {previa}{plazo}sh -c \"$1\"; s=$?; [ \"$s\" -eq {CODIGO_PODMAN} ] && s=1; exit \"$s\""
     )
 }
 
@@ -1365,8 +1367,8 @@ impl<'a> Sesion<'a> {
     }
 
     /// Argumentos de `podman exec` para `cmd`. Con `con_timeout` y si la imagen trae `timeout`, lo pone antes.
-    /// Todo paso corre dentro de un `sh` envoltorio: primero la activación (si hay), después el PATH del
-    /// sistema y el `cmd` como `$1`. Con `con_timeout` y si la imagen trae `timeout`, el `timeout` va dentro
+    /// Todo paso corre dentro de un `sh` envoltorio: primero el PATH del sistema, después la activación
+    /// (si hay) y el `cmd` como `$1`. Con `con_timeout` y si la imagen trae `timeout`, el `timeout` va dentro
     /// del envoltorio. El envoltorio convierte el 125 del producto en 1 (ver `CODIGO_PODMAN`).
     pub(crate) fn paso_args(&self, entorno: &Entorno, cmd: &str, con_timeout: bool) -> Vec<String> {
         let mut args: Vec<String> = vec!["exec".into()];
@@ -4664,7 +4666,7 @@ pub(crate) mod tests {
                 "n",
                 "sh",
                 "-c",
-                "export A=1; export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; timeout 120 sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"",
+                "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export A=1; timeout 120 sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"",
                 "_",
                 "pytest -q",
             ]
@@ -4672,8 +4674,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sesion_paso_args_pone_el_path_del_sistema_despues_de_la_activacion() {
-        // El PATH del sistema va primero, y los directorios del producto (venv, pydeps) quedan detrás.
+    fn sesion_paso_args_pone_el_path_del_sistema_antes_de_la_activacion() {
+        // El PATH del sistema va antes de la activación. La activación de Root (venv, pydeps) queda primero.
         let exec = ExecFalso::con_codigos(&[]);
         let s = sesion_de_prueba(&exec, false);
         let entorno = Entorno {
@@ -4688,7 +4690,7 @@ pub(crate) mod tests {
         let sistema = envoltorio
             .find("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH")
             .expect("el PATH del sistema va en el envoltorio");
-        assert!(activacion < sistema, "{envoltorio}");
+        assert!(sistema < activacion, "{envoltorio}");
     }
 
     #[test]
@@ -5145,20 +5147,23 @@ pub(crate) mod tests {
 
     /// Imagen de los tests con podman real. Debe estar construida o descargada localmente.
     const ALPINE: &str = "docker.io/library/alpine:3.20";
+    /// Imagen con `python` en `/usr/local/bin`. Debe estar descargada localmente (`--pull=never`).
+    const PYTHON_SLIM: &str = "docker.io/library/python:3.12-slim";
 
     #[test]
     fn guarda_podman_envoltorio_el_wget_del_sistema_gana_al_wget_falso_del_producto() {
         crate::saltar_sin_podman!();
-        // GUARDA con podman real: el producto deja un `wget` falso (exit 0) en /tmp/pydeps/bin.
-        // Alpine sí trae `wget` en el sistema (busybox). Con el PATH del sistema primero, el escenario
-        // usa el wget real, que falla al conectar a 127.0.0.1:1. El falso solo tapa herramientas que el
-        // sistema NO tiene; no tapa una que el sistema sí tiene.
+        // GUARDA con podman real: el producto deja un `wget` falso (exit 0) en /tmp/producto/bin.
+        // La activación lo agrega al final del PATH, detrás del sistema. Alpine sí trae `wget` en el
+        // sistema (busybox). Con el PATH del sistema primero, el escenario usa el wget real, que falla
+        // al conectar a 127.0.0.1:1. El falso solo tapa herramientas que el sistema NO tiene; no tapa
+        // una que el sistema sí tiene.
         let sesion = Sesion::de_imagen(&EXEC_REAL, ALPINE, None).expect("arranca el contenedor");
         let entorno = Entorno {
             dir: None,
-            activar: "export PATH=/tmp/pydeps/bin:$PATH;".into(),
+            activar: "export PATH=$PATH:/tmp/producto/bin;".into(),
         };
-        let instalar = "mkdir -p /tmp/pydeps/bin && printf '#!/bin/sh\\nexit 0\\n' > /tmp/pydeps/bin/wget && chmod +x /tmp/pydeps/bin/wget";
+        let instalar = "mkdir -p /tmp/producto/bin && printf '#!/bin/sh\\nexit 0\\n' > /tmp/producto/bin/wget && chmod +x /tmp/producto/bin/wget";
         let paso = sesion
             .paso(&entorno, instalar, PLAZO_CORTO, false)
             .expect("corre el paso del producto");
@@ -5174,6 +5179,41 @@ pub(crate) mod tests {
             )
             .expect("corre el escenario");
         assert!(matches!(r, Prueba::Fallo { .. }), "el wget falso pasó");
+    }
+
+    #[test]
+    fn guarda_podman_envoltorio_el_venv_de_root_gana_al_python_del_sistema() {
+        crate::saltar_sin_podman!();
+        // GUARDA con podman real: el venv de Root tapa al `python` de /usr/local/bin. El PATH del sistema
+        // va antes de la activación, así el venv queda primero.
+        let sesion =
+            Sesion::de_imagen(&EXEC_REAL, PYTHON_SLIM, None).expect("arranca el contenedor");
+        let preparar = sesion
+            .paso(
+                &Entorno::default(),
+                "python -m venv /tmp/venv-eval",
+                PLAZO_CORTO,
+                false,
+            )
+            .expect("corre el paso de preparación");
+        assert_eq!(preparar.codigo, 0, "{preparar:?}");
+        let entorno = Entorno {
+            dir: None,
+            activar: ACTIVAR_PYTHON.into(),
+        };
+        let prefijo = sesion
+            .paso(
+                &entorno,
+                "python -c \"import sys; print(sys.prefix)\"",
+                PLAZO_CORTO,
+                false,
+            )
+            .expect("corre python -c");
+        assert_eq!(prefijo.stdout.trim(), "/tmp/venv-eval", "{prefijo:?}");
+        let ruta = sesion
+            .paso(&entorno, "command -v python", PLAZO_CORTO, false)
+            .expect("corre command -v");
+        assert_eq!(ruta.stdout.trim(), "/tmp/venv-eval/bin/python", "{ruta:?}");
     }
 
     #[test]
