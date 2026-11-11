@@ -77,15 +77,16 @@ impl Acumulador {
         Ok(())
     }
 
-    /// Cierra el stream. Con `finish_reason` = `length` el tope cortó la respuesta: es truncada, y
-    /// puede venir sin texto. Sin uso, el costo no se midió: la llamada cuenta como cortada.
+    /// Cierra el stream. Con `finish_reason` = `length` el tope cortó la respuesta. Con
+    /// `content_filter` el filtro la cortó. Las dos son truncadas, y pueden venir sin texto.
+    /// Sin uso, el costo no se midió: la llamada cuenta como cortada.
     pub(crate) fn cerrar(self) -> Result<Crudo, ErrorProveedor> {
         let (Some(in_tokens), Some(out_tokens)) = (self.in_tokens, self.out_tokens) else {
             return Err(ErrorProveedor::Cortada(
                 "el stream terminó sin el evento de uso".into(),
             ));
         };
-        let truncada = self.finish.as_deref() == Some("length");
+        let truncada = matches!(self.finish.as_deref(), Some("length" | "content_filter"));
         if !truncada && !self.vio_contenido {
             return Err(ErrorProveedor::Respuesta(
                 "falta /choices/0/delta/content".into(),
@@ -233,6 +234,17 @@ mod tests {
             r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":32000}}"#,
         ])
         .expect("truncada no es error");
+        assert!(crudo.truncada);
+        assert_eq!(crudo.texto, "");
+    }
+
+    #[test]
+    fn proveedores_deepseek_stream_content_filter_es_truncada_aunque_venga_vacia() {
+        let crudo = acumula(&[
+            r#"{"choices":[{"delta":{},"finish_reason":"content_filter"}]}"#,
+            USO,
+        ])
+        .expect("filtrada no es error");
         assert!(crudo.truncada);
         assert_eq!(crudo.texto, "");
     }
