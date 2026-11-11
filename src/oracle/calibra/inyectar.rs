@@ -450,13 +450,8 @@ fn bucle(dir: &Path, camino: &[String], rng: &mut Prng) -> io::Result<Lugar> {
         let lineas = partir(&leer(dir, &archivo)?);
         let limite = limite_de_produccion(&lineas);
         for (i, linea) in lineas[..limite].iter().enumerate() {
-            let t = linea.trim_start();
-            let es_funcion = ["pub fn ", "fn ", "pub(crate) fn "]
-                .iter()
-                .any(|p| t.starts_with(p));
-            if es_funcion
+            if nombre_de_funcion(linea).is_some()
                 && linea.trim_end().ends_with('{')
-                && !t.contains("const fn")
                 && en_camino(linea, camino)
             {
                 candidatos.push((archivo.clone(), i));
@@ -1149,8 +1144,8 @@ fn es_parte_de_palabra(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Texto limpio de cada línea del archivo, en el mismo orden. `analizar` lleva el estado entre líneas: un
-/// comentario de bloque o una cadena cruda que sigue de una línea a otra quedan en blanco en todas sus líneas.
+/// Texto limpio de cada línea del archivo, en el mismo orden.
+/// `analizar` recuerda el estado entre líneas. Un comentario o una cadena que cruza líneas queda en blanco.
 fn limpias_de(lineas: &[String]) -> Vec<String> {
     analizar(lineas)
         .into_iter()
@@ -1584,6 +1579,24 @@ mod tests {
             .nth(inyeccion.linea as usize - 1)
             .expect("línea");
         assert!(linea.contains("let _ = (0..2_000u32)"), "{linea}");
+    }
+
+    /// `true` si `bucle` elige la única función de un archivo con la firma `firma`.
+    fn bucle_elige_la_funcion(firma: &str) -> bool {
+        let dir = repo_de(&[("src/lib.rs", &format!("{firma}\n    1\n}}\n"))]);
+        bucle(dir.path(), &[], &mut Prng(7)).expect("E/S").is_some()
+    }
+
+    #[test]
+    fn bucle_reconoce_pub_crate_const_fn() {
+        assert!(bucle_elige_la_funcion("pub(crate) const fn f() -> u32 {"));
+    }
+
+    #[test]
+    fn bucle_reconoce_async_y_unsafe_fn() {
+        assert!(bucle_elige_la_funcion("async fn f() -> u32 {"));
+        assert!(bucle_elige_la_funcion("pub unsafe fn f() -> u32 {"));
+        assert!(bucle_elige_la_funcion("pub(super) fn f() -> u32 {"));
     }
 
     #[test]
