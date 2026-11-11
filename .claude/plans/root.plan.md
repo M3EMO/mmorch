@@ -7426,3 +7426,97 @@ Brief: `docs/builds/brief-local-91.md`. Base: punta de `laptop/tarea-90`, que co
 - El punto 3 corre en paralelo.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
+
+## Vuelta del 2026-11-11 (13): la Tarea 91 no pasa, y el diseño que falta
+
+**Estado.** La Tarea 91 está en `laptop/tarea-91` (ea76273). Con podman dio 3033 verdes, 14 fallas y 4 ignorados. La revisión halló 3 HIGH y 2 MEDIUM. Las mezclas de la 84 a la 90 y P95 a P101 esperan al usuario.
+
+**Lo que salió mal en mi diseño.** La regla 3 prohibió creer el texto del repo, pero no dijo cómo saber que un fallo fue por la red. Dos caminos todavía leían texto: `pide_red` en los escenarios y `red_no_configurada` sobre una línea que trae el texto del `RUN`. El diseño estaba incompleto, no solo el código.
+
+## 1. Clase A: el contenedor de evaluación no arranca
+
+**Causa probable, leída en el código y sin verificar con podman.**
+- `iniciar_evaluacion` arma `podman run -d` con `argumentos_separado` (`src/oracle/contenedor.rs:124`). Monta `/repo`, `/salida`, la caché y `escenarios/`.
+- El camino viejo, `ejecutar`, llamaba a `validar_rutas` antes de lanzar. El camino nuevo no la llama.
+- `Sesion::iniciar` (`src/oracle/entrega.rs:1275`) descarta el stderr de un `run` fallido. Prueba con `sleep` y con `tail`, y termina con "la imagen no trae sleep ni tail".
+- Si un montaje no existe, por ejemplo la caché de `descarga::cache_de` o la carpeta de `escenarios/`, podman falla. El mensaje culpa a `sleep`, y oculta la causa real.
+
+**Arreglo en dos pasos.**
+1. `Sesion::iniciar` conserva el stderr del `run` fallido y lo pone en su error. `iniciar_evaluacion` llama a `validar_rutas` antes del `run`.
+2. Con el mensaje real, el organizador corre los tests con podman y arregla la causa. Si la causa no es un montaje, la informa.
+
+## 2. El diseño que falta
+
+**Regla 4: saber que un fallo es de red sale de un experimento, nunca de un texto.**
+
+### Clase B: un build sin red que falla
+
+1. Todo paso que puede necesitar red y falla sin red se repite con red. Es un `RUN`, o un `ADD` o `COPY` con URL. No se mira el texto.
+2. **Si con red pasa:** la imagen construye, con el hallazgo de severidad 1 "necesita red", como hoy.
+3. **Si con red falla:** es rojo, "la imagen no construye".
+4. **Si la red no se puede usar:** queda pendiente. Eso lo dice una sonda de red, no el texto del build.
+5. El registro de la repetición y su Gate siguen como hoy.
+
+### HIGH-3: saber si la red se puede usar
+
+1. **Sonda de red, una vez por proceso.** `podman run --rm --network pasta:--no-map-gw --entrypoint sh <imagen de la tarea> -c true`. La imagen de la tarea es local, porque la evaluación ya la usa.
+2. Código 0: la red se puede usar. Otro código: no se puede.
+3. Es un código de salida de un proceso que lanza Root (regla 1). El `Dockerfile` no interviene.
+4. `red_no_configurada` deja de decidir. Puede quedar como dato del aviso.
+
+### HIGH-2: el 125 de podman contra el 125 del producto
+
+1. Cada paso corre dentro de un `sh` envoltorio que lanza Root: `sh -c '<cmd>'; s=$?; [ "$s" -eq 125 ] && s=1; exit "$s"`.
+2. Así, un 125 del producto llega como 1: un rojo, que es lo correcto.
+3. Un 125 de `podman exec` es siempre de podman, y es infraestructura.
+4. El producto no puede cambiar el código del envoltorio: es su proceso padre. Si lo mata, `podman exec` da 137 o 143, y eso es un fallo.
+5. 126 y 127 del producto son rojos. `Sesion` ya comprobó al arrancar que `sh` existe.
+
+### HIGH-1: un escenario que falla sin red
+
+1. Un escenario que sale distinto de 0 es un fallo. No se mira su salida.
+2. **Un escenario que necesita red lo declara.** `[[escenario]]` suma `red = true`, con valor por defecto `false`.
+3. Un escenario con `red = true` no corre sin red. Queda pendiente con el motivo "el escenario pide red", sin correr.
+4. `pide_red` sale de `correr_escenario`.
+5. La generación de tareas de D3 decide `red` al escribir el `tarea.toml`, no después de ver el resultado.
+
+### MEDIUM-1: entorno compartido entre pasos
+
+**Entra ahora solo una parte, la barata.**
+- El `PATH` de cada paso pone primero los directorios del sistema: `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`. Después van los directorios del producto, como el `bin/` del venv.
+- Así, un `curl` falso del producto no tapa al `curl` del sistema.
+
+**El resto se acepta, con su motivo.** `instalar` es código del producto, y los escenarios prueban ese producto. El producto siempre controla parte de lo que el escenario ve. Cerrarlo del todo pide correr cada escenario en otro contenedor, sin el producto, y eso rompe lo que el escenario mide.
+
+### MEDIUM-2: junit verde con código 0, fuera de pytest
+
+Se acepta. Con nextest, el código 0 ya dice que todos los tests pasaron. Un junit falsificado en verde no agrega nada. El límite real sigue siendo el de la vuelta (12): un test pasado de rojo a verde mientras otro sigue rojo.
+
+**¿Pide una decisión del usuario? No.** `red = true` es un campo del contrato de las tareas, que escribe el generador de D3. No cambia qué promete Root.
+
+## 3. Las 9 preguntas de la Tarea 91
+
+1. **Escenario con pendiente de red en el contenedor de evaluación:** cambia. Va por declaración (`red = true`), como en HIGH-1.
+2. **`PLAZO_PASO_ENTREGA` de 15 minutos:** acepto. `instalar` de un repo de Rust grande puede pasarlo. Se mide en t1 cuando corra la entrega.
+3. **Sin RustSec en el contenedor de evaluación:** acepto. La evaluación no corre cargo audit.
+4. **Solo `escenarios/` en `/oraculo/escenarios`:** acepto. `oculto/` y `tarea.toml` quedan afuera, como en la imagen.
+5. **El entorno va en cada paso:** acepto.
+6. **En el preludio de Rust, solo 125 es infraestructura:** acepto. Con el envoltorio de HIGH-2, ese 125 es siempre de podman.
+7. **`red_no_configurada` sobre la última línea:** queda reemplazada por la sonda de red de HIGH-3.
+8. **Imagen base ausente con `creating build container`:** acepto. Ese texto lo escribe podman antes de correr cualquier `RUN`.
+9. **El riesgo aceptado de D2:** sigue abierto, con el mismo motivo.
+
+## 4. Tarea 91b
+
+Brief: `docs/builds/brief-local-91b.md`. Mismo worktree (`~/.cache/root-wt/local91`), rama `laptop/tarea-91`, sobre ea76273. El organizador puede correr con podman los tests de `tests/entrega.rs` y los de `entrega` de la biblioteca.
+
+| Punto | Qué |
+|---|---|
+| 1 | Clase A: el error real de podman, `validar_rutas`, y la causa |
+| 2 | Envoltorio del 125 y `PATH` con el sistema primero |
+| 3 | Sonda de red, y repetición con red por experimento |
+| 4 | `red = true` en `[[escenario]]`, y fuera `pide_red` de los escenarios |
+
+Los cuatro tocan `src/oracle/entrega.rs`, así que van en serie, en ese orden. El punto 1 va primero porque sin él no se puede probar nada con podman.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
