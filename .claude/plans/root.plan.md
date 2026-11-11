@@ -6964,3 +6964,60 @@ Brief: `docs/builds/brief-local-85.md`, con base 1e68899 y rama `laptop/tarea-85
 5. **El dataset sigue frenado** por P97 y P99. El final, por P98.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P100 siguen abiertas.
+
+## Vuelta del 2026-11-11 (7): informe de la Tarea 85 y Tarea 86
+
+**Estado.** La Tarea 85 está en `laptop/tarea-85` (3cd5898). Con podman, la 85 dio 2933, 0 y 4, y la 84 dio 2922, 0 y 4. Las mezclas de la 82 a la 85 esperan la orden del usuario. El orquestador calibra Seguridad en t1 y después Diseño y Arquitectura. No espero esos datos.
+
+## La carrera de la señal: se cierra
+
+**El hueco.** Si la señal llega entre el spawn de `podman run` y el registro de su pid, el hilo de la señal no ve el hijo. Root sale, y el hijo sigue vivo con la credencial montada. Quitar el contenedor por nombre no alcanza si podman todavía no lo registró.
+
+**Por qué se cierra.** Es justo el caso de la Tarea 85: el token legible después de que Root salió. La ventana es corta, pero D3 y D4 lanzan muchas corridas.
+
+**Cómo: un solo cerrojo para el spawn y la señal.**
+1. El spawn y el registro del pid van juntos, bajo un cerrojo.
+2. El hilo de la señal toma ese cerrojo antes de leer el pid. Así, o no hay hijo, o ya está registrado.
+3. Con el cerrojo tomado, el hilo marca "terminando". Ningún spawn nuevo arranca después de esa marca.
+4. El spawn es fork y exec: el cerrojo dura milisegundos.
+
+## Las 7 preguntas
+
+Todas son de diseño. Ninguna pide una pregunta nueva al usuario.
+
+1. **`ps` o `rm` con error salen por stderr:** acepto.
+2. **`stat` o `btime` ilegibles conservan la corrida:** acepto. Barrer una corrida viva le quita la credencial a mitad de camino. En Linux, el `stat` de un proceso propio siempre se lee, así que el caso es casi imposible.
+3. **El aviso de cola sigue diciendo el tope:** acepto.
+4. **La cola de stdout de podman también se alinea:** acepto.
+5. **`paso` para todo comando de podman:** acepto.
+6. **`ENTRADA_JUEZ_BYTES` sin usos: se borra en la Tarea 86,** después de unir los llamadores. Los literales "inestable en esta tarea" en aserciones de tests se quedan: fijan el texto que ve el usuario.
+7. **Un subagente editó otro worktree.** No es una pregunta de producto, pero pide dos cosas:
+   - El orquestador revisa `git status` en `local82` a `local85` y en el worktree principal. Un cambio que no es de su tarea se informa antes de mezclar.
+   - Desde la Tarea 86, el organizador da a cada subagente la ruta absoluta de su worktree. Antes de cada commit, corre `git -C <ruta> status` y compara con la lista de archivos del brief.
+
+## La HIGH 3 ya está cerrada
+
+**Corrección a mis vueltas anteriores.** Dije que la HIGH 3 seguía abierta. El commit 4f3358c ya la cerró:
+- gitleaks corre sobre una copia sin `.gitleaks.toml` ni `.gitleaksignore`, y con `--ignore-gitleaks-allow` (`src/oracle/perfiles/herramientas.rs:412` a `417`);
+- cargo audit corre sobre una copia sin `.cargo/audit.toml` (líneas 421 a 424);
+- clippy usa `--force-warn` contra un `allow` del repo.
+
+**Tres guardas usan las herramientas reales con podman:** `guarda_gitleaks_ignora_el_gitleaks_toml_del_repo`, `guarda_gitleaks_ignora_el_gitleaksignore_del_repo` y `guarda_gitleaks_no_respeta_el_comentario_allow`. Las tres pasaron en la suite con podman.
+
+**Queda un hueco chico:** cargo audit no tiene guarda con la herramienta real. Solo hay un test del texto del comando. Va a la Tarea 86, y se escribe sin podman. Corre en la suite con podman al mezclar.
+
+## Tarea 86
+
+Brief: `docs/builds/brief-local-86.md`, con base 3cd5898 y rama `laptop/tarea-86`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Un cerrojo para el spawn y la señal | `src/corre/ejecutor.rs`, `src/corre/corrida.rs` |
+| 2 | Borrar `ENTRADA_JUEZ_BYTES` | `src/oracle/calibra.rs` |
+| 3 | Guarda real de cargo audit contra `.cargo/audit.toml` | `src/oracle/perfiles/herramientas.rs` (solo tests) |
+
+Los tres puntos no comparten archivos, y corren en paralelo.
+
+**Después de la 86, la revisión de cierre queda así:** los 5 HIGH cerrados. De los MEDIUM, los que tocan `corre` y el aislamiento de escenarios son los puntos 6, 7, 10, 11, 13 y 15. No verifiqué si siguen abiertos en la punta: la HIGH 3 mostró que una revisión vieja puede estar ya resuelta. Antes de ordenarlos, el orquestador los verifica contra 3cd5898, sin API. Los ordeno cuando lleguen esa verificación y los datos de calibración de t1.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P100 siguen abiertas.
