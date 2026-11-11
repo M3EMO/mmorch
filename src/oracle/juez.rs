@@ -213,7 +213,7 @@ pub struct ResultadoJuez {
 }
 
 /// Una ventana del prompt del juez, sin su texto. `motivo` es `cambio`, `grande` o `sonda`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExtractoGuardado {
     pub archivo: String,
     pub desde: u32,

@@ -591,6 +591,34 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "pruebas"
       ]
     },
+    "ExtractoGuardado": {
+      "description": "Una ventana del prompt del juez, sin su texto. `motivo` es `cambio`, `grande` o `sonda`.",
+      "type": "object",
+      "properties": {
+        "archivo": {
+          "type": "string"
+        },
+        "desde": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "hasta": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "archivo",
+        "desde",
+        "hasta",
+        "motivo"
+      ]
+    },
     "Fila": {
       "description": "Una medición de una dimensión de una tarea, con su muestra.",
       "type": "object",
@@ -620,6 +648,17 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           ],
           "format": "float",
           "default": null
+        },
+        "extractos_base": {
+          "description": "Extractos que leyó el juez en cada juicio de la base, en orden. Una sola lista si la dimensión no repite\nla base. Una fila sin el campo vale vacía.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ExtractoGuardado"
+            }
+          }
         },
         "huella": {
           "description": "Huella del juez con que se midió la fila: el prompt y las rúbricas de la dimensión (`huella_de`).\nUna fila sin el campo vale `None`. Con ítems del juez, `None` cuenta como vieja y no calibra.",
@@ -774,6 +813,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "es_defecto": {
       "type": "boolean"
     },
+    "extractos": {
+      "description": "Los extractos que leyó el juez en este caso (archivo, primera línea, última línea y motivo).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ExtractoGuardado"
+      }
+    },
     "item": {
       "description": "Ítem de rúbrica que el defecto debe hacer caer. `None` en un caso limpio.",
       "type": [
@@ -902,7 +949,37 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "caso",
     "es_defecto",
     "detectado"
-  ]
+  ],
+  "$defs": {
+    "ExtractoGuardado": {
+      "description": "Una ventana del prompt del juez, sin su texto. `motivo` es `cambio`, `grande` o `sonda`.",
+      "type": "object",
+      "properties": {
+        "archivo": {
+          "type": "string"
+        },
+        "desde": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "hasta": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "archivo",
+        "desde",
+        "hasta",
+        "motivo"
+      ]
+    }
+  }
 }
 ```
 
@@ -2140,6 +2217,34 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "evidencia"
       ]
     },
+    "ExtractoGuardado": {
+      "description": "Una ventana del prompt del juez, sin su texto. `motivo` es `cambio`, `grande` o `sonda`.",
+      "type": "object",
+      "properties": {
+        "archivo": {
+          "type": "string"
+        },
+        "desde": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "hasta": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "archivo",
+        "desde",
+        "hasta",
+        "motivo"
+      ]
+    },
     "Forma": {
       "description": "Forma de una corrida (decisión 28): roles en orden, si hubo verificador y la configuración.",
       "type": "object",
@@ -2642,6 +2747,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "estado": {
           "$ref": "#/$defs/Estado"
+        },
+        "extractos": {
+          "description": "Ventanas que leyó el juez de diseño, sin su texto. Un veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExtractoGuardado"
+          }
         },
         "global": {
           "type": [
@@ -5182,6 +5295,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "estado": {
       "$ref": "#/$defs/Estado"
     },
+    "extractos": {
+      "description": "Ventanas que leyó el juez de diseño, sin su texto. Un veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ExtractoGuardado"
+      }
+    },
     "global": {
       "type": [
         "number",
@@ -5648,6 +5769,34 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "peso",
         "cumplimiento",
         "evidencia"
+      ]
+    },
+    "ExtractoGuardado": {
+      "description": "Una ventana del prompt del juez, sin su texto. `motivo` es `cambio`, `grande` o `sonda`.",
+      "type": "object",
+      "properties": {
+        "archivo": {
+          "type": "string"
+        },
+        "desde": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "hasta": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "archivo",
+        "desde",
+        "hasta",
+        "motivo"
       ]
     },
     "Fuente": {

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use serde_json::{Map, json};
 
-use super::juez::{MAX_ENTRADA_JUEZ_BYTES, huella_del_prompt};
+use super::juez::{ExtractoGuardado, MAX_ENTRADA_JUEZ_BYTES, huella_del_prompt};
 use super::memo::{Alcance, MemoSondas, ReusoSondas};
 use super::mutacion::MutanteMuerto;
 use super::rubrica::{Mide, Rubrica, cargar_embebidas};
@@ -98,6 +98,10 @@ pub struct Fila {
     /// dimensión. Una fila sin el campo vale vacía.
     #[serde(default)]
     pub inestables: Vec<String>,
+    /// Extractos que leyó el juez en cada juicio de la base, en orden. Una sola lista si la dimensión no repite
+    /// la base. Una fila sin el campo vale vacía.
+    #[serde(default)]
+    pub extractos_base: Vec<Vec<ExtractoGuardado>>,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -373,6 +377,9 @@ pub struct CasoGuardado {
     /// Valor de la dimensión calibrada en este caso. `None` si el caso no tiene puntaje de la dimensión.
     #[serde(default)]
     pub valor: Option<f32>,
+    /// Los extractos que leyó el juez en este caso (archivo, primera línea, última línea y motivo).
+    #[serde(default)]
+    pub extractos: Vec<ExtractoGuardado>,
     /// Motivo por el que el caso no aplica. Solo en el renglón de un caso no aplicable.
     #[serde(default)]
     pub no_aplicable: Option<String>,
@@ -869,12 +876,15 @@ fn calibrar_medida_con_hilos(
             }
         }
     }
+    let extractos_base: Vec<Vec<ExtractoGuardado>> =
+        juicios.iter().map(|j| j.extractos.clone()).collect();
     let refs: Vec<&Veredicto> = juicios.iter().collect();
     let inestables = inestables::inestables_de(&refs, dimension, &pesos.del_juez);
     // Una dimensión cuyos ítems estables pesan menos de la mitad no mide casos: ahorra el gasto del juez.
     if inestables::dimension_inestable(&pesos, &inestables) {
         let fila = Fila {
             inestables: inestables.iter().cloned().collect(),
+            extractos_base,
             ..fila_no_aplica(tarea, dimension, semilla, &inestables::motivo(&inestables))
         };
         return Ok(Medida {
@@ -1027,6 +1037,7 @@ fn calibrar_medida_con_hilos(
             reemplazos,
             ruidosos: ruidosos.into_iter().collect(),
             inestables: inestables.iter().cloned().collect(),
+            extractos_base,
             ..fila_de(
                 tarea,
                 dimension,
@@ -1121,6 +1132,7 @@ fn fila_de(
         ruidosos: Vec::new(),
         inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
+        extractos_base: Vec::new(),
     }
 }
 
@@ -1411,6 +1423,7 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64, motivo: &st
         ruidosos: Vec::new(),
         inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
+        extractos_base: Vec::new(),
     }
 }
 
@@ -1527,12 +1540,15 @@ struct Caso {
     valor_base: Option<f32>,
     /// Valor de la dimensión calibrada en este caso. `None` si el caso no tiene puntaje de la dimensión.
     valor: Option<f32>,
+    /// Extractos que leyó el juez en este caso. Vacío mientras el veredicto no los lleve.
+    extractos: Vec<ExtractoGuardado>,
 }
 
 impl Caso {
     /// Un caso medido con su veredicto. Lo derivado (`detectado`, `motivo`, niveles, `items`) lo calcula
     /// `finalizar_casos` sobre todos los casos. Aquí queda en su valor neutro.
     fn nuevo(indice: u32, inyeccion: Option<Inyeccion>, veredicto: Veredicto) -> Caso {
+        let extractos = veredicto.extractos.clone();
         Caso {
             indice,
             es_defecto: inyeccion.is_some(),
@@ -1547,6 +1563,7 @@ impl Caso {
             niveles: BTreeMap::new(),
             valor_base: None,
             valor: None,
+            extractos,
             reemplazos: 0,
             target_reusado: false,
             limpio_reusado: false,
@@ -1579,6 +1596,7 @@ impl CasoGuardado {
             niveles: caso.niveles.clone(),
             valor_base: caso.valor_base,
             valor: caso.valor,
+            extractos: caso.extractos.clone(),
             no_aplicable: None,
             mutante: caso.inyeccion.as_ref().and_then(|i| i.mutante.clone()),
             tests_apagados: caso
@@ -1609,6 +1627,7 @@ impl CasoGuardado {
             niveles: BTreeMap::new(),
             valor_base: None,
             valor: None,
+            extractos: Vec::new(),
             no_aplicable: Some(no.motivo.clone()),
             mutante: None,
             tests_apagados: Vec::new(),
@@ -2067,6 +2086,7 @@ mod tests {
             ruidosos: Vec::new(),
             inestables: Vec::new(),
             huella: None,
+            extractos_base: Vec::new(),
         }
     }
 
@@ -6410,6 +6430,154 @@ mod tests {
         let texto = serde_json::to_string(&nuevo).expect("serializa");
         let ida: CasoGuardado = serde_json::from_str(&texto).expect("lee");
         assert_eq!(ida.target_reusado, Some(true));
+    }
+
+    /// Un caso con defecto guarda los extractos que leyó el juez. El rango de uno cubre la línea del defecto.
+    #[test]
+    fn caso_con_defecto_guarda_sus_extractos_y_el_rango_cubre_la_linea() {
+        let base = veredicto_de(Dimension::Seguridad, 0.9, None);
+        let mut caso = Caso::nuevo(1, Some(inyeccion_modulo()), base);
+        caso.extractos = vec![ExtractoGuardado {
+            archivo: "src/lib.rs".into(),
+            desde: 1,
+            hasta: 10,
+            motivo: "cambio".into(),
+        }];
+        let guardado = CasoGuardado::de(&caso);
+        assert_eq!(guardado.extractos.len(), 1, "{:?}", guardado.extractos);
+        let linea = guardado.linea.expect("el defecto tiene línea");
+        let extracto = &guardado.extractos[0];
+        assert_eq!(extracto.archivo, "src/lib.rs");
+        assert!((extracto.desde..=extracto.hasta).contains(&linea));
+    }
+
+    /// Los extractos llegan al archivo `.casos.jsonl` y vuelven a leerse igual.
+    #[test]
+    fn escribir_casos_guarda_los_extractos_en_el_renglon() {
+        let base = veredicto_de(Dimension::Seguridad, 0.9, None);
+        let mut caso = Caso::nuevo(1, Some(inyeccion_modulo()), base);
+        let esperados = vec![ExtractoGuardado {
+            archivo: "src/lib.rs".into(),
+            desde: 1,
+            hasta: 10,
+            motivo: "cambio".into(),
+        }];
+        caso.extractos = esperados.clone();
+        let home = tempfile::tempdir().expect("home");
+        let fila = fila("t", Dimension::Seguridad, 1.0, None);
+        let ruta = escribir_casos(home.path(), "t", Dimension::Seguridad, &fila, &[caso], &[])
+            .expect("escribe")
+            .expect("hay casos");
+        let texto = fs::read_to_string(ruta).expect("lee");
+        let leido: CasoGuardado = serde_json::from_str(texto.trim()).expect("caso");
+        assert_eq!(leido.extractos, esperados);
+    }
+
+    /// Un renglón de `.casos.jsonl` sin el campo `extractos` se lee con lista vacía.
+    #[test]
+    fn caso_guardado_viejo_sin_extractos_lee_lista_vacia() {
+        let viejo = r#"{"caso":3,"es_defecto":true,"detectado":true}"#;
+        let caso: CasoGuardado = serde_json::from_str(viejo).expect("renglón de antes");
+        assert!(caso.extractos.is_empty(), "{:?}", caso.extractos);
+    }
+
+    /// Un caso con defecto toma los extractos de su veredicto. El rango del archivo del defecto cubre su línea.
+    #[test]
+    fn caso_con_defecto_toma_los_extractos_de_su_veredicto() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let evaluador = |ruta: &Path, _: TipoCaso, _: Target| {
+            let extractos = arbol(ruta)
+                .into_keys()
+                .map(|archivo| ExtractoGuardado {
+                    archivo,
+                    desde: 1,
+                    hasta: u32::MAX,
+                    motivo: "cambio".into(),
+                })
+                .collect();
+            Ok(Veredicto {
+                extractos,
+                ..base.clone()
+            })
+        };
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("calibra");
+        let caso = medida
+            .casos
+            .iter()
+            .find(|c| c.es_defecto)
+            .expect("hay un caso con defecto");
+        let guardado = CasoGuardado::de(caso);
+        assert!(!guardado.extractos.is_empty(), "{:?}", guardado.extractos);
+        let linea = guardado.linea.expect("el defecto tiene línea");
+        let archivo = guardado.archivo.clone().expect("el defecto tiene archivo");
+        let extracto = guardado
+            .extractos
+            .iter()
+            .find(|e| e.archivo == archivo)
+            .expect("hay un extracto del archivo del defecto");
+        assert!((extracto.desde..=extracto.hasta).contains(&linea));
+    }
+
+    /// La base de una dimensión con juez guarda un extracto por cada uno de sus tres juicios.
+    #[test]
+    fn base_con_juez_guarda_una_lista_de_extractos_por_juicio() {
+        let mut base = veredicto_de(Dimension::Estructura, 1.0, None);
+        base.extractos = vec![ExtractoGuardado {
+            archivo: "src/lib.rs".into(),
+            desde: 1,
+            hasta: 10,
+            motivo: "grande".into(),
+        }];
+        let evaluador = |_: &Path, _: TipoCaso, _: Target| Ok(base.clone());
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("calibra");
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(fila.extractos_base.len(), 3, "{:?}", fila.extractos_base);
+        assert!(fila.extractos_base.iter().all(|e| e.len() == 1));
+    }
+
+    /// Una fila de antes de `extractos_base` se lee con lista vacía.
+    #[test]
+    fn fila_vieja_sin_extractos_base_lee_lista_vacia() {
+        let mut texto =
+            serde_json::to_value(fila("t", Dimension::Estructura, 1.0, None)).expect("json");
+        texto
+            .as_object_mut()
+            .expect("objeto")
+            .remove("extractos_base");
+        let leida: Fila = serde_json::from_value(texto).expect("fila vieja");
+        assert!(
+            leida.extractos_base.is_empty(),
+            "{:?}",
+            leida.extractos_base
+        );
     }
 
     // Punto 3: calibración de punta a punta con el evaluador real (`evaluar_con`), sin podman ni contenedores.

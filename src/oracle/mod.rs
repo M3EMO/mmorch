@@ -49,7 +49,7 @@ use contenedor::{Ejecucion, Resultado};
 use descarga::python::AVISO_NO_VERIFICADAS;
 use entrega::{FabricaEscenarios, FabricaReal, Podman, PodmanReal, ResultadoEntrega};
 use informe::{Redactor, RedactorMedido, RedactorProveedor};
-use juez::{EntradaJuez, EstadoJuez, JuezProveedor, ModeloJuez, ResultadoJuez};
+use juez::{EntradaJuez, EstadoJuez, ExtractoGuardado, JuezProveedor, ModeloJuez, ResultadoJuez};
 use junit::{Junit, ResultadoTest};
 use perfiles::herramientas::{EjecutorContenedor, EjecutorHerramienta};
 use perfiles::{ResultadoSonda, combinar, deduplicar_hallazgos};
@@ -872,6 +872,7 @@ fn evaluar_con(
         ambiguedades,
         contrato_fallidos: fallidos_de(&contrato),
         hallazgos_descartados: medicion.hallazgos_descartados,
+        extractos: medicion.extractos,
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
     let redactor_medido = deps
@@ -956,6 +957,8 @@ struct Medicion {
     pendientes: Vec<Pendiente>,
     /// Hallazgos del juez descartados, con su motivo. No puntúan. Van al `Veredicto`.
     hallazgos_descartados: Vec<HallazgoDescartado>,
+    /// Ventanas que leyó el juez de diseño. Van al `Veredicto`.
+    extractos: Vec<ExtractoGuardado>,
 }
 
 /// El juez de diseño que `medir` usa: el modelo si se armó, su nombre y las rúbricas de la evaluación.
@@ -1052,6 +1055,10 @@ fn medir(
         descartados,
     } = juicio;
     hallazgos.extend(de_juez);
+    let extractos = resultado
+        .as_ref()
+        .map(|r| r.extractos.clone())
+        .unwrap_or_default();
     let puntajes = DIMENSIONES
         .iter()
         .map(|&dimension| match dimension {
@@ -1135,6 +1142,7 @@ fn medir(
         avisos,
         pendientes: entrega.pendientes,
         hallazgos_descartados: descartados,
+        extractos,
     })
 }
 
@@ -5496,6 +5504,7 @@ mod tests {
                 reemplazos: 0,
                 huella: None,
                 inestables: inestables.iter().map(|i| (*i).into()).collect(),
+                extractos_base: Vec::new(),
             }],
         }
     }
@@ -5517,6 +5526,15 @@ mod tests {
             }
         }
         JuezFalso::con(&respuesta_juez(json!(items), json!([])), 0.0)
+    }
+
+    #[test]
+    fn oraculo_diseno_copia_los_extractos_del_juez_al_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let juez = juez_de_diseno(Some(2), Some(2), None);
+        let rubricas = [rubrica_diseno()];
+        let v = evaluar_rust_con(base.path(), &rubricas, Some(&juez));
+        assert!(!v.extractos.is_empty(), "el juez leyó extractos");
     }
 
     #[test]
@@ -6160,6 +6178,7 @@ mod tests {
             ruidosos: Vec::new(),
             huella: None,
             inestables: Vec::new(),
+            extractos_base: Vec::new(),
         })
         .collect();
         let calibracion = Calibraciones {

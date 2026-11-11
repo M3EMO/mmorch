@@ -7,6 +7,8 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::oracle::juez::ExtractoGuardado;
+
 /// Versión del formato de las líneas JSONL y de los objetos persistidos.
 pub const VERSION: u32 = 1;
 
@@ -441,6 +443,9 @@ pub struct Veredicto {
     /// Un veredicto viejo lee vacío.
     #[serde(default)]
     pub hallazgos_descartados: Vec<HallazgoDescartado>,
+    /// Ventanas que leyó el juez de diseño, sin su texto. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub extractos: Vec<ExtractoGuardado>,
 }
 
 impl Default for Veredicto {
@@ -472,6 +477,7 @@ impl Default for Veredicto {
             ambiguedades: Vec::new(),
             contrato_fallidos: Vec::new(),
             hallazgos_descartados: Vec::new(),
+            extractos: Vec::new(),
         }
     }
 }
@@ -690,6 +696,7 @@ mod tests {
             ambiguedades: Vec::new(),
             contrato_fallidos: Vec::new(),
             hallazgos_descartados: Vec::new(),
+            extractos: Vec::new(),
         }
     }
 
@@ -1088,6 +1095,24 @@ mod tests {
             .remove("contrato_fallidos");
         let viejo: Veredicto = serde_json::from_value(json).expect("lee");
         assert!(viejo.contrato_fallidos.is_empty());
+    }
+
+    #[test]
+    fn veredicto_viejo_sin_extractos_lee_lista_vacia() {
+        // Un veredicto anterior al campo `extractos` lo lee con lista vacía.
+        let v = Veredicto {
+            extractos: vec![ExtractoGuardado {
+                archivo: "src/lib.rs".into(),
+                desde: 1,
+                hasta: 10,
+                motivo: "cambio".into(),
+            }],
+            ..Veredicto::default()
+        };
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        json.as_object_mut().expect("objeto").remove("extractos");
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee");
+        assert!(viejo.extractos.is_empty(), "{:?}", viejo.extractos);
     }
 
     #[test]
