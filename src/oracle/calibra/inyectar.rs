@@ -414,11 +414,23 @@ const BUCLE: &str =
     "let _ = (0..2_000u32).map(|i| (0..2_000u32).filter(|j| *j == i).count()).sum::<usize>();";
 
 /// Nombre de la función que declara `linea` (`pub fn procesar(` da `procesar`). `None` si no declara una.
+/// Acepta visibilidad (`pub`, `pub(crate)`, `pub(super)`) y los calificadores `const`, `async` y `unsafe`,
+/// en cualquier orden.
 fn nombre_de_funcion(linea: &str) -> Option<&str> {
-    let t = linea.trim_start();
-    let resto = ["pub(crate) fn ", "pub fn ", "fn "]
+    let mut t = linea.trim_start();
+    if let Some(resto) = ["pub(crate) ", "pub(super) ", "pub "]
         .iter()
-        .find_map(|p| t.strip_prefix(p))?;
+        .find_map(|v| t.strip_prefix(v))
+    {
+        t = resto;
+    }
+    while let Some(resto) = ["const ", "async ", "unsafe "]
+        .iter()
+        .find_map(|q| t.strip_prefix(q))
+    {
+        t = resto;
+    }
+    let resto = t.strip_prefix("fn ")?;
     let fin = resto
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .unwrap_or(resto.len());
@@ -2934,6 +2946,24 @@ pub fn dos(x: u32) -> bool {
                 "    if !(x && y) { 1 } else { 0 }".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn nombre_de_funcion_reconoce_calificadores_y_visibilidad() {
+        assert_eq!(
+            nombre_de_funcion("pub(crate) const fn f() -> u32 {"),
+            Some("f")
+        );
+        assert_eq!(nombre_de_funcion("async unsafe fn g() {"), Some("g"));
+        assert_eq!(nombre_de_funcion("pub(super) async fn h() {"), Some("h"));
+        assert_eq!(nombre_de_funcion("const fn k() -> u32 {"), Some("k"));
+        assert_eq!(nombre_de_funcion("pub unsafe fn m() {"), Some("m"));
+        assert_eq!(
+            nombre_de_funcion("pub fn procesar(x: u32) {"),
+            Some("procesar")
+        );
+        assert_eq!(nombre_de_funcion("const LIMITE: u32 = 3;"), None);
+        assert_eq!(nombre_de_funcion("let fn_x = 1;"), None);
     }
 
     #[test]
