@@ -516,6 +516,9 @@ pub struct CasoGuardado {
     /// `true` si `mutantes_cambiados` no está vacío: el caso movió mutantes que no son su defecto.
     #[serde(default)]
     pub ruidoso: bool,
+    /// `-F` de cargo-mutants que midió el caso. Vacío si el caso no midió mutación.
+    #[serde(default)]
+    pub filtro: String,
     /// Nombres completos de los tests que `AssertBorrado` apagó. Vacío en los demás defectos.
     #[serde(default)]
     pub tests_apagados: Vec<String>,
@@ -760,6 +763,7 @@ struct Evaluada {
     veredicto: Veredicto,
     reusado: bool,
     mutantes: Vec<MutanteEstado>,
+    filtro: String,
 }
 
 /// Evalúa la copia `copia` del caso `i` como `tipo`. Reusa el `target` de la base si `puede_reusar` lo permite.
@@ -786,6 +790,7 @@ fn evaluar_copia(
     let id = r.id_de(i);
     // Vacía la muestra de una evaluación anterior: lo que quede en el hilo es de esta evaluación.
     let _ = super::mutacion::tomar_muestra();
+    let _ = super::mutacion::tomar_filtro();
     // Los casos corren con el plazo de la base: un plazo automático cambiaría con los tests que se apagan.
     let veredicto = con_caso(&id, || {
         super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
@@ -793,6 +798,7 @@ fn evaluar_copia(
         })
     })?;
     let mutantes = super::mutacion::tomar_muestra();
+    let filtro = super::mutacion::tomar_filtro();
     let frio = veredicto
         .avisos
         .iter()
@@ -801,6 +807,7 @@ fn evaluar_copia(
         veredicto,
         reusado: reusa && !frio,
         mutantes,
+        filtro,
     })
 }
 
@@ -829,6 +836,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             veredicto,
             reusado,
             mutantes,
+            filtro,
         } = evaluar_copia(r, &copia, TipoCaso::Limpio, i)?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
@@ -846,6 +854,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             target_reusado: reusado,
             mutantes,
             mutantes_cambiados,
+            filtro,
             ..Caso::nuevo(i as u32, None, veredicto)
         };
         return Ok(Medido {
@@ -903,6 +912,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             veredicto,
             reusado,
             mutantes,
+            filtro,
         } = super::mutacion::con_archivo_acotado(acotado, || {
             evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)
         })?;
@@ -932,10 +942,10 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
                 continue;
             }
         }
-        medido = Some((inyeccion, veredicto, reusado, mutantes));
+        medido = Some((inyeccion, veredicto, reusado, mutantes, filtro));
         break;
     }
-    let Some((inyeccion, veredicto, reusado, mutantes)) = medido else {
+    let Some((inyeccion, veredicto, reusado, mutantes, filtro)) = medido else {
         return Ok(Medido {
             reemplazos: invalidos,
             caso: None,
@@ -958,6 +968,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         target_reusado: reusado,
         mutantes,
         mutantes_cambiados,
+        filtro,
         ..Caso::nuevo(i as u32, Some(inyeccion), veredicto)
     };
     Ok(Medido {
@@ -1798,6 +1809,8 @@ struct Caso {
     mutantes: Vec<MutanteEstado>,
     /// Mutantes cuyo estado cambió frente a la base, sin el mutante elegido. Vacío en un caso reusado.
     mutantes_cambiados: Vec<String>,
+    /// `-F` de cargo-mutants que midió el caso. Vacío si el caso no midió mutación.
+    filtro: String,
 }
 
 impl Caso {
@@ -1827,6 +1840,7 @@ impl Caso {
             omitidos: Vec::new(),
             mutantes: Vec::new(),
             mutantes_cambiados: Vec::new(),
+            filtro: String::new(),
         }
     }
 
@@ -1871,6 +1885,7 @@ impl CasoGuardado {
             mutantes: caso.mutantes.clone(),
             mutantes_cambiados: caso.mutantes_cambiados.clone(),
             ruidoso: !caso.mutantes_cambiados.is_empty(),
+            filtro: caso.filtro.clone(),
         }
     }
 
@@ -1905,6 +1920,7 @@ impl CasoGuardado {
             mutantes: Vec::new(),
             mutantes_cambiados: Vec::new(),
             ruidoso: false,
+            filtro: String::new(),
         }
     }
 }
@@ -8624,6 +8640,59 @@ mod tests {
             "{:?}",
             limpio.mutantes_cambiados
         );
+    }
+
+    #[test]
+    fn calibra_caso_guarda_el_filtro_de_su_mutacion() {
+        let (_t, tarea) = tarea_prueba();
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let outcomes = match tipo {
+                TipoCaso::Defecto(_) => MUTANTES_DEFECTO,
+                _ => MUTANTES_BASE,
+            };
+            let _ = crate::oracle::mutacion::sonda_mutacion(&MutacionFalsa { outcomes }, &tarea);
+            Ok(diseno_con(&[(ITEM_MODULARIDAD, 3), (ITEM_ROBUSTEZ, 3)]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            4,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let con_defecto = medida
+            .casos
+            .iter()
+            .find(|c| c.es_defecto)
+            .expect("hay un caso con defecto");
+        let guardado = CasoGuardado::de(con_defecto);
+        assert!(
+            guardado.filtro.starts_with(" -F '^(?:"),
+            "el filtro del caso: {:?}",
+            guardado.filtro
+        );
+        assert!(
+            guardado.filtro.contains("replace x -> u8 with 0"),
+            "el filtro nombra el mutante medido: {:?}",
+            guardado.filtro
+        );
+    }
+
+    #[test]
+    fn calibra_caso_viejo_sin_filtro_lee_vacio() {
+        let caso = Caso::nuevo(0, None, Veredicto::default());
+        let mut vieja = serde_json::to_value(CasoGuardado::de(&caso)).expect("serializa");
+        vieja.as_object_mut().expect("objeto").remove("filtro");
+        let leido: CasoGuardado = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert!(leido.filtro.is_empty(), "{:?}", leido.filtro);
     }
 
     #[test]

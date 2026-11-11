@@ -44,6 +44,9 @@ pub struct ResultadoMutacion {
     /// Duración de la fase Test del Baseline, en segundos. `None` si el reporte no la trae o es una sonda sin reporte.
     #[serde(default)]
     pub base_segundos: Option<f64>,
+    /// Mutantes del reporte que no estaban en la muestra pedida, en orden del reporte. No cuentan en el puntaje.
+    #[serde(default)]
+    pub fuera_de_la_muestra: Vec<String>,
 }
 
 /// Multiplicador del plazo por mutante sobre la duración de la fase Test de la base. Cita de cargo-mutants:
@@ -110,6 +113,76 @@ thread_local! {
 /// Saca la muestra que midió la última `sonda_mutacion` de este hilo. Deja la muestra vacía.
 pub(crate) fn tomar_muestra() -> Vec<MutanteEstado> {
     ULTIMA_MUESTRA.with(|u| std::mem::take(&mut *u.borrow_mut()))
+}
+
+thread_local! {
+    /// Filtro `-F` de la última corrida que armó `sonda_mutacion` en este hilo. Vacío si no armó ninguno.
+    static ULTIMO_FILTRO: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Saca el filtro `-F` de la última `sonda_mutacion` de este hilo. Deja el filtro vacío.
+pub(crate) fn tomar_filtro() -> String {
+    ULTIMO_FILTRO.with(|u| std::mem::take(&mut *u.borrow_mut()))
+}
+
+/// Nombres de todos los mutantes del reporte, en orden, si el reporte es medible. Si no, vacío.
+/// Sirve de pedidos cuando la muestra es el reporte entero.
+pub(crate) fn nombres_del_reporte(json: &str) -> Vec<String> {
+    match leer_viables(json) {
+        Ok(Lectura::Medible(_, _, nombres)) => nombres,
+        _ => Vec::new(),
+    }
+}
+
+/// Nombres exactos del `-F` de `cmd`, un comando de `comando_de_corrida`. None si no trae `-F`.
+/// Invierte `filtro_de`: des-entrecomilla el shell y des-escapa cada alterno de la regex.
+pub(crate) fn pedidos_del_comando(cmd: &str) -> Option<Vec<String>> {
+    const ANCLA: &str = "/salida/mutants -F '";
+    let inicio = cmd.find(ANCLA)? + ANCLA.len() - 1;
+    let filtro = desentrecomilla(&cmd[inicio..])?;
+    let cuerpo = filtro.strip_prefix("^(?:")?.strip_suffix(")$")?;
+    if cuerpo.is_empty() {
+        return Some(Vec::new());
+    }
+    separar_alternos(cuerpo)
+}
+
+/// Lee una cadena de `sh` entre comillas simples, desde su `'` inicial. Cada `'` interna va como `'\''`.
+fn desentrecomilla(texto: &str) -> Option<String> {
+    let mut resto = texto.strip_prefix('\'')?;
+    let mut salida = String::new();
+    loop {
+        if let Some(r) = resto.strip_prefix("'\\''") {
+            salida.push('\'');
+            resto = r;
+        } else if resto.starts_with('\'') {
+            return Some(salida);
+        } else {
+            let c = resto.chars().next()?;
+            salida.push(c);
+            resto = &resto[c.len_utf8()..];
+        }
+    }
+}
+
+/// Parte `cuerpo` por sus `|` sin escapar y des-escapa cada alterno. None si termina en `\` suelto.
+fn separar_alternos(cuerpo: &str) -> Option<Vec<String>> {
+    let mut nombres = vec![String::new()];
+    let mut escapado = false;
+    for c in cuerpo.chars() {
+        let actual = nombres.last_mut()?;
+        if escapado {
+            actual.push(c);
+            escapado = false;
+        } else if c == '\\' {
+            escapado = true;
+        } else if c == '|' {
+            nombres.push(String::new());
+        } else {
+            actual.push(c);
+        }
+    }
+    (!escapado).then_some(nombres)
 }
 
 /// Nombres, en orden de `caso`, de los mutantes que están en `base` y en `caso` con estado distinto.
@@ -229,7 +302,8 @@ struct Viable {
 /// no hay muestra.
 enum Lectura {
     Sin(String),
-    Medible(Vec<Viable>, Option<f64>),
+    /// Viables, duración de la base y los nombres de todos los mutantes del reporte (`Unviable` incluidos).
+    Medible(Vec<Viable>, Option<f64>, Vec<String>),
 }
 
 /// Valida el reporte y lista sus viables. `Unviable` no compila: no cuenta. Es la base de la muestra
@@ -249,6 +323,7 @@ fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
     // `Baseline` es la marca de fin: sin él, la lista no prueba que la corrida terminó.
     let mut hay_baseline = false;
     let mut base_segundos = None;
+    let mut nombres: Vec<String> = Vec::new();
     for resultado in &resultados {
         let de = |m: &Mutante, estado: EstadoMutante| Viable {
             archivo: m.file.clone(),
@@ -276,17 +351,20 @@ fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
                     )));
                 }
             },
-            Escenario::Mutant(mutante) => match resultado.summary.as_str() {
-                "Unviable" => {}
-                "CaughtMutant" => viables.push(de(mutante, EstadoMutante::Muerto)),
-                "Timeout" => viables.push(de(mutante, EstadoMutante::Vencido)),
-                "MissedMutant" => viables.push(de(mutante, EstadoMutante::Vivo)),
-                otro => {
-                    return Err(ErrorOraculo::Infra(format!(
-                        "resumen de mutante desconocido: {otro}"
-                    )));
+            Escenario::Mutant(mutante) => {
+                nombres.push(mutante.name.clone());
+                match resultado.summary.as_str() {
+                    "Unviable" => {}
+                    "CaughtMutant" => viables.push(de(mutante, EstadoMutante::Muerto)),
+                    "Timeout" => viables.push(de(mutante, EstadoMutante::Vencido)),
+                    "MissedMutant" => viables.push(de(mutante, EstadoMutante::Vivo)),
+                    otro => {
+                        return Err(ErrorOraculo::Infra(format!(
+                            "resumen de mutante desconocido: {otro}"
+                        )));
+                    }
                 }
-            },
+            }
         }
     }
     if !hay_baseline {
@@ -305,7 +383,7 @@ fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
             informe.total_mutants
         )));
     }
-    Ok(Lectura::Medible(viables, base_segundos))
+    Ok(Lectura::Medible(viables, base_segundos, nombres))
 }
 
 /// Primeros `mutantes_max` viables, en el orden del archivo. El `-F` ya filtra la muestra de la sonda.
@@ -318,17 +396,30 @@ pub fn parsear_outcomes(
     json: &str,
     mutantes_max: u32,
     requisitos: &[Requisito],
+    pedidos: &[String],
 ) -> Result<ResultadoMutacion, ErrorOraculo> {
     if mutantes_max == 0 {
         return Err(ErrorOraculo::Infra("mutantes_max debe ser 1 o más".into()));
     }
-    let (viables, base_segundos) = match leer_viables(json)? {
+    let (viables, base_segundos, del_reporte) = match leer_viables(json)? {
         Lectura::Sin(motivo) => return Ok(desde_sonda(sin_veredicto(DIMENSION, motivo))),
-        Lectura::Medible(viables, base_segundos) => (viables, base_segundos),
+        Lectura::Medible(viables, base_segundos, del_reporte) => {
+            (viables, base_segundos, del_reporte)
+        }
     };
+    let fuera_de_la_muestra = fuera_de(&del_reporte, pedidos);
+    if let Some(faltante) = primer_faltante(pedidos, &del_reporte) {
+        let motivo = format!("el reporte no trae el mutante pedido {faltante}");
+        return Ok(ResultadoMutacion {
+            fuera_de_la_muestra,
+            ..desde_sonda(sin_veredicto(DIMENSION, motivo))
+        });
+    }
+    let viables = de_la_muestra(viables, pedidos);
     if viables.is_empty() {
         return Ok(ResultadoMutacion {
             base_segundos,
+            fuera_de_la_muestra,
             ..desde_sonda(ResultadoSonda {
                 dimension: DIMENSION,
                 valor: None,
@@ -379,7 +470,30 @@ pub fn parsear_outcomes(
             })
             .collect(),
         base_segundos,
+        fuera_de_la_muestra,
     })
+}
+
+/// Nombres del reporte que no están en `pedidos`, en orden del reporte.
+fn fuera_de(del_reporte: &[String], pedidos: &[String]) -> Vec<String> {
+    del_reporte
+        .iter()
+        .filter(|n| !pedidos.contains(*n))
+        .cloned()
+        .collect()
+}
+
+/// Primer nombre de `pedidos`, en su orden, que el reporte no trae. Un `Unviable` sí cuenta como traído.
+fn primer_faltante<'a>(pedidos: &'a [String], del_reporte: &[String]) -> Option<&'a String> {
+    pedidos.iter().find(|p| !del_reporte.contains(p))
+}
+
+/// Viables que están en `pedidos`, en su orden. Los demás no forman la muestra.
+fn de_la_muestra(viables: Vec<Viable>, pedidos: &[String]) -> Vec<Viable> {
+    viables
+        .into_iter()
+        .filter(|v| pedidos.contains(&v.nombre))
+        .collect()
 }
 
 /// Tests fallidos por log: la clave es la ruta `log/<archivo>.log`. Cada lista sigue el orden del archivo.
@@ -417,13 +531,22 @@ fn tests_de(viable: &Viable, por_log: &BTreeMap<&str, Vec<&str>>) -> Vec<String>
 /// Mutantes muertos de la muestra que mide `parsear_outcomes`, en el orden del archivo. Cada uno trae
 /// los tests que fallaron con él, según `tests_fallidos` (el `tests-fallidos.txt` de la corrida). Un
 /// reporte sin veredicto, ilegible o vacío no tiene muestra: da una lista vacía.
-pub fn mutantes_muertos(json: &str, mutantes_max: u32, tests_fallidos: &str) -> Vec<MutanteMuerto> {
+pub fn mutantes_muertos(
+    json: &str,
+    pedidos: &[String],
+    mutantes_max: u32,
+    tests_fallidos: &str,
+) -> Vec<MutanteMuerto> {
     if mutantes_max == 0 {
         return Vec::new();
     }
-    let Ok(Lectura::Medible(viables, _)) = leer_viables(json) else {
+    let Ok(Lectura::Medible(viables, _, del_reporte)) = leer_viables(json) else {
         return Vec::new();
     };
+    if primer_faltante(pedidos, &del_reporte).is_some() {
+        return Vec::new();
+    }
+    let viables = de_la_muestra(viables, pedidos);
     let por_log = leer_tests_fallidos(tests_fallidos);
     muestra(&viables, mutantes_max)
         .iter()
@@ -588,6 +711,7 @@ fn desde_sonda(sonda: ResultadoSonda) -> ResultadoMutacion {
         truncado: false,
         mutantes: Vec::new(),
         base_segundos: None,
+        fuera_de_la_muestra: Vec::new(),
     }
 }
 
@@ -603,9 +727,11 @@ pub fn sonda_mutacion_en(
     tarea: &Tarea,
     cambios: Option<&BTreeMap<String, Vec<(u32, u32)>>>,
 ) -> ResultadoMutacion {
-    let resultado = medir_mutantes(ej, tarea, cambios);
+    let mut filtro = String::new();
+    let resultado = medir_mutantes(ej, tarea, cambios, &mut filtro);
     ULTIMA_MUESTRA.with(|u| *u.borrow_mut() = resultado.mutantes.clone());
     ULTIMA_BASE_SEGUNDOS.with(|u| *u.borrow_mut() = resultado.base_segundos);
+    ULTIMO_FILTRO.with(|u| *u.borrow_mut() = filtro);
     resultado
 }
 
@@ -628,10 +754,12 @@ fn dentro_del_cambio(nombre: &str, cambios: &BTreeMap<String, Vec<(u32, u32)>>) 
 
 /// Cuerpo de `sonda_mutacion_en`. Su resultado sale con la muestra de `mutantes`.
 /// Con `cambios`, la muestra y el total son los mutantes que caen dentro del cambio.
+/// `filtro` recibe el `-F` de la corrida, si llega a armarla.
 fn medir_mutantes(
     ej: &dyn EjecutorHerramienta,
     tarea: &Tarea,
     cambios: Option<&BTreeMap<String, Vec<(u32, u32)>>>,
+    filtro: &mut String,
 ) -> ResultadoMutacion {
     if tarea.lenguaje != "rust" {
         return desde_sonda(sin_veredicto(
@@ -704,7 +832,8 @@ fn medir_mutantes(
         }
         None => muestra,
     };
-    let salida = match ej.ejecutar(&comando_de_corrida(tarea, &filtro_de(&muestra))) {
+    *filtro = filtro_de(&muestra);
+    let salida = match ej.ejecutar(&comando_de_corrida(tarea, filtro.as_str())) {
         Ok(s) => s,
         Err(e) => return desde_sonda(sin_veredicto(DIMENSION, e.to_string())),
     };
@@ -712,7 +841,7 @@ fn medir_mutantes(
         let base = format!("no dejó reporte (cargo-mutants código {})", salida.codigo);
         return desde_sonda(sin_veredicto(DIMENSION, con_cola(base, &salida.stderr)));
     };
-    let mut resultado = parsear_outcomes(json, max, &tarea.requisito)
+    let mut resultado = parsear_outcomes(json, max, &tarea.requisito, &muestra)
         .unwrap_or_else(|e| desde_sonda(sin_veredicto(DIMENSION, e.to_string())));
     // El reporte solo trae la muestra: el total real sale del listado.
     if resultado.sonda.valor.is_some() && total > max {
@@ -783,25 +912,6 @@ mod tests {
         serde_json::Value::Array(items).to_string()
     }
 
-    /// Nombres de los mutantes del reporte, en orden. Un reporte que no se lee da un solo nombre.
-    fn nombres_del_reporte(json: &str) -> Vec<String> {
-        let valor: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
-        let nombres: Vec<String> = valor["outcomes"]
-            .as_array()
-            .map(|outs| {
-                outs.iter()
-                    .filter_map(|o| o["scenario"]["Mutant"]["name"].as_str())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-        if nombres.is_empty() {
-            vec!["m".into()]
-        } else {
-            nombres
-        }
-    }
-
     /// Salida del listado: el JSON va en `listado.json`, como lo deja `comando_de_listado`.
     fn salida_listado(json: String) -> SalidaHerramienta {
         let mut s = SalidaHerramienta::default();
@@ -817,7 +927,11 @@ mod tests {
                 return Ok(SalidaHerramienta::default());
             }
             if cmd.contains("--list") {
-                let nombres = nombres_del_reporte(json);
+                // Un reporte que no se mide da un listado de un mutante: el motivo sale del reporte.
+                let mut nombres = nombres_del_reporte(json);
+                if nombres.is_empty() {
+                    nombres.push("m".into());
+                }
                 let refs: Vec<&str> = nombres.iter().map(String::as_str).collect();
                 return Ok(salida_listado(listado_json(&refs)));
             }
@@ -1064,7 +1178,8 @@ mod tests {
 
     #[test]
     fn mutacion_con_asserts_da_valor_uno_y_cero_hallazgos() {
-        let r = parsear_outcomes(CON_ASSERTS, 60, &[]).expect("parsea");
+        let r = parsear_outcomes(CON_ASSERTS, 60, &[], &nombres_del_reporte(CON_ASSERTS))
+            .expect("parsea");
         assert_eq!(r.sonda.valor, Some(1.0));
         assert_eq!(r.sonda.motivo, None);
         assert!(r.sonda.hallazgos.is_empty());
@@ -1076,7 +1191,8 @@ mod tests {
 
     #[test]
     fn mutacion_sin_asserts_da_dos_novenos_y_siete_hallazgos_con_archivo_y_linea() {
-        let r = parsear_outcomes(SIN_ASSERTS, 60, &[]).expect("parsea");
+        let r = parsear_outcomes(SIN_ASSERTS, 60, &[], &nombres_del_reporte(SIN_ASSERTS))
+            .expect("parsea");
         let valor = r.sonda.valor.expect("valor");
         assert!((valor - 2.0 / 9.0).abs() < 1e-6, "valor {valor}");
         assert_eq!(r.muertos, 2);
@@ -1093,8 +1209,10 @@ mod tests {
 
     #[test]
     fn mutacion_sin_asserts_puntaje_menor_que_con_asserts() {
-        let con = parsear_outcomes(CON_ASSERTS, 60, &[]).expect("parsea");
-        let sin = parsear_outcomes(SIN_ASSERTS, 60, &[]).expect("parsea");
+        let con = parsear_outcomes(CON_ASSERTS, 60, &[], &nombres_del_reporte(CON_ASSERTS))
+            .expect("parsea");
+        let sin = parsear_outcomes(SIN_ASSERTS, 60, &[], &nombres_del_reporte(SIN_ASSERTS))
+            .expect("parsea");
         assert!(sin.sonda.valor < con.sonda.valor);
     }
 
@@ -1113,7 +1231,7 @@ mod tests {
             ));
         }
         let json = format!(r#"{{"total_mutants":20,"outcomes":[{}]}}"#, outs.join(","));
-        let r = parsear_outcomes(&json, 5, &[]).expect("parsea");
+        let r = parsear_outcomes(&json, 5, &[], &nombres_del_reporte(&json)).expect("parsea");
         assert_eq!(r.muestra, 5);
         assert!(r.truncado);
         assert_eq!(r.total_conocido, Some(20));
@@ -1126,7 +1244,7 @@ mod tests {
     #[test]
     fn mutacion_baseline_failure_da_sin_veredicto_con_motivo() {
         let json = r#"{"outcomes":[{"scenario":"Baseline","summary":"Failure"}]}"#;
-        let r = parsear_outcomes(json, 60, &[]).expect("parsea");
+        let r = parsear_outcomes(json, 60, &[], &nombres_del_reporte(json)).expect("parsea");
         assert_eq!(r.sonda.valor, None);
         assert_eq!(
             r.sonda.motivo.as_deref(),
@@ -1138,7 +1256,7 @@ mod tests {
     fn mutacion_sin_viables_da_valor_none() {
         let json = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},
             {"scenario":{"Mutant":{"name":"m","file":"src/a.rs"}},"summary":"Unviable"}]}"#;
-        let r = parsear_outcomes(json, 60, &[]).expect("parsea");
+        let r = parsear_outcomes(json, 60, &[], &nombres_del_reporte(json)).expect("parsea");
         assert_eq!(r.sonda.valor, None);
         assert!(
             r.sonda
@@ -1151,7 +1269,8 @@ mod tests {
 
     #[test]
     fn mutacion_reporte_valido_sin_mutantes_da_motivo_sin_mutantes_para_medir() {
-        let r = parsear_outcomes(SIN_MUTANTES, 60, &[]).expect("parsea");
+        let r = parsear_outcomes(SIN_MUTANTES, 60, &[], &nombres_del_reporte(SIN_MUTANTES))
+            .expect("parsea");
         assert_eq!(r.sonda.valor, None);
         assert!(r.sonda.hallazgos.is_empty());
         let motivo = r.sonda.motivo.unwrap_or_default();
@@ -1173,11 +1292,12 @@ mod tests {
             .sonda
             .motivo
             .unwrap_or_default();
-        let motivo_sin_mutantes = parsear_outcomes(SIN_MUTANTES, 60, &[])
-            .expect("parsea")
-            .sonda
-            .motivo
-            .unwrap_or_default();
+        let motivo_sin_mutantes =
+            parsear_outcomes(SIN_MUTANTES, 60, &[], &nombres_del_reporte(SIN_MUTANTES))
+                .expect("parsea")
+                .sonda
+                .motivo
+                .unwrap_or_default();
         assert!(!motivo_sin_reporte.is_empty());
         assert!(!motivo_sin_mutantes.is_empty());
         assert_ne!(motivo_sin_reporte, motivo_sin_mutantes);
@@ -1185,14 +1305,14 @@ mod tests {
 
     #[test]
     fn mutacion_json_roto_es_error_de_infraestructura() {
-        let r = parsear_outcomes("{no es json", 60, &[]);
+        let r = parsear_outcomes("{no es json", 60, &[], &nombres_del_reporte("{no es json"));
         assert!(matches!(r, Err(ErrorOraculo::Infra(_))));
     }
 
     #[test]
     fn mutacion_mutantes_max_cero_es_error_de_infraestructura() {
         assert!(matches!(
-            parsear_outcomes(CON_ASSERTS, 0, &[]),
+            parsear_outcomes(CON_ASSERTS, 0, &[], &nombres_del_reporte(CON_ASSERTS)),
             Err(ErrorOraculo::Infra(_))
         ));
     }
@@ -1637,7 +1757,8 @@ mod tests {
 
     #[test]
     fn mutantes_muertos_devuelve_los_muertos_de_la_muestra_en_orden() {
-        let muertos = mutantes_muertos(MUERTOS_MIXTOS, 60, "");
+        let muertos =
+            mutantes_muertos(MUERTOS_MIXTOS, &nombres_del_reporte(MUERTOS_MIXTOS), 60, "");
         assert_eq!(
             muertos,
             vec![
@@ -1652,30 +1773,38 @@ mod tests {
     fn mutantes_muertos_recorta_a_la_muestra_de_mutantes_max() {
         // Los viables en orden: a1 (muerto), b3 (vivo), b4 (muerto), c5 (muerto).
         assert_eq!(
-            mutantes_muertos(MUERTOS_MIXTOS, 1, ""),
+            mutantes_muertos(MUERTOS_MIXTOS, &nombres_del_reporte(MUERTOS_MIXTOS), 1, ""),
             vec![muerto("src/a.rs", 1, "a1")]
         );
         assert_eq!(
-            mutantes_muertos(MUERTOS_MIXTOS, 3, ""),
+            mutantes_muertos(MUERTOS_MIXTOS, &nombres_del_reporte(MUERTOS_MIXTOS), 3, ""),
             vec![muerto("src/a.rs", 1, "a1"), muerto("src/b.rs", 4, "b4")]
         );
     }
 
     #[test]
     fn mutantes_muertos_coincide_con_los_muertos_de_parsear_outcomes() {
-        let muertos = mutantes_muertos(SIN_ASSERTS, 60, "");
-        let r = parsear_outcomes(SIN_ASSERTS, 60, &[]).expect("parsea");
+        let muertos = mutantes_muertos(SIN_ASSERTS, &nombres_del_reporte(SIN_ASSERTS), 60, "");
+        let r = parsear_outcomes(SIN_ASSERTS, 60, &[], &nombres_del_reporte(SIN_ASSERTS))
+            .expect("parsea");
         assert_eq!(muertos.len(), r.muertos as usize);
         assert!(muertos.iter().all(|m| m.archivo == "src/calc.rs"));
     }
 
     #[test]
     fn mutantes_muertos_json_ilegible_vacio_o_sin_veredicto_es_vacio() {
-        assert!(mutantes_muertos("", 60, "").is_empty());
-        assert!(mutantes_muertos("{no es json", 60, "").is_empty());
+        assert!(mutantes_muertos("", &nombres_del_reporte(""), 60, "").is_empty());
+        assert!(
+            mutantes_muertos("{no es json", &nombres_del_reporte("{no es json"), 60, "").is_empty()
+        );
         let sin_baseline = r#"{"outcomes":[{"scenario":{"Mutant":{"name":"m","file":"src/a.rs"}},"summary":"CaughtMutant"}]}"#;
-        assert!(mutantes_muertos(sin_baseline, 60, "").is_empty());
-        assert!(mutantes_muertos(MUERTOS_MIXTOS, 0, "").is_empty());
+        assert!(
+            mutantes_muertos(sin_baseline, &nombres_del_reporte(sin_baseline), 60, "").is_empty()
+        );
+        assert!(
+            mutantes_muertos(MUERTOS_MIXTOS, &nombres_del_reporte(MUERTOS_MIXTOS), 0, "")
+                .is_empty()
+        );
     }
 
     const CON_LOGS: &str = include_str!("../../tests/fixtures/mutacion/outcomes-con-logs.json");
@@ -1683,7 +1812,8 @@ mod tests {
 
     #[test]
     fn mutantes_muertos_cruza_log_path_con_los_tests_fallidos() {
-        let muertos = mutantes_muertos(CON_LOGS, 60, TESTS_FALLIDOS);
+        let muertos =
+            mutantes_muertos(CON_LOGS, &nombres_del_reporte(CON_LOGS), 60, TESTS_FALLIDOS);
         assert_eq!(muertos.len(), 3, "{muertos:?}");
         assert_eq!(muertos[0].tests, vec!["t::ok"]);
         assert_eq!(
@@ -1694,7 +1824,8 @@ mod tests {
 
     #[test]
     fn mutantes_muertos_timeout_queda_con_tests_vacios() {
-        let muertos = mutantes_muertos(CON_LOGS, 60, TESTS_FALLIDOS);
+        let muertos =
+            mutantes_muertos(CON_LOGS, &nombres_del_reporte(CON_LOGS), 60, TESTS_FALLIDOS);
         let timeout = &muertos[1];
         assert_eq!(
             timeout.nombre,
@@ -1706,7 +1837,7 @@ mod tests {
     #[test]
     fn mutantes_muertos_sin_log_path_o_sin_entrada_da_tests_vacios() {
         let json = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"m","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"CaughtMutant"}]}"#;
-        let muertos = mutantes_muertos(json, 60, TESTS_FALLIDOS);
+        let muertos = mutantes_muertos(json, &nombres_del_reporte(json), 60, TESTS_FALLIDOS);
         assert_eq!(muertos.len(), 1);
         assert!(muertos[0].tests.is_empty(), "{muertos:?}");
     }
@@ -1716,7 +1847,7 @@ mod tests {
         let json = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"m","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"CaughtMutant","log_path":"log/a.log"}]}"#;
         let texto = "log/a.log:test z::uno ... FAILED\nlog/a.log:test a::dos ... FAILED\n\
                      log/a.log:test z::uno ... FAILED\n";
-        let muertos = mutantes_muertos(json, 60, texto);
+        let muertos = mutantes_muertos(json, &nombres_del_reporte(json), 60, texto);
         assert_eq!(muertos[0].tests, vec!["z::uno", "a::dos"]);
     }
 
@@ -1753,7 +1884,13 @@ mod tests {
     #[test]
     fn mutacion_muestra_da_muerto_vivo_y_vencido_en_orden() {
         // Los viables en orden: a1 caza, a2 no compila (no cuenta), b3 se escapa, b4 agota el tiempo, c5 caza.
-        let r = parsear_outcomes(MUERTOS_MIXTOS, 60, &[]).expect("parsea");
+        let r = parsear_outcomes(
+            MUERTOS_MIXTOS,
+            60,
+            &[],
+            &nombres_del_reporte(MUERTOS_MIXTOS),
+        )
+        .expect("parsea");
         assert_eq!(
             r.mutantes,
             vec![
@@ -1801,10 +1938,17 @@ mod tests {
     #[test]
     fn mutacion_puntaje_no_cambia_con_el_estado_vencido() {
         // `Vencido` cuenta como muerto: el valor sale igual que antes del estado nuevo.
-        let r = parsear_outcomes(MUERTOS_MIXTOS, 60, &[]).expect("parsea");
+        let r = parsear_outcomes(
+            MUERTOS_MIXTOS,
+            60,
+            &[],
+            &nombres_del_reporte(MUERTOS_MIXTOS),
+        )
+        .expect("parsea");
         assert_eq!((r.muertos, r.vivos, r.muestra), (3, 1, 4));
         assert_eq!(r.sonda.valor, Some(0.75));
-        let r = parsear_outcomes(SIN_ASSERTS, 60, &[]).expect("parsea");
+        let r = parsear_outcomes(SIN_ASSERTS, 60, &[], &nombres_del_reporte(SIN_ASSERTS))
+            .expect("parsea");
         assert_eq!((r.muertos, r.vivos, r.muestra), (2, 7, 9));
         assert!((r.sonda.valor.expect("valor") - 2.0 / 9.0).abs() < 1e-6);
     }
@@ -1825,9 +1969,21 @@ mod tests {
 
     #[test]
     fn mutacion_parsear_outcomes_lee_la_duracion_de_test_del_baseline() {
-        let r = parsear_outcomes(BASE_CON_FASES, 60, &[]).expect("parsea");
+        let r = parsear_outcomes(
+            BASE_CON_FASES,
+            60,
+            &[],
+            &nombres_del_reporte(BASE_CON_FASES),
+        )
+        .expect("parsea");
         assert_eq!(r.base_segundos, Some(12.5));
-        let sin_fases = parsear_outcomes(MUERTOS_MIXTOS, 60, &[]).expect("parsea");
+        let sin_fases = parsear_outcomes(
+            MUERTOS_MIXTOS,
+            60,
+            &[],
+            &nombres_del_reporte(MUERTOS_MIXTOS),
+        )
+        .expect("parsea");
         assert_eq!(
             sin_fases.base_segundos, None,
             "sin phase_results no hay duración"
@@ -1872,5 +2028,120 @@ mod tests {
             !comando_de_corrida(&t, "").contains("--timeout"),
             "tras un pánico también vuelve"
         );
+    }
+
+    /// Reporte con un mutante por cada `(nombre, resumen)`, en orden. Cada uno tiene su línea.
+    fn reporte_con(mutantes: &[(&str, &str)]) -> String {
+        let mut outs = vec![serde_json::json!({"scenario": "Baseline", "summary": "Success"})];
+        for (i, (nombre, resumen)) in mutantes.iter().enumerate() {
+            outs.push(serde_json::json!({
+                "scenario": {"Mutant": {"name": nombre, "file": "src/a.rs",
+                    "span": {"start": {"line": i + 1}}}},
+                "summary": resumen
+            }));
+        }
+        serde_json::json!({"total_mutants": mutantes.len(), "outcomes": outs}).to_string()
+    }
+
+    /// Pasa nombres literales a `String`, como los pide `parsear_outcomes`.
+    fn strs(nombres: &[&str]) -> Vec<String> {
+        nombres.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn mutacion_fuera_de_la_muestra_no_cuenta_y_se_lista_en_orden() {
+        // Reporte: x1 cazado, p1 vivo, x2 cazado, p2 cazado, p3 vivo. Se pidieron p1, p2 y p3.
+        let json = reporte_con(&[
+            ("x1", "CaughtMutant"),
+            ("p1", "MissedMutant"),
+            ("x2", "CaughtMutant"),
+            ("p2", "CaughtMutant"),
+            ("p3", "MissedMutant"),
+        ]);
+        let r = parsear_outcomes(&json, 60, &[], &strs(&["p1", "p2", "p3"])).expect("parsea");
+        assert_eq!((r.muestra, r.muertos, r.vivos), (3, 1, 2));
+        let valor = r.sonda.valor.expect("valor");
+        assert!((valor - 1.0 / 3.0).abs() < 1e-6, "valor {valor}");
+        assert_eq!(r.sonda.hallazgos.len(), 2);
+        assert_eq!(r.fuera_de_la_muestra, strs(&["x1", "x2"]));
+        let medidos: Vec<&str> = r.mutantes.iter().map(|m| m.nombre.as_str()).collect();
+        assert_eq!(medidos, vec!["p1", "p2", "p3"]);
+    }
+
+    #[test]
+    fn mutacion_pedido_que_falta_en_el_reporte_da_sin_veredicto() {
+        let json = reporte_con(&[("a", "CaughtMutant"), ("u", "Unviable")]);
+        let r =
+            parsear_outcomes(&json, 60, &[], &strs(&["a", "falta1", "falta2"])).expect("parsea");
+        assert_eq!(r.sonda.valor, None);
+        assert_eq!(
+            r.sonda.motivo.as_deref(),
+            Some("el reporte no trae el mutante pedido falta1")
+        );
+        // Un `Unviable` cuenta como presente: no falta, aunque no entre en la muestra.
+        let r = parsear_outcomes(&json, 60, &[], &strs(&["a", "u"])).expect("parsea");
+        assert_eq!(r.sonda.valor, Some(1.0));
+        assert_eq!(r.sonda.motivo, None);
+    }
+
+    #[test]
+    fn mutantes_muertos_no_devuelve_lo_que_no_estaba_en_la_muestra() {
+        let json = reporte_con(&[
+            ("a", "CaughtMutant"),
+            ("b", "CaughtMutant"),
+            ("c", "CaughtMutant"),
+        ]);
+        let muertos = mutantes_muertos(&json, &strs(&["a", "b"]), 60, "");
+        let nombres: Vec<&str> = muertos.iter().map(|m| m.nombre.as_str()).collect();
+        assert_eq!(nombres, vec!["a", "b"]);
+        // Con un pedido que el reporte no trae, el reporte no tiene veredicto: no hay muertos.
+        assert!(mutantes_muertos(&json, &strs(&["a", "falta"]), 60, "").is_empty());
+    }
+
+    #[test]
+    fn mutacion_reporte_con_solo_la_muestra_da_el_mismo_puntaje() {
+        let con = parsear_outcomes(CON_ASSERTS, 60, &[], &nombres_del_reporte(CON_ASSERTS))
+            .expect("parsea");
+        assert_eq!(
+            (con.sonda.valor, con.muertos, con.vivos, con.muestra),
+            (Some(1.0), 10, 0, 10)
+        );
+        assert!(con.fuera_de_la_muestra.is_empty());
+        let sin = parsear_outcomes(SIN_ASSERTS, 60, &[], &nombres_del_reporte(SIN_ASSERTS))
+            .expect("parsea");
+        assert_eq!((sin.muertos, sin.vivos, sin.muestra), (2, 7, 9));
+        assert_eq!(sin.sonda.hallazgos.len(), 7);
+        assert!((sin.sonda.valor.expect("valor") - 2.0 / 9.0).abs() < 1e-6);
+        assert!(sin.fuera_de_la_muestra.is_empty());
+    }
+
+    #[test]
+    fn pedidos_del_comando_invierte_el_filtro_exacto() {
+        let nombres = strs(&[
+            "src/a.rs:1:5: replace a -> u8 with 0",
+            "src/b.rs:2:9: replace x || y with x && y",
+            "src/c.rs:3:1: replace it's \\ (q) . with 'x'",
+            "src/d.rs:4:1: replace f.g+h with ^$ [z]{2}",
+        ]);
+        let cmd = comando_de_corrida(&tarea_pruebas(5), &filtro_de(&nombres));
+        assert_eq!(pedidos_del_comando(&cmd), Some(nombres));
+        assert_eq!(
+            pedidos_del_comando(&comando_de_corrida(&tarea_pruebas(5), "")),
+            None
+        );
+    }
+
+    #[test]
+    fn mutacion_sonda_deja_su_filtro_y_el_mutante_de_mas_queda_fuera() {
+        // El listado trae a y b. La corrida devuelve además c, que no estaba en la muestra.
+        let ej = con_listado_y_corrida(listado_json(&["a", "b"]), corrida_de(&["a", "b", "c"]));
+        let r = sonda_mutacion(&ej, &tarea_pruebas(60));
+        assert_eq!(r.muestra, 2);
+        assert_eq!(r.fuera_de_la_muestra, strs(&["c"]));
+        assert_eq!(tomar_filtro(), filtro_de(&strs(&["a", "b"])));
+        assert!(tomar_filtro().is_empty(), "tras tomarlo queda vacío");
+        // Una sonda sin herramienta no arma filtro.
+        let _ = sonda_mutacion(&falta_la_herramienta(), &tarea_pruebas(60));
+        assert!(tomar_filtro().is_empty(), "sin corrida no hay filtro");
     }
 }

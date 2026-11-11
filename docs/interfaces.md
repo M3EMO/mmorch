@@ -877,6 +877,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "$ref": "#/$defs/ExtractoGuardado"
       }
     },
+    "filtro": {
+      "description": "`-F` de cargo-mutants que midió el caso. Vacío si el caso no midió mutación.",
+      "type": "string",
+      "default": ""
+    },
     "item": {
       "description": "Ítem de rúbrica que el defecto debe hacer caer. `None` en un caso limpio.",
       "type": [
