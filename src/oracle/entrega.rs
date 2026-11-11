@@ -54,21 +54,6 @@ const PLAZO_CORTO: Duration = Duration::from_secs(60);
 const TEST_BUILD: &str = "dockerfile::build";
 /// Ítem de la rúbrica que mide la construcción. Su ancla 3 pide que construya sin red.
 const ITEM_CONSTRUCCION: &str = "entrega.contenedor";
-/// Fragmentos (en minúscula) de la salida de un `RUN` que delatan falta de DNS o de ruta. Solo
-/// cuentan dentro de un `RUN`. Sin patrones de conexión: "connection refused" o "failed to
-/// connect" también salen cuando un servicio local no arranca, y eso es falla del producto.
-/// "unable to locate package" no suma: los patrones de DNS de abajo ya cubren la falta de red.
-const PATRONES_RED: [&str; 8] = [
-    "could not resolve host",
-    "temporary failure in name resolution",
-    "network is unreachable",
-    "name or service not known",
-    "no route to host",
-    "dns: transient error",
-    // Lo que imprime `apk` ante un fallo de DNS. No sale cuando un servicio local no arranca.
-    "temporary error (try again later)",
-    "bad address",
-];
 /// Fragmentos (en minúscula) de un `FROM` cuya imagen no está local (`--pull=never`).
 const PATRONES_AUSENTE: [&str; 3] = ["image not known", "no such image", "unable to find"];
 /// Contador de las etiquetas temporales de `podman build`.
@@ -957,12 +942,6 @@ fn run_pide_network(logico: &str) -> bool {
     false
 }
 
-/// Verdadero si la salida de un build trae evidencia de falta de red.
-fn pide_red(salida: &str) -> bool {
-    let minuscula = salida.to_lowercase();
-    PATRONES_RED.iter().any(|p| minuscula.contains(p))
-}
-
 /// Dónde corrió un escenario: en la imagen construida, o en el contenedor de evaluación.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1436,6 +1415,10 @@ impl<'a> Sesion<'a> {
         entorno: &Entorno,
         escenario: &Escenario,
     ) -> Result<Prueba, ErrorOraculo> {
+        // Root no corre los escenarios que piden red: quedan pendientes sin ejecutarse.
+        if escenario.red {
+            return Ok(Prueba::Pendiente("el escenario pide red".into()));
+        }
         // El plazo de Root corta el `podman exec` a los 120 s, con o sin `timeout` en la imagen.
         let salida = match self.paso(entorno, &escenario.cmd, PLAZO_ESCENARIO, true) {
             Ok(salida) => salida,
@@ -1458,12 +1441,6 @@ impl<'a> Sesion<'a> {
             return Ok(Prueba::Paso);
         }
         let texto = format!("{}\n{}", salida.stdout, salida.stderr);
-        if pide_red(&texto) {
-            let linea = ultima_linea_de(&texto).unwrap_or_default();
-            return Ok(Prueba::Pendiente(format!(
-                "necesita red: el contenedor de escenario corre con --network none: {linea}"
-            )));
-        }
         let cita = ultima_linea_de(&texto).unwrap_or_else(|| escenario.id.clone());
         Ok(Prueba::Fallo {
             codigo: salida.codigo,
@@ -2858,36 +2835,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn entrega_pide_red_no_confunde_un_servicio_caido_con_falta_de_red() {
-        // Un producto que no arranca da "connection refused": falla del producto, no de la red.
-        assert!(!pide_red(
-            "Error: dial tcp 127.0.0.1:8080: connect: connection refused"
-        ));
-        assert!(!pide_red(
-            "curl: (7) Failed to connect to localhost port 80"
-        ));
-        // Los de DNS y de ruta siguen contando como falta de red.
-        assert!(pide_red("curl: (6) Could not resolve host: example.com"));
-        assert!(pide_red("ping: no route to host"));
-    }
-
-    #[test]
-    fn entrega_pide_red_reconoce_los_errores_de_apk_y_wget() {
-        assert!(pide_red(
-            "WARNING: fetching x: DNS: transient error (try again later)"
-        ));
-        // Salida real de `apk add` sin red.
-        assert!(pide_red(
-            "WARNING: fetching https://dl-cdn.alpinelinux.org/x: temporary error (try again later)"
-        ));
-        assert!(pide_red("wget: bad address 'example.com'"));
-        assert!(pide_red("curl: (6) Could not resolve host: example.com"));
-        assert!(!pide_red(
-            "Error: building at STEP \"RUN false\": exit status 1"
-        ));
-    }
-
     /// Repo temporal con los archivos dados (ruta, texto). Crea las carpetas que haga falta.
     fn repo_con_archivos(archivos: &[(&str, &str)]) -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("temp dir");
@@ -3357,6 +3304,7 @@ pub(crate) mod tests {
         let sin_capacidades = Escenario {
             id: "capacidades".into(),
             cmd: "grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/self/status".into(),
+            red: false,
         };
         let r = corredor
             .correr(&sin_capacidades)
@@ -3368,6 +3316,7 @@ pub(crate) mod tests {
         let chown = Escenario {
             id: "chown".into(),
             cmd: "chown nobody /tmp".into(),
+            red: false,
         };
         let r = corredor.correr(&chown).expect("corre el escenario");
         assert!(
@@ -3377,6 +3326,7 @@ pub(crate) mod tests {
         let bomba = Escenario {
             id: "procesos".into(),
             cmd: "i=0; while [ $i -lt 700 ]; do sleep 5 & i=$((i+1)); done; wait".into(),
+            red: false,
         };
         let r = corredor.correr(&bomba).expect("corre el escenario");
         assert!(!matches!(r, Prueba::Paso), "700 procesos salieron bien");
@@ -4597,6 +4547,7 @@ pub(crate) mod tests {
         Escenario {
             id: "e".into(),
             cmd: cmd.into(),
+            red: false,
         }
     }
 
@@ -4797,16 +4748,41 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sesion_correr_escenario_sin_red_queda_pendiente() {
-        let exec = ExecFalso::con(vec![Ok(salida(6, "Could not resolve host: x\n"))]);
+    fn sesion_correr_escenario_con_texto_de_red_y_sin_red_es_fallo() {
+        // La salida no decide la clasificación: sin `red`, salir 1 es fallo aunque diga "could not resolve host".
+        let exec = ExecFalso::con(vec![Ok(salida(1, "Could not resolve host: x\n"))]);
         let s = sesion_de_prueba(&exec, true);
         match s
             .correr_escenario(&Entorno::default(), &escenario_de("wget x"))
             .expect("corre")
         {
-            Prueba::Pendiente(motivo) => assert!(motivo.contains("necesita red"), "{motivo}"),
+            Prueba::Fallo { codigo, cita } => {
+                assert_eq!(codigo, 1);
+                assert!(cita.contains("Could not resolve host"), "{cita}");
+            }
+            _ => panic!("debía fallar"),
+        }
+    }
+
+    #[test]
+    fn sesion_correr_escenario_con_red_queda_pendiente_sin_correrlo() {
+        let exec = ExecFalso::vacio();
+        let s = sesion_de_prueba(&exec, true);
+        let escenario = Escenario {
+            id: "e".into(),
+            cmd: "wget x".into(),
+            red: true,
+        };
+        match s
+            .correr_escenario(&Entorno::default(), &escenario)
+            .expect("corre")
+        {
+            Prueba::Pendiente(motivo) => {
+                assert!(motivo.contains("el escenario pide red"), "{motivo}")
+            }
             _ => panic!("debía quedar pendiente"),
         }
+        assert!(exec.llamadas().is_empty(), "{:?}", exec.llamadas());
     }
 
     #[test]
@@ -5193,6 +5169,7 @@ pub(crate) mod tests {
                 &Escenario {
                     id: "wget".into(),
                     cmd: "wget -q -T 1 http://127.0.0.1:1/x".into(),
+                    red: false,
                 },
             )
             .expect("corre el escenario");
@@ -5237,12 +5214,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn eval_escenario_con_red_queda_pendiente_fuera_del_mapa() {
+    fn eval_escenario_con_red_queda_pendiente_sin_correrlo() {
         let repo = repo_completo();
-        let fabrica = FabricaEvalFalsa::con(
-            ExecFalso::vacio().responde("exit 1", Resp::Codigo(6, "Could not resolve host: x\n")),
+        let fabrica = FabricaEvalFalsa::con(ExecFalso::vacio());
+        let t = tarea_de(
+            "shell",
+            &format!("{ENTREGA}\n[[escenario]]\nid = \"b\"\ncmd = \"exit 1\"\nred = true\n"),
         );
-        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}"));
         let r = sonda_con(&fabrica, repo.path(), &t);
         assert!(
             !r.escenarios.contains_key("b"),
@@ -5250,7 +5228,17 @@ pub(crate) mod tests {
         );
         assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
         assert_eq!(r.pendientes[0].test, "tarea.toml::escenario-b");
-        assert!(r.pendientes[0].motivo.contains("red"));
+        assert!(
+            r.pendientes[0].motivo.contains("el escenario pide red"),
+            "{:?}",
+            r.pendientes
+        );
+        let corrio = fabrica
+            .exec
+            .llamadas()
+            .iter()
+            .any(|args| args.iter().any(|a| a.contains("exit 1")));
+        assert!(!corrio, "el escenario con red no debe correr");
     }
 
     #[test]

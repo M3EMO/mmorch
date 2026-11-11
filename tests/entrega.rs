@@ -838,7 +838,7 @@ fn entrega_escenario_sin_construir_corre_en_contenedor_de_evaluacion() {
 }
 
 #[test]
-fn entrega_escenario_con_red_queda_pendiente_y_no_false() {
+fn entrega_escenario_que_declara_red_queda_pendiente_y_no_false() {
     root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
@@ -846,8 +846,9 @@ fn entrega_escenario_con_red_queda_pendiente_y_no_false() {
         "{FROM_ALPINE}COPY hola.txt /hola.txt\nUSER 1000\n"
     ));
     let home = home_9d2();
-    let tarea =
-        tarea_con("[[escenario]]\nid = \"descarga\"\ncmd = \"wget -q http://example.com -O /x\"\n");
+    let tarea = tarea_con(
+        "[[escenario]]\nid = \"descarga\"\ncmd = \"wget -q http://example.com -O /x\"\nred = true\n",
+    );
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
     let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     assert_eq!(r.escenarios.get("descarga"), None, "{r:?}");

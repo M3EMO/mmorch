@@ -5011,6 +5011,7 @@ mod tests {
         tarea.escenario = vec![Escenario {
             id: "e2e".into(),
             cmd: "exit 0".into(),
+            red: false,
         }];
         let contrato = Clasificacion {
             estables: BTreeMap::from([("test_a::t1".to_string(), ResultadoTest::Pasa)]),
@@ -5033,6 +5034,7 @@ mod tests {
         tarea.escenario = vec![Escenario {
             id: "e2e".into(),
             cmd: "exit 0".into(),
+            red: false,
         }];
         let contrato = Clasificacion {
             estables: BTreeMap::from([("test_a::t1".to_string(), ResultadoTest::Pasa)]),
@@ -8030,6 +8032,7 @@ mod tests {
         con_escenario.escenario = vec![Escenario {
             id: "e2e".into(),
             cmd: "exit 0".into(),
+            red: false,
         }];
         let mut con_escenario_de_requisito = tarea_rust(base.path());
         con_escenario_de_requisito.requisito[0].escenarios = vec!["e2e".into()];

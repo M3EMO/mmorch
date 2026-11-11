@@ -163,6 +163,9 @@ pub struct Escenario {
     /// Nombre estable. Solo `[A-Za-z0-9._-]`. Los requisitos lo citan por este id.
     pub id: String,
     pub cmd: String,
+    /// El escenario pide red. Root no lo corre.
+    #[serde(default)]
+    pub red: bool,
 }
 
 fn espera_por_defecto() -> u64 {
@@ -651,6 +654,24 @@ cmd = "/oraculo/escenarios/set_get.sh"
 id = "reinicio.v2_ok"
 cmd = "exit 0"
 "#;
+
+    #[test]
+    fn escenario_red_por_defecto_es_falso_y_con_red_true_es_verdadero() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Un tarea.toml viejo: `[[escenario]]` sin `red`.
+        escribir(
+            dir.path(),
+            &format!("{MINIMO}\n[[escenario]]\nid = \"a\"\ncmd = \"exit 0\"\n"),
+        );
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert!(!t.escenario[0].red);
+        escribir(
+            dir.path(),
+            &format!("{MINIMO}\n[[escenario]]\nid = \"a\"\ncmd = \"exit 0\"\nred = true\n"),
+        );
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert!(t.escenario[0].red);
+    }
 
     #[test]
     fn entrega_seccion_y_escenarios_se_parsean() {
