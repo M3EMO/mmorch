@@ -7520,3 +7520,47 @@ Brief: `docs/builds/brief-local-91b.md`. Mismo worktree (`~/.cache/root-wt/local
 Los cuatro tocan `src/oracle/entrega.rs`, así que van en serie, en ese orden. El punto 1 va primero porque sin él no se puede probar nada con podman.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
+
+## Vuelta del 2026-11-11 (14): Tarea 91 cerrada en la rama, revisión de la 91c y Tarea 92
+
+**Estado.** `laptop/tarea-91` (9b47e65) da 3062, 0 y 4 con podman, con la 91b y la 91c. La re-revisión no halló HIGH. Las mezclas de la 84 a la 91 y P95 a P101 esperan al usuario.
+
+**La 91c corrigió un error de mi brief.** Pedí poner el `PATH` del sistema primero, sin pensar en el venv que arma Root. En `python:3.12-slim`, el `python` del sistema tapaba al del venv, y las dependencias quedaban invisibles. El orquestador lo midió con un test real. El orden correcto es: Root, sistema, resto.
+
+## 1. Las 6 preguntas de la 91b
+
+1. **`PATH` del sistema primero:** queda reemplazado por el orden de la 91c. Acepto ese orden.
+2. **La sonda usa `tarea.imagen`:** acepto la imagen, pero cambia lo que significa un fallo de la sonda. Va a la Tarea 92, con el MEDIUM 2.
+3. **Todo `RUN` que falla se repite con red, incluso `RUN false`:** acepto. Es el costo de no creer el texto. Cada repetición registra su Gate.
+4. **`tarea.toml` existentes con escenarios que piden red: ninguno.** Revisé `brasa`, `memora` y `s2-t1` a `s2-t3` en solo lectura. Ninguno declara `[[escenario]]`. Los `escenarios = []` son listas vacías dentro de los requisitos. No hay que agregar `red = true` en ninguno. El generador de D3 decide `red` al escribir cada tarea nueva.
+5. **Se perdió "connection refused no es red":** acepto. No queda ningún patrón de texto.
+6. **Cita del plazo con código 124:** acepto.
+
+## 2. La re-revisión sobre 9b47e65
+
+| Hallazgo | Decisión |
+|---|---|
+| MEDIUM 1: `timeout` y `sh` se resuelven con el `PATH` ya activado. Un `instalar` puede dejar un `sh` falso en el venv | **Se cierra en la 92.** Root busca las rutas absolutas de `sh` y `timeout` al arrancar la sesión, con el `PATH` del sistema, y las usa en cada envoltorio |
+| MEDIUM 2: la sonda de red se guarda una vez por proceso, también cuando falla | **Se cierra en la 92,** con el diseño de abajo |
+| LOW 3: sin `exec`, el proceso interno de un escenario vencido puede vivir hasta el final y ocupar un puerto | **Se acepta.** El `timeout` de adentro del envoltorio mata el escenario a tiempo. Solo una imagen sin `timeout` cae en el caso, y es rara |
+| LOW 4: la sonda prueba que pasta arma la red, no que haya salida a internet | **Se acepta.** Un host que mide builds con red debe tener internet. Un host sin salida es un error de configuración del operador. El build con red lo muestra como rojo, y el aviso de la repetición queda en el veredicto |
+| LOW 5: un `RUN` intermitente da "necesita red" sin serlo | **Se acepta.** Un `RUN` intermitente ya es un defecto del `Dockerfile`, y el hallazgo es de severidad 1 |
+
+**El diseño nuevo de la sonda, para el MEDIUM 2.** Es un experimento con control, según la regla 4 de la vuelta (13).
+1. **Control:** `podman run --rm --network none --entrypoint sh <imagen> -c true`. Si falla, la sonda no pudo correr. El resultado es infraestructura, con su motivo. No es "sin red".
+2. **Prueba:** el mismo comando con `--network pasta:--no-map-gw`. Si el control pasa y la prueba falla, la red no se puede usar.
+3. **Memoria por imagen.** Se guarda solo un resultado positivo, por imagen. Un resultado negativo se vuelve a medir en el próximo build.
+4. Así, un fallo pasajero o una imagen sin `sh` no dejan "sin red" para todas las tareas siguientes.
+
+## 3. Tarea 92
+
+Brief: `docs/builds/brief-local-92.md`, con base 9b47e65 y rama `laptop/tarea-92`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Rutas absolutas de `sh` y `timeout` en el envoltorio | `src/oracle/entrega.rs` |
+| 2 | Sonda de red con control, y memoria por imagen solo para positivos | `src/oracle/entrega.rs` |
+
+Los dos puntos tocan `entrega.rs`, así que van en serie.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
