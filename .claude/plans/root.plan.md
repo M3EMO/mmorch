@@ -7744,3 +7744,69 @@ Brief: `docs/builds/brief-local-95.md`, con base 03308b9 y rama `laptop/tarea-95
 Los dos puntos no comparten archivos, y corren en paralelo.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
+
+## Vuelta del 2026-11-11 (18): la Tarea 95, el junit que falta, y Tarea 96
+
+**Estado.** La Tarea 95 está en `laptop/tarea-95` (d4e6722), con 3107, 0 y 4 sin podman. La suite con podman corre ahora. La revisión no halló falsificación, y halló un HIGH. Las mezclas de la 84 a la 95 y P95 a P101 esperan al usuario.
+
+**t2 confirma la decisión de la vuelta (17).** Funciona detectó su defecto en t2, porque `comportamiento_roto` cayó en `src/pattern/tok_pattern.rs:94`, y los tests de t2 pasan por ahí: dio 0,945 contra 1,0. Completitud repitió el caso de t1: 101 y "sin veredicto". Ese binario es anterior a la Tarea 95.
+
+## 1. El HIGH: un build roto sin junit
+
+**Lo que pasa.** `cmd_nextest` (`src/ficha.rs:393`) termina así: `s=$?; cp /salida/target/nextest/ci/junit.xml /salida/<xml>.xml || exit 1; exit $s`.
+- Si el build se rompe, nextest no escribe junit.
+- Si `/salida/target` está limpio, el `cp` falla, y el comando sale con 1, no con 101.
+- La regla del 101 de la Tarea 95 nunca llega. El caso cae en infraestructura.
+- En la calibración de t1 y t2 sí llegó 101, porque había un junit viejo en `/salida/target`, el de la corrida base.
+
+**Un segundo problema, del mismo `cp`.** Si nextest falla antes de escribir, el `cp` copia el junit de la corrida anterior. Ese junit habla de otro código. Hoy el cruce lo frena casi siempre, pero el comando no debería entregar un junit viejo nunca.
+
+**Decisión.**
+1. **El comando conserva el código de nextest, pase lo que pase con el `cp`.** La forma nueva es: `rm -f /salida/target/nextest/ci/junit.xml; <nextest>; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/<xml>.xml 2>/dev/null; exit $s`.
+2. **El `rm -f` va antes de nextest.** Así un junit viejo nunca llega a `/salida`.
+3. **Root decide con el código, cuando no hay junit,** solo con `runner = "nextest"`:
+   - 101 sin junit: "la suite no compila". Cada test esperado es un fallo. Ya lo hace la Tarea 95.
+   - 100 sin junit: "la suite falló y no dejó junit". Cada test esperado es un fallo.
+   - 0 sin junit, o cualquier otro código sin junit: infraestructura, como hoy.
+4. **El `cp` previo al test** del comando oculto (`cp /oraculo/oculto/... tests/ || exit 1`) se queda. Ese 1 es un fallo de preparación, no del producto, y es infraestructura.
+
+**¿Abre una falsificación? No.**
+- Un 0 sin junit sigue en infraestructura. Nunca da verde.
+- Un 100 sin junit pasa de infraestructura a rojo. Hoy, un producto que borra el junit después de fallar consigue "sin veredicto" en vez de rojo. Con la regla nueva, borrar el junit no le sirve.
+- El código sale del `sh` que lanza Root como proceso principal del contenedor. Los tests son hijos de nextest y no pueden cambiarlo.
+
+**Los `tarea.toml` ya minados.** s2-t1 a s2-t3 traen el comando viejo dentro de `contrato.cmd` y `oculto.cmd`.
+1. Después de la mezcla de la 96, el orquestador cambia esos dos comandos a la forma nueva, en los tres `tarea.toml`. Lo hace en el mismo cambio que aplica las capas de la vuelta (11).
+2. El generador de la minería, `armar_s2.py`, y el de D3 usan la forma nueva desde ahora.
+3. **Efecto en las filas.** Cambiar el `tarea.toml` cambia su `tarea_hash` (Tarea 89). Las filas de esas tareas escritas con ese hash dejan de valer. Las de Seguridad, Pruebas, Funciona y Completitud se recalibran sin API. Las filas de juez de t1 vienen del binario de la 85, sin `tarea_hash`, y siguen valiendo.
+
+## 2. Las 6 preguntas de la Tarea 95
+
+1. **Build roto sin junit:** queda resuelta con la sección 1.
+2. **`bootstrap/` idéntico al repo bueno:** acepto. Sin cambio, el defecto no aplica.
+3. **Un archivo nuevo cuenta entero:** acepto. Un módulo que agrega el commit es justo lo que la tarea pide construir.
+4. **`en_cambio` solo en los dos defectos:** acepto.
+5. **La frase "ninguna línea del cambio" para un módulo: cambia.** La frase pasa a "ningún lugar del cambio admite este defecto". Va a la 96.
+6. **Un build roto en una repetición posterior deja toda la suite en rojo:** acepto. Con el mismo código, un build que falla en la segunda repetición es raro. El error queda del lado del rojo.
+
+**La revisión de la 95:**
+- **MEDIUM, los esperados salen de `pruebas` y `bordes`:** se acepta. La regla de D3 ya pide ids exactos de un junit real en `pruebas`. Una referencia por archivo no entra en una tarea nueva.
+- **MEDIUM, 101 por un entorno roto:** ya aceptado en la vuelta (17). Da rojo, nunca verde.
+- **MEDIUM, un archivo renombrado entra entero, y uno con solo borrados no aporta rango:** se acepta. Un renombre en el commit es parte del cambio. Un borrado no deja dónde inyectar.
+- **LOW, `en_cambio` significa cosas distintas en cada defecto:** se aclara en el comentario del campo, en la 96.
+- **LOW, comparar el motivo con una cadena:** se acepta.
+- **LOW, el reintento de inestables también da rojo total con 101:** se acepta, por el mismo motivo de la pregunta 6.
+
+## 3. Tarea 96
+
+Brief: `docs/builds/brief-local-96.md`, con base d4e6722 y rama `laptop/tarea-96`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | `cmd_nextest` conserva el código y borra el junit viejo | `src/ficha.rs` |
+| 2 | 100 o 101 sin junit, con nextest: rojo | `src/oracle/mod.rs` |
+| 3 | La frase del motivo y el comentario de `en_cambio` | `src/oracle/calibra/inyectar.rs`, `src/oracle/calibra.rs` |
+
+Los tres puntos no comparten archivos, y corren en paralelo.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
