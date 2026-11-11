@@ -458,16 +458,18 @@ fn extractos_de_cambios(
         let Ok(contenido) = fs::read_to_string(ruta) else {
             continue;
         };
-        let total = contenido.lines().count();
+        let lineas: Vec<&str> = contenido.lines().collect();
         let omitidas = secretos.get(archivo.as_str()).cloned().unwrap_or_default();
         let mut emitidas = 0;
-        for (desde, hasta) in ventanas(rangos, total) {
+        for (desde, hasta) in ventanas(rangos, &lineas, &omitidas, limites.extracto_max) {
             // Entre dos ventanas del mismo archivo va la marca de recorte, en su propia línea.
             let separador = if emitidas > 0 { largo_separador() } else { 0 };
             if *restante <= separador {
                 break;
             }
-            let limite = (*restante - separador).min(limites.extracto_max);
+            let presupuesto = *restante - separador;
+            let filas = largo_filas(&lineas, desde, hasta, &omitidas);
+            let limite = limite_de_emision(filas, presupuesto);
             let (texto, ultima) = numerar_rango(&contenido, desde, hasta, limite, &omitidas);
             if texto.is_empty() {
                 continue;
@@ -497,14 +499,49 @@ fn lineas_cambiadas(rangos: &[(u32, u32)]) -> usize {
         .sum()
 }
 
-/// Ventanas de un archivo de `total` líneas: cada rango con `CONTEXTO` líneas a cada lado, dentro de
-/// `1..=total`. Las ventanas que se tocan o se solapan se unen.
-fn ventanas(rangos: &[(u32, u32)], total: usize) -> Vec<(usize, usize)> {
+/// Ventanas de un archivo de `lineas`: cada rango con `CONTEXTO` líneas a cada lado. Las que se tocan o se
+/// solapan se unen. Una ventana que pasa `limite` caracteres baja su contexto, por igual de cada lado, hasta
+/// que entra. Si ni con contexto 0 entra, se parte en ventanas consecutivas que entran.
+fn ventanas(
+    rangos: &[(u32, u32)],
+    lineas: &[&str],
+    omitidas: &BTreeSet<u32>,
+    limite: usize,
+) -> Vec<(usize, usize)> {
+    let total = lineas.len();
+    let mut salida = Vec::new();
+    for (desde, hasta) in expandir_y_unir(rangos, total, CONTEXTO) {
+        // Los rangos del bloque: los que caen dentro de la ventana con contexto completo.
+        let del_bloque: Vec<(u32, u32)> = rangos
+            .iter()
+            .copied()
+            .filter(|&(a, b)| (a as usize) <= hasta && (b as usize) >= desde)
+            .collect();
+        let mut contexto = CONTEXTO;
+        let mut partes = expandir_y_unir(&del_bloque, total, contexto);
+        while contexto > 0
+            && !partes
+                .iter()
+                .all(|&(d, h)| largo_filas(lineas, d, h, omitidas) <= limite)
+        {
+            contexto -= 1;
+            partes = expandir_y_unir(&del_bloque, total, contexto);
+        }
+        for (d, h) in partes {
+            salida.extend(partir(d, h, lineas, omitidas, limite));
+        }
+    }
+    salida
+}
+
+/// Expande cada rango con `contexto` líneas a cada lado, dentro de `1..=total`. Las que se tocan o se
+/// solapan se unen.
+fn expandir_y_unir(rangos: &[(u32, u32)], total: usize, contexto: usize) -> Vec<(usize, usize)> {
     let mut expandidas: Vec<(usize, usize)> = rangos
         .iter()
         .map(|&(desde, hasta)| {
-            let desde = (desde as usize).saturating_sub(CONTEXTO).max(1);
-            let hasta = (hasta as usize).saturating_add(CONTEXTO).min(total);
+            let desde = (desde as usize).saturating_sub(contexto).max(1);
+            let hasta = (hasta as usize).saturating_add(contexto).min(total);
             (desde, hasta)
         })
         .filter(|(desde, hasta)| desde <= hasta)
@@ -518,6 +555,63 @@ fn ventanas(rangos: &[(u32, u32)], total: usize) -> Vec<(usize, usize)> {
         }
     }
     unidas
+}
+
+/// Parte `desde..=hasta` en ventanas consecutivas que entran en `limite`. Una línea que sola no entra se
+/// deja fuera.
+fn partir(
+    desde: usize,
+    hasta: usize,
+    lineas: &[&str],
+    omitidas: &BTreeSet<u32>,
+    limite: usize,
+) -> Vec<(usize, usize)> {
+    let mut salida = Vec::new();
+    let mut inicio = desde;
+    while inicio <= hasta {
+        let mut fin = inicio - 1;
+        let mut usados = 0;
+        while fin < hasta {
+            let largo = largo_filas(lineas, fin + 1, fin + 1, omitidas);
+            if usados + largo > limite {
+                break;
+            }
+            usados += largo;
+            fin += 1;
+        }
+        if fin < inicio {
+            inicio += 1;
+        } else {
+            salida.push((inicio, fin));
+            inicio = fin + 1;
+        }
+    }
+    salida
+}
+
+/// Caracteres de las filas `desde..=hasta` como las escribe `numerar_rango`, sin marca. Acotadas al archivo.
+fn largo_filas(lineas: &[&str], desde: usize, hasta: usize, omitidas: &BTreeSet<u32>) -> usize {
+    (desde..=hasta.min(lineas.len()))
+        .map(|numero| {
+            let texto = if omitidas.contains(&(numero as u32)) {
+                LINEA_OMITIDA
+            } else {
+                lineas[numero - 1]
+            };
+            format!("{numero}: {texto}\n").chars().count()
+        })
+        .sum()
+}
+
+/// Límite para `numerar_rango` de una ventana de `filas` caracteres con `presupuesto` libre. Si la ventana
+/// entra, el límite le deja sitio exacto: no corta. Si no entra, el límite es el presupuesto y corta con la
+/// marca.
+fn limite_de_emision(filas: usize, presupuesto: usize) -> usize {
+    if filas <= presupuesto {
+        filas + largo_separador()
+    } else {
+        presupuesto
+    }
 }
 
 /// Largo de la línea de marca entre dos ventanas: la marca y su salto de línea.
@@ -2648,6 +2742,120 @@ mod tests {
                 .all(|e| e.archivo != "src/grande.rs" || e.motivo == Motivo::Cambio),
             "{salida:?}"
         );
+    }
+
+    #[test]
+    fn juez_veinte_lineas_cambiadas_entran_enteras_si_el_contexto_baja() {
+        let cambio = |k: usize| format!("fn cambio_{k}() {{ \"{}\" }}\n", "c".repeat(100));
+        let base = |k: usize| format!("fn f{k}() {{ \"{}\" }}\n", "x".repeat(50));
+        let nuevo: String = (1..=200)
+            .map(|k| {
+                if (90..=109).contains(&k) {
+                    cambio(k)
+                } else {
+                    base(k)
+                }
+            })
+            .collect();
+        let viejo: String = (1..=200).map(base).collect();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let ini = tempfile::tempdir().expect("tempdir");
+        for (dir, texto) in [(repo.path(), &nuevo), (ini.path(), &viejo)] {
+            fs::create_dir(dir.join("src")).expect("crea src");
+            fs::write(dir.join("src/largo.rs"), texto).expect("escribe");
+        }
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            inicial: Some(ini.path()),
+            ..c.entrada()
+        };
+        let limites = LimitesPrompt {
+            extracto_max: 4000,
+            ..LimitesPrompt::default()
+        };
+        let salida = extractos(&entrada, &limites);
+        let cambios: Vec<&Extracto> = salida
+            .iter()
+            .filter(|e| e.archivo == "src/largo.rs" && e.motivo == Motivo::Cambio)
+            .collect();
+        assert_eq!(cambios.len(), 1, "{salida:?}");
+        let v = cambios[0];
+        for k in 90..=109 {
+            let fila = format!("{k}: {}", cambio(k));
+            assert!(v.texto.contains(&fila), "falta la línea {k}: {}", v.texto);
+        }
+        assert!(
+            v.texto.chars().count() <= 4000,
+            "{}",
+            v.texto.chars().count()
+        );
+        // El contexto baja por igual de cada lado.
+        assert_eq!(90 - v.desde, v.hasta - 109, "{salida:?}");
+    }
+
+    #[test]
+    fn juez_cambio_que_solo_pasa_el_maximo_se_parte_en_ventanas() {
+        let cambio = |k: usize| format!("fn cambio_{k}() {{ \"{}\" }}\n", "c".repeat(190));
+        let nuevo: String = (1..=300)
+            .map(|k| {
+                if (100..=159).contains(&k) {
+                    cambio(k)
+                } else {
+                    format!("fn f{k}() {{}}\n")
+                }
+            })
+            .collect();
+        let viejo: String = (1..=300).map(|k| format!("fn f{k}() {{}}\n")).collect();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let ini = tempfile::tempdir().expect("tempdir");
+        for (dir, texto) in [(repo.path(), &nuevo), (ini.path(), &viejo)] {
+            fs::create_dir(dir.join("src")).expect("crea src");
+            fs::write(dir.join("src/cambio.rs"), texto).expect("escribe");
+        }
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            inicial: Some(ini.path()),
+            ..c.entrada()
+        };
+        let limites = LimitesPrompt::default();
+        let salida = extractos(&entrada, &limites);
+        let cambios: Vec<&Extracto> = salida
+            .iter()
+            .filter(|e| e.archivo == "src/cambio.rs" && e.motivo == Motivo::Cambio)
+            .collect();
+        assert!(cambios.len() >= 2, "{salida:?}");
+        for e in &cambios {
+            assert!(
+                e.texto.chars().count() <= limites.extracto_max,
+                "{}",
+                e.texto.chars().count()
+            );
+        }
+        for k in 100..=159 {
+            let fila = format!("{k}: {}", cambio(k));
+            assert!(
+                cambios.iter().any(|e| e.texto.contains(&fila)),
+                "falta la línea {k}"
+            );
+        }
+        let p = construir_prompt(&entrada, &limites);
+        let seccion = seccion_extractos_de(&p.usuario);
+        assert!(
+            chars_sin_encabezados(seccion) <= limites.extractos_total,
+            "{seccion}"
+        );
+        assert_eq!(
+            seccion.matches("--- src/cambio.rs ---").count(),
+            1,
+            "{seccion}"
+        );
+        assert!(seccion.contains(&format!("{MARCA_RECORTE}\n")), "{seccion}");
     }
 
     #[test]
