@@ -313,13 +313,18 @@ const VERSION_SONDAS_BASE: u32 = 1;
 /// Versión de las sondas de `dimension`. Subirla cambia la huella de la dimensión: sus filas viejas no calibran.
 fn version_de_sondas(dimension: Dimension) -> u32 {
     match dimension {
-        // Arquitectura sube a 2 por el cambio de imports agrupados de sus sondas.
-        Dimension::Arquitectura => 2,
+        // Arquitectura sube a 3: sus aristas y capas leen `limpia`, que ahora deja en blanco los comentarios de
+        // bloque y las cadenas de varias líneas. Antes subió a 2 por los imports agrupados.
+        Dimension::Arquitectura => 3,
+        // Seguridad sube a 2: `unsafe` y `unwrap()` se buscan en `limpia`. Un comentario de bloque ya no da hallazgo.
+        Dimension::Seguridad => 2,
+        // Estructura sube a 2: el largo de las funciones se cuenta sobre `limpia` (llaves en blanco fuera de código).
+        Dimension::Estructura => 2,
+        // Diseno sube a 2: el juez de diseño lee el mapa (API pública y aristas), que se arma sobre `limpia`.
+        Dimension::Diseno => 2,
+        // Sin sondas que lean `limpia` en el perfil rust: su versión no cambia.
         Dimension::Funciona
-        | Dimension::Seguridad
         | Dimension::Eficiencia
-        | Dimension::Estructura
-        | Dimension::Diseno
         | Dimension::Completitud
         | Dimension::Entrega
         | Dimension::Pruebas => VERSION_SONDAS_BASE,
@@ -4903,18 +4908,19 @@ mod tests {
     #[test]
     fn version_de_sondas_de_arquitectura_cambia_su_huella_y_no_la_de_seguridad() {
         let prompt = huella_del_prompt();
-        assert_eq!(version_de_sondas(Dimension::Arquitectura), 2);
+        assert_eq!(version_de_sondas(Dimension::Arquitectura), 3);
         assert_ne!(
             huella_con_version(Dimension::Arquitectura, &prompt, 1),
-            huella_con_version(Dimension::Arquitectura, &prompt, 2)
+            huella_con_version(Dimension::Arquitectura, &prompt, 3)
         );
         assert_eq!(
             huella_de(Dimension::Arquitectura),
-            huella_con_version(Dimension::Arquitectura, &prompt, 2)
+            huella_con_version(Dimension::Arquitectura, &prompt, 3)
         );
+        // Seguridad subió a 2 en su propia versión. Su huella sigue sin depender de la de Arquitectura.
         assert_eq!(
             huella_de(Dimension::Seguridad),
-            huella_con_version(Dimension::Seguridad, &prompt, 1)
+            huella_con_version(Dimension::Seguridad, &prompt, 2)
         );
     }
 
@@ -5112,12 +5118,14 @@ mod tests {
     }
 
     #[test]
-    fn calibra_huella_de_diseno_no_cambia_de_valor() {
+    fn calibra_huella_de_diseno_incluye_su_version_de_sondas_2() {
+        // Diseno subió a la versión 2 al leer el mapa sobre `limpia`. Su huella ya no es la de la versión base.
         let juntas: String = rubricas_de(Dimension::Diseno)
             .iter()
             .map(Rubrica::hash)
             .collect();
-        let esperada = calcular_hash(format!("{}\n{juntas}", huella_del_prompt()).as_bytes());
+        let esperada =
+            calcular_hash(format!("{}\n{juntas}\nsondas v2", huella_del_prompt()).as_bytes());
         assert_eq!(huella_de(Dimension::Diseno), esperada);
     }
 

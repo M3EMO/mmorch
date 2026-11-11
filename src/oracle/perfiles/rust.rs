@@ -41,7 +41,8 @@ pub(crate) struct Archivo {
     pub(crate) lineas: Vec<String>,
 }
 
-/// Una línea con su número, su texto crudo y su texto sin comentarios ni cadenas.
+/// Una línea con su número, su texto crudo y su texto sin comentarios ni contenido de cadenas.
+/// `limpia` tiene el mismo largo en bytes que la línea cruda sin recortar: sus partes en blanco son espacios.
 pub(crate) struct Linea {
     pub(crate) numero: u32,
     pub(crate) cruda: String,
@@ -258,34 +259,186 @@ fn es_archivo_de_test(ruta: &str) -> bool {
         || ruta.ends_with("_tests.rs")
 }
 
-/// Quita comentarios `//` y cambia el contenido de las cadenas por espacios, por línea.
-fn limpiar_linea(linea: &str) -> String {
-    let mut salida = String::with_capacity(linea.len());
-    let mut en_cadena = false;
-    let mut chars = linea.chars().peekable();
-    while let Some(c) = chars.next() {
-        if en_cadena {
-            match c {
-                '\\' => {
-                    chars.next();
-                    salida.push(' ');
-                }
-                '"' => {
-                    en_cadena = false;
-                    salida.push('"');
-                }
-                _ => salida.push(' '),
+/// Estado del limpiador al empezar una línea. Un comentario o una cadena pueden seguir en la línea siguiente.
+#[derive(Clone, Copy, Default)]
+enum Estado {
+    #[default]
+    Codigo,
+    /// Dentro de `/* ... */`. Cuenta los `/*` sin cerrar, porque los comentarios de bloque se anidan.
+    Bloque(u32),
+    /// Dentro de una cadena `"..."` que sigue desde una línea anterior.
+    Cadena,
+    /// Dentro de una cadena cruda `r#"..."#`. Guarda cuántas `#` cierran la cadena.
+    CadenaCruda(usize),
+}
+
+/// Limpia las líneas de un fuente en orden. Recuerda el estado entre una línea y la siguiente.
+#[derive(Default)]
+struct Limpiador {
+    estado: Estado,
+}
+
+impl Limpiador {
+    /// Cambia cada comentario y cada contenido de cadena por espacios, un espacio por byte.
+    /// El largo en bytes no cambia. Los delimitadores `"`, `r#"` y `"#` se conservan.
+    fn limpiar(&mut self, linea: &str) -> String {
+        let cs: Vec<char> = linea.chars().collect();
+        let mut salida = String::with_capacity(linea.len());
+        let mut i = 0;
+        while i < cs.len() {
+            let estado = self.estado;
+            i += match estado {
+                Estado::Codigo => self.en_codigo(&cs, i, &mut salida),
+                Estado::Bloque(n) => self.en_bloque(n, &cs, i, &mut salida),
+                Estado::Cadena => self.en_cadena(&cs, i, &mut salida),
+                Estado::CadenaCruda(n) => self.en_cadena_cruda(n, &cs, i, &mut salida),
+            };
+        }
+        salida
+    }
+
+    /// Procesa código desde `cs[i]`. Devuelve cuántos caracteres consumió.
+    fn en_codigo(&mut self, cs: &[char], i: usize, salida: &mut String) -> usize {
+        match (cs[i], cs.get(i + 1).copied()) {
+            ('/', Some('/')) => {
+                // El resto de la línea es comentario.
+                tramo_en_blanco(salida, &cs[i..]);
+                cs.len() - i
             }
-        } else if c == '/' && chars.peek() == Some(&'/') {
-            break;
-        } else if c == '"' {
-            en_cadena = true;
-            salida.push('"');
-        } else {
-            salida.push(c);
+            ('/', Some('*')) => {
+                self.estado = Estado::Bloque(1);
+                tramo_en_blanco(salida, &cs[i..i + 2]);
+                2
+            }
+            ('"', _) => {
+                self.estado = Estado::Cadena;
+                salida.push('"');
+                1
+            }
+            ('r', _) => match inicio_de_cadena_cruda(cs, i) {
+                Some(n) => {
+                    self.estado = Estado::CadenaCruda(n);
+                    salida.extend(&cs[i..i + n + 2]);
+                    n + 2
+                }
+                None => {
+                    salida.push('r');
+                    1
+                }
+            },
+            ('\'', _) => match largo_de_caracter(cs, i) {
+                // Un literal de carácter se copia tal cual: su comilla no abre cadena.
+                Some(largo) => {
+                    salida.extend(&cs[i..i + largo]);
+                    largo
+                }
+                // Sin cierre en esa forma es un lifetime: solo se copia la comilla.
+                None => {
+                    salida.push('\'');
+                    1
+                }
+            },
+            (c, _) => {
+                salida.push(c);
+                1
+            }
         }
     }
-    salida
+
+    /// Procesa un comentario de bloque desde `cs[i]`, con `n` niveles abiertos.
+    fn en_bloque(&mut self, n: u32, cs: &[char], i: usize, salida: &mut String) -> usize {
+        match (cs[i], cs.get(i + 1).copied()) {
+            ('/', Some('*')) => {
+                self.estado = Estado::Bloque(n + 1);
+                tramo_en_blanco(salida, &cs[i..i + 2]);
+                2
+            }
+            ('*', Some('/')) => {
+                self.estado = if n <= 1 {
+                    Estado::Codigo
+                } else {
+                    Estado::Bloque(n - 1)
+                };
+                tramo_en_blanco(salida, &cs[i..i + 2]);
+                2
+            }
+            (c, _) => {
+                tramo_en_blanco(salida, &[c]);
+                1
+            }
+        }
+    }
+
+    /// Procesa el contenido de una cadena `"..."` desde `cs[i]`.
+    fn en_cadena(&mut self, cs: &[char], i: usize, salida: &mut String) -> usize {
+        match cs[i] {
+            '\\' => {
+                // La barra escapa el carácter que sigue. Si es el último de la línea, la cadena sigue.
+                let largo = if i + 1 < cs.len() { 2 } else { 1 };
+                tramo_en_blanco(salida, &cs[i..i + largo]);
+                largo
+            }
+            '"' => {
+                self.estado = Estado::Codigo;
+                salida.push('"');
+                1
+            }
+            c => {
+                tramo_en_blanco(salida, &[c]);
+                1
+            }
+        }
+    }
+
+    /// Procesa el contenido de una cadena cruda desde `cs[i]`. No tiene escapes.
+    fn en_cadena_cruda(&mut self, n: usize, cs: &[char], i: usize, salida: &mut String) -> usize {
+        let cierra =
+            cs[i] == '"' && cs.len() >= i + 1 + n && cs[i + 1..i + 1 + n].iter().all(|&c| c == '#');
+        if cierra {
+            self.estado = Estado::Codigo;
+            salida.extend(&cs[i..i + 1 + n]);
+            1 + n
+        } else {
+            tramo_en_blanco(salida, &[cs[i]]);
+            1
+        }
+    }
+}
+
+/// Escribe un espacio por cada byte del carácter `c`.
+fn tramo_en_blanco(salida: &mut String, tramo: &[char]) {
+    for c in tramo {
+        for _ in 0..c.len_utf8() {
+            salida.push(' ');
+        }
+    }
+}
+
+/// Si `cs[i]` es una `r` que abre una cadena cruda (`r"`, `r#"`, `br"`), da cuántas `#` tiene.
+fn inicio_de_cadena_cruda(cs: &[char], i: usize) -> Option<usize> {
+    let previo_ok = match i {
+        0 => true,
+        _ if cs[i - 1] == 'b' => i < 2 || !es_ident(cs[i - 2]),
+        _ => !es_ident(cs[i - 1]),
+    };
+    if !previo_ok {
+        return None;
+    }
+    let n = cs[i + 1..].iter().take_while(|&&c| c == '#').count();
+    (cs.get(i + 1 + n) == Some(&'"')).then_some(n)
+}
+
+/// Largo del literal de carácter que empieza en `cs[i]`: `'x'`, `'\n'` o `'\u{..}'`. `None` si es un lifetime.
+fn largo_de_caracter(cs: &[char], i: usize) -> Option<usize> {
+    if cs.get(i + 1) == Some(&'\\') {
+        // La barra escapa el carácter que sigue, que puede ser una comilla.
+        cs.iter()
+            .skip(i + 3)
+            .position(|&c| c == '\'')
+            .map(|p| p + 4)
+    } else {
+        (cs.get(i + 2) == Some(&'\'')).then_some(3)
+    }
 }
 
 /// Marca cada línea como de test o no. Un bloque `#[cfg(test)]` cuenta con sus llaves.
@@ -293,9 +446,10 @@ pub(crate) fn analizar(texto: &[String]) -> Vec<Linea> {
     let mut profundidad: i32 = 0;
     let mut bloque_test: Option<i32> = None;
     let mut pendiente = false;
+    let mut limpiador = Limpiador::default();
     let mut salida = Vec::with_capacity(texto.len());
     for (indice, cruda) in texto.iter().enumerate() {
-        let limpia = limpiar_linea(cruda);
+        let limpia = limpiador.limpiar(cruda);
         let mut de_test = bloque_test.is_some();
         if limpia.contains("#[cfg(test)]") {
             pendiente = true;
@@ -988,6 +1142,88 @@ mod tests {
         );
         let r = seguridad_nativa(dir.path(), &[]);
         assert!(r.hallazgos.is_empty());
+    }
+
+    #[test]
+    fn limpia_bloque_de_comentario_de_tres_lineas_queda_en_blanco() {
+        let texto = ["    /*", "    unsafe a > b", "    */"].map(String::from);
+        let lineas = analizar(&texto);
+        for (i, linea) in lineas.iter().enumerate() {
+            assert!(
+                linea.limpia.trim().is_empty(),
+                "línea {i}: {:?}",
+                linea.limpia
+            );
+            assert_eq!(linea.limpia.len(), texto[i].len(), "línea {i}");
+        }
+    }
+
+    #[test]
+    fn limpia_cadena_cruda_de_varias_lineas_deja_el_medio_en_blanco() {
+        let texto = ["let s = r#\"", "a > b", "\"#;"].map(String::from);
+        let lineas = analizar(&texto);
+        assert!(lineas[1].limpia.trim().is_empty(), "{:?}", lineas[1].limpia);
+        assert_eq!(lineas[1].limpia.len(), texto[1].len());
+    }
+
+    #[test]
+    fn limpia_bloque_anidado_se_cierra_en_el_segundo_cierre() {
+        let una = analizar(&["/* /* */ */ x".to_string()]);
+        assert_eq!(una[0].limpia.trim(), "x");
+        let varias = ["/* a /*", "b */", "c */ x"].map(String::from);
+        let lineas = analizar(&varias);
+        assert!(lineas[1].limpia.trim().is_empty(), "{:?}", lineas[1].limpia);
+        assert_eq!(lineas[2].limpia.trim(), "x");
+    }
+
+    #[test]
+    fn sonda_unsafe_dentro_de_comentario_de_bloque_no_cuenta() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "src/protocolo/mod.rs",
+            "/*\nunsafe fn f() {}\n*/\npub fn g() -> u8 { 1 }\n",
+        );
+        let r = seguridad_nativa(dir.path(), &[]);
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+    }
+
+    #[test]
+    fn aristas_use_dentro_de_comentario_de_bloque_no_cuenta() {
+        let texto = "/*\nuse crate::app::run;\n*/\npub fn f() {}\n";
+        let archivos = [archivo_de("src/x.rs", texto)];
+        let mods = modulos_de(&["x", "app"]);
+        assert!(aristas_entre_modulos(&archivos, &mods).is_empty());
+    }
+
+    #[test]
+    fn limpia_cadena_comun_multilinea_deja_el_medio_en_blanco() {
+        let texto = ["let s = \"a", "unsafe", "b\";"].map(String::from);
+        let lineas = analizar(&texto);
+        assert!(lineas[1].limpia.trim().is_empty(), "{:?}", lineas[1].limpia);
+        assert_eq!(lineas[1].limpia.len(), texto[1].len());
+    }
+
+    #[test]
+    fn limpia_conserva_el_largo_en_bytes_con_caracteres_multibyte() {
+        let texto = ["let s = \"ñu\"; // año"].map(String::from);
+        let lineas = analizar(&texto);
+        assert_eq!(lineas[0].limpia.len(), texto[0].len());
+    }
+
+    #[test]
+    fn limpia_comilla_de_caracter_no_abre_cadena() {
+        // Guarda: la comilla de un literal de carácter no abre cadena. Los lifetimes tampoco.
+        let texto = [
+            "let c = '\"'; unsafe { f() }",
+            "let d = '\\''; unsafe { g() }",
+            "fn h<'a>(x: &'a u8) -> &'a u8 { unsafe { x } }",
+        ]
+        .map(String::from);
+        let lineas = analizar(&texto);
+        for linea in &lineas {
+            assert!(tiene_token(&linea.limpia, "unsafe"), "{:?}", linea.limpia);
+        }
     }
 
     #[test]
