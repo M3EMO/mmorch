@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -107,8 +108,9 @@ pub struct MotivoSinVeredicto {
 }
 
 /// Construye el Dockerfile elegido con `--network none --pull=never` y verifica que corre sin root.
-/// Si un `RUN` pide red, lo repite una vez con red (Tarea 9d3). `imagenes` son las imágenes base
-/// que vio la fase de descarga: un problema suyo da sin veredicto.
+/// Si un paso puede pedir red, lo repite una vez con red (Tarea 9d3). Si la repetición falla, la
+/// sonda de red del host decide: fallo del producto, o sin veredicto (Tarea 91). `imagenes` son las
+/// imágenes base que vio la fase de descarga: un problema suyo da sin veredicto.
 pub fn construir_dockerfile(
     repo: &Path,
     home: &Path,
@@ -121,6 +123,34 @@ pub fn construir_dockerfile(
 /// Corre `podman` con argumentos. El real llama a `correr_podman`; los tests usan un falso.
 pub(crate) trait Podman {
     fn correr(&self, args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo>;
+
+    /// Sonda de red del host (Tarea 91): verdadero si un contenedor de `imagen` arma la red `pasta`.
+    /// Solo se pregunta cuando la repetición con red falló.
+    fn red_disponible(&self, imagen: &str) -> bool {
+        sonda_de_red(|args| self.correr(args, PLAZO_CORTO), imagen)
+    }
+}
+
+/// Corre la sonda de red con `correr`. Verdadero solo si el contenedor sale con 0.
+/// Un `Err` de podman cuenta como sin red.
+fn sonda_de_red(
+    correr: impl Fn(&[&str]) -> Result<SalidaPodman, ErrorOraculo>,
+    imagen: &str,
+) -> bool {
+    let prueba = correr(&[
+        "run",
+        PROXY_FUERA,
+        "--rm",
+        "--network",
+        "pasta:--no-map-gw",
+        "--pull=never",
+        "--entrypoint",
+        "sh",
+        imagen,
+        "-c",
+        "true",
+    ]);
+    matches!(prueba, Ok(salida) if salida.codigo == 0)
 }
 
 /// Podman real: lanza el binario con `correr_podman`.
@@ -129,6 +159,12 @@ pub(crate) struct PodmanReal;
 impl Podman for PodmanReal {
     fn correr(&self, args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
         correr_podman_build("podman", args, plazo)
+    }
+
+    /// Se guarda una vez por proceso: la red del host no cambia de una imagen a otra.
+    fn red_disponible(&self, imagen: &str) -> bool {
+        static SONDA: OnceLock<bool> = OnceLock::new();
+        *SONDA.get_or_init(|| sonda_de_red(|args| self.correr(args, PLAZO_CORTO), imagen))
     }
 }
 
@@ -382,6 +418,8 @@ fn motivos_sin_veredicto(
 
 /// Aviso cuando el build con red no llega a construir por un error de podman: queda el Pendiente.
 const AVISO_RED_NO_ARRANCO: &str = "la construcción con red no arrancó";
+/// Motivo del Pendiente cuando el host no arma la red de podman (la sonda sale mal).
+const MOTIVO_RED_EN_HOST: &str = "la red no se pudo configurar en este host";
 /// Marcadores (en minúsculas) de un build con red donde podman no armó la red del `RUN`.
 const MARCADORES_RED_NO_CONFIGURADA: [&str; 4] = [
     "setup network",
@@ -482,7 +520,7 @@ fn construir_con<'a>(
     };
     let df = contexto.join(&ruta).to_string_lossy().into_owned();
     let ctx = contexto.to_string_lossy().into_owned();
-    let mut build = correr_build(podman, false, &imagen.etiqueta, &df, &ctx, plazo)?;
+    let build = correr_build(podman, false, &imagen.etiqueta, &df, &ctx, plazo)?;
     let mut con_red = false;
     // Un `ADD` con URL baja desde el host aunque el build vaya sin red: que salga 0 no prueba que sea
     // sin red. Ese paso manda la repetición con red, igual que un `RUN` que falla sin red (A11).
@@ -509,23 +547,8 @@ fn construir_con<'a>(
                 registrar_repeticion(home, tarea, &ruta, &texto, linea, &cita)?;
                 // Un error de podman en el respaldo (opción de red rechazada, timeout) no borra el
                 // Pendiente del primer build: queda con un aviso y nunca da verde.
-                let con_red_salida = correr_build(podman, true, &imagen.etiqueta, &df, &ctx, plazo)
-                    .and_then(|salida| {
-                        if salida.codigo == 0 {
-                            return Ok((salida, None));
-                        }
-                        // Sin red configurable en el host: es error de podman, no un `RUN` que no construye.
-                        if let Some(linea) = red_no_configurada(&salida) {
-                            return Err(ErrorOraculo::Infra(linea));
-                        }
-                        clasificar_fallo(&salida, &ruta, &texto, reqs, true)
-                            .map(|d| (salida, Some(d)))
-                    });
-                let desenlace_red = match con_red_salida {
-                    Ok((salida, desenlace)) => {
-                        build = salida;
-                        desenlace
-                    }
+                let salida = match correr_build(podman, true, &imagen.etiqueta, &df, &ctx, plazo) {
+                    Ok(salida) => salida,
                     Err(error) => {
                         avisos.push(format!("{AVISO_RED_NO_ARRANCO}: {error}"));
                         resultado.pendientes.push(pendiente_de_build(motivo));
@@ -536,7 +559,7 @@ fn construir_con<'a>(
                         });
                     }
                 };
-                if build.codigo == 0 {
+                if salida.codigo == 0 {
                     con_red = true;
                     resultado.hallazgos.push(crear_hallazgo(
                         DIMENSION,
@@ -548,18 +571,44 @@ fn construir_con<'a>(
                         SONDA,
                         reqs,
                     ));
-                } else if let Some(otro) = desenlace_red {
-                    anotar_desenlace(&mut resultado, otro);
+                } else if !podman.red_disponible(&tarea.imagen) {
+                    // El host no arma la red: no hay veredicto. La última línea del stderr solo es un dato.
+                    let dato = red_no_configurada(&salida)
+                        .or_else(|| ultima_linea_de(&salida.stderr))
+                        .unwrap_or_else(|| "sin salida de error".into());
+                    avisos.push(format!("{AVISO_RED_NO_ARRANCO}: {dato}"));
+                    resultado
+                        .pendientes
+                        .push(pendiente_de_build(MOTIVO_RED_EN_HOST.into()));
+                    return Ok(Construccion {
+                        resultado,
+                        imagen: None,
+                        avisos,
+                    });
+                } else {
+                    // Con la red del host, el fallo es del producto: hallazgo. Si podman no arrancó, aviso.
+                    match clasificar_fallo(&salida, &ruta, &texto, reqs, true) {
+                        Ok(desenlace) => anotar_desenlace(&mut resultado, desenlace),
+                        Err(error) => {
+                            avisos.push(format!("{AVISO_RED_NO_ARRANCO}: {error}"));
+                            resultado.pendientes.push(pendiente_de_build(motivo));
+                        }
+                    }
+                    return Ok(Construccion {
+                        resultado,
+                        imagen: None,
+                        avisos,
+                    });
                 }
             }
-            otro => anotar_desenlace(&mut resultado, otro),
-        }
-        if build.codigo != 0 {
-            return Ok(Construccion {
-                resultado,
-                imagen: None,
-                avisos,
-            });
+            otro => {
+                anotar_desenlace(&mut resultado, otro);
+                return Ok(Construccion {
+                    resultado,
+                    imagen: None,
+                    avisos,
+                });
+            }
         }
     }
     let con_sh = tiene_sh(podman, &imagen.etiqueta)?;
@@ -701,11 +750,12 @@ enum Desenlace {
     Hallazgo(Hallazgo),
 }
 
-/// Separa un fallo de build en falta de red, imagen base ausente, o producto que no construye.
-/// Solo cuenta la última línea no vacía del stderr: la escribe podman después de que terminó el
-/// proceso del repo. Lo que imprime un `RUN` (stdout, o un `STEP` falso) no decide el paso.
-/// Sin esa línea de paso, ver `sin_paso_en_la_linea_final`. Con `con_red`, un fallo de paso es
-/// hallazgo: la repetición con red no da `PendienteRed`.
+/// Separa un fallo de build en imagen base ausente, paso que puede necesitar red, o producto que no
+/// construye. Solo cuenta la última línea no vacía del stderr: la escribe podman después de que
+/// terminó el proceso del repo. Lo que imprime un `RUN` (stdout, o un `STEP` falso) no decide el paso.
+/// Un paso que puede necesitar red (`RUN`, o `ADD`/`COPY` con URL) da `PendienteRed` sin red, sin
+/// mirar el texto. Con `con_red`, un fallo de paso es hallazgo: la repetición no da `PendienteRed`.
+/// Sin esa línea de paso, ver `sin_paso_en_la_linea_final`.
 fn clasificar_fallo(
     build: &SalidaPodman,
     archivo: &str,
@@ -713,7 +763,6 @@ fn clasificar_fallo(
     reqs: &[Requisito],
     con_red: bool,
 ) -> Result<Desenlace, ErrorOraculo> {
-    let salida = format!("{}\n{}", build.stdout, build.stderr);
     let ultima = ultima_linea_de(&build.stderr);
     let Some(linea_paso) = ultima
         .as_deref()
@@ -754,7 +803,7 @@ fn clasificar_fallo(
             "podman no pudo arrancar el FROM de la línea {linea}"
         )));
     }
-    if !con_red && red_paso && pide_red(&salida) {
+    if !con_red && red_paso {
         let motivo = format!("no se pudo construir sin red: línea {linea}, {cita}");
         return Ok(Desenlace::PendienteRed {
             motivo,
@@ -855,8 +904,8 @@ fn indice_del_paso(instrucciones_df: &[Instruccion], paso: &str) -> Option<usize
     hallados.next().is_none().then_some(primero)
 }
 
-/// La última línea del stderr, si dice que podman no pudo armar la red del build (`slirp4netns`, `pasta`
-/// o `netavark`). Solo esa línea cuenta: el stdout y el resto del stderr los imprime el `RUN` del repo.
+/// Dato para el aviso: la última línea del stderr, si dice que podman no pudo armar la red del build
+/// (`slirp4netns`, `pasta` o `netavark`). No decide nada: la sonda de red decide (Tarea 91).
 fn red_no_configurada(build: &SalidaPodman) -> Option<String> {
     ultima_linea_de(&build.stderr)
         .filter(|linea| es_linea_red_no_configurada(linea))
@@ -2415,6 +2464,11 @@ pub(crate) mod tests {
         clasificar_fallo(salida, "Dockerfile", texto, &[], false).expect("clasifica el fallo")
     }
 
+    /// Como `clasifica`, con la red del host ya probada: un fallo de paso da hallazgo.
+    fn clasifica_con_red(salida: &SalidaPodman, texto: &str) -> Desenlace {
+        clasificar_fallo(salida, "Dockerfile", texto, &[], true).expect("clasifica el fallo")
+    }
+
     #[test]
     fn entrega_paso_cuyo_texto_no_esta_en_el_dockerfile_da_sin_veredicto() {
         let texto = "FROM alpine:3.20\nRUN echo hola\n";
@@ -2436,7 +2490,7 @@ pub(crate) mod tests {
         let texto = "FROM alpine:3.20 AS base\nWORKDIR /app\nRUN echo listo > /app/x\n\
             FROM alpine:3.20\nWORKDIR /srv\nRUN false\n";
         let salida = build_fallido(&["FROM alpine:3.20", "WORKDIR /srv", "RUN false"], "");
-        match clasifica(&salida, texto) {
+        match clasifica_con_red(&salida, texto) {
             Desenlace::Hallazgo(h) => {
                 assert_eq!((h.severidad, h.linea), (3, 6), "{h:?}");
                 assert_eq!(h.cita, "RUN false");
@@ -2543,7 +2597,7 @@ pub(crate) mod tests {
                     .into(),
             paso: Some("STEP 2/2: RUN a".into()),
         };
-        match clasifica(&salida, "FROM x\nRUN a\n") {
+        match clasifica_con_red(&salida, "FROM x\nRUN a\n") {
             Desenlace::Hallazgo(h) => assert!(
                 h.detalle.contains("la imagen no construye: línea 2"),
                 "{}",
@@ -2564,7 +2618,7 @@ pub(crate) mod tests {
                     .into(),
             paso: Some("STEP 2/3: RUN a".into()),
         };
-        match clasifica(&salida, "FROM x\nRUN a\nRUN b\n") {
+        match clasifica_con_red(&salida, "FROM x\nRUN a\nRUN b\n") {
             Desenlace::Hallazgo(h) => assert!(
                 h.detalle.contains("la imagen no construye: línea 3"),
                 "{}",
@@ -2586,7 +2640,7 @@ pub(crate) mod tests {
                 "Error: building at STEP \"RUN ./falla\": while running runtime: exit status 1\n"
                     .into(),
         };
-        match clasifica(&salida, "FROM debian:12\nRUN ./falla\n") {
+        match clasifica_con_red(&salida, "FROM debian:12\nRUN ./falla\n") {
             Desenlace::Hallazgo(h) => {
                 assert_eq!((h.severidad, h.linea), (3, 2), "{h:?}");
                 assert_eq!(h.cita, "RUN ./falla");
@@ -2702,7 +2756,7 @@ pub(crate) mod tests {
                 "Error: building at STEP \"RUN ./falla\": while running runtime: exit status 1\n"
                     .into(),
         };
-        match clasifica(&salida, "FROM debian:12\nRUN echo hola\nRUN ./falla\n") {
+        match clasifica_con_red(&salida, "FROM debian:12\nRUN echo hola\nRUN ./falla\n") {
             Desenlace::Hallazgo(h) => assert_eq!(h.linea, 3, "{h:?}"),
             otro => panic!("debía ser hallazgo de la línea 3, no {}", nombre(&otro)),
         }
@@ -2777,10 +2831,13 @@ pub(crate) mod tests {
             "FROM docker.io/library/alpine:3.20\nRUN echo \"STEP 9/9: FROM falsa\"; exit 1\n";
         let repo = repo_con_archivos(&[("Dockerfile", texto)]);
         let home = tempfile::tempdir().expect("home");
+        // La sonda de red corre en la imagen de la tarea: con podman real, una que existe local.
+        let mut tarea = tarea_de("shell", "");
+        tarea.imagen = "docker.io/library/alpine:3.20".into();
         let c = construir_con(
             repo.path(),
             home.path(),
-            &tarea_de("shell", ""),
+            &tarea,
             &[],
             PLAZO_BUILD,
             &PodmanReal,
@@ -3042,15 +3099,46 @@ pub(crate) mod tests {
         args.iter().any(|a| a.starts_with("pasta"))
     }
 
-    /// Respuesta de mentira: el `build` sin red da `sin_red` y con red da `con_red`. El resto sale
-    /// sano: `id -u` da 1000 (no es root) e `image inspect` da `app`.
+    /// Verdadero si la llamada es la sonda de red del host (Tarea 91): un `run` con `pasta` y `sh`.
+    fn es_sonda_de_red(args: &[&str]) -> bool {
+        args[0] == "run" && args.contains(&"sh") && args.iter().any(|a| a.starts_with("pasta"))
+    }
+
+    /// Salida de la sonda de red cuando el host no arma la red `pasta`.
+    pub(crate) fn salida_sonda_roja() -> SalidaPodman {
+        SalidaPodman {
+            paso: None,
+            codigo: 125,
+            stdout: String::new(),
+            stderr: "Error: creating network: pasta: executable file not found in $PATH\n".into(),
+        }
+    }
+
+    /// Respuesta de mentira: el `build` sin red da `sin_red` y con red da `con_red`. La sonda de red
+    /// sale en verde. El resto sale sano: `id -u` da 1000 (no es root) e `image inspect` da `app`.
     pub(crate) fn responde_build(
         sin_red: SalidaPodman,
         con_red: SalidaPodman,
     ) -> impl Fn(&[&str]) -> SalidaPodman {
+        responde_build_con_sonda(sin_red, con_red, true)
+    }
+
+    /// Como `responde_build`. `sonda_ok` dice si la sonda de red del host sale bien.
+    pub(crate) fn responde_build_con_sonda(
+        sin_red: SalidaPodman,
+        con_red: SalidaPodman,
+        sonda_ok: bool,
+    ) -> impl Fn(&[&str]) -> SalidaPodman {
         move |args| match args[0] {
             "build" if es_build_con_red(args) => con_red.clone(),
             "build" => sin_red.clone(),
+            "run" if es_sonda_de_red(args) => {
+                if sonda_ok {
+                    salida_ok()
+                } else {
+                    salida_sonda_roja()
+                }
+            }
             "run" if args.contains(&"id") => SalidaPodman {
                 paso: None,
                 codigo: 0,
@@ -3703,9 +3791,10 @@ pub(crate) mod tests {
     fn entrega_red_setup_network_con_red_queda_pendiente_con_aviso() {
         let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
         let home = tempfile::tempdir().expect("home");
-        let podman = PodmanFalso::nuevo(responde_build(
+        let podman = PodmanFalso::nuevo(responde_build_con_sonda(
             salida_sin_red(),
             salida_red_no_configurada(),
+            false,
         ));
         let c = construir_con(
             repo.path(),
@@ -3721,10 +3810,9 @@ pub(crate) mod tests {
         assert!(!r.con_red, "{r:?}");
         assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
         assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-        assert!(
-            r.pendientes[0].motivo.contains("línea 2"),
-            "{:?}",
-            r.pendientes
+        assert_eq!(
+            r.pendientes[0].motivo,
+            "la red no se pudo configurar en este host"
         );
         assert!(
             c.avisos
@@ -3746,7 +3834,11 @@ pub(crate) mod tests {
             stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
             stderr: "Error: creating network: pasta: executable file not found in $PATH\n".into(),
         };
-        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), pasta_falla));
+        let podman = PodmanFalso::nuevo(responde_build_con_sonda(
+            salida_sin_red(),
+            pasta_falla,
+            false,
+        ));
         let c = construir_con(
             repo.path(),
             home.path(),
@@ -3760,10 +3852,9 @@ pub(crate) mod tests {
         assert!(!r.construida, "{r:?}");
         assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
         assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-        assert!(
-            r.pendientes[0].motivo.contains("línea 2"),
-            "{:?}",
-            r.pendientes
+        assert_eq!(
+            r.pendientes[0].motivo,
+            "la red no se pudo configurar en este host"
         );
         assert!(
             c.avisos
@@ -3942,6 +4033,198 @@ pub(crate) mod tests {
         assert_eq!(gates_de_repeticion(home.path()).len(), 1);
     }
 
+    /// Dockerfile con un `RUN wget`: falla sin red, y la salida no trae ningún texto de red.
+    const DF_WGET: &str = "FROM debian:12\nRUN wget -q http://example.com/x\nUSER app\n";
+
+    /// Salida de `podman build` de un `RUN wget` que falla, sin ningún texto de red.
+    fn salida_wget_que_falla() -> SalidaPodman {
+        SalidaPodman {
+            paso: None,
+            codigo: 1,
+            stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN wget -q http://example.com/x\nboom\n"
+                .into(),
+            stderr: "boom\n\
+                Error: building at STEP \"RUN wget -q http://example.com/x\": exit status 4\n"
+                .into(),
+        }
+    }
+
+    #[test]
+    fn entrega_red_run_que_falla_sin_texto_de_red_se_repite_con_red() {
+        // Sin mirar el texto: un RUN que falla sin red se repite con red igual.
+        let repo = repo_con_archivos(&[("Dockerfile", DF_WGET)]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(
+            salida_wget_que_falla(),
+            salida_wget_que_falla(),
+        ));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        assert_eq!(podman.builds().len(), 2, "{:?}", podman.builds());
+        assert!(
+            podman.builds()[1].contains(&"pasta:--no-map-gw".to_string()),
+            "{:?}",
+            podman.builds()[1]
+        );
+        assert_eq!(gates_de_repeticion(home.path()).len(), 1);
+        assert!(
+            c.resultado.pendientes.is_empty(),
+            "{:?}",
+            c.resultado.pendientes
+        );
+    }
+
+    #[test]
+    fn entrega_red_con_sonda_verde_y_build_con_red_que_falla_da_rojo() {
+        let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
+        let home = tempfile::tempdir().expect("home");
+        // Con red, el `apt-get` falla sin texto de red: el paso de la línea 2 no construye.
+        let con_red_falla = SalidaPodman {
+            paso: None,
+            codigo: 100,
+            stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
+            stderr: "E: Unable to locate package curl\n\
+                Error: building at STEP \"RUN apt-get install -y curl\": exit status 100\n"
+                .into(),
+        };
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), con_red_falla));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(!r.construida, "{r:?}");
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].severidad, 3, "{:?}", r.hallazgos);
+        assert!(
+            r.hallazgos[0]
+                .detalle
+                .contains("la imagen no construye: línea 2"),
+            "{:?}",
+            r.hallazgos
+        );
+        assert_eq!(podman.builds().len(), 2, "{:?}", podman.builds());
+    }
+
+    #[test]
+    fn entrega_red_con_sonda_roja_queda_pendiente_con_motivo_exacto_y_aviso() {
+        let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build_con_sonda(
+            salida_sin_red(),
+            salida_red_no_configurada(),
+            false,
+        ));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(!r.construida, "{r:?}");
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
+        assert_eq!(
+            r.pendientes[0].motivo,
+            "la red no se pudo configurar en este host"
+        );
+        assert!(
+            c.avisos
+                .iter()
+                .any(|a| a.starts_with(AVISO_RED_NO_ARRANCO)
+                    && a.contains("could not find slirp4netns")),
+            "{:?}",
+            c.avisos
+        );
+    }
+
+    #[test]
+    fn entrega_red_run_con_texto_setup_network_y_false_con_sonda_verde_da_rojo() {
+        // El RUN imprime "setup network" y sale con 1. El texto del repo no decide: con sonda verde, rojo.
+        const DF: &str = "FROM debian:12\nRUN echo \"setup network\"; false\nUSER app\n";
+        let fallo = |stderr_previo: &str| SalidaPodman {
+            paso: None,
+            codigo: 1,
+            stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN echo \"setup network\"; false\n"
+                .into(),
+            stderr: format!(
+                "{stderr_previo}Error: building at STEP \"RUN echo \"setup network\"; false\": exit status 1\n"
+            ),
+        };
+        let repo = repo_con_archivos(&[("Dockerfile", DF)]);
+        let home = tempfile::tempdir().expect("home");
+        // Sin red, el texto del RUN trae falta de DNS: hay repetición. Con red, el texto del RUN trae "setup network".
+        let podman = PodmanFalso::nuevo(responde_build(
+            fallo("Temporary failure in name resolution\n"),
+            fallo(""),
+        ));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].linea, 2, "{:?}", r.hallazgos);
+        assert!(
+            !c.avisos.iter().any(|a| a.starts_with(AVISO_RED_NO_ARRANCO)),
+            "{:?}",
+            c.avisos
+        );
+    }
+
+    #[test]
+    fn entrega_copy_local_que_falla_da_rojo_sin_repetir() {
+        const DF: &str = "FROM debian:12\nCOPY no-existe /x\nUSER app\n";
+        let fallo = SalidaPodman {
+            paso: None,
+            codigo: 1,
+            stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: COPY no-existe /x\n".into(),
+            stderr: "Error: building at STEP \"COPY no-existe /x\": checking on sources under \"/ctx\": no such file or directory\n"
+                .into(),
+        };
+        let repo = repo_con_archivos(&[("Dockerfile", DF)]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(fallo, salida_ok()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].linea, 2, "{:?}", r.hallazgos);
+        assert_eq!(podman.builds().len(), 1, "{:?}", podman.builds());
+        assert!(gates_de_repeticion(home.path()).is_empty());
+    }
+
     #[test]
     fn entrega_paso_con_url_reconoce_add_y_copy_con_fuente_remota() {
         assert!(paso_con_url("ADD https://x.org/a.tar.gz /a"));
@@ -4024,9 +4307,10 @@ pub(crate) mod tests {
     fn entrega_dockerfile_con_paso_fallido_por_red_sin_otros_hallazgos_no_da_valor() {
         let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
         let home = tempfile::tempdir().expect("home");
-        let podman = PodmanFalso::nuevo(responde_build(
+        let podman = PodmanFalso::nuevo(responde_build_con_sonda(
             salida_sin_red(),
             salida_red_no_configurada(),
+            false,
         ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
@@ -4140,9 +4424,10 @@ pub(crate) mod tests {
         let repo =
             repo_con_archivos(&[("Dockerfile", "FROM scratch\nRUN apt-get install -y curl\n")]);
         let home = tempfile::tempdir().expect("home");
-        let podman = PodmanFalso::nuevo(responde_build(
+        let podman = PodmanFalso::nuevo(responde_build_con_sonda(
             salida_sin_red(),
             salida_red_no_configurada(),
+            false,
         ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
@@ -4156,8 +4441,8 @@ pub(crate) mod tests {
         .expect("entrega");
         assert_eq!(r.faltantes.len(), 1, "{:?}", r.faltantes);
         assert_eq!(r.faltantes[0].item, "entrega.contenedor");
-        assert!(
-            r.faltantes[0].motivo.contains("línea 2"),
+        assert_eq!(
+            r.faltantes[0].motivo, "la red no se pudo configurar en este host",
             "{:?}",
             r.faltantes
         );
@@ -4170,9 +4455,10 @@ pub(crate) mod tests {
             "FROM scratch\nUSER app\nRUN apt-get install -y curl\n",
         )]);
         let home = tempfile::tempdir().expect("home");
-        let podman = PodmanFalso::nuevo(responde_build(
+        let podman = PodmanFalso::nuevo(responde_build_con_sonda(
             salida_sin_red(),
             salida_red_no_configurada(),
+            false,
         ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
@@ -4198,9 +4484,10 @@ pub(crate) mod tests {
             "FROM debian:12\nRUN apt-get install -y curl\n",
         )]);
         let home = tempfile::tempdir().expect("home");
-        let podman = PodmanFalso::nuevo(responde_build(
+        let podman = PodmanFalso::nuevo(responde_build_con_sonda(
             salida_sin_red(),
             salida_red_no_configurada(),
+            false,
         ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
@@ -4275,7 +4562,7 @@ pub(crate) mod tests {
                       exit 1";
         let salida = correr_podman_build("sh", &["-c", script], PLAZO_BUILD).expect("corre");
         let texto = "FROM x\nRUN a\nRUN x\n";
-        match clasifica(&salida, texto) {
+        match clasifica_con_red(&salida, texto) {
             Desenlace::Hallazgo(h) => assert!(
                 h.detalle.contains("la imagen no construye: línea 3"),
                 "{}",
@@ -4294,7 +4581,7 @@ pub(crate) mod tests {
                       echo 'Error: building at STEP \"RUN false\": exit status 1' >&2; exit 1";
         let salida = correr_podman_build("sh", &["-c", script], PLAZO_BUILD).expect("corre");
         let texto = "FROM debian:12\nRUN false\n";
-        match clasifica(&salida, texto) {
+        match clasifica_con_red(&salida, texto) {
             Desenlace::Hallazgo(h) => assert!(
                 h.detalle.contains("la imagen no construye"),
                 "{}",

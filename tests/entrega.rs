@@ -304,16 +304,10 @@ fn entrega_build_sin_user_corre_como_root_y_la_regla_no_se_duplica() {
     );
 }
 
-/// Un `RUN` que pide red se repite con red (Tarea 9d3). La laptop puede tener red o no: los dos
-/// desenlaces válidos son construir con red (hallazgo de severidad 1) o quedar pendiente con su línea.
-fn afirma_repeticion_con_red(r: &ResultadoDockerfile, linea: u32, pista: &str) {
-    assert!(
-        !r.hallazgos
-            .iter()
-            .any(|h| h.detalle.contains("la imagen no construye")),
-        "{:?}",
-        r.hallazgos
-    );
+/// Un `RUN` que falla sin red se repite con red (Tarea 9d3). El host decide el desenlace válido:
+/// construir con red (hallazgo de severidad 1), un `RUN` que no construye en su línea (la red del
+/// host anda), o pendiente con el motivo de la red (el host no arma la red de podman).
+fn afirma_repeticion_con_red(r: &ResultadoDockerfile, linea: u32) {
     if r.con_red {
         assert!(r.construida, "{r:?}");
         assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
@@ -324,14 +318,24 @@ fn afirma_repeticion_con_red(r: &ResultadoDockerfile, linea: u32, pista: &str) {
             .collect();
         assert_eq!(de_red.len(), 1, "{:?}", r.hallazgos);
         assert_eq!((de_red[0].severidad, de_red[0].linea), (1, linea));
+    } else if r.pendientes.is_empty() {
+        assert!(!r.construida, "{r:?}");
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        let h = &r.hallazgos[0];
+        assert_eq!((h.severidad, h.linea), (3, linea), "{h:?}");
+        assert!(
+            h.detalle
+                .contains(&format!("la imagen no construye: línea {linea}")),
+            "{}",
+            h.detalle
+        );
     } else {
         assert!(!r.construida, "{r:?}");
         assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
         assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-        let motivo = &r.pendientes[0].motivo;
-        assert!(
-            motivo.contains(&format!("línea {linea}")) && motivo.contains(pista),
-            "{motivo}"
+        assert_eq!(
+            r.pendientes[0].motivo,
+            "la red no se pudo configurar en este host"
         );
         assert_eq!(r.corre_sin_root, None);
     }
@@ -345,15 +349,15 @@ fn entrega_build_run_apk_sin_red_se_repite_con_red_o_queda_pendiente() {
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}RUN apk add --no-cache curl\n"));
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    afirma_repeticion_con_red(&r, 2, "apk");
+    afirma_repeticion_con_red(&r, 2);
     assert!(
         imagenes_temporales().is_empty(),
         "queda una imagen temporal"
     );
 }
 
-/// Un `RUN` de red que falla en la 2ª etapa queda pendiente en su línea. La 1ª etapa tiene pasos
-/// previos (`WORKDIR`, `RUN`) que antes se mapeaban por índice al paso 3/3 y daban un hallazgo.
+/// Un `RUN` de red que falla en la 2ª etapa queda en su línea: rojo, o pendiente si el host no tiene
+/// red. La 1ª etapa tiene pasos previos (`WORKDIR`, `RUN`) que antes se mapeaban por índice al paso 3/3 y daban un hallazgo.
 #[test]
 fn entrega_build_run_de_red_en_segunda_etapa_queda_pendiente_en_su_linea() {
     root::saltar_sin_podman!();
@@ -365,14 +369,7 @@ fn entrega_build_run_de_red_en_segunda_etapa_queda_pendiente_en_su_linea() {
     );
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
-    assert!(!r.construida, "{r:?}");
-    assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-    let motivo = &r.pendientes[0].motivo;
-    assert!(
-        motivo.contains("línea 6") && motivo.contains("wget"),
-        "{motivo}"
-    );
+    afirma_repeticion_con_red(&r, 6);
     assert!(
         imagenes_temporales().is_empty(),
         "queda una imagen temporal"
@@ -391,14 +388,7 @@ fn entrega_build_arg_antes_del_from_ubica_el_run_de_red() {
     );
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
-    assert!(!r.construida, "{r:?}");
-    assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-    let motivo = &r.pendientes[0].motivo;
-    assert!(
-        motivo.contains("línea 4") && motivo.contains("wget"),
-        "{motivo}"
-    );
+    afirma_repeticion_con_red(&r, 4);
     assert!(
         imagenes_temporales().is_empty(),
         "queda una imagen temporal"
@@ -451,7 +441,7 @@ fn entrega_build_wget_sin_red_se_repite_con_red_o_queda_pendiente() {
     ));
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    afirma_repeticion_con_red(&r, 2, "wget");
+    afirma_repeticion_con_red(&r, 2);
 }
 
 #[test]

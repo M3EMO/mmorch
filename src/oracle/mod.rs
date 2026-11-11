@@ -2804,7 +2804,8 @@ mod tests {
     use super::*;
     use crate::oracle::contenedor::SalidaPodman;
     use crate::oracle::entrega::tests::{
-        PodmanFalso, responde_build, salida_ok, salida_red_no_configurada, salida_sin_red,
+        PodmanFalso, responde_build, responde_build_con_sonda, salida_ok,
+        salida_red_no_configurada, salida_sin_red,
     };
     use crate::oracle::entrega::{CorredorDeEscenario, FabricaEscenarios, Podman};
 
@@ -7002,7 +7003,8 @@ mod tests {
         fs::write(repo.join("Dockerfile"), DF_RUN_FALSO).expect("Dockerfile");
         let correr = correr_suites(JUNIT_CONTRATO);
         let fabrica = herramientas(&[]);
-        let podman = PodmanFalso::nuevo(responde_build(salida_run_falso(), salida_ok()));
+        // Sin red y con red el `RUN false` falla: la repetición con red no lo salva (hallazgo rojo).
+        let podman = PodmanFalso::nuevo(responde_build(salida_run_falso(), salida_run_falso()));
         let deps = deps_con_podman(&correr, &fabrica, &podman);
         let v = evaluar_con_deps(base.path(), &repo, deps);
         let hallazgo = v.hallazgos.iter().find(|h| {
@@ -7064,9 +7066,10 @@ mod tests {
         .expect("Dockerfile");
         let correr = correr_suites(JUNIT_CONTRATO);
         let fabrica = herramientas(&[]);
-        let podman = PodmanFalso::nuevo(responde_build(
+        let podman = PodmanFalso::nuevo(responde_build_con_sonda(
             salida_sin_red(),
             salida_red_no_configurada(),
+            false,
         ));
         let deps = deps_con_podman(&correr, &fabrica, &podman);
         let v = evaluar_con_deps(base.path(), &repo, deps);
@@ -7077,7 +7080,10 @@ mod tests {
             .iter()
             .find(|f| f.item == "entrega.contenedor")
             .unwrap_or_else(|| panic!("falta el ítem de construcción: {:?}", entrega.faltantes));
-        assert!(faltante.motivo.contains("línea 2"), "{faltante:?}");
+        assert_eq!(
+            faltante.motivo, "la red no se pudo configurar en este host",
+            "{faltante:?}"
+        );
     }
 
     #[test]
@@ -7092,16 +7098,18 @@ mod tests {
         let correr = correr_suites(JUNIT_CONTRATO);
         let fabrica = herramientas(&[]);
         // Sin red el `RUN` falla por nombres. Con red, podman no arma la red: queda pendiente con aviso.
-        let podman = PodmanFalso::nuevo(responde_build(
+        let podman = PodmanFalso::nuevo(responde_build_con_sonda(
             salida_sin_red(),
             salida_red_no_configurada(),
+            false,
         ));
         let deps = deps_con_podman(&correr, &fabrica, &podman);
         let v = evaluar_con_deps(base.path(), &repo, deps);
         assert!(
-            v.pendientes
-                .iter()
-                .any(|p| p.test == "dockerfile::build" && p.motivo.contains("línea 2")),
+            v.pendientes.iter().any(|p| {
+                p.test == "dockerfile::build"
+                    && p.motivo == "la red no se pudo configurar en este host"
+            }),
             "{:?}",
             v.pendientes
         );
