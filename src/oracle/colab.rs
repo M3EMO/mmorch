@@ -3630,6 +3630,13 @@ mod tests {
     }
 
     #[test]
+    fn leer_todo_con_tope_no_empieza_a_mitad_de_un_caracter() {
+        let texto = leer_todo_con(Some("€€€".as_bytes()), 4);
+        assert_eq!(texto, "[aviso: salida recortada a los últimos 4 bytes]\n€");
+        assert!(!texto.contains('\u{FFFD}'), "{texto:?}");
+    }
+
+    #[test]
     fn leer_todo_con_salida_chica_sale_igual_y_sin_aviso() {
         let texto = leer_todo_con(Some(&b"hola\n"[..]), 100);
         assert_eq!(texto, "hola\n");

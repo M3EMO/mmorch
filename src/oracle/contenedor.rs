@@ -350,7 +350,15 @@ pub(crate) enum Modo {
 }
 
 /// Lee un flujo hasta EOF con un tope. Reintenta si la lectura se interrumpe. Otro error corta la lectura.
-pub(crate) fn leer_con_tope<R: Read>(mut flujo: R, tope: usize, modo: Modo) -> Lectura {
+pub(crate) fn leer_con_tope<R: Read>(flujo: R, tope: usize, modo: Modo) -> Lectura {
+    match modo {
+        Modo::Inicio => leer_inicio(flujo, tope),
+        Modo::Cola => leer_cola(flujo, tope, |_| {}),
+    }
+}
+
+/// Guarda el inicio hasta `tope` bytes. Lo que pasa del tope se lee y se descarta.
+fn leer_inicio<R: Read>(mut flujo: R, tope: usize) -> Lectura {
     let mut bytes = Vec::new();
     let mut total: usize = 0;
     let mut trozo = [0u8; 8192];
@@ -359,32 +367,63 @@ pub(crate) fn leer_con_tope<R: Read>(mut flujo: R, tope: usize, modo: Modo) -> L
             Ok(0) => break,
             Ok(n) => {
                 total += n;
-                match modo {
-                    Modo::Inicio => {
-                        // Sigue leyendo al pasar el tope. Así el proceso no se bloquea al escribir.
-                        let libre = tope - bytes.len();
-                        bytes.extend_from_slice(&trozo[..n.min(libre)]);
-                    }
-                    Modo::Cola => {
-                        bytes.extend_from_slice(&trozo[..n]);
-                        // Se recorta al pasar el doble: el recorte cuesta lo mismo que la entrada leída.
-                        if bytes.len() > 2 * tope {
-                            bytes.drain(..bytes.len() - tope);
-                        }
-                    }
+                // Sigue leyendo al pasar el tope. Así el proceso no se bloquea al escribir.
+                let libre = tope - bytes.len();
+                bytes.extend_from_slice(&trozo[..n.min(libre)]);
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    Lectura {
+        bytes,
+        recortada: total > tope,
+    }
+}
+
+/// Lee un flujo hasta EOF y guarda su cola de `tope` bytes. `al_leer` ve cada trozo antes de recortar.
+/// Si el total pasó el tope, la cola empieza en un borde de carácter UTF-8. Así no sale un carácter partido.
+fn leer_cola<R: Read>(mut flujo: R, tope: usize, mut al_leer: impl FnMut(&[u8])) -> Lectura {
+    let mut cola = Vec::new();
+    let mut total: usize = 0;
+    let mut trozo = [0u8; 8192];
+    loop {
+        match flujo.read(&mut trozo) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                al_leer(&trozo[..n]);
+                cola.extend_from_slice(&trozo[..n]);
+                // Se recorta al pasar el doble: el recorte cuesta lo mismo que la entrada leída.
+                if cola.len() > 2 * tope {
+                    cola.drain(..cola.len() - tope);
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
     }
-    if modo == Modo::Cola && bytes.len() > tope {
-        bytes.drain(..bytes.len() - tope);
+    let recortada = total > tope;
+    if cola.len() > tope {
+        cola.drain(..cola.len() - tope);
+    }
+    // Solo si hubo recorte: una salida completa se guarda entera, aunque no sea UTF-8.
+    if recortada {
+        cola.drain(..saltos_hasta_caracter(&cola));
     }
     Lectura {
-        bytes,
-        recortada: total > tope,
+        bytes: cola,
+        recortada,
     }
+}
+
+/// Cuántos bytes saltar al inicio para caer en un borde de carácter UTF-8.
+/// Un carácter UTF-8 tiene como máximo 3 bytes de continuación. El tope de 3 evita saltar de más.
+fn saltos_hasta_caracter(cola: &[u8]) -> usize {
+    cola.iter()
+        .take(3)
+        .take_while(|b| (**b & 0xC0) == 0x80)
+        .count()
 }
 
 /// Lee un flujo completo en otro hilo, con el tope del builder. Así el proceso no se bloquea al llenar el pipe.
@@ -422,32 +461,7 @@ pub(crate) fn leer_cola_en_hilo_con<R: Read + Send + 'static>(
     flujo: R,
     tope: usize,
 ) -> JoinHandle<Vec<u8>> {
-    thread::spawn(move || leer_cola_con(flujo, tope, |_| {}))
-}
-
-/// Lee un flujo hasta EOF y conserva los últimos `tope` bytes. `al_leer` ve cada trozo antes de que se recorte.
-fn leer_cola_con<R: Read>(mut flujo: R, tope: usize, mut al_leer: impl FnMut(&[u8])) -> Vec<u8> {
-    let mut cola = Vec::new();
-    let mut trozo = [0u8; 8192];
-    loop {
-        match flujo.read(&mut trozo) {
-            Ok(0) => break,
-            Ok(n) => {
-                al_leer(&trozo[..n]);
-                cola.extend_from_slice(&trozo[..n]);
-                // Se recorta al pasar el doble: el recorte cuesta lo mismo que la entrada leída.
-                if cola.len() > 2 * tope {
-                    cola.drain(..cola.len() - tope);
-                }
-            }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => break,
-        }
-    }
-    if cola.len() > tope {
-        cola.drain(..cola.len() - tope);
-    }
-    cola
+    thread::spawn(move || leer_cola(flujo, tope, |_| {}).bytes)
 }
 
 /// Lee el stdout de `podman` en otro hilo. Da la cola y la última línea `STEP` vista, si hubo una.
@@ -461,7 +475,7 @@ fn leer_salida_en_hilo(
 /// Lee un flujo hasta EOF. Da la cola de `tope` bytes y la última línea completa `STEP` que vio.
 pub(crate) fn leer_salida_con_step<R: Read>(flujo: R, tope: usize) -> (Vec<u8>, Option<String>) {
     let mut rastreo = RastreoStep::default();
-    let cola = leer_cola_con(flujo, tope, |trozo| rastreo.alimentar(trozo));
+    let cola = leer_cola(flujo, tope, |trozo| rastreo.alimentar(trozo)).bytes;
     (cola, rastreo.cerrar())
 }
 
@@ -1054,6 +1068,29 @@ mod tests {
                 recortada: false
             }
         );
+    }
+
+    #[test]
+    fn modo_cola_no_empieza_a_mitad_de_un_caracter() {
+        // "€€€" ocupa 9 bytes. Con tope 4, el corte cae dentro del segundo "€".
+        let lectura = leer_con_tope("€€€".as_bytes(), 4, Modo::Cola);
+        assert_eq!(lectura.bytes, "€".as_bytes());
+        assert!(lectura.recortada);
+    }
+
+    #[test]
+    fn modo_cola_con_flujo_largo_no_empieza_a_mitad_de_un_caracter() {
+        // Pasa el doble del tope. El recorte intermedio no debe cambiar el resultado final.
+        let texto = "€".repeat(100);
+        let lectura = leer_con_tope(texto.as_bytes(), 4, Modo::Cola);
+        assert_eq!(lectura.bytes, "€".as_bytes());
+    }
+
+    #[test]
+    fn cola_de_podman_no_empieza_a_mitad_de_un_caracter() {
+        let flujo = io::Cursor::new("€€€".as_bytes().to_vec());
+        let bytes = leer_cola_en_hilo_con(flujo, 4).join().expect("hilo");
+        assert_eq!(bytes, "€".as_bytes());
     }
 
     #[test]
