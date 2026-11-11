@@ -25,6 +25,9 @@ pub(crate) const ARCHIVO_OUTCOMES: &str = "outcomes.json";
 pub(crate) const ARCHIVO_TESTS_FALLIDOS: &str = "tests-fallidos.txt";
 /// Listado JSON de los mutantes que deja `comando_de_listado` dentro de `/salida`.
 const ARCHIVO_LISTADO: &str = "listado.json";
+/// Mutantes "delete field ... from struct ... expression". cargo-mutants 27.1.0 ignora `-F` para este tipo:
+/// los corre siempre, aunque la muestra no los pida. Se excluyen con `--exclude-re` en el listado y en la corrida.
+const EXCLUIR_DELETE_FIELD: &str = "delete field .* from struct .* expression";
 const DETALLE_VIVO: &str = "este cambio de comportamiento no lo detecta ningún test";
 const SEVERIDAD_VIVO: u8 = 2;
 
@@ -602,10 +605,17 @@ pub(crate) fn archivo_acotado() -> Option<String> {
 /// Comando que lista los mutantes en orden de ejecución, sobre una copia de `/repo`. Escribe el
 /// listado en `/salida`: el stdout del ejecutor se corta a sus últimos caracteres.
 pub(crate) fn comando_de_listado() -> String {
+    let exclusion = exclusion_de_mutantes();
     format!(
         "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
-         cargo mutants --list --json --no-shuffle > /salida/{ARCHIVO_LISTADO}"
+         cargo mutants --list --json --no-shuffle{exclusion} > /salida/{ARCHIVO_LISTADO}"
     )
+}
+
+/// Opción `--exclude-re` que saca `EXCLUIR_DELETE_FIELD` de los comandos de cargo-mutants. Empieza con
+/// espacio. Va antes de `--output` en la corrida: `pedidos_del_comando` busca el `-F` después de ese flag.
+fn exclusion_de_mutantes() -> String {
+    format!(" --exclude-re {}", comilla_shell(EXCLUIR_DELETE_FIELD))
 }
 
 /// Filtro `-F` que deja solo los mutantes de `nombres`: su alternación exacta, escapada.
@@ -646,9 +656,10 @@ fn comando_de_corrida(tarea: &Tarea, filtro: &str) -> String {
     let plazo = PLAZO_FIJO
         .with(|p| *p.borrow())
         .map_or(String::new(), |s| format!(" --timeout {s}"));
+    let exclusion = exclusion_de_mutantes();
     format!(
         "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
-         CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle --jobs 1{plazo} \
+         CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle --jobs 1{plazo}{exclusion} \
          --output /salida/mutants{filtro} -- --offline; \
          (cd /salida/mutants/mutants.out && grep -H '^test .* \\.\\.\\. FAILED$' log/*.log) \
          > /salida/{ARCHIVO_TESTS_FALLIDOS} 2>/dev/null; \
@@ -1352,6 +1363,16 @@ mod tests {
     }
 
     #[test]
+    fn mutacion_listado_y_corrida_excluyen_los_delete_field() {
+        // cargo-mutants 27.1.0 ignora `-F` en los mutantes "delete field ... from struct ... expression".
+        let exclusion = " --exclude-re 'delete field .* from struct .* expression'";
+        let listado = comando_de_listado();
+        assert!(listado.contains(exclusion), "{listado}");
+        let corrida = comando_de_corrida(&tarea_pruebas(5), "");
+        assert!(corrida.contains(exclusion), "{corrida}");
+    }
+
+    #[test]
     fn mutacion_sin_acotar_los_comandos_son_iguales_a_hoy() {
         assert_eq!(archivo_acotado(), None);
         let listado = comando_de_listado();
@@ -1359,7 +1380,7 @@ mod tests {
             listado,
             format!(
                 "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
-                 cargo mutants --list --json --no-shuffle > /salida/listado.json"
+                 cargo mutants --list --json --no-shuffle --exclude-re 'delete field .* from struct .* expression' > /salida/listado.json"
             )
         );
         let corrida = comando_de_corrida(&tarea_pruebas(5), "");
@@ -2004,7 +2025,9 @@ mod tests {
     fn mutacion_con_plazo_fijo_el_comando_lleva_timeout_antes_de_output() {
         let cmd = con_plazo_fijo(Some(75), || comando_de_corrida(&tarea_pruebas(5), ""));
         assert!(
-            cmd.contains("--jobs 1 --timeout 75 --output /salida/mutants"),
+            cmd.contains(
+                "--jobs 1 --timeout 75 --exclude-re 'delete field .* from struct .* expression' --output /salida/mutants"
+            ),
             "{cmd}"
         );
         assert!(es_comando_de_mutacion(&cmd), "{cmd}");
