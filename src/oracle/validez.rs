@@ -1589,6 +1589,7 @@ anclas = [
 
     fn puntaje(dimension: Dimension, valor: f32, items: Vec<NivelItem>) -> Puntaje {
         Puntaje {
+            motivo_sin_calibrar: None,
             dimension,
             valor,
             calibrada: true,

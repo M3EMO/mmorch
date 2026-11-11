@@ -845,6 +845,15 @@ fn confianza(v: &Veredicto, tarea: &Tarea) -> Confianza {
         tests_pendientes: v.pendientes.clone(),
         ambiguedades: v.ambiguedades.clone(),
         sin_calibrar: v.sin_calibrar.clone(),
+        motivos_sin_calibrar: v
+            .puntajes
+            .iter()
+            .filter_map(|p| {
+                p.motivo_sin_calibrar
+                    .as_ref()
+                    .map(|motivo| (p.dimension, motivo.clone()))
+            })
+            .collect(),
         sin_veredicto: v
             .puntajes
             .iter()
@@ -1012,10 +1021,13 @@ pub fn markdown(tarea: &str, informe: &Informe) -> String {
         datos.push(format!("- Test pendiente {}: {}", p.test, p.motivo));
     }
     if !c.sin_calibrar.is_empty() {
-        let nombres: Vec<&str> = c
+        let nombres: Vec<String> = c
             .sin_calibrar
             .iter()
-            .map(|d| nombre_dimension(*d))
+            .map(|d| match c.motivos_sin_calibrar.get(d) {
+                Some(motivo) => format!("{} ({motivo})", nombre_dimension(*d)),
+                None => nombre_dimension(*d).to_string(),
+            })
             .collect();
         datos.push(format!("- Sin calibrar: {}", unir(&nombres)));
     }
@@ -1266,6 +1278,7 @@ modulos = ["config"]
             .iter()
             .map(|&dimension| match (dimension, completitud) {
                 (Dimension::Completitud, Some(valor)) => Puntaje {
+                    motivo_sin_calibrar: None,
                     dimension,
                     valor,
                     calibrada: false,
@@ -1275,6 +1288,7 @@ modulos = ["config"]
                     faltantes: Vec::new(),
                 },
                 (Dimension::Completitud, None) => Puntaje {
+                    motivo_sin_calibrar: None,
                     dimension,
                     valor: 0.0,
                     calibrada: false,
@@ -1284,6 +1298,7 @@ modulos = ["config"]
                     faltantes: Vec::new(),
                 },
                 _ => Puntaje {
+                    motivo_sin_calibrar: None,
                     dimension,
                     valor: 1.0,
                     calibrada: false,
@@ -2270,6 +2285,23 @@ modulos = ["config"]
             .map(|a| a.refs[0].as_str())
             .collect();
         assert_eq!(refs, vec!["h-seguridad-3", "R2", "R4"]);
+    }
+
+    #[test]
+    fn informe_muestra_el_motivo_junto_a_la_dimension_sin_calibrar() {
+        let mut v = ecc();
+        v.sin_calibrar = vec![Dimension::Diseno];
+        let diseno = v
+            .puntajes
+            .iter_mut()
+            .find(|p| p.dimension == Dimension::Diseno)
+            .expect("ecc tiene Diseño");
+        diseno.motivo_sin_calibrar = Some("calibración de otro juez".into());
+        let md = markdown("memora", &informe_de(&v));
+        assert!(
+            md.contains("- Sin calibrar: Diseño (calibración de otro juez)"),
+            "{md}"
+        );
     }
 
     #[test]

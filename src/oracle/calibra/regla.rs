@@ -183,6 +183,7 @@ mod tests {
     ) -> Veredicto {
         Veredicto {
             puntajes: vec![Puntaje {
+                motivo_sin_calibrar: None,
                 dimension,
                 valor,
                 calibrada: false,
