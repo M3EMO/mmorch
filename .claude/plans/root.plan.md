@@ -6845,3 +6845,55 @@ Dije que Arquitectura y Diseño de t1 daban veredicto en todos sus casos. En Dis
 ## Vuelta del 2026-11-11 (4): brief de la Tarea 83
 
 Escribí `docs/builds/brief-local-83.md`, con base 5aa2dc6 y rama `laptop/tarea-83`. Trae 4 puntos: control de gasto por llamada con reserva atómica, estabilidad de ítems con 3 juicios de la base, extractos en los casos y marca de línea omitida. Los puntos 1 a 3 van en serie por `calibra.rs`, y el 4 va después del 1. La Tarea 82 pasó la suite con podman: 2859 verdes y 0 fallas. Su mezcla espera la orden del usuario.
+
+## Vuelta del 2026-11-11 (5): informe de la Tarea 83 y Tarea 84
+
+**Estado.** La Tarea 83 está en `laptop/tarea-83` (86f260c), con 2884 verdes y 0 fallas sin podman. Su suite con podman corre ahora. La Tarea 82 dio 2859, 0 y 5. Las dos mezclas esperan la orden del usuario.
+
+**Archivos fuera de la lista: se acepta.** Son campos nuevos sin lógica, literales para compilar y el render de ítems inestables. Ese render lo pedía el punto 2.9. El error de origen es mío: el brief decía que `Veredicto` ya guardaba los extractos, y no era así.
+
+**Las 14 preguntas.** Todas son de diseño. Ninguna pide una pregunta nueva al usuario.
+
+1. **Archivos fuera de la lista:** acepto, como arriba.
+2. **Dimensión inestable en `no_aplica`: cambia.** `no_aplica` quiere decir "el defecto no aplica a esta tarea". D4 cuenta las dos cosas por separado. Usar el mismo campo para dos sentidos confunde al próximo lector. `Fila` suma `inestable: Option<String>`. Va a la Tarea 84.
+3. **Base repetida sin juez: se salta.** Si el juez no corre en esa tarea, la base se juzga una sola vez. Repetir no mide nada y gasta. Va a la Tarea 84.
+4. **`Fila.extractos_base`:** acepto.
+5. **Defecto sobre un ítem inestable:** acepto. La dimensión todavía lo puede detectar por sondas o por cita del juez. Solo sale la vía de la baja del ítem.
+6. **Una calibración no excluye ítems por su fila vieja:** acepto. Si no, un ítem inestable nunca se recuperaría.
+7. **`evaluar` con huella vieja: se exige huella vigente.** Una fila con otra huella no calibra. Su lista de inestables tampoco vale. Va a la Tarea 84.
+8. **Hallazgos del juez sobre ítems excluidos:** se quedan. La inestabilidad es de los niveles. Un hallazgo trae su cita, y el gate de evidencia ya lo revisa.
+9. **Rechazo por hilo:** acepto. Es mejor que mi pedido: no tira casos ya pagados.
+10. **`Presupuesto.gasto_desde` sin lectura: se borra.** Va a la Tarea 84.
+11. **Precios validados en `calibrar_tarea_con`:** acepto. Mismo mensaje y mismo código 2.
+12. **Marca de línea larga:** acepto el texto, el umbral y la prioridad del secreto.
+13. **Limpios compartidos con los mismos extractos:** acepto.
+14. **`docs/interfaces.md` en dos commits:** acepto. Lo pide el hook.
+
+**Borrados candidatos de la sección 5: se borran en la Tarea 84.** Son `cota_bytes_de_prompt`, con sus 4 tests, y `casos_con_reserva_abierta` y `casos_con_reserva_abierta_en`, con sus tests. Ninguno tiene uso en producción.
+
+**Huecos que quedan, sin tarea por ahora.**
+- El juez de config no guarda extractos. Ninguna medición lo pide hoy.
+- No hay test de integración de `validar_precios_de_home`.
+
+**Tarea 84.** Brief: `docs/builds/brief-local-84.md`, con base 86f260c y rama `laptop/tarea-84`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | La credencial no queda en disco si `corre` muere por una señal. Hay un barrido al arrancar | `src/corre/corrida.rs`, `src/corre/mod.rs`, `src/corre/ejecutor.rs` |
+| 2 | Lecturas con tope: `leer_en_hilo` y `leer_todo` | `src/oracle/contenedor.rs`, `src/corre/ejecutor.rs`, `src/oracle/colab.rs` |
+| 3 | El `STEP` de un build se conserva aunque la salida pase 1 MiB | `src/oracle/entrega.rs`, `src/oracle/contenedor.rs` |
+| 4 | Preguntas 2, 3, 7 y 10 | `src/oracle/calibra.rs`, `src/lib.rs`, `tests/calibra.rs`, `docs/interfaces.md` |
+| 5 | Borrados candidatos | `src/oracle/juez.rs`, `src/observe/uso.rs` |
+
+**Parte de dos HIGH ya está hecha.**
+- El commit 571d3e5 dejó el build con una cola de 1 MiB, y `clasificar_fallo` lee esa cola. El HIGH 2 queda solo para salidas de más de 1 MiB después del `STEP`.
+- `leer_cola_en_hilo` ya lee con tope. Quedan sin tope `leer_en_hilo`, en `src/corre/ejecutor.rs:337`, y `leer_todo`, en `src/oracle/colab.rs:463`.
+
+**Orden.**
+- El punto 2 va primero.
+- El punto 3 va después del 2, porque comparten `contenedor.rs`.
+- El punto 1 va después del 2, porque comparten `ejecutor.rs`.
+- Los puntos 4 y 5 corren en paralelo con todos.
+- **Base 86f260c.** La Tarea 84 arranca sobre la 83 sin mezclar, igual que la 83 sobre la 82. Si una mezcla anterior se rechaza, la 84 se rebasa.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P100 siguen abiertas.
