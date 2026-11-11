@@ -15,13 +15,15 @@ use serde::{Deserialize, Serialize};
 
 use serde_json::{Map, json};
 
-use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES};
+use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES, huella_del_prompt};
 use super::memo::{Alcance, MemoSondas, ReusoSondas};
 use super::mutacion::MutanteMuerto;
+use super::rubrica::{Mide, Rubrica, cargar_embebidas};
 use super::tarea::Tarea;
 use super::{AVISO_TARGET_FRIO, ErrorOraculo, OpcionesOraculo, Partes, Target, partes_de};
 use crate::borrado;
 use crate::config::{Config, Precio};
+use crate::goal::calcular_hash;
 use crate::observe;
 use crate::proveedores::{INTENTOS_MAX, MAX_TOKENS_JUEZ, con_caso, costo_peor_caso};
 use crate::tipos::{Dimension, Eleccion, Evento, Hallazgo, Puntaje, Veredicto};
@@ -87,6 +89,10 @@ pub struct Fila {
     /// Inyecciones inválidas reemplazadas en la calibración, incluidas las del caso agotado.
     #[serde(default)]
     pub reemplazos: u32,
+    /// Huella del juez con que se midió la fila: el prompt y las rúbricas de la dimensión (`huella_de`).
+    /// Una fila sin el campo vale `None`. Con ítems del juez, `None` cuenta como vieja y no calibra.
+    #[serde(default)]
+    pub huella: Option<String>,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -154,12 +160,25 @@ impl Calibraciones {
             let calibrable = fila.is_some_and(|f| {
                 !f.incompleta
                     && f.limpios_sin_veredicto * 100 <= f.limpios * MAX_LIMPIOS_SIN_VEREDICTO_PCT
+                    && huella_vigente(f, puntaje.dimension)
             });
             puntaje.calibrada =
                 calibrable && puntaje.exactitud_balanceada.is_some_and(|e| e >= UMBRAL);
         }
     }
+
+    /// Motivo por el que la fila más reciente de `dimension` no calibra por su huella: es de otro juez.
+    /// `None` si no hay fila con muestra suficiente, o si su huella es la actual.
+    pub fn motivo_sin_calibrar(&self, tarea: &str, dimension: Dimension) -> Option<&'static str> {
+        let fila = self
+            .de(tarea, dimension)
+            .filter(|f| muestra_suficiente(f))?;
+        (!huella_vigente(fila, dimension)).then_some(MOTIVO_OTRO_JUEZ)
+    }
 }
+
+/// Motivo de un puntaje cuya fila tiene otra huella: la calibración sale de otro juez.
+const MOTIVO_OTRO_JUEZ: &str = "calibración de otro juez";
 
 /// Media de los `valor` de las dimensiones calibradas y con veredicto, con pesos iguales. `None` si ninguna.
 pub fn global_de(puntajes: &[Puntaje]) -> Option<f32> {
@@ -169,6 +188,39 @@ pub fn global_de(puntajes: &[Puntaje]) -> Option<f32> {
         .map(|p| p.valor)
         .collect();
     (!valores.is_empty()).then(|| valores.iter().sum::<f32>() / valores.len() as f32)
+}
+
+/// Huella de la calibración de `dimension`: el prompt del juez y las rúbricas de la dimensión.
+/// Cambiar uno cambia la huella. Las filas con otra huella no calibran si la dimensión tiene ítems del juez.
+pub fn huella_de(dimension: Dimension) -> String {
+    let juntas: String = rubricas_de(dimension).iter().map(Rubrica::hash).collect();
+    calcular_hash(format!("{}\n{juntas}", huella_del_prompt()).as_bytes())
+}
+
+/// Rúbricas embebidas de `dimension`. Su id es la clave de la dimensión.
+fn rubricas_de(dimension: Dimension) -> Vec<Rubrica> {
+    cargar_embebidas()
+        .expect("las rúbricas embebidas cargan")
+        .into_iter()
+        .filter(|r| Dimension::desde_clave(&r.id) == Some(dimension))
+        .collect()
+}
+
+/// `dimension` tiene ítems que mide el juez (`juez` o `mixto`). Sin ellos, solo cuentan sus sondas.
+fn tiene_items_de_juez(dimension: Dimension) -> bool {
+    rubricas_de(dimension)
+        .iter()
+        .flat_map(|r| r.item.iter())
+        .any(|i| i.mide != Mide::Sonda)
+}
+
+/// La fila sirve para `dimension` según su huella. Con huella, debe ser la actual. Sin huella, sirve solo si la
+/// dimensión no tiene ítems del juez.
+fn huella_vigente(fila: &Fila, dimension: Dimension) -> bool {
+    match &fila.huella {
+        Some(huella) => *huella == huella_de(dimension),
+        None => !tiene_items_de_juez(dimension),
+    }
 }
 
 pub mod inyectar;
@@ -966,6 +1018,7 @@ fn fila_de(
         no_aplica: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
+        huella: Some(huella_de(dimension)),
     }
 }
 
@@ -1288,6 +1341,7 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64, motivo: &st
         no_aplica: Some(motivo.into()),
         reemplazos: 0,
         ruidosos: Vec::new(),
+        huella: Some(huella_de(dimension)),
     }
 }
 
@@ -1941,6 +1995,7 @@ mod tests {
             no_aplica: None,
             reemplazos: 0,
             ruidosos: Vec::new(),
+            huella: None,
         }
     }
 
@@ -4101,6 +4156,108 @@ mod tests {
         c.aplicar("memora", &mut puntajes);
         assert!(!puntajes[0].calibrada, "una fila no aplica no calibra");
         assert_eq!(puntajes[0].exactitud_balanceada, None);
+    }
+
+    /// Fila de Diseño con exactitud 1.0 y la huella dada. Sus conteos pasan la muestra mínima.
+    fn fila_de_diseno_con_huella(huella: Option<String>) -> Fila {
+        Fila {
+            huella,
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        }
+    }
+
+    /// Aplica una sola fila a un puntaje de `dimension` y dice si la calibra.
+    fn calibra_con_una_fila(fila: Fila, dimension: Dimension) -> bool {
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![fila],
+        };
+        let mut puntajes = vec![puntaje(dimension, 0.8)];
+        c.aplicar("memora", &mut puntajes);
+        puntajes[0].calibrada
+    }
+
+    #[test]
+    fn huella_vieja_no_calibra_diseno_aunque_la_exactitud_llegue_al_umbral() {
+        let vieja = fila_de_diseno_con_huella(Some("vieja".into()));
+        assert_eq!(vieja.exactitud_balanceada, Some(1.0));
+        assert!(!calibra_con_una_fila(vieja, Dimension::Diseno));
+    }
+
+    #[test]
+    fn fila_sin_huella_no_calibra_diseno() {
+        let sin = fila_de_diseno_con_huella(None);
+        assert!(!calibra_con_una_fila(sin, Dimension::Diseno));
+    }
+
+    #[test]
+    fn huella_actual_calibra_diseno() {
+        let actual = fila_de_diseno_con_huella(Some(huella_de(Dimension::Diseno)));
+        assert!(calibra_con_una_fila(actual, Dimension::Diseno));
+    }
+
+    #[test]
+    fn dimension_solo_de_sondas_sin_huella_sigue_calibrando() {
+        let sin = fila("memora", Dimension::Seguridad, 1.0, Some(1.0));
+        assert_eq!(sin.huella, None);
+        assert!(calibra_con_una_fila(sin, Dimension::Seguridad));
+    }
+
+    #[test]
+    fn dimension_solo_de_sondas_con_huella_distinta_no_calibra() {
+        let otra = Fila {
+            huella: Some("vieja".into()),
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        };
+        assert!(!calibra_con_una_fila(otra, Dimension::Seguridad));
+    }
+
+    #[test]
+    fn motivo_de_otro_juez_aparece_con_huella_vieja() {
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![fila_de_diseno_con_huella(Some("vieja".into()))],
+        };
+        assert_eq!(
+            c.motivo_sin_calibrar("memora", Dimension::Diseno),
+            Some("calibración de otro juez")
+        );
+        let vigente = Calibraciones {
+            v: VERSION,
+            filas: vec![fila_de_diseno_con_huella(Some(huella_de(
+                Dimension::Diseno,
+            )))],
+        };
+        assert_eq!(
+            vigente.motivo_sin_calibrar("memora", Dimension::Diseno),
+            None
+        );
+        assert_eq!(c.motivo_sin_calibrar("otra", Dimension::Diseno), None);
+    }
+
+    #[test]
+    fn fila_vieja_sin_huella_en_json_se_lee_none() {
+        let fila = fila("memora", Dimension::Diseno, 1.0, Some(1.0));
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        vieja.as_object_mut().expect("objeto").remove("huella");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!(leida.huella, None);
+    }
+
+    #[test]
+    fn calibrar_con_escribe_la_huella_de_su_dimension() {
+        let base = veredicto_base();
+        let fila = calibrar(
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| if limpia { base.clone() } else { hundido(base) },
+            20,
+        );
+        assert_eq!(fila.huella, Some(huella_de(Dimension::Seguridad)));
+        assert_ne!(
+            huella_de(Dimension::Seguridad),
+            huella_de(Dimension::Diseno)
+        );
     }
 
     #[test]

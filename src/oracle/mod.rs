@@ -2,6 +2,7 @@
 
 pub mod auditar;
 pub mod calibra;
+mod cambios;
 pub mod colab;
 pub mod configs;
 pub mod contenedor;
@@ -1157,6 +1158,8 @@ fn juzgar_diseno(
     let spec_ruta = tarea.dir.join(&tarea.spec);
     let spec = fs::read_to_string(&spec_ruta).map_err(|e| infra("leer la spec del juez", e))?;
     let mapa = mapa::construir(repo)?;
+    // Con `bootstrap/`, el juez lee primero lo que cambió frente al estado inicial.
+    let bootstrap = tarea.dir.join("bootstrap");
     let entrada = EntradaJuez {
         spec: &spec,
         requisitos: &tarea.requisito,
@@ -1164,6 +1167,7 @@ fn juzgar_diseno(
         hallazgos_sondas: sondas,
         rubricas: juez.rubricas,
         repo,
+        inicial: bootstrap.is_dir().then_some(bootstrap.as_path()),
     };
     let mut resultado = juez::juzgar(
         &entrada,
@@ -5348,6 +5352,7 @@ mod tests {
             hallazgos: Vec::new(),
             descartes: Vec::new(),
             hallazgos_descartados: Vec::new(),
+            extractos: Vec::new(),
             faltantes: vec![TOPE_ID.to_string()],
         };
         let rubricas = [rubrica_diseno()];
@@ -5756,6 +5761,7 @@ mod tests {
             no_aplica: None,
             reemplazos: 0,
             ruidosos: Vec::new(),
+            huella: None,
         })
         .collect();
         let calibracion = Calibraciones {
@@ -5884,6 +5890,7 @@ mod tests {
             hallazgos: Vec::new(),
             descartes: Vec::new(),
             hallazgos_descartados: Vec::new(),
+            extractos: Vec::new(),
             faltantes: Vec::new(),
         }
     }
