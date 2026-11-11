@@ -5761,6 +5761,7 @@ mod tests {
             no_aplica: None,
             reemplazos: 0,
             ruidosos: Vec::new(),
+            huella: None,
         })
         .collect();
         let calibracion = Calibraciones {

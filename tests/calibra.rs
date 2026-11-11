@@ -998,6 +998,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
         no_aplica: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
+        huella: None,
     };
     agregar(home.path(), &seguridad).expect("agrega seguridad");
     let cal = Calibraciones::cargar(home.path()).expect("carga");
@@ -1139,6 +1140,7 @@ fn fila_vieja_sin_no_aplica_se_lee() {
         no_aplica: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
+        huella: None,
     };
     let mut vieja = serde_json::to_value(&fila).expect("serializa");
     vieja.as_object_mut().expect("objeto").remove("no_aplica");
@@ -1169,6 +1171,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
         no_aplica: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
+        huella: None,
     };
     agregar(home.path(), &antes).expect("agrega");
     let llamadas = Mutex::new(0u32);

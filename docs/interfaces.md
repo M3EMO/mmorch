@@ -621,6 +621,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "format": "float",
           "default": null
         },
+        "huella": {
+          "description": "Huella del juez con que se midió la fila: el prompt y las rúbricas de la dimensión (`huella_de`).\nUna fila sin el campo vale `None`. Con ítems del juez, `None` cuenta como vieja y no calibra.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "incompleta": {
           "description": "`true` si el tope de gasto detuvo la calibración antes de medir todos sus casos (decisión 48). Una\nfila incompleta no calibra la dimensión, aunque su exactitud llegue a `UMBRAL`.",
           "type": "boolean",
