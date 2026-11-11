@@ -383,14 +383,15 @@ pub fn borrador_tarea(ficha: &Ficha, nombre: &str) -> Result<String, ErrorFicha>
 const CMD_CONTRATO: &str = "ORACULO_REPO=/repo CARGO_TARGET_DIR=/salida/target python3 -m pytest -q -p no:cacheprovider --junitxml=/salida/contrato.xml /oraculo/contrato";
 const CMD_OCULTO: &str = "ORACULO_REPO=/repo CARGO_TARGET_DIR=/salida/target python3 -m pytest -q -p no:cacheprovider --junitxml=/salida/oculto.xml /oraculo/oculto";
 
-/// Comando de nextest que copia el junit a `/salida/<xml>.xml`. El `cp` corre aunque nextest falle,
-/// y el código de salida de nextest se conserva.
+/// Comando de nextest que copia el junit a `/salida/<xml>.xml`.
+/// El código de nextest llega entero aunque el `cp` falle.
+/// El `rm -f` evita copiar un junit viejo de otra corrida.
 ///
 /// Usa el tool-config `/etc/root-oraculo/nextest.toml` que trae la imagen: ahí vive el perfil `ci`
 /// y su store. El repo no pide el perfil `ci`; lo define la imagen.
 fn cmd_nextest(xml: &str) -> String {
     format!(
-        "CARGO_TARGET_DIR=/salida/target cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/{xml}.xml || exit 1; exit $s"
+        "rm -f /salida/target/nextest/ci/junit.xml; CARGO_TARGET_DIR=/salida/target cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/{xml}.xml 2>/dev/null; exit $s"
     )
 }
 
@@ -808,5 +809,75 @@ mod tests {
         assert_eq!(revision.juez, JUEZ_NO_PEDIDO);
         assert!(!revision.hallazgos.is_empty());
         assert_eq!(revision.codigo_de_salida(), 1);
+    }
+
+    #[test]
+    fn nextest_borra_el_junit_viejo_antes_de_correr_cargo() {
+        let cmd = cmd_nextest("contrato");
+        let rm = "rm -f /salida/target/nextest/ci/junit.xml";
+        let cargo = "cargo nextest run";
+        let pos_rm = cmd.find(rm).expect("el comando trae el rm -f");
+        let pos_cargo = cmd.find(cargo).expect("el comando corre cargo nextest");
+        assert!(pos_rm < pos_cargo, "el rm -f va antes de cargo: {cmd}");
+    }
+
+    #[test]
+    fn nextest_no_corta_con_el_cp_y_conserva_el_codigo() {
+        let cmd = cmd_nextest("contrato");
+        assert!(
+            !cmd.contains("|| exit 1"),
+            "el cp no corta el comando: {cmd}"
+        );
+        assert!(
+            cmd.ends_with("exit $s"),
+            "el comando termina con exit $s: {cmd}"
+        );
+    }
+
+    /// Corre `cmd_nextest` con `/salida` dentro de un tempdir y un `cargo` falso delante en el PATH.
+    fn correr_nextest(cargo_falso: &str) -> (tempfile::TempDir, std::process::ExitStatus) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).expect("carpeta bin");
+        let cargo = bin.join("cargo");
+        fs::write(&cargo, cargo_falso).expect("cargo falso");
+        fs::set_permissions(&cargo, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("permisos del cargo falso");
+        let salida = dir.path().join("salida");
+        fs::create_dir(&salida).expect("carpeta salida");
+        let comando = cmd_nextest("contrato").replace("/salida", &salida.display().to_string());
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&comando)
+            .env("PATH", path)
+            .status()
+            .expect("sh del host");
+        (dir, status)
+    }
+
+    #[test]
+    fn nextest_cargo_que_falla_sin_junit_sale_con_su_codigo() {
+        let (_dir, status) = correr_nextest("#!/bin/sh\nexit 101\n");
+        assert_eq!(status.code(), Some(101));
+    }
+
+    #[test]
+    fn nextest_copia_el_junit_y_sale_0_si_cargo_pasa() {
+        let cargo_ok = "#!/bin/sh\n\
+            mkdir -p \"$CARGO_TARGET_DIR/nextest/ci\"\n\
+            printf '<testsuites/>' > \"$CARGO_TARGET_DIR/nextest/ci/junit.xml\"\n\
+            exit 0\n";
+        let (dir, status) = correr_nextest(cargo_ok);
+        assert_eq!(status.code(), Some(0));
+        let copiado = dir.path().join("salida").join("contrato.xml");
+        assert_eq!(
+            fs::read_to_string(copiado).expect("junit copiado"),
+            "<testsuites/>"
+        );
     }
 }
