@@ -43,6 +43,10 @@ const FASE_LANZAMIENTO: &str = "lanzamiento";
 const FASE_SESION: &str = "sesion";
 const FASE_EVALUACION: &str = "evaluacion";
 const FASE_TRANSCRIPT: &str = "transcript";
+/// Fase del `Gate` que queda cuando el oráculo no deja líneas distintivas para buscar huellas.
+const FASE_HUELLA: &str = "huella";
+/// Motivo de ese `Gate`. Rutas y nombres siguen valiendo; solo faltan las líneas.
+const MOTIVO_HUELLA_VACIA: &str = "huella sin líneas distintivas";
 /// Motivo del `Gate` de aviso: sin token legible en la copia, el transcript se guarda sin redactar.
 const MOTIVO_SIN_TOKEN: &str =
     "sin accessToken legible en la copia: el transcript se guardó sin redactar";
@@ -182,6 +186,16 @@ fn correr_interno(
         hecho: false,
     };
     let id = corrida.id.clone();
+    // Sin líneas distintivas, el oráculo solo se ve por rutas y nombres: se anota en el log.
+    if !huellas.tiene_lineas() {
+        gate(
+            &ruta_eventos,
+            &id,
+            FASE_HUELLA,
+            MOTIVO_HUELLA_VACIA.into(),
+            None,
+        )?;
+    }
     // Lo que dejó una corrida anterior: sus transcripts y el mayor número de lanzamiento.
     let (previos, mayor_previo) = previos_de(deps.home, &id)?;
 

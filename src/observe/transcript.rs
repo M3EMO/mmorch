@@ -6,10 +6,10 @@
 //!   el cwd del transcript o un `cd` previo del mismo comando; los enlaces se siguen. La salida no
 //!   cuenta rutas: `ps` o `ls` pueden nombrar `ROOT_HOME` sin que se lea el oráculo.
 //! - `nombre`: un archivo o una función `def test_...` del oráculo oculto que no aparece en
-//!   `contrato/`. Los de contrato los ve el builder, así que no cuentan.
+//!   `contrato/` ni en `bootstrap/`. Lo que ve el builder no cuenta.
 //! - `huella`: una línea larga y única de un archivo oculto, recortada, que aparece en la entrada o
 //!   en la salida. Se descartan los imports, los comentarios y las líneas que también están en
-//!   `contrato/`.
+//!   `contrato/` o en `bootstrap/`. Lo que el builder ya ve no es una huella.
 //!
 //! Cada motivo da como mucho un `OraculoLeido` por llamada. La cita es el fragmento que coincidió,
 //! recortado a 200 caracteres: nunca más que la línea que coincidió.
@@ -33,6 +33,8 @@ use crate::tipos::{Evento, TipoEvento};
 const LARGO_CITA: usize = 200;
 /// Largo mínimo de una línea del oráculo para servir de huella.
 const LARGO_HUELLA: usize = 40;
+/// Directorios de `bootstrap/` que no se leen: no son código del builder.
+const EXCLUIDOS_BOOTSTRAP: &[&str] = &[".git", "target"];
 
 /// Una llamada a herramienta del transcript, con la salida que le llegó.
 #[derive(Debug, Clone, PartialEq)]
@@ -173,6 +175,7 @@ fn texto_del_resultado(contenido: Option<&Value>) -> String {
 impl HuellasOraculo {
     /// Arma las huellas de la tarea `tarea` dentro de `root_home`. `home` expande `~`.
     /// Falla si `oraculos/<tarea>/oculto/` no existe: sin ese archivo no hay nada que buscar.
+    /// `contrato/` y `bootstrap/` son opcionales. Lo que contienen no cuenta como huella.
     pub fn armar(
         root_home: &Path,
         home: Option<&Path>,
@@ -191,14 +194,20 @@ impl HuellasOraculo {
         } else {
             Vec::new()
         };
+        let carpeta_bootstrap = carpeta.join("bootstrap");
+        let bootstrap = if carpeta_bootstrap.is_dir() {
+            archivos_bajo_excepto(&carpeta_bootstrap, EXCLUIDOS_BOOTSTRAP)?
+        } else {
+            Vec::new()
+        };
 
-        // Nombres y texto de contrato: lo que el builder ya ve no cuenta como lectura.
-        let mut texto_contrato = String::new();
-        for archivo in &contratos {
-            texto_contrato.push_str(&nombre_de(archivo));
-            texto_contrato.push('\n');
-            texto_contrato.push_str(&leer_lossy(archivo)?);
-            texto_contrato.push('\n');
+        // Nombres y texto que el builder ve, en contrato/ y bootstrap/: no cuentan como lectura.
+        let mut texto_visible = String::new();
+        for archivo in contratos.iter().chain(&bootstrap) {
+            texto_visible.push_str(&nombre_de(archivo));
+            texto_visible.push('\n');
+            texto_visible.push_str(&leer_lossy(archivo)?);
+            texto_visible.push('\n');
         }
 
         let mut nombres = BTreeSet::new();
@@ -217,14 +226,12 @@ impl HuellasOraculo {
         }
         let nombres = nombres
             .into_iter()
-            .filter(|nombre| !aparece_bordeado(&texto_contrato, nombre))
+            .filter(|nombre| !aparece_bordeado(&texto_visible, nombre))
             .collect();
         let lineas = conteo
             .into_iter()
             .filter(|(linea, veces)| {
-                *veces == 1
-                    && es_huella_candidata(linea)
-                    && !texto_contrato.contains(linea.as_str())
+                *veces == 1 && es_huella_candidata(linea) && !texto_visible.contains(linea.as_str())
             })
             .map(|(linea, _)| linea)
             .collect();
@@ -247,16 +254,28 @@ impl HuellasOraculo {
             lineas,
         })
     }
+
+    /// Dice si queda al menos una línea distintiva. Sin ellas, el oráculo solo deja rutas y nombres.
+    pub fn tiene_lineas(&self) -> bool {
+        !self.lineas.is_empty()
+    }
 }
 
 /// Archivos bajo `carpeta`, recursivo, en orden. Un directorio inexistente es error.
 fn archivos_bajo(carpeta: &Path) -> io::Result<Vec<PathBuf>> {
+    archivos_bajo_excepto(carpeta, &[])
+}
+
+/// Como `archivos_bajo`, pero no entra en los directorios cuyo nombre está en `excluidos`.
+fn archivos_bajo_excepto(carpeta: &Path, excluidos: &[&str]) -> io::Result<Vec<PathBuf>> {
     let mut archivos = Vec::new();
     for entrada in fs::read_dir(carpeta)? {
         let entrada = entrada?;
         let ruta = entrada.path();
         if entrada.file_type()?.is_dir() {
-            archivos.extend(archivos_bajo(&ruta)?);
+            if !excluidos.contains(&nombre_de(&ruta).as_str()) {
+                archivos.extend(archivos_bajo_excepto(&ruta, excluidos)?);
+            }
         } else if ruta.is_file() {
             archivos.push(ruta);
         }
@@ -738,5 +757,117 @@ mod tests {
         assert_eq!(eventos.len(), 1, "{eventos:?}");
         assert_eq!(eventos[0].extra["motivo"], "nombre");
         assert_eq!(eventos[0].extra["cita"], "test_indice");
+    }
+
+    /// Línea que el builder ve en `bootstrap/` y que también está en el oráculo oculto.
+    const LINEA_VISIBLE: &str = "let search_modes = SearchModeMap::default();";
+    /// Línea larga y única del oráculo oculto. El builder no la ve.
+    const LINEA_UNICA: &str = "assert sincronizar(tmp, \"clave-secreta-42\") == [1, 2, 3]";
+
+    /// Escribe `contenido` en `ruta` y crea sus carpetas padre.
+    fn escribir_archivo(ruta: &Path, contenido: &str) {
+        fs::create_dir_all(ruta.parent().expect("tiene padre")).expect("carpetas");
+        fs::write(ruta, contenido).expect("escribe el archivo");
+    }
+
+    /// Oráculo con `oculto/t.py` que tiene `LINEA_VISIBLE` y `LINEA_UNICA`. Sin `contrato/`.
+    /// Devuelve `ROOT_HOME`.
+    fn oraculo_con_linea_visible(tmp: &tempfile::TempDir) -> PathBuf {
+        let base = tmp.path().canonicalize().expect("canónica");
+        let root = base.join("home/.local/share/root");
+        escribir_archivo(
+            &root.join("oraculos/x/oculto/t.py"),
+            &format!("{LINEA_VISIBLE}\n{LINEA_UNICA}\n"),
+        );
+        root
+    }
+
+    #[test]
+    fn transcript_linea_oculta_que_el_builder_ve_en_bootstrap_no_es_huella() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_con_linea_visible(&tmp);
+        escribir_archivo(
+            &root.join("oraculos/x/bootstrap/benches/composite.rs"),
+            &format!("fn main() {{\n    {LINEA_VISIBLE}\n}}\n"),
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        assert!(
+            !huellas.lineas.iter().any(|linea| linea == LINEA_VISIBLE),
+            "{:?}",
+            huellas.lineas
+        );
+    }
+
+    #[test]
+    fn transcript_nombre_oculto_que_el_builder_ve_en_bootstrap_no_es_huella() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_falso(&tmp);
+        escribir_archivo(
+            &root.join("oraculos/x/bootstrap/README.md"),
+            "Ejemplo: test_indice corre con pytest -k.\n",
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        assert!(
+            !huellas.nombres.iter().any(|nombre| nombre == "test_indice"),
+            "{:?}",
+            huellas.nombres
+        );
+    }
+
+    #[test]
+    fn transcript_linea_unica_sigue_siendo_huella_con_bootstrap() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_con_linea_visible(&tmp);
+        escribir_archivo(
+            &root.join("oraculos/x/bootstrap/benches/composite.rs"),
+            &format!("fn main() {{\n    {LINEA_VISIBLE}\n}}\n"),
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        assert!(
+            huellas.lineas.contains(&LINEA_UNICA.to_string()),
+            "{:?}",
+            huellas.lineas
+        );
+    }
+
+    #[test]
+    fn transcript_sin_bootstrap_las_huellas_son_las_de_siempre() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_falso(&tmp);
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        assert_eq!(
+            huellas.nombres,
+            vec!["t.py".to_string(), "test_indice".to_string()]
+        );
+        assert_eq!(
+            huellas.lineas,
+            vec!["assert sincronizar(tmp, \"clave-secreta-42\") == [1, 2, 3]".to_string()]
+        );
+    }
+
+    #[test]
+    fn transcript_bootstrap_ignora_git_y_target() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_con_linea_visible(&tmp);
+        // Lo que está en `.git` o `target` no lo ve el builder: no debe quitar huellas.
+        escribir_archivo(
+            &root.join("oraculos/x/bootstrap/.git/objeto.txt"),
+            &format!("{LINEA_VISIBLE}\n"),
+        );
+        escribir_archivo(
+            &root.join("oraculos/x/bootstrap/target/debug/salida.txt"),
+            &format!("{LINEA_UNICA}\n"),
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        assert!(
+            huellas.lineas.contains(&LINEA_VISIBLE.to_string()),
+            "{:?}",
+            huellas.lineas
+        );
+        assert!(
+            huellas.lineas.contains(&LINEA_UNICA.to_string()),
+            "{:?}",
+            huellas.lineas
+        );
     }
 }
