@@ -6733,3 +6733,7 @@ P95, P96, P97, P98 y P99 siguen abiertas, como están en las vueltas anteriores.
 
 - **a)** Borrarlos. Recomendada: su trabajo ya está en la punta, y ocupan disco.
 - **b)** Dejarlos por ahora.
+
+## Vuelta del 2026-11-11 (2): brief de la Tarea 82
+
+Escribí `docs/builds/brief-local-82.md`, con base 99c0f01 y rama `laptop/tarea-82`. Trae los 4 puntos de la vuelta anterior: huella solo de sondas, ventana de cambio, motivo visible y cota del peor caso. La cota cuenta 2 pedidos y 4 bytes por carácter, con 256 KiB como máximo. El informe trae la cota vieja y la nueva para t1, sin API. La medición de estabilidad sigue en paralelo.
