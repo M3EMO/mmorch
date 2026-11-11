@@ -3635,6 +3635,55 @@ mod tests {
         assert!(matches!(s, Suite::Clasificada(_)), "{s:?}");
     }
 
+    /// Guarda: el junit se lee solo al terminar el contenedor. `ejecutar` espera a podman y a los lectores.
+    #[test]
+    fn oraculo_el_junit_se_lee_con_el_contenedor_terminado() {
+        let base = tempfile::tempdir().expect("base");
+        // Suite no oculta (no pytest): el junit es `oculto.xml`, con nombre fijo y sin collect-only.
+        let tarea = tarea_no_pytest(base.path());
+        let eventos: std::cell::RefCell<Vec<&str>> = std::cell::RefCell::new(Vec::new());
+        let veces = std::cell::Cell::new(0);
+        let correr = |e: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            veces.set(veces.get() + 1);
+            eventos.borrow_mut().push("contenedor:inicio");
+            // Root borra el junit antes de correr: al entrar, el archivo no existe.
+            assert!(
+                !e.salida.join(XML_OCULTO).exists(),
+                "el junit existe antes de correr"
+            );
+            fs::write(e.salida.join(XML_OCULTO), JUNIT_DOS_VERDES).expect("junit");
+            eventos.borrow_mut().push("contenedor:fin");
+            Ok(resultado_falso(0, ""))
+        };
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        let Suite::Clasificada(c) = s else {
+            panic!("debía ser verde con el junit del final: {s:?}");
+        };
+        assert_eq!(c.conteo, Conteo { pasa: 2, total: 2 });
+        assert!(
+            c.estables.values().all(|r| *r == ResultadoTest::Pasa),
+            "{c:?}"
+        );
+        assert_eq!(*eventos.borrow(), ["contenedor:inicio", "contenedor:fin"]);
+        assert_eq!(veces.get(), 1, "el contenedor corre una vez");
+    }
+
+    /// Guarda: si el contenedor termina sin junit, es infraestructura. No espera nada más.
+    #[test]
+    fn oraculo_sin_junit_al_terminar_el_contenedor_es_infra() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_no_pytest(base.path());
+        let correr = |_: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            // Proceso de fondo simulado: no escribe el junit y devuelve.
+            Ok(resultado_falso(0, ""))
+        };
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr);
+        assert!(
+            matches!(&s, Err(ErrorOraculo::Infra(m)) if m.contains("no produjo /salida/")),
+            "sin junit al terminar debe ser infra: {s:?}"
+        );
+    }
+
     /// Tarea cuya suite oculta no es pytest: el junit lo escribe el propio comando.
     fn tarea_no_pytest(base: &Path) -> Tarea {
         let mut tarea = tarea_de_prueba(base);
