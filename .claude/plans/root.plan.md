@@ -7871,3 +7871,93 @@ Brief: `docs/builds/brief-local-97.md`. Base: punta de `laptop/tarea-96`, que co
 **Después de mezclar:** el orquestador repite la calibración de Pruebas en t2, sin API. Con el estado por mutante, se ve cuál fue la causa.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
+
+## Vuelta del 2026-11-11 (20): casos dentro de cambios chicos, cuántos casos alcanzan, y Tarea 98
+
+**Estado.** La Tarea 96 está en `laptop/tarea-96` (7b65814), con 3115, 0 y 4 sin podman. Su suite con podman corre ahora. La 95 dio 3107, 0 y 4 con podman. La Tarea 97 se construye desde 7b65814. Las mezclas de la 84 a la 96 y P95 a P101 esperan al usuario.
+
+**Lo medido con la 95.** Con la regla "dentro del cambio", 5 de 6 defectos no aplican. El único caso dentro del cambio, Funciona en t3, no se detectó. La mutación cayó en la línea que arregla la tarea, y el único test oculto no cubre ese comportamiento. Es un escape real del test, no un fallo de Root.
+
+## 1. Lo que encontré al pensar los operadores: el riesgo de la detección segura
+
+**Los tests ocultos se eligieron porque ejecutan el cambio.** El criterio 1 de admisión pide que pasen de rojo a verde con el commit. Entonces:
+- **Revertir el arreglo da una detección segura.** t2 cambia `>=` por `>`. Un operador que vuelve `>` a `>=` recrea el estado inicial, y el test oculto está hecho para atraparlo.
+- **Vaciar una función nueva da una detección segura.** En una tarea de función nueva, vaciar la función recrea el estado inicial.
+- **Borrar un módulo que se usa da una detección segura.** El build se rompe, y la regla del 101 da rojo siempre.
+- **Cualquier otra mutación del cambio** queda cerca, pero no es segura. El caso de t3 lo muestra.
+
+**Consecuencia: Funciona y Completitud son dimensiones de oráculo.** Su calibración prueba el camino de la medición: correr los tests, leer el junit y calcular. Su sensibilidad dice cuánto cubren los tests de la tarea. No dice nada de un juicio de Root. Lo mismo dije de Pruebas en la vuelta (19).
+
+## 2. Funciona y Completitud dentro de cambios chicos
+
+**Funciona: operadores más amplios dentro del cambio, sin revertir el arreglo.**
+1. Sobre líneas de producción dentro del cambio, sin comentarios ni cadenas, usando `limpia`:
+   - comparaciones: `<` con `<=`, `>` con `>=`, `==` con `!=`, en los dos sentidos;
+   - lógica: `&&` con `||`;
+   - condiciones: quitar o agregar un `!` al principio de una condición de `if` o `while`;
+   - literales: `true` con `false`;
+   - aritmética: `+ 1` con `- 1`.
+2. **Regla anti revertir.** Se descarta toda mutación cuya línea resultante es igual a una línea del estado inicial, en el mismo archivo. Así ningún operador recrea el arreglo deshecho.
+3. Con varios candidatos, se elige con la semilla, como hoy.
+
+**Completitud: cuerpo vaciado, solo en código que ya existía.**
+1. Defecto nuevo, `cuerpo_vaciado`. Toma una función cuyo cuerpo cruza el cambio, y reemplaza su cuerpo por `todo!()`.
+2. **Solo si la función ya existía en el estado inicial.** Vaciar una función nueva recrea el estado inicial, y daría una detección segura.
+3. `modulo_borrado` queda solo para tareas sin `bootstrap/`, como memora y brasa. Con estado inicial, su detección es segura por el 101.
+4. Los módulos anidados no se agregan a `modulo_borrado`. Con la regla del punto 3, ya no hace falta.
+
+**Lo que esto no arregla.** Con cambios de 2 a 34 líneas, cada tarea da uno o dos candidatos. La cantidad de casos sale de tener más tareas, no de más operadores. Va en la sección 3.
+
+## 3. Cuántos casos alcanzan
+
+**La cota inferior de Wilson al 95 %** con todos los casos acertados:
+
+| Casos | Cota inferior |
+|---|---|
+| 5 | 0,57 |
+| 10 | 0,72 |
+| 16 | 0,81 |
+| 20 | 0,84 |
+| 35 | 0,90 |
+
+Con un fallo, 29 de 30 da 0,83. Con tres fallos, 57 de 60 da 0,86.
+
+**La regla de hoy no alcanza.** "Calibrada" pide exactitud de 0,9 o más, con 5 defectos y 5 limpios por tarea. Con 5 de 5, lo único que se puede afirmar al 95 % es 0,57. Es una estimación puntual, no una cota.
+
+**Lo que haría falta,** por tipo de dimensión:
+- **Dimensiones de juez** (Arquitectura, Diseño, Estructura): una cota de 0,8 pide 16 casos sin fallos, o cerca de 30 con un fallo. Una tarea da pocos. Hay que juntar casos de varias tareas, por versión de Root. Con 20 tareas de D3 y 2 casos por tarea, se llega a 40.
+- **Dimensiones de oráculo** (Funciona, Completitud, Pruebas, Seguridad, Entrega): un número no mide un juicio. Basta probar el camino: al menos un defecto detectado por versión, y todos los limpios bien.
+
+**Más tareas minadas: sí, hacen falta.** Las 3 de S2 dan pocos casos por dimensión, y el dataset de función nueva tiene 6. Es la misma conclusión de P97, ahora con números.
+
+**Esto cambia qué significa "calibrada", y eso lo decide el usuario: va en P102.**
+
+## 4. Una dimensión sin casos en ninguna tarea
+
+**Decisión técnica.** Root la informa como "sin calibrar: ningún caso aplicable en las tareas medidas". No es lo mismo que una calibración baja, y no se mezcla con ella.
+- El puntaje se muestra igual, marcado sin calibrar.
+- No entra al puntaje global, como hoy con toda dimensión sin calibrar.
+- El informe de D4 lista esas dimensiones aparte, con el defecto que no aplicó y su motivo.
+
+## 5. Tarea 98
+
+Brief: `docs/builds/brief-local-98.md`. Base: punta de `laptop/tarea-97`, que completa el orquestador. Rama `laptop/tarea-98`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Operadores de Funciona dentro del cambio, con la regla anti revertir | `src/oracle/calibra/inyectar.rs` |
+| 2 | `cuerpo_vaciado` para Completitud, y `modulo_borrado` solo sin estado inicial | `src/oracle/calibra/inyectar.rs` |
+
+- Los dos puntos tocan `inyectar.rs`, así que van en serie.
+- No toca archivos de la 97. Si registrar el defecto nuevo pide tocar `src/oracle/calibra.rs`, el builder lo dice y lo toca lo mínimo.
+- La 98 no depende de P102: los operadores sirven con cualquier definición de "calibrada".
+
+## Preguntas para el usuario (2026-11-11, 20)
+
+P95 a P101 siguen abiertas.
+
+**P102: hoy, Root marca una dimensión como "calibrada" con 5 defectos y 5 limpios de una sola tarea, y una exactitud de 0,9 o más. Con 5 casos, lo único que se puede afirmar al 95 % es una exactitud de 0,57.**
+
+- **a)** Para las dimensiones de juez, "calibrada" pasa a pedir una cota inferior de Wilson de 0,8 o más, con los casos de todas las tareas juntos, por versión de Root. Son unos 16 a 30 casos por dimensión. Para las dimensiones de oráculo, "calibrada" pide un defecto detectado y todos los limpios bien. Recomendada: es la única que dice algo con este tamaño de muestra, y abarata D4, porque no pide 5 y 5 por tarea.
+- **b)** Dejar la regla de hoy, por tarea, y mostrar al lado la cota de Wilson como dato.
+- **c)** Dejar la regla de hoy, sin cambios.
