@@ -845,7 +845,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "type": "boolean"
     },
     "en_cambio": {
-      "description": "`true` si el defecto cayó dentro del cambio de `bootstrap/`. `false` en los casos limpios y sin cambio.",
+      "description": "`true` si el defecto cayó dentro del cambio de `bootstrap/`.\nEn `ComportamientoRoto`, la línea invertida es una línea tocada.\nEn `ModuloBorrado`, el módulo borrado es un archivo tocado.\nUn archivo tocado tiene al menos una línea del cambio. Los casos limpios y sin cambio valen `false`.",
       "type": "boolean",
       "default": false
     },

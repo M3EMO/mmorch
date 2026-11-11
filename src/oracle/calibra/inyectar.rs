@@ -95,7 +95,10 @@ pub struct Inyeccion {
     pub mutante: Option<String>,
     /// Nombres completos de los tests que `AssertBorrado` apagó con `#[ignore]`. Vacía en los demás defectos.
     pub tests_apagados: Vec<String>,
-    /// `true` si el defecto (`ComportamientoRoto` o `ModuloBorrado`) cayó dentro del cambio de `bootstrap/`.
+    /// `true` si el defecto cayó dentro del cambio de `bootstrap/`.
+    /// En `ComportamientoRoto`, la línea invertida es una línea tocada.
+    /// En `ModuloBorrado`, el módulo borrado es un archivo tocado.
+    /// Un archivo tocado tiene al menos una línea del cambio.
     pub en_cambio: bool,
 }
 

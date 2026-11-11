@@ -503,7 +503,10 @@ pub struct CasoGuardado {
     /// Nombres completos de los tests que `AssertBorrado` apagó. Vacío en los demás defectos.
     #[serde(default)]
     pub tests_apagados: Vec<String>,
-    /// `true` si el defecto cayó dentro del cambio de `bootstrap/`. `false` en los casos limpios y sin cambio.
+    /// `true` si el defecto cayó dentro del cambio de `bootstrap/`.
+    /// En `ComportamientoRoto`, la línea invertida es una línea tocada.
+    /// En `ModuloBorrado`, el módulo borrado es un archivo tocado.
+    /// Un archivo tocado tiene al menos una línea del cambio. Los casos limpios y sin cambio valen `false`.
     #[serde(default)]
     pub en_cambio: bool,
 }
@@ -1842,7 +1845,7 @@ pub const MAX_REEMPLAZOS: u32 = 5;
 const MOTIVO_SIN_CANDIDATO: &str = "sin candidato para inyectar";
 
 /// Motivo de un defecto de línea o de módulo sin lugar dentro del cambio de `bootstrap/`.
-const MOTIVO_FUERA_DEL_CAMBIO: &str = "ninguna línea del cambio admite este defecto";
+const MOTIVO_FUERA_DEL_CAMBIO: &str = "ningún lugar del cambio admite este defecto";
 
 /// Motivo de un `AssertBorrado` no aplicable: la base no dejó mutantes muertos.
 const MOTIVO_SIN_MUERTOS: &str = "la base no dio mutantes muertos";
@@ -1851,7 +1854,7 @@ const MOTIVO_SIN_MUERTOS: &str = "la base no dio mutantes muertos";
 const MOTIVO_SIN_TEST_DE_MUERTO: &str = "ningún mutante muerto tiene tests fallidos ubicables";
 
 /// Motivo de un caso sin inyección. `AssertBorrado` separa si la base no dio muertos de si ninguno tiene test.
-/// Con `con_rangos`, un defecto de línea o de módulo dice que ninguna línea del cambio lo admite.
+/// Con `con_rangos`, un defecto de línea o de módulo dice que ningún lugar del cambio lo admite.
 /// Los demás defectos usan el motivo común.
 fn motivo_sin_inyeccion(defecto: Defecto, sin_muertos: bool, con_rangos: bool) -> &'static str {
     match (defecto, sin_muertos) {
@@ -5413,7 +5416,7 @@ mod tests {
     }
 
     #[test]
-    fn calibra_con_bootstrap_sin_igualdad_en_el_cambio_dice_que_ninguna_linea_admite_el_defecto() {
+    fn calibra_con_bootstrap_sin_igualdad_en_el_cambio_dice_que_ningun_lugar_admite_el_defecto() {
         let (dir, tarea) = tarea_con_bootstrap(false);
         let repo = dir.path().join("repo-bueno");
         let base = veredicto_de(Dimension::Funciona, 1.0, None);
@@ -5427,7 +5430,7 @@ mod tests {
         assert!(!medida.no_aplicables.is_empty(), "hay casos no aplicables");
         for no in &medida.no_aplicables {
             assert_eq!(
-                no.motivo, "ninguna línea del cambio admite este defecto",
+                no.motivo, "ningún lugar del cambio admite este defecto",
                 "{no:?}"
             );
         }
@@ -5437,11 +5440,11 @@ mod tests {
     fn motivo_de_defecto_de_linea_sin_candidato_dentro_del_cambio_lo_dice() {
         assert_eq!(
             motivo_sin_inyeccion(Defecto::ComportamientoRoto, false, true),
-            "ninguna línea del cambio admite este defecto"
+            "ningún lugar del cambio admite este defecto"
         );
         assert_eq!(
             motivo_sin_inyeccion(Defecto::ModuloBorrado, false, true),
-            "ninguna línea del cambio admite este defecto"
+            "ningún lugar del cambio admite este defecto"
         );
         assert_eq!(
             motivo_sin_inyeccion(Defecto::ComportamientoRoto, false, false),
