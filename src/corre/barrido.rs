@@ -1,6 +1,6 @@
 //! Barrido de copias de credencial de corridas muertas. Al arrancar una corrida, quita la copia
-//! `.credentials.json` de las carpetas de corridas cuyo proceso ya no vive o no es `r00t`. Deja un
-//! `Gate` por cada copia barrida. El `Gate` nunca lleva el contenido de la copia.
+//! `.credentials.json` de las carpetas de corridas cuyo proceso ya no vive, no es `r00t` o es otro
+//! proceso con el pid reusado. Deja un `Gate` por cada copia barrida. El `Gate` nunca lleva el contenido de la copia.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -95,9 +95,15 @@ pub fn barrer_con_proc(
     Ok(())
 }
 
-/// Por qué la corrida `id` está muerta. `None` si su proceso vive y es `r00t`.
-/// Un pid sin carpeta en `raiz_proc` no vive. Uno cuyo cmdline no es de `r00t` está muerto: el pid
-/// se reusó. Un cmdline que no se puede leer por permisos cuenta como vivo.
+/// Ticks de reloj por segundo del `starttime` de `/proc/<pid>/stat`. Linux usa 100 (CLK_TCK).
+const TICKS_POR_SEG: u64 = 100;
+/// Margen en segundos entre el inicio del proceso y los segundos del id. Cubre el redondeo de `btime`.
+const MARGEN_S: u64 = 2;
+
+/// Por qué la corrida `id` está muerta. `None` si su proceso vive, es `r00t` y es la misma corrida.
+/// Un pid sin carpeta en `raiz_proc` no vive. Un cmdline que no es de `r00t` está muerto. Un
+/// cmdline ilegible es de otro usuario: no es `r00t` nuestro. Un proceso que empezó después de la
+/// corrida es otro proceso con el pid reusado.
 fn motivo_de_muerte(id: &str, raiz_proc: &Path) -> Option<String> {
     let Some(pid) = pid_de(id) else {
         return Some("el id no tiene pid legible".to_string());
@@ -106,15 +112,54 @@ fn motivo_de_muerte(id: &str, raiz_proc: &Path) -> Option<String> {
     if !carpeta.exists() {
         return Some(format!("el pid {pid} no vive"));
     }
-    match fs::read(carpeta.join("cmdline")) {
-        Ok(cmdline) if es_r00t(&cmdline) => None,
-        Ok(_) => Some(format!("el pid {pid} no es r00t")),
-        Err(fuente) if fuente.kind() == io::ErrorKind::PermissionDenied => None,
+    let cmdline = match fs::read(carpeta.join("cmdline")) {
+        Ok(cmdline) => cmdline,
         Err(fuente) if fuente.kind() == io::ErrorKind::NotFound => {
-            Some(format!("el pid {pid} no vive"))
+            return Some(format!("el pid {pid} no vive"));
         }
-        Err(_) => Some(format!("el pid {pid} no es r00t")),
+        Err(_) => return Some(format!("el cmdline del pid {pid} es ilegible")),
+    };
+    if !es_r00t(&cmdline) {
+        return Some(format!("el pid {pid} no es r00t"));
     }
+    motivo_si_pid_reusado(id, pid, raiz_proc)
+}
+
+/// Motivo si el proceso `pid` empezó más de `MARGEN_S` segundos después de la corrida `id`. `None`
+/// si empezó antes o en el margen, o si no se puede leer su inicio: en ese caso la corrida se
+/// conserva, porque su cmdline ya dijo que es `r00t`.
+fn motivo_si_pid_reusado(id: &str, pid: u32, raiz_proc: &Path) -> Option<String> {
+    let segundos = segundos_de(id)?;
+    let inicio = inicio_de_proceso(pid, raiz_proc)?;
+    (inicio > segundos + MARGEN_S)
+        .then(|| format!("el pid {pid} empezó después de la corrida: se reusó"))
+}
+
+/// Segundos de inicio que lleva el id: el tercero desde el final.
+fn segundos_de(id: &str) -> Option<u64> {
+    let mut partes = id.rsplit('-');
+    partes.next()?;
+    partes.next()?;
+    partes.next()?.parse().ok()
+}
+
+/// Segundos de inicio del proceso `pid`: `btime` más el `starttime` en ticks. `None` si `stat` o
+/// `btime` no se pueden leer o parsear.
+fn inicio_de_proceso(pid: u32, raiz_proc: &Path) -> Option<u64> {
+    let stat = fs::read_to_string(raiz_proc.join(pid.to_string()).join("stat")).ok()?;
+    // El comm va entre paréntesis y puede tener espacios o `)`: se parte después del último `)`.
+    // Después del `)` el primer campo es el 3 (state). El campo 22 (starttime) es el índice 19.
+    let despues_del_comm = stat.rsplit_once(')')?.1;
+    let ticks: u64 = despues_del_comm.split_whitespace().nth(19)?.parse().ok()?;
+    Some(btime_del_sistema(raiz_proc)? + ticks / TICKS_POR_SEG)
+}
+
+/// Segundos desde el arranque del sistema, de la línea `btime` de `<raiz_proc>/stat`.
+fn btime_del_sistema(raiz_proc: &Path) -> Option<u64> {
+    let stat = fs::read_to_string(raiz_proc.join("stat")).ok()?;
+    stat.lines()
+        .find_map(|linea| linea.strip_prefix("btime "))
+        .and_then(|valor| valor.trim().parse().ok())
 }
 
 /// Dice si el cmdline (argumentos separados por NUL) empieza con un programa `r00t`. Mira solo el
@@ -148,6 +193,7 @@ fn gate(ruta_eventos: &Path, corrida: &str, motivo: String) -> Result<(), ErrorC
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
@@ -308,6 +354,98 @@ mod tests {
         let gates = gates_de_barrido(&e.eventos);
         assert_eq!(gates.len(), 4, "un Gate por corrida");
         assert!(gates.iter().all(|ev| motivo(ev).contains("no es r00t")));
+    }
+
+    /// Crea un proceso falso `r00t` con `stat` y `btime`. El inicio del proceso es
+    /// `btime + ticks / 100` segundos.
+    fn proceso_con_inicio(raiz_proc: &Path, pid: u32, btime: u64, ticks: u64) {
+        proceso_falso(raiz_proc, pid, b"/usr/bin/r00t\0corre\0");
+        // Campo 22 (starttime) es el índice 19 después del `)` que cierra el comm.
+        let stat =
+            format!("{pid} (r00t) S 1 {pid} {pid} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {ticks}\n");
+        fs::write(raiz_proc.join(pid.to_string()).join("stat"), stat).expect("stat");
+        let contenido = format!("cpu  1 2 3\nbtime {btime}\n");
+        fs::write(raiz_proc.join("stat"), contenido).expect("btime");
+    }
+
+    #[test]
+    fn cmdline_ilegible_es_de_otro_usuario_y_se_barre() {
+        let e = escenario();
+        let raiz_proc = e.base.join("proc");
+        let pid = 4000301;
+        proceso_falso(&raiz_proc, pid, b"/usr/bin/r00t\0corre\0");
+        let cmdline = raiz_proc.join(pid.to_string()).join("cmdline");
+        fs::set_permissions(&cmdline, fs::Permissions::from_mode(0o000)).expect("sin permiso");
+        let id = format!("corre-memo-ecc-test-100-{pid}-0");
+        let copia = corrida_con_copia(&e.raiz, &id);
+        barrer_con_proc(&e.raiz, &e.eventos, &raiz_proc).expect("barre");
+        assert!(
+            fs::symlink_metadata(&copia).is_err(),
+            "un cmdline ilegible no es r00t nuestro: la copia se barre"
+        );
+        let gates = gates_de_barrido(&e.eventos);
+        assert_eq!(gates.len(), 1, "un Gate de barrido");
+        assert!(
+            motivo(&gates[0]).contains("ilegible"),
+            "{}",
+            motivo(&gates[0])
+        );
+        assert!(sin_token(&e.eventos));
+    }
+
+    #[test]
+    fn pid_reusado_por_otro_r00t_que_empezo_despues_se_barre() {
+        let e = escenario();
+        let raiz_proc = e.base.join("proc");
+        let pid = 4000401;
+        // La corrida nació a los 1700000000 s. El proceso del pid nació diez segundos después.
+        proceso_con_inicio(&raiz_proc, pid, 1_700_000_000, 1000);
+        let id = format!("corre-memo-ecc-test-1700000000-{pid}-0");
+        let copia = corrida_con_copia(&e.raiz, &id);
+        barrer_con_proc(&e.raiz, &e.eventos, &raiz_proc).expect("barre");
+        assert!(
+            fs::symlink_metadata(&copia).is_err(),
+            "otra corrida r00t con el mismo pid: la copia se barre"
+        );
+        let gates = gates_de_barrido(&e.eventos);
+        assert_eq!(gates.len(), 1, "un Gate de barrido");
+        assert!(
+            motivo(&gates[0]).contains("empezó después"),
+            "{}",
+            motivo(&gates[0])
+        );
+        assert!(sin_token(&e.eventos));
+    }
+
+    #[test]
+    fn r00t_vivo_que_empezo_antes_o_en_el_margen_no_se_barre() {
+        let e = escenario();
+        let raiz_proc = e.base.join("proc");
+        // La corrida nació a los 1700000000 s. El `btime` es uno solo para todo el /proc falso.
+        // Un proceso que nació 500 s antes: es la misma corrida.
+        let antes = 4000501;
+        proceso_con_inicio(&raiz_proc, antes, 1_699_999_000, 50_000);
+        // Un proceso que nació 2 s después: está en el margen, sigue siendo la misma corrida.
+        let margen = 4000502;
+        proceso_con_inicio(&raiz_proc, margen, 1_699_999_000, 100_200);
+        let copia_antes = corrida_con_copia(
+            &e.raiz,
+            &format!("corre-memo-ecc-test-1700000000-{antes}-0"),
+        );
+        let copia_margen = corrida_con_copia(
+            &e.raiz,
+            &format!("corre-memo-ecc-test-1700000000-{margen}-0"),
+        );
+        barrer_con_proc(&e.raiz, &e.eventos, &raiz_proc).expect("barre");
+        assert!(
+            copia_antes.is_file(),
+            "el pid es de la misma corrida: la copia queda"
+        );
+        assert!(
+            copia_margen.is_file(),
+            "dentro del margen de dos segundos: la copia queda"
+        );
+        assert!(gates_de_barrido(&e.eventos).is_empty(), "sin Gate");
     }
 
     #[test]
