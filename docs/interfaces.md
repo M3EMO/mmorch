@@ -1881,6 +1881,41 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           },
           "default": {}
         },
+        "motivos_sin_calibrar": {
+          "description": "Motivo de cada dimensión de `sin_calibrar` que no calibra por su huella. Clave: la dimensión.",
+          "type": "object",
+          "properties": {
+            "arquitectura": {
+              "type": "string"
+            },
+            "completitud": {
+              "type": "string"
+            },
+            "diseno": {
+              "type": "string"
+            },
+            "eficiencia": {
+              "type": "string"
+            },
+            "entrega": {
+              "type": "string"
+            },
+            "estructura": {
+              "type": "string"
+            },
+            "funciona": {
+              "type": "string"
+            },
+            "pruebas": {
+              "type": "string"
+            },
+            "seguridad": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
         "repeticiones": {
           "description": "Repeticiones del oculto que corrieron.",
           "type": "integer",
@@ -2200,6 +2235,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "evidencia_visible": [],
             "faltantes": [],
             "inestables": {},
+            "motivos_sin_calibrar": {},
             "repeticiones": 0,
             "requisitos_pendientes": [],
             "sin_calibrar": [],
@@ -2376,6 +2412,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "items": {
             "$ref": "#/$defs/NivelItem"
           }
+        },
+        "motivo_sin_calibrar": {
+          "description": "Por qué el puntaje no está calibrado por su huella, como \"calibración de otro juez\".\n`None` si está calibrado o si no hay fila con muestra suficiente.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "sin_veredicto": {
           "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",
@@ -2801,6 +2845,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "evidencia_visible": [],
         "faltantes": [],
         "inestables": {},
+        "motivos_sin_calibrar": {},
         "repeticiones": 0,
         "requisitos_pendientes": [],
         "sin_calibrar": [],
@@ -2925,6 +2970,41 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "additionalProperties": {
             "$ref": "#/$defs/TasaTest"
           },
+          "default": {}
+        },
+        "motivos_sin_calibrar": {
+          "description": "Motivo de cada dimensión de `sin_calibrar` que no calibra por su huella. Clave: la dimensión.",
+          "type": "object",
+          "properties": {
+            "arquitectura": {
+              "type": "string"
+            },
+            "completitud": {
+              "type": "string"
+            },
+            "diseno": {
+              "type": "string"
+            },
+            "eficiencia": {
+              "type": "string"
+            },
+            "entrega": {
+              "type": "string"
+            },
+            "estructura": {
+              "type": "string"
+            },
+            "funciona": {
+              "type": "string"
+            },
+            "pruebas": {
+              "type": "string"
+            },
+            "seguridad": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
           "default": {}
         },
         "repeticiones": {
@@ -3841,6 +3921,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "items": {
         "$ref": "#/$defs/NivelItem"
       }
+    },
+    "motivo_sin_calibrar": {
+      "description": "Por qué el puntaje no está calibrado por su huella, como \"calibración de otro juez\".\n`None` si está calibrado o si no hay fila con muestra suficiente.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
     },
     "sin_veredicto": {
       "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",
@@ -5161,6 +5249,41 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           },
           "default": {}
         },
+        "motivos_sin_calibrar": {
+          "description": "Motivo de cada dimensión de `sin_calibrar` que no calibra por su huella. Clave: la dimensión.",
+          "type": "object",
+          "properties": {
+            "arquitectura": {
+              "type": "string"
+            },
+            "completitud": {
+              "type": "string"
+            },
+            "diseno": {
+              "type": "string"
+            },
+            "eficiencia": {
+              "type": "string"
+            },
+            "entrega": {
+              "type": "string"
+            },
+            "estructura": {
+              "type": "string"
+            },
+            "funciona": {
+              "type": "string"
+            },
+            "pruebas": {
+              "type": "string"
+            },
+            "seguridad": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
         "repeticiones": {
           "description": "Repeticiones del oculto que corrieron.",
           "type": "integer",
@@ -5457,6 +5580,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "evidencia_visible": [],
             "faltantes": [],
             "inestables": {},
+            "motivos_sin_calibrar": {},
             "repeticiones": 0,
             "requisitos_pendientes": [],
             "sin_calibrar": [],
@@ -5633,6 +5757,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "items": {
             "$ref": "#/$defs/NivelItem"
           }
+        },
+        "motivo_sin_calibrar": {
+          "description": "Por qué el puntaje no está calibrado por su huella, como \"calibración de otro juez\".\n`None` si está calibrado o si no hay fila con muestra suficiente.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "sin_veredicto": {
           "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",

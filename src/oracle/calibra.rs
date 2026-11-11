@@ -2014,6 +2014,7 @@ mod tests {
     fn veredicto_base() -> Veredicto {
         Veredicto {
             puntajes: vec![Puntaje {
+                motivo_sin_calibrar: None,
                 dimension: Dimension::Seguridad,
                 valor: 1.0,
                 calibrada: false,
@@ -2416,6 +2417,7 @@ mod tests {
             .expect("borra el Dockerfile");
         let base = Veredicto {
             puntajes: vec![Puntaje {
+                motivo_sin_calibrar: None,
                 dimension: Dimension::Entrega,
                 valor: 1.0,
                 calibrada: false,
@@ -2444,6 +2446,7 @@ mod tests {
         let dir = copia_fixture();
         let base = Veredicto {
             puntajes: vec![Puntaje {
+                motivo_sin_calibrar: None,
                 dimension: Dimension::Eficiencia,
                 valor: 1.0,
                 calibrada: false,
@@ -2473,6 +2476,7 @@ mod tests {
         let dir = copia_fixture();
         let base = Veredicto {
             puntajes: vec![Puntaje {
+                motivo_sin_calibrar: None,
                 dimension: Dimension::Eficiencia,
                 valor: 1.0,
                 calibrada: false,
@@ -2681,6 +2685,7 @@ mod tests {
     fn veredicto_de_pruebas() -> Veredicto {
         Veredicto {
             puntajes: vec![Puntaje {
+                motivo_sin_calibrar: None,
                 dimension: Dimension::Pruebas,
                 valor: 1.0,
                 calibrada: false,
@@ -4046,6 +4051,7 @@ mod tests {
 
     pub(super) fn puntaje(dimension: Dimension, valor: f32) -> Puntaje {
         Puntaje {
+            motivo_sin_calibrar: None,
             dimension,
             valor,
             calibrada: false,

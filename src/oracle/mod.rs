@@ -835,6 +835,13 @@ fn evaluar_con(
     pendientes_del_veredicto.extend(medicion.pendientes);
     let mut puntajes = medicion.puntajes;
     deps.calibracion.aplicar(&tarea.nombre, &mut puntajes);
+    // Un puntaje calibrado no lleva motivo. Uno sin calibrar lleva el de su fila, si la huella no es la actual.
+    for puntaje in puntajes.iter_mut().filter(|p| !p.calibrada) {
+        puntaje.motivo_sin_calibrar = deps
+            .calibracion
+            .motivo_sin_calibrar(&tarea.nombre, puntaje.dimension)
+            .map(str::to_string);
+    }
     let sin_calibrar = sin_calibrar(&puntajes);
     let global = calibra::global_de(&puntajes);
     let mut veredicto = Veredicto {
@@ -1272,6 +1279,7 @@ fn parte_juez(
         .collect();
     Some(Parte {
         puntaje: Puntaje {
+            motivo_sin_calibrar: None,
             dimension,
             valor,
             calibrada: false,
@@ -1419,6 +1427,7 @@ fn juntar_partes(dimension: Dimension, sondas: Parte, juez: Option<Parte>) -> Pu
     }
     let valor = (ws as f32 * sondas.puntaje.valor + wj as f32 * vj) / (ws + wj) as f32;
     Puntaje {
+        motivo_sin_calibrar: None,
         dimension,
         valor,
         calibrada: false,
@@ -1661,6 +1670,7 @@ fn funciona(
     }
     let valor = partes.iter().sum::<f32>() / partes.len() as f32;
     Puntaje {
+        motivo_sin_calibrar: None,
         dimension: DIMENSION,
         valor,
         calibrada: false,
@@ -1696,6 +1706,7 @@ fn fraccion_pasa(c: &Clasificacion, entorno: &BTreeSet<String>) -> (u32, u32) {
 /// Puntaje de una dimensión sin veredicto: `valor` 0 y el motivo.
 fn sin_veredicto_puntaje(dimension: Dimension, motivo: String) -> Puntaje {
     Puntaje {
+        motivo_sin_calibrar: None,
         dimension,
         valor: 0.0,
         calibrada: false,
@@ -5622,6 +5633,58 @@ mod tests {
     }
 
     #[test]
+    fn oraculo_motivo_sin_calibrar_de_fila_con_huella_de_otro_juez() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        fs::write(
+            home.join(calibra::ARCHIVO),
+            json!({"v": 1, "filas": [
+                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 20, "defectos": 10,
+                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.95},
+                {"tarea": "tarea-rust", "dimension": "diseno", "n": 20, "defectos": 10,
+                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.95,
+                 "huella": "vieja"},
+            ]})
+            .to_string(),
+        )
+        .expect("calibración");
+        let calibracion = Calibraciones::cargar(&home).expect("carga");
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([
+                    item_juez(MODULARIDAD_ID, 2, json!([ev_lib()])),
+                    item_juez(TOPE_ID, 2, json!([ev_lib()])),
+                ]),
+                json!([]),
+            ),
+            0.0,
+        );
+        let rubricas = [rubrica_diseno()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                calibracion: &calibracion,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        assert!(!diseno.calibrada);
+        assert_eq!(
+            diseno.motivo_sin_calibrar.as_deref(),
+            Some("calibración de otro juez")
+        );
+        let seguridad = puntaje_de_prueba(&v, Dimension::Seguridad);
+        assert!(seguridad.calibrada);
+        assert_eq!(seguridad.motivo_sin_calibrar, None);
+    }
+
+    #[test]
     fn oraculo_sin_calibracion_global_es_none() {
         let base = tempfile::tempdir().expect("base");
         let v = veredicto_sano(base.path());
@@ -5799,6 +5862,7 @@ mod tests {
     fn parte_de(valor: f32, peso: u32) -> Parte {
         Parte {
             puntaje: Puntaje {
+                motivo_sin_calibrar: None,
                 dimension: Dimension::Estructura,
                 valor,
                 calibrada: false,

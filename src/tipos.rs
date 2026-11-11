@@ -41,7 +41,9 @@ pub enum Via {
     Nube,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Dimension {
     Funciona,
@@ -255,6 +257,10 @@ pub struct Puntaje {
     /// Ítems de la dimensión que ninguna sonda mide para el lenguaje de la tarea.
     #[serde(default)]
     pub faltantes: Vec<ItemFaltante>,
+    /// Por qué el puntaje no está calibrado por su huella, como "calibración de otro juez".
+    /// `None` si está calibrado o si no hay fila con muestra suficiente.
+    #[serde(default)]
+    pub motivo_sin_calibrar: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -339,6 +345,9 @@ pub struct Confianza {
     /// Dimensiones con veredicto que no están calibradas.
     #[serde(default)]
     pub sin_calibrar: Vec<Dimension>,
+    /// Motivo de cada dimensión de `sin_calibrar` que no calibra por su huella. Clave: la dimensión.
+    #[serde(default)]
+    pub motivos_sin_calibrar: BTreeMap<Dimension, String>,
     /// Dimensiones sin veredicto, con su motivo.
     #[serde(default)]
     pub sin_veredicto: Vec<ParteSinVeredicto>,
@@ -635,6 +644,7 @@ mod tests {
                 total: 48,
             },
             puntajes: vec![Puntaje {
+                motivo_sin_calibrar: None,
                 dimension: Dimension::Seguridad,
                 valor: 0.95,
                 calibrada: true,
@@ -814,6 +824,7 @@ mod tests {
             total: 16,
         });
         ida_y_vuelta(&Puntaje {
+            motivo_sin_calibrar: None,
             dimension: Dimension::Eficiencia,
             valor: 0.5,
             calibrada: false,
@@ -973,8 +984,31 @@ mod tests {
     }
 
     #[test]
+    fn tipos_puntaje_viejo_sin_motivo_sin_calibrar_se_lee_none() {
+        let texto = r#"{"dimension":"diseno","valor":0.5,"calibrada":false,
+            "exactitud_balanceada":0.7,"items":[],"sin_veredicto":null,"faltantes":[]}"#;
+        let p: Puntaje = serde_json::from_str(texto).expect("un puntaje viejo se acepta");
+        assert_eq!(p.motivo_sin_calibrar, None);
+    }
+
+    #[test]
+    fn tipos_ida_y_vuelta_de_puntaje_con_motivo_sin_calibrar() {
+        ida_y_vuelta(&Puntaje {
+            dimension: Dimension::Diseno,
+            valor: 0.5,
+            calibrada: false,
+            exactitud_balanceada: Some(0.7),
+            items: Vec::new(),
+            sin_veredicto: None,
+            faltantes: Vec::new(),
+            motivo_sin_calibrar: Some("calibración de otro juez".into()),
+        });
+    }
+
+    #[test]
     fn tipos_ida_y_vuelta_de_puntaje_sin_veredicto() {
         ida_y_vuelta(&Puntaje {
+            motivo_sin_calibrar: None,
             dimension: Dimension::Diseno,
             valor: 0.0,
             calibrada: false,

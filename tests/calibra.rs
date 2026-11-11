@@ -61,6 +61,7 @@ fn home_con_tarea(extra: &str) -> tempfile::TempDir {
 fn veredicto_plano() -> Veredicto {
     Veredicto {
         puntajes: vec![Puntaje {
+            motivo_sin_calibrar: None,
             dimension: Dimension::Seguridad,
             valor: 1.0,
             calibrada: false,
@@ -582,6 +583,7 @@ fn es_limpia(ruta: &Path) -> bool {
 fn veredicto_seguridad(valor: f32, sin: Option<&str>) -> Veredicto {
     Veredicto {
         puntajes: vec![Puntaje {
+            motivo_sin_calibrar: None,
             dimension: Dimension::Seguridad,
             valor,
             calibrada: false,
@@ -1004,6 +1006,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
     let cal = Calibraciones::cargar(home.path()).expect("carga");
     let mut puntajes = vec![
         Puntaje {
+            motivo_sin_calibrar: None,
             dimension: Dimension::Eficiencia,
             valor: 0.5,
             calibrada: true,
@@ -1013,6 +1016,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
             faltantes: vec![],
         },
         Puntaje {
+            motivo_sin_calibrar: None,
             dimension: Dimension::Seguridad,
             valor: 0.8,
             calibrada: false,
@@ -1196,6 +1200,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
 fn veredicto_con(dimension: Dimension, valor: f32, sin: Option<&str>) -> Veredicto {
     Veredicto {
         puntajes: vec![Puntaje {
+            motivo_sin_calibrar: None,
             dimension,
             valor,
             calibrada: false,

@@ -217,6 +217,7 @@ mod tests {
     fn veredicto_con_diseno(sin: Option<&str>) -> Veredicto {
         Veredicto {
             puntajes: vec![Puntaje {
+                motivo_sin_calibrar: None,
                 dimension: Dimension::Diseno,
                 valor: 1.0,
                 calibrada: false,
