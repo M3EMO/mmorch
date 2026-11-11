@@ -785,7 +785,6 @@ fn evaluar_con(
     // Un error de infraestructura deja Entrega sin veredicto con su motivo, como un error del ejecutor.
     let entrega = if partes.entrega {
         entrega::entregar_con(
-            ej.as_ref(),
             &repo_copia,
             tarea,
             &home,

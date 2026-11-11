@@ -112,6 +112,31 @@ pub struct Resultado {
 /// Argumentos de `podman run`, sin el binario `podman`.
 pub fn argumentos(e: &Ejecucion, nombre: &str) -> Vec<String> {
     let mut args: Vec<String> = ["run", "--rm", "--name", nombre].map(String::from).into();
+    args.extend(opciones(e));
+    args.push(e.imagen.clone());
+    args.extend(["sh", "-c"].map(String::from));
+    args.push(e.cmd.clone());
+    args
+}
+
+/// Argumentos de `podman run -d` para un contenedor que Root mantiene vivo. Corre `comando` como
+/// entrypoint. No lleva `--rm`: Root quita el contenedor con `podman rm -f`.
+pub(crate) fn argumentos_separado(e: &Ejecucion, nombre: &str, comando: &[&str]) -> Vec<String> {
+    let Some((entrada, resto)) = comando.split_first() else {
+        return Vec::new();
+    };
+    let mut args: Vec<String> = ["run", "-d", "--name", nombre].map(String::from).into();
+    args.extend(opciones(e));
+    args.extend(["--entrypoint", entrada].map(String::from));
+    args.push(e.imagen.clone());
+    args.extend(resto.iter().map(|a| a.to_string()));
+    args
+}
+
+/// Opciones de `podman run` de la ejecución: endurecimiento, límites, montajes y variables. Van
+/// antes de la imagen. No incluye la cabecera (`run`, nombre) ni la cola (imagen y comando).
+fn opciones(e: &Ejecucion) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
     // Sin capacidades de Linux ni ganancia de privilegios por setuid.
     args.extend(["--cap-drop=all", "--security-opt=no-new-privileges"].map(String::from));
     args.push(format!("--pids-limit={PIDS_LIMITE}"));
@@ -163,9 +188,6 @@ pub fn argumentos(e: &Ejecucion, nombre: &str) -> Vec<String> {
         args.push("-e".into());
         args.push(nombre.clone());
     }
-    args.push(e.imagen.clone());
-    args.extend(["sh", "-c"].map(String::from));
-    args.push(e.cmd.clone());
     args
 }
 
@@ -302,6 +324,77 @@ fn correr_comando(
 fn matar(hijo: &mut Child) {
     let _ = hijo.kill();
     let _ = hijo.wait();
+}
+
+/// Plazo para recoger la salida de un hijo muerto. Un nieto con el pipe abierto no hace esperar más.
+const PLAZO_RECOGIDA: Duration = Duration::from_secs(2);
+
+/// Proceso de `podman` que sigue vivo mientras Root lo necesita, por ejemplo un `podman exec`.
+/// Sus lectores corren en hilos. `terminar` lo mata y recoge lo que escribió.
+pub(crate) struct HijoPodman {
+    hijo: Child,
+    salida: Option<JoinHandle<Vec<u8>>>,
+    error: Option<JoinHandle<Vec<u8>>>,
+}
+
+/// Lanza `podman` con `args` y deja el proceso vivo. Un fallo al lanzar es `Infra`.
+pub(crate) fn lanzar_hijo(args: &[&str]) -> Result<HijoPodman, ErrorOraculo> {
+    lanzar_programa("podman", args)
+}
+
+/// Igual que `lanzar_hijo`, con el programa como parámetro. Los tests lo usan con `sh`.
+fn lanzar_programa(programa: &str, args: &[&str]) -> Result<HijoPodman, ErrorOraculo> {
+    // Un solo podman a la vez: el turno cubre el arranque. El proceso vivo no lo retiene.
+    let _turno = turno_de_contenedor();
+    let mut hijo = Command::new(programa)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| ErrorOraculo::Infra(format!("no se pudo lanzar podman: {err}")))?;
+    let salida = hijo.stdout.take().map(leer_cola_en_hilo);
+    let error = hijo.stderr.take().map(leer_cola_en_hilo);
+    Ok(HijoPodman {
+        hijo,
+        salida,
+        error,
+    })
+}
+
+impl HijoPodman {
+    /// Verdadero si el proceso ya salió. No espera.
+    pub(crate) fn terminado(&mut self) -> Result<bool, ErrorOraculo> {
+        self.hijo
+            .try_wait()
+            .map(|estado| estado.is_some())
+            .map_err(|e| ErrorOraculo::Infra(format!("no se pudo consultar podman: {e}")))
+    }
+
+    /// Mata el proceso y da su stdout seguido de su stderr, con la cola de `COLA` caracteres.
+    /// Mata antes de recoger: así el proceso no sigue escribiendo al pipe.
+    pub(crate) fn terminar(&mut self) -> String {
+        matar(&mut self.hijo);
+        let limite = Instant::now() + PLAZO_RECOGIDA;
+        let salida = recoger_antes(self.salida.take(), limite);
+        let error = recoger_antes(self.error.take(), limite);
+        cola(&format!("{salida}{error}"))
+    }
+}
+
+/// Recoge la salida de un lector si termina antes de `limite`. Si no, da texto vacío.
+/// El hilo sigue solo y termina cuando se cierra su pipe.
+fn recoger_antes(hilo: Option<JoinHandle<Vec<u8>>>, limite: Instant) -> String {
+    let Some(hilo) = hilo else {
+        return String::new();
+    };
+    while !hilo.is_finished() {
+        if Instant::now() >= limite {
+            return String::new();
+        }
+        thread::sleep(SONDEO);
+    }
+    recoger(Some(hilo))
 }
 
 /// Falla antes de lanzar podman si falta alguna ruta montada.
@@ -525,7 +618,8 @@ pub(crate) fn recoger(hilo: Option<JoinHandle<Vec<u8>>>) -> String {
 /// Da la cola del stdout de `podman` y la última línea `STEP` que vio el lector, si hubo una.
 ///
 /// La cola va cruda. Un build con más de 1 MiB después de su `STEP` deja la cola sin ese `STEP`.
-/// Esa línea viaja aparte, en `paso`. `clasificar_fallo` la usa si la cola no trae ningún `STEP`.
+/// Esa línea viaja aparte, en `paso`. Si la cola no trae ningún `STEP`, `clasificar_fallo` mira `paso`
+/// para decidir entre sin veredicto e infraestructura.
 fn recoger_salida(hilo: Option<JoinHandle<(Vec<u8>, Option<String>)>>) -> (String, Option<String>) {
     let (bytes, paso) = hilo.and_then(|h| h.join().ok()).unwrap_or_default();
     (String::from_utf8_lossy(&bytes).into_owned(), paso)
@@ -1208,5 +1302,79 @@ mod tests {
     fn tamano_legible_usa_mib_solo_si_es_exacto() {
         assert_eq!(tamano_legible(TOPE_SALIDA_BUILDER), "64 MiB");
         assert_eq!(tamano_legible(1000), "1000 bytes");
+    }
+
+    #[test]
+    fn argumentos_separado_deja_el_contenedor_vivo_y_sin_rm() {
+        let args = argumentos_separado(&ejecucion(), "root-oraculo-1-1", &["sleep", "600"]);
+        let inicio: Vec<&str> = args[..4].iter().map(String::as_str).collect();
+        assert_eq!(inicio, ["run", "-d", "--name", "root-oraculo-1-1"]);
+        assert!(!args.iter().any(|a| a == "--rm"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--user"), "{args:?}");
+    }
+
+    #[test]
+    fn argumentos_separado_lleva_el_mismo_endurecimiento_y_montajes() {
+        let args = argumentos_separado(&ejecucion(), "n", &["sleep", "600"]);
+        assert!(args.contains(&"--cap-drop=all".to_string()), "{args:?}");
+        assert!(
+            args.contains(&"--security-opt=no-new-privileges".to_string()),
+            "{args:?}"
+        );
+        assert!(contiene_par(&args, "--network", "none"), "{args:?}");
+        assert!(args.contains(&"/tmp/r:/repo:ro,z".to_string()), "{args:?}");
+        assert!(args.contains(&"/tmp/s:/salida:z".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn argumentos_separado_pone_el_comando_con_entrypoint_antes_de_la_imagen() {
+        let args = argumentos_separado(&ejecucion(), "n", &["sleep", "600"]);
+        assert!(contiene_par(&args, "--entrypoint", "sleep"), "{args:?}");
+        let entrada = args.iter().position(|a| a == "--entrypoint");
+        let imagen = args
+            .iter()
+            .position(|a| a == "docker.io/library/alpine:3.20");
+        assert!(entrada < imagen, "{args:?}");
+        let fin: Vec<&str> = args[args.len() - 2..].iter().map(String::as_str).collect();
+        assert_eq!(fin, ["docker.io/library/alpine:3.20", "600"]);
+    }
+
+    #[test]
+    fn hijo_podman_terminado_dice_si_ya_salio() {
+        let mut hijo = lanzar_programa("sh", &["-c", "echo listo"]).expect("lanza");
+        let inicio = Instant::now();
+        while !hijo.terminado().expect("consulta") {
+            assert!(
+                inicio.elapsed() < Duration::from_secs(20),
+                "el hijo no salió"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(hijo.terminar(), "listo\n");
+    }
+
+    #[test]
+    fn hijo_podman_terminar_mata_y_da_stdout_seguido_de_stderr() {
+        let mut hijo = lanzar_programa("sh", &["-c", "echo hola; echo err >&2; exec sleep 20"])
+            .expect("lanza");
+        // Da tiempo a que el hijo escriba antes de matarlo.
+        thread::sleep(Duration::from_millis(500));
+        assert!(!hijo.terminado().expect("consulta"), "el hijo vivo");
+        assert_eq!(hijo.terminar(), "hola\nerr\n");
+        assert!(hijo.terminado().expect("consulta"), "quedó muerto");
+    }
+
+    #[test]
+    fn hijo_podman_terminar_no_cuelga_si_un_nieto_tiene_el_pipe() {
+        // El `sleep` del nieto hereda el pipe. Matar `sh` no cierra el pipe: `terminar` no debe esperarlo.
+        let mut hijo = lanzar_programa("sh", &["-c", "echo hola; sleep 20"]).expect("lanza");
+        thread::sleep(Duration::from_millis(300));
+        let inicio = Instant::now();
+        hijo.terminar();
+        assert!(
+            inicio.elapsed() < Duration::from_secs(10),
+            "terminar tardó {:?}",
+            inicio.elapsed()
+        );
     }
 }

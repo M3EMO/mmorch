@@ -18,11 +18,10 @@ use crate::observe;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::configs::{self, Instruccion, instrucciones, palabra_clave};
 use crate::oracle::contenedor::{
-    MEMORIA, PIDS_LIMITE, PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman,
-    correr_podman as correr_podman_crudo, correr_programa, texto_de_linea_step,
+    Ejecucion, HijoPodman, MEMORIA, PIDS_LIMITE, PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman,
+    correr_podman as correr_podman_crudo, correr_programa, lanzar_hijo, texto_de_linea_step,
 };
 use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
-use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
 use crate::oracle::perfiles::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
 use crate::oracle::tarea::{Escenario, Requisito, Tarea};
 use crate::oracle::{CARPETA_TEMPORALES, copiar_repo, infra, temporal};
@@ -32,16 +31,6 @@ const SONDA: &str = "entrega";
 const DIMENSION: Dimension = Dimension::Entrega;
 /// Carpeta con escritura. Todos los `.rc` y `.log` de la entrega van aquí.
 const SALIDA: &str = "/salida";
-/// Líneas finales del log de `instalar` que entran al resultado.
-const LINEAS_LOG: usize = 40;
-/// Líneas finales de la salida de cada escenario que entran a `/salida`.
-const LINEAS_ESCENARIO: usize = 20;
-/// Log completo de `correr`. Vive en `/tmp` del contenedor: nunca llega a `/salida`.
-const LOG_CORRER_COMPLETO: &str = "/tmp/entrega-correr.full.log";
-/// Primer archivo que escribe el script. Sin él, el contenedor no ejecutó el script (M20).
-const ARCHIVO_ARRANQUE: &str = "entrega-arranque.ok";
-/// Código del preludio de Python. Distinto de cero, o ausente, es infraestructura (M21).
-const ARCHIVO_PRELUDIO: &str = "entrega-preludio.rc";
 /// Límite de cada escenario, en segundos.
 const TIMEOUT_ESCENARIO: u32 = 120;
 /// Plazo del host para cada escenario dentro de la imagen. El `timeout` interno corta antes.
@@ -50,6 +39,10 @@ const PLAZO_ESCENARIO: Duration = Duration::from_secs(TIMEOUT_ESCENARIO as u64);
 const CODIGO_TIEMPO: i32 = 124;
 /// Código con que podman sale ante un error propio (imagen, contenedor o uso).
 const CODIGO_PODMAN: i32 = 125;
+/// Plazo de cada paso de la evaluación en el contenedor: preludio, copia, instalar y escenarios de evaluación.
+const PLAZO_PASO_ENTREGA: Duration = Duration::from_secs(15 * 60);
+/// Contador de los contenedores de evaluación de este proceso.
+static CONTADOR_EVALUACION: AtomicU64 = AtomicU64::new(0);
 
 /// Plazo por defecto de cada `podman build`.
 const PLAZO_BUILD: Duration = Duration::from_secs(20 * 60);
@@ -138,6 +131,42 @@ impl Podman for PodmanReal {
     }
 }
 
+/// Proceso de `podman` que sigue vivo. Root lo consulta con `terminado` y lo cierra con `terminar`.
+pub(crate) trait ProcesoVivo {
+    fn terminado(&mut self) -> Result<bool, ErrorOraculo>;
+    fn terminar(&mut self) -> String;
+}
+
+/// Puerta de la sesión de escenarios hacia `podman`. El real lanza el binario. Los tests dan respuestas.
+pub(crate) trait Exec {
+    fn exec(&self, args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo>;
+    /// Lanza `podman` y deja el proceso vivo.
+    fn lanzar(&self, args: &[&str]) -> Result<Box<dyn ProcesoVivo>, ErrorOraculo>;
+}
+
+/// Ejecutor real: corre `podman` de verdad.
+pub(crate) struct ExecReal;
+
+impl Exec for ExecReal {
+    fn exec(&self, args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+        correr_podman_crudo(args, plazo).map(recortar_salida)
+    }
+
+    fn lanzar(&self, args: &[&str]) -> Result<Box<dyn ProcesoVivo>, ErrorOraculo> {
+        lanzar_hijo(args).map(|hijo| Box::new(hijo) as Box<dyn ProcesoVivo>)
+    }
+}
+
+impl ProcesoVivo for HijoPodman {
+    fn terminado(&mut self) -> Result<bool, ErrorOraculo> {
+        HijoPodman::terminado(self)
+    }
+
+    fn terminar(&mut self) -> String {
+        HijoPodman::terminar(self)
+    }
+}
+
 /// Arranca el contenedor de escenario de una imagen construida (Tarea 9d2). El real usa `podman`.
 pub(crate) trait FabricaEscenarios {
     /// Arranca `imagen` y da el corredor de sus escenarios. Un `Err` deja el motivo.
@@ -146,6 +175,11 @@ pub(crate) trait FabricaEscenarios {
         imagen: &str,
         escenarios: Option<&Path>,
     ) -> Result<Box<dyn CorredorDeEscenario + '_>, String>;
+
+    /// Arranca el contenedor de evaluación (parte 2b). Un `Err` deja el motivo. Por defecto no arranca nada.
+    fn iniciar_evaluacion(&self, _ejecucion: &Ejecucion) -> Result<Sesion<'_>, String> {
+        Err("sin contenedor de evaluación".into())
+    }
 }
 
 /// Corre un escenario dentro de su contenedor y dice cómo le fue.
@@ -156,20 +190,35 @@ pub(crate) trait CorredorDeEscenario {
 /// Fábrica real: arranca el contenedor de escenario con `podman`.
 pub(crate) struct FabricaReal;
 
+/// Ejecutor real que usa la fábrica. Sin estado, así que basta una instancia estática.
+static EXEC_REAL: ExecReal = ExecReal;
+
 impl FabricaEscenarios for FabricaReal {
     fn iniciar(
         &self,
         imagen: &str,
         escenarios: Option<&Path>,
     ) -> Result<Box<dyn CorredorDeEscenario + '_>, String> {
-        ContenedorEscenario::iniciar(imagen, escenarios)
-            .map(|c| Box::new(c) as Box<dyn CorredorDeEscenario + '_>)
+        Sesion::de_imagen(&EXEC_REAL, imagen, escenarios)
+            .map(|s| Box::new(s) as Box<dyn CorredorDeEscenario + '_>)
+    }
+
+    fn iniciar_evaluacion(&self, ejecucion: &Ejecucion) -> Result<Sesion<'_>, String> {
+        let nombre = format!(
+            "root-entrega-eval-{}-{}",
+            std::process::id(),
+            CONTADOR_EVALUACION.fetch_add(1, Ordering::Relaxed)
+        );
+        let arranque = |comando: &[&str]| {
+            crate::oracle::contenedor::argumentos_separado(ejecucion, &nombre, comando)
+        };
+        Sesion::iniciar(&EXEC_REAL, &nombre, &arranque)
     }
 }
 
-impl CorredorDeEscenario for ContenedorEscenario {
+impl CorredorDeEscenario for Sesion<'_> {
     fn correr(&self, escenario: &Escenario) -> Result<Prueba, ErrorOraculo> {
-        ContenedorEscenario::correr(self, escenario)
+        self.correr_escenario(&Entorno::default(), escenario)
     }
 }
 
@@ -974,18 +1023,16 @@ pub struct ResultadoEntrega {
 /// Construye los Dockerfile, corre la sonda de entrega y los escenarios. Una sola construcción.
 /// Los escenarios corren contra la imagen si construye; si no, en el contenedor de evaluación.
 pub fn entregar(
-    ej: &dyn EjecutorHerramienta,
     repo: &Path,
     tarea: &Tarea,
     home: &Path,
     imagenes: &[ImagenBase],
 ) -> Result<ResultadoEntrega, ErrorOraculo> {
-    entregar_con(ej, repo, tarea, home, imagenes, &PodmanReal, &FabricaReal)
+    entregar_con(repo, tarea, home, imagenes, &PodmanReal, &FabricaReal)
 }
 
 /// Como `entregar`, con el podman y la fábrica de escenarios que se pasen. Producción pasa los reales.
 pub(crate) fn entregar_con(
-    ej: &dyn EjecutorHerramienta,
     repo: &Path,
     tarea: &Tarea,
     home: &Path,
@@ -1035,32 +1082,21 @@ pub(crate) fn entregar_con(
         }
         _ => None,
     };
-    let mut resultado = sonda_entrega_con(ej, repo, tarea, contenedor.is_none());
+    let mut resultado = sonda_entrega_con(fabrica, repo, tarea, home, contenedor.is_none());
     if let Some(c) = &contenedor {
         for escenario in &tarea.escenario {
-            let id = escenario.id.clone();
-            match c.correr(escenario)? {
-                Prueba::Paso => {
-                    resultado.escenarios.insert(id.clone(), true);
-                }
-                Prueba::Fallo { codigo, cita } => {
-                    resultado.escenarios.insert(id.clone(), false);
-                    let detalle = format!("escenario falló (código {codigo})");
-                    resultado
-                        .sonda
-                        .hallazgos
-                        .push(hallazgo_de_escenario(escenario, &detalle, &cita, reqs));
-                }
-                Prueba::Pendiente(motivo) => resultado.pendientes.push(Pendiente {
-                    test: format!("tarea.toml::escenario-{id}"),
-                    motivo,
-                    colab: None,
-                    tasa: None,
-                }),
-            }
+            let prueba = c.correr(escenario)?;
+            aplicar_prueba(
+                &mut resultado.escenarios,
+                &mut resultado.sonda.hallazgos,
+                &mut resultado.pendientes,
+                escenario,
+                prueba,
+                reqs,
+            );
             resultado
                 .lugar_escenarios
-                .insert(id, LugarEscenario::Imagen);
+                .insert(escenario.id.clone(), LugarEscenario::Imagen);
         }
     }
     let construida = construccion.construida;
@@ -1141,11 +1177,6 @@ pub(crate) enum Prueba {
 /// Bytes de salida de un proceso que conserva la entrega: solo la cola. Mismo valor que `descarga`.
 const COLA: usize = 4000;
 
-/// Corre `podman` y deja solo la cola de su stdout y su stderr. Toda llamada de este archivo pasa aquí.
-fn correr_podman(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
-    correr_podman_crudo(args, plazo).map(recortar_salida)
-}
-
 /// Corre `podman` para un build y deja la cola de 1 MiB de cada flujo, sin recortar a `COLA`.
 /// `clasificar_fallo` necesita la línea final de podman aunque el error de antes sea largo. Lo que se muestra se recorta
 /// en su punto de salida. `programa` es `podman` en producción; los tests pasan `sh`.
@@ -1179,10 +1210,43 @@ fn recortar_salida(salida: SalidaPodman) -> SalidaPodman {
     }
 }
 
-/// Contenedor vivo de la imagen construida, donde los escenarios corren con `podman exec`.
+/// Datos de entorno que una sesión aplica a sus `exec`. Vacío para la imagen: sin directorio ni activación.
+#[derive(Default, Clone)]
+pub(crate) struct Entorno {
+    /// Directorio de trabajo dentro del contenedor (`-w`). Sin valor, el de la imagen.
+    dir: Option<String>,
+    /// Línea de `sh` que corre antes del comando, por ejemplo `export A=1;`. Vacía no hace nada.
+    activar: String,
+}
+
+/// Activación de Rust para cada paso de la evaluación. `podman exec` no conserva el entorno entre pasos.
+const ACTIVAR_RUST: &str = "export CARGO_HOME=/tmp/cargo-home;";
+/// Activación de Python: el venv del preludio, o el `--target` si el venv no funcionó.
+const ACTIVAR_PYTHON: &str = "if [ -f /tmp/venv-eval/bin/activate ]; then . /tmp/venv-eval/bin/activate; else export PYTHONPATH=/tmp/pydeps PATH=/tmp/pydeps/bin:$PATH; fi;";
+
+/// Entorno de los pasos de la evaluación: `/salida/work` con entrega, `/repo` sin ella, y la activación del lenguaje.
+fn entorno_de_evaluacion(tarea: &Tarea) -> Entorno {
+    let dir = if tarea.entrega.is_some() {
+        format!("{SALIDA}/work")
+    } else {
+        "/repo".to_string()
+    };
+    let activar = match tarea.lenguaje.as_str() {
+        "rust" => ACTIVAR_RUST,
+        "python" => ACTIVAR_PYTHON,
+        _ => "",
+    };
+    Entorno {
+        dir: Some(dir),
+        activar: activar.to_string(),
+    }
+}
+
+/// Contenedor vivo, donde los pasos corren con `podman exec`. Cada paso lleva su `Entorno`.
 /// Su `Drop` lo borra con `podman rm -f -t 0`, pase lo que pase.
-struct ContenedorEscenario {
+pub(crate) struct Sesion<'a> {
     nombre: String,
+    exec: &'a dyn Exec,
     /// Verdadero si la imagen trae `timeout`. Si no, el plazo lo pone Root desde afuera.
     tiene_timeout: bool,
 }
@@ -1190,50 +1254,114 @@ struct ContenedorEscenario {
 /// Contador de los contenedores de escenario de este proceso.
 static CONTADOR_ESCENARIO: AtomicU64 = AtomicU64::new(0);
 
-impl ContenedorEscenario {
-    /// Arranca la imagen sin red, con `sleep` o, si no está, con `tail -f /dev/null`.
-    /// Sin `sh` no sirve para escenarios: devuelve el motivo y la evaluación usa el contenedor de evaluación.
-    fn iniciar(imagen: &str, escenarios: Option<&Path>) -> Result<Self, String> {
+impl<'a> Sesion<'a> {
+    /// Arranca un contenedor de la imagen construida. Sus argumentos salen de `args_arranque`.
+    pub(crate) fn de_imagen(
+        exec: &'a dyn Exec,
+        imagen: &str,
+        escenarios: Option<&Path>,
+    ) -> Result<Self, String> {
         let nombre = format!(
             "root-entrega-esc-{}-{}",
             std::process::id(),
             CONTADOR_ESCENARIO.fetch_add(1, Ordering::Relaxed)
         );
+        let arranque = |comando: &[&str]| args_arranque(imagen, escenarios, &nombre, comando);
+        Self::iniciar(exec, &nombre, &arranque)
+    }
+
+    /// Arranca el contenedor con `sleep` o, si no está, con `tail -f /dev/null`. `arranque` da los
+    /// argumentos de `run` para cada comando. Sin `sh` no sirve para escenarios: devuelve el motivo.
+    pub(crate) fn iniciar(
+        exec: &'a dyn Exec,
+        nombre: &str,
+        arranque: &dyn Fn(&[&str]) -> Vec<String>,
+    ) -> Result<Self, String> {
         for comando in [vec!["sleep", "600"], vec!["tail", "-f", "/dev/null"]] {
-            let args = args_arranque(imagen, escenarios, &nombre, &comando);
+            let args = arranque(comando.as_slice());
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            let arranco = correr_podman(&refs, PLAZO_CORTO).is_ok_and(|s| s.codigo == 0);
-            if arranco && corriendo(&nombre) {
-                let sh = correr_podman(&["exec", nombre.as_str(), "sh", "-c", "true"], PLAZO_CORTO);
+            let arranco = exec.exec(&refs, PLAZO_CORTO).is_ok_and(|s| s.codigo == 0);
+            if arranco && corriendo(exec, nombre) {
+                let sh = exec.exec(&["exec", nombre, "sh", "-c", "true"], PLAZO_CORTO);
                 if sh.is_ok_and(|s| s.codigo == 0) {
-                    let tiene_timeout = correr_podman(
-                        &["exec", nombre.as_str(), "sh", "-c", "command -v timeout"],
-                        PLAZO_CORTO,
-                    )
-                    .is_ok_and(|s| s.codigo == 0);
-                    return Ok(ContenedorEscenario {
-                        nombre,
+                    let tiene_timeout = exec
+                        .exec(
+                            &["exec", nombre, "sh", "-c", "command -v timeout"],
+                            PLAZO_CORTO,
+                        )
+                        .is_ok_and(|s| s.codigo == 0);
+                    return Ok(Sesion {
+                        nombre: nombre.to_string(),
+                        exec,
                         tiene_timeout,
                     });
                 }
-                quitar(&nombre);
+                quitar(exec, nombre);
                 return Err("la imagen no trae sh".into());
             }
-            quitar(&nombre);
+            quitar(exec, nombre);
         }
         Err("la imagen no trae sleep ni tail: no arranca el contenedor".into())
     }
 
-    /// Corre el `cmd` del escenario con el límite de `timeout` dentro del contenedor.
-    fn correr(&self, escenario: &Escenario) -> Result<Prueba, ErrorOraculo> {
-        let plazo_texto = TIMEOUT_ESCENARIO.to_string();
-        let mut args = vec!["exec", self.nombre.as_str()];
-        if self.tiene_timeout {
-            args.extend(["timeout", plazo_texto.as_str()]);
+    /// Argumentos de `podman exec` para `cmd`. Con `con_timeout` y si la imagen trae `timeout`, lo pone antes.
+    /// Con `activar`, el comando corre dentro de un `sh` que antes ejecuta esa línea.
+    pub(crate) fn paso_args(&self, entorno: &Entorno, cmd: &str, con_timeout: bool) -> Vec<String> {
+        let mut args: Vec<String> = vec!["exec".into()];
+        if let Some(dir) = &entorno.dir {
+            args.extend(["-w".to_string(), dir.clone()]);
         }
-        args.extend(["sh", "-c", escenario.cmd.as_str()]);
+        args.push(self.nombre.clone());
+        if con_timeout && self.tiene_timeout {
+            args.extend(["timeout".to_string(), TIMEOUT_ESCENARIO.to_string()]);
+        }
+        if entorno.activar.is_empty() {
+            args.extend(["sh".to_string(), "-c".to_string(), cmd.to_string()]);
+        } else {
+            let envoltorio = format!("{} exec sh -c \"$1\"", entorno.activar);
+            args.extend([
+                "sh".to_string(),
+                "-c".to_string(),
+                envoltorio,
+                "_".to_string(),
+                cmd.to_string(),
+            ]);
+        }
+        args
+    }
+
+    /// Corre `cmd` con `podman exec` y da la salida que dio el ejecutor.
+    pub(crate) fn paso(
+        &self,
+        entorno: &Entorno,
+        cmd: &str,
+        plazo: Duration,
+        con_timeout: bool,
+    ) -> Result<SalidaPodman, ErrorOraculo> {
+        let args = self.paso_args(entorno, cmd, con_timeout);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.exec.exec(&refs, plazo)
+    }
+
+    /// Lanza `cmd` dentro del contenedor y lo deja vivo.
+    pub(crate) fn lanzar(
+        &self,
+        entorno: &Entorno,
+        cmd: &str,
+    ) -> Result<Box<dyn ProcesoVivo>, ErrorOraculo> {
+        let args = self.paso_args(entorno, cmd, false);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.exec.lanzar(&refs)
+    }
+
+    /// Corre el `cmd` del escenario con el límite de `timeout` dentro del contenedor y dice cómo le fue.
+    pub(crate) fn correr_escenario(
+        &self,
+        entorno: &Entorno,
+        escenario: &Escenario,
+    ) -> Result<Prueba, ErrorOraculo> {
         // El plazo de Root corta el `podman exec` a los 120 s, con o sin `timeout` en la imagen.
-        let salida = match correr_podman(&args, PLAZO_ESCENARIO) {
+        let salida = match self.paso(entorno, &escenario.cmd, PLAZO_ESCENARIO, true) {
             Ok(salida) => salida,
             Err(ErrorOraculo::Infra(motivo)) if motivo.contains("superó") => {
                 return Ok(Prueba::Fallo {
@@ -1267,15 +1395,15 @@ impl ContenedorEscenario {
     }
 }
 
-impl Drop for ContenedorEscenario {
+impl Drop for Sesion<'_> {
     fn drop(&mut self) {
-        quitar(&self.nombre);
+        quitar(self.exec, &self.nombre);
     }
 }
 
 /// Borra un contenedor por nombre, sin esperar la parada. Un fallo no importa: ya hay un resultado.
-fn quitar(nombre: &str) {
-    let _ = correr_podman(&["rm", "-f", "-t", "0", nombre], PLAZO_CORTO);
+fn quitar(exec: &dyn Exec, nombre: &str) {
+    let _ = exec.exec(&["rm", "-f", "-t", "0", nombre], PLAZO_CORTO);
 }
 
 /// Un escenario usa `/oraculo` si su `cmd` nombra esa ruta: sus scripts viven en `escenarios/`.
@@ -1334,8 +1462,8 @@ fn args_arranque(
 }
 
 /// Verdadero si el contenedor sigue corriendo.
-fn corriendo(nombre: &str) -> bool {
-    correr_podman(
+fn corriendo(exec: &dyn Exec, nombre: &str) -> bool {
+    exec.exec(
         &[
             "container",
             "inspect",
@@ -1358,108 +1486,23 @@ fn ultima_linea_de(texto: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Script de `sh` que corre la entrega y los escenarios. Escribe `.rc` y `.log` en `/salida`.
-/// Sin `[entrega]`, solo corre los escenarios, sobre `/repo`.
-pub fn construir_script(tarea: &Tarea) -> String {
-    construir_script_con(tarea, true)
-}
-
-/// Verdadero si el script lleva el preludio de Python: la tarea es de Python (M21).
-fn aplica_preludio_python(tarea: &Tarea) -> bool {
-    tarea.lenguaje == "python"
-}
-
-/// Motivo de infraestructura si el script no llegó a correr del todo. Sin marcador, el contenedor no
-/// arrancó el script. Con preludio de Python sin código 0, el preludio no se aplicó (M21). Con entrega y
-/// sin `.rc` de instalar, `instalar` nunca corrió (M20). Ninguno de estos es un "no instala" del producto.
-fn fallo_de_infraestructura(archivos: &BTreeMap<String, String>, tarea: &Tarea) -> Option<String> {
-    if !archivos.contains_key(ARCHIVO_ARRANQUE) {
-        return Some("el contenedor no arrancó el script de entrega".into());
-    }
-    if aplica_preludio_python(tarea) && codigo(archivos, ARCHIVO_PRELUDIO) != Some(0) {
-        return Some("el preludio de Python no pudo aplicarse".into());
-    }
-    if tarea.entrega.is_some() && codigo(archivos, "entrega-instalar.rc").is_none() {
-        return Some("instalar nunca corrió: falló la copia de /repo o el script se cortó".into());
-    }
-    None
-}
-
-/// Script del contenedor de evaluación. Con `escenarios` en falso no corre ninguno: van a la imagen.
+/// Texto descriptivo de los pasos de la evaluación. `memo.rs` lo usa como clave de texto: no es un script.
+#[cfg(test)]
 pub(crate) fn construir_script_con(tarea: &Tarea, escenarios: bool) -> String {
-    let eval: &[Escenario] = if escenarios { &tarea.escenario } else { &[] };
-    // Primera acción: si no escribe el marcador, el contenedor no arrancó el script (M20).
-    let mut s = format!("echo ok > {SALIDA}/{ARCHIVO_ARRANQUE} || exit 1\n");
-    if tarea.lenguaje == "rust" {
-        // El preludio termina en `&& `: su `true` aísla un fallo de caché del resto del script.
-        s.push_str(PRELUDIO);
-        s.push_str("true\n");
-    }
-    if aplica_preludio_python(tarea) {
-        // Corre en el shell principal: el venv que activa queda vigente para el resto del script (M21).
-        // El código sale a `ARCHIVO_PRELUDIO`. Si falla, el script termina sin copiar ni instalar.
-        let rc = format!("{SALIDA}/{ARCHIVO_PRELUDIO}");
-        s.push_str(&format!(
-            "{}echo 0 > {rc} || echo 1 > {rc}\n\
-             if [ \"$(cat {rc})\" != 0 ]; then exit 0; fi\n",
-            descarga::PRELUDIO_PYTHON
-        ));
-    }
-    let work = format!("{SALIDA}/work");
+    let mut pasos: Vec<String> = preludio_de(&tarea.lenguaje).into_iter().collect();
     if let Some(entrega) = &tarea.entrega {
-        s.push_str(&format!(
-            "cp -a /repo {work} || exit 1\ncd {work} || exit 1\n"
-        ));
-        s.push_str(&format!(
-            "{{ ( {} ) 2>&1; echo $? > {SALIDA}/entrega-instalar.rc; }} \
-             | tail -n {LINEAS_LOG} > {SALIDA}/entrega-instalar.log\n",
-            entrega.instalar
-        ));
-        s.push_str(&format!(
-            "if [ \"$(cat {SALIDA}/entrega-instalar.rc)\" != 0 ]; then exit 0; fi\n"
-        ));
-        // `correr` va dentro de un grupo de procesos propio, para matarlo entero al final.
-        // El archivo `.fin` marca que `correr` terminó: sin él, sigue vivo.
-        let fin = format!("{SALIDA}/entrega-correr.fin");
-        let interno = format!("( {} ); echo $? > {fin}", entrega.correr);
-        s.push_str(&format!(
-            "if command -v setsid >/dev/null 2>&1; then GRUPO=setsid; else GRUPO=; fi\n\
-             $GRUPO sh -c {} > {LOG_CORRER_COMPLETO} 2>&1 &\n\
-             PID=$!\n\
-             sleep {}\n\
-             if [ -f {fin} ]; then echo 1 > {SALIDA}/entrega-correr.rc; \
-             else echo 0 > {SALIDA}/entrega-correr.rc; fi\n",
-            comillas_simples(&interno),
-            entrega.espera_segundos
-        ));
-    } else {
-        s.push_str("cd /repo || exit 1\n");
+        pasos.push(format!("cp -a /repo {SALIDA}/work"));
+        pasos.push(entrega.instalar.clone());
+        pasos.push(entrega.correr.clone());
     }
-    for escenario in eval {
-        s.push_str(&format!(
-            "{{ timeout {TIMEOUT_ESCENARIO} sh -c {}; echo $? > {SALIDA}/entrega-escenario-{}.rc; }} \
-             2>&1 | tail -n {LINEAS_ESCENARIO} > {SALIDA}/entrega-escenario-{}.log\n",
-            comillas_simples(&escenario.cmd),
-            escenario.id,
-            escenario.id
-        ));
+    if escenarios {
+        pasos.extend(tarea.escenario.iter().map(|e| e.cmd.clone()));
     }
-    if tarea.entrega.is_some() {
-        s.push_str(
-            "if [ -n \"$PID\" ]; then kill -KILL -- -\"$PID\" 2>/dev/null; \
-             kill -KILL \"$PID\" 2>/dev/null; fi\n",
-        );
-        // Solo la cola del log de `correr` llega a `/salida`.
-        s.push_str(&format!(
-            "tail -n {LINEAS_LOG} {LOG_CORRER_COMPLETO} > {SALIDA}/entrega-correr.log\n"
-        ));
-    }
-    s
-}
-
-/// Envuelve `texto` en comillas simples de `sh`. Las comillas simples dentro salen escapadas.
-fn comillas_simples(texto: &str) -> String {
-    format!("'{}'", texto.replace('\'', "'\\''"))
+    pasos.push(format!(
+        "evaluación de escenarios: {}",
+        if escenarios { "sí" } else { "no" }
+    ));
+    pasos.join("\n")
 }
 
 /// Archivos de `archivos` que no existen en `repo`.
@@ -1489,16 +1532,17 @@ pub(crate) fn entrega_sin_veredicto(motivo: String) -> ResultadoEntrega {
     }
 }
 
-/// Sonda de entrega con el contenedor de evaluación para todo. Un `Err` del ejecutor es infraestructura.
-pub fn sonda_entrega(ej: &dyn EjecutorHerramienta, repo: &Path, tarea: &Tarea) -> ResultadoEntrega {
-    sonda_entrega_con(ej, repo, tarea, true)
+/// Sonda de entrega con el contenedor de evaluación para todo. Un `Err` de podman es infraestructura.
+pub fn sonda_entrega(repo: &Path, tarea: &Tarea, home: &Path) -> ResultadoEntrega {
+    sonda_entrega_con(&FabricaReal, repo, tarea, home, true)
 }
 
 /// Sonda de entrega. `escenarios_eval` en falso deja los escenarios para la imagen construida.
 fn sonda_entrega_con(
-    ej: &dyn EjecutorHerramienta,
+    fabrica: &dyn FabricaEscenarios,
     repo: &Path,
     tarea: &Tarea,
+    home: &Path,
     escenarios_eval: bool,
 ) -> ResultadoEntrega {
     let reqs = tarea.requisito.as_slice();
@@ -1528,24 +1572,15 @@ fn sonda_entrega_con(
         Err(motivo) => motivos.push(motivo),
     }
     let mut escenarios = BTreeMap::new();
+    let mut pendientes = Vec::new();
     if tarea.entrega.is_some() || !eval.is_empty() {
-        match ej.ejecutar(&construir_script_con(tarea, escenarios_eval)) {
-            // Una falla de arranque es infraestructura: sin veredicto, sin hallazgos de producto.
-            Ok(salida) => {
-                // Cada archivo de la salida se lee solo por su cola, como el resto de la salida de procesos.
-                let archivos_cola: BTreeMap<String, String> = salida
-                    .archivos
-                    .into_iter()
-                    .map(|(nombre, texto)| (nombre, recortar_cola(texto)))
-                    .collect();
-                match fallo_de_infraestructura(&archivos_cola, tarea) {
-                    Some(motivo) => motivos.push(motivo),
-                    None => {
-                        revisar_salida(&archivos_cola, tarea, eval, &mut hallazgos, &mut escenarios)
-                    }
-                }
+        match evaluar_en_contenedor(fabrica, repo, home, tarea, eval) {
+            Ok(ev) => {
+                hallazgos.extend(ev.hallazgos);
+                escenarios = ev.escenarios;
+                pendientes = ev.pendientes;
             }
-            Err(e) => motivos.push(e.to_string()),
+            Err(motivo) => motivos.push(motivo),
         }
     }
     let lugar_escenarios = escenarios
@@ -1567,62 +1602,215 @@ fn sonda_entrega_con(
         },
         escenarios,
         lugar_escenarios,
-        pendientes: Vec::new(),
+        pendientes,
         sin_veredicto: Vec::new(),
         avisos: Vec::new(),
         faltantes: Vec::new(),
     }
 }
 
-/// Convierte los `.rc` y `.log` de la salida en hallazgos y en el estado de cada escenario.
-fn revisar_salida(
-    archivos: &BTreeMap<String, String>,
-    tarea: &Tarea,
-    corridos: &[Escenario],
-    hallazgos: &mut Vec<Hallazgo>,
+/// Estado de un escenario que dejó la evaluación: su paso o su fallo, y los pendientes que salieron.
+/// Lo llena `correr_en_evaluacion`. Sin veredicto, no sale nada de aquí.
+#[derive(Default)]
+struct Evaluada {
+    hallazgos: Vec<Hallazgo>,
+    escenarios: BTreeMap<String, bool>,
+    pendientes: Vec<Pendiente>,
+}
+
+/// Aplica el resultado de un escenario al estado de la entrega. Lo usan la imagen y la evaluación.
+/// Un pendiente no entra al mapa de escenarios: solo queda como `Pendiente`.
+fn aplicar_prueba(
     escenarios: &mut BTreeMap<String, bool>,
+    hallazgos: &mut Vec<Hallazgo>,
+    pendientes: &mut Vec<Pendiente>,
+    escenario: &Escenario,
+    prueba: Prueba,
+    reqs: &[Requisito],
 ) {
+    let id = escenario.id.clone();
+    match prueba {
+        Prueba::Paso => {
+            escenarios.insert(id, true);
+        }
+        Prueba::Fallo { codigo, cita } => {
+            escenarios.insert(id, false);
+            let detalle = format!("escenario falló (código {codigo})");
+            hallazgos.push(hallazgo_de_escenario(escenario, &detalle, &cita, reqs));
+        }
+        Prueba::Pendiente(motivo) => pendientes.push(Pendiente {
+            test: format!("tarea.toml::escenario-{id}"),
+            motivo,
+            colab: None,
+            tasa: None,
+        }),
+    }
+}
+
+/// Preludio que corre una vez antes de copiar, en su propio `podman exec`. `true` cierra la línea.
+fn preludio_de(lenguaje: &str) -> Option<String> {
+    match lenguaje {
+        "rust" => Some(format!("{PRELUDIO}true")),
+        "python" => Some(format!("{}true", descarga::PRELUDIO_PYTHON)),
+        _ => None,
+    }
+}
+
+/// Ejecución del contenedor de evaluación: la imagen de la tarea, el repo en `/repo` y `escenarios/` en
+/// `/oraculo/escenarios` si un `cmd` lo usa. Sin red y sin caché en escritura. `salida` es la carpeta temporal.
+fn ejecucion_de_evaluacion(repo: &Path, home: &Path, tarea: &Tarea, salida: &Path) -> Ejecucion {
+    Ejecucion {
+        imagen: tarea.imagen.clone(),
+        repo: Some(repo.to_path_buf()),
+        oraculo: montaje_de_escenarios(tarea),
+        oraculo_destino: Some("/oraculo/escenarios".into()),
+        salida: salida.to_path_buf(),
+        cmd: String::new(),
+        env: Vec::new(),
+        timeout: PLAZO_PASO_ENTREGA,
+        red: false,
+        cache: descarga::cache_de(home, &tarea.lenguaje, repo, &tarea.imagen),
+        cache_rw: false,
+        rustsec: None,
+        trabajo: None,
+        secretos: Vec::new(),
+    }
+}
+
+/// Corre la evaluación en su contenedor propio: arranque, pasos y cierre. Un `Err` es infraestructura.
+/// La carpeta de salida vive hasta después de quitar el contenedor.
+fn evaluar_en_contenedor(
+    fabrica: &dyn FabricaEscenarios,
+    repo: &Path,
+    home: &Path,
+    tarea: &Tarea,
+    eval: &[Escenario],
+) -> Result<Evaluada, String> {
+    let tmp = home.join(CARPETA_TEMPORALES);
+    fs::create_dir_all(&tmp).map_err(|e| format!("directorio temporal de la evaluación: {e}"))?;
+    let salida = temporal(&tmp).map_err(|e| format!("carpeta de salida de la evaluación: {e}"))?;
+    let ejecucion = ejecucion_de_evaluacion(repo, home, tarea, salida.path());
+    // La sesión se declara después de la salida: se quita antes que la carpeta.
+    let sesion = fabrica
+        .iniciar_evaluacion(&ejecucion)
+        .map_err(|motivo| format!("el contenedor no arrancó el script de entrega: {motivo}"))?;
+    correr_en_evaluacion(&sesion, tarea, eval)
+}
+
+/// Corre la evaluación en `sesion`. Cada paso es su propio `podman exec`. Un `Err` es infraestructura.
+/// El hijo de `correr` se termina pase lo que pase, antes de que la sesión quite el contenedor.
+fn correr_en_evaluacion(
+    sesion: &Sesion<'_>,
+    tarea: &Tarea,
+    eval: &[Escenario],
+) -> Result<Evaluada, String> {
+    let mut lanzado: Option<Box<dyn ProcesoVivo>> = None;
+    let resultado = correr_pasos(sesion, tarea, eval, &mut lanzado);
+    if let Some(mut hijo) = lanzado {
+        hijo.terminar();
+    }
+    resultado
+}
+
+/// Los pasos en orden: preludio, copia, instalar, correr y escenarios. `lanzado` guarda el hijo de `correr`.
+fn correr_pasos(
+    sesion: &Sesion<'_>,
+    tarea: &Tarea,
+    eval: &[Escenario],
+    lanzado: &mut Option<Box<dyn ProcesoVivo>>,
+) -> Result<Evaluada, String> {
     let reqs = tarea.requisito.as_slice();
-    let instalo = match tarea.entrega {
-        Some(_) => {
-            let ok = codigo(archivos, "entrega-instalar.rc") == Some(0);
-            if !ok {
-                let cita = ultima_linea(archivos, "entrega-instalar.log")
-                    .unwrap_or_else(|| "(sin salida)".to_string());
-                let detalle = "no instala: el comando de instalación falla";
-                hallazgos.push(crear_hallazgo(
-                    DIMENSION, 3, "", 0, &cita, detalle, SONDA, reqs,
+    let entorno = entorno_de_evaluacion(tarea);
+    let sin_entorno = Entorno::default();
+    let mut out = Evaluada::default();
+    let a_texto = |e: ErrorOraculo| e.to_string();
+
+    // Preludio: sin activación y sin timeout. En Python cualquier código distinto de 0 es infraestructura.
+    // En Rust solo cuenta el 125 de podman: el `true` del final aísla el resto.
+    if let Some(preludio) = preludio_de(&tarea.lenguaje) {
+        let salida = sesion
+            .paso(&sin_entorno, &preludio, PLAZO_PASO_ENTREGA, false)
+            .map_err(a_texto)?;
+        if tarea.lenguaje == "python" && salida.codigo != 0 {
+            return Err("el preludio de Python no pudo aplicarse".into());
+        }
+        if tarea.lenguaje == "rust" && salida.codigo == CODIGO_PODMAN {
+            return Err("el preludio de Rust no pudo aplicarse".into());
+        }
+    }
+
+    if let Some(entrega) = &tarea.entrega {
+        // La copia corre en `/` y sin activación: el directorio `/salida/work` todavía no existe.
+        let en_raiz = Entorno {
+            dir: Some("/".into()),
+            activar: String::new(),
+        };
+        let copia = format!("cp -a /repo {SALIDA}/work");
+        let copiado = sesion
+            .paso(&en_raiz, &copia, PLAZO_PASO_ENTREGA, false)
+            .map_err(a_texto)?;
+        if copiado.codigo != 0 {
+            return Err(
+                "instalar nunca corrió: falló la copia de /repo o el script se cortó".into(),
+            );
+        }
+        let instalado = sesion
+            .paso(&entorno, &entrega.instalar, PLAZO_PASO_ENTREGA, false)
+            .map_err(a_texto)?;
+        if instalado.codigo == CODIGO_PODMAN {
+            return Err(
+                "instalar no corrió: podman no pudo correr el comando de instalación".into(),
+            );
+        }
+        if instalado.codigo != 0 {
+            // La cita es la última línea de la salida. Los escenarios no corren: el producto no instala.
+            let texto = format!("{}\n{}", instalado.stdout, instalado.stderr);
+            let cita = ultima_linea_de(&texto).unwrap_or_else(|| "(sin salida)".into());
+            let detalle = "no instala: el comando de instalación falla";
+            out.hallazgos.push(crear_hallazgo(
+                DIMENSION, 3, "", 0, &cita, detalle, SONDA, reqs,
+            ));
+            for escenario in eval {
+                out.escenarios.insert(escenario.id.clone(), false);
+                let no_corrio = "no corrió: el producto no instala";
+                out.hallazgos.push(hallazgo_de_escenario(
+                    escenario,
+                    no_corrio,
+                    &escenario.id,
+                    reqs,
                 ));
             }
-            ok
+            return Ok(out);
         }
-        None => true,
-    };
-    if tarea.entrega.is_some() && instalo && codigo(archivos, "entrega-correr.rc") == Some(1) {
-        let cita = ultima_linea(archivos, "entrega-correr.log")
-            .unwrap_or_else(|| "(sin salida)".to_string());
-        let detalle = "no arranca: el comando de arranque muere antes de tiempo";
-        hallazgos.push(crear_hallazgo(
-            DIMENSION, 3, "", 0, &cita, detalle, SONDA, reqs,
-        ));
-    }
-    for escenario in corridos {
-        let rc = codigo(archivos, &format!("entrega-escenario-{}.rc", escenario.id));
-        let ok = rc == Some(0);
-        escenarios.insert(escenario.id.clone(), ok);
-        if ok {
-            continue;
+        // `correr` sigue vivo mientras corren los escenarios. Si muere antes de la espera, es un hallazgo.
+        *lanzado = Some(sesion.lanzar(&entorno, &entrega.correr).map_err(a_texto)?);
+        std::thread::sleep(Duration::from_secs(entrega.espera_segundos));
+        if let Some(hijo) = lanzado.as_mut()
+            && hijo.terminado().map_err(a_texto)?
+        {
+            let log = hijo.terminar();
+            let cita = ultima_linea_de(&log).unwrap_or_else(|| "(sin salida)".into());
+            let detalle = "no arranca: el comando de arranque muere antes de tiempo";
+            out.hallazgos.push(crear_hallazgo(
+                DIMENSION, 3, "", 0, &cita, detalle, SONDA, reqs,
+            ));
         }
-        let detalle = match rc {
-            _ if !instalo => "no corrió: el producto no instala".to_string(),
-            Some(c) => format!("escenario falló (código {c})"),
-            None => "no corrió: el escenario no llegó a su código de salida".to_string(),
-        };
-        // La cita es la última línea de su salida. Sin salida, el id del escenario.
-        let cita = ultima_linea(archivos, &format!("entrega-escenario-{}.log", escenario.id))
-            .unwrap_or_else(|| escenario.id.clone());
-        hallazgos.push(hallazgo_de_escenario(escenario, &detalle, &cita, reqs));
     }
+
+    for escenario in eval {
+        let prueba = sesion
+            .correr_escenario(&entorno, escenario)
+            .map_err(a_texto)?;
+        aplicar_prueba(
+            &mut out.escenarios,
+            &mut out.hallazgos,
+            &mut out.pendientes,
+            escenario,
+            prueba,
+            reqs,
+        );
+    }
+    Ok(out)
 }
 
 /// Hallazgo de entrega de un escenario que no pasó. Lleva los requisitos que lo citan.
@@ -1642,83 +1830,214 @@ fn hallazgo_de_escenario(
     h
 }
 
-/// Código de salida de un `.rc`. `None` si el archivo falta o no es un número.
-fn codigo(archivos: &BTreeMap<String, String>, nombre: &str) -> Option<i32> {
-    archivos.get(nombre).and_then(|t| t.trim().parse().ok())
-}
-
-/// Última línea no vacía de un `.log`. `None` si el archivo falta o está vacío.
-fn ultima_linea(archivos: &BTreeMap<String, String>, nombre: &str) -> Option<String> {
-    archivos
-        .get(nombre)
-        .and_then(|t| t.lines().map(str::trim).rev().find(|l| !l.is_empty()))
-        .map(str::to_string)
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::oracle::ErrorOraculo;
-    use crate::oracle::perfiles::herramientas::SalidaHerramienta;
+    use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, SalidaHerramienta};
     use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use std::fs;
     use std::rc::Rc;
 
-    /// Ejecutor de mentira: responde siempre lo mismo y cuenta las llamadas.
-    struct Falso {
-        salida: Result<SalidaHerramienta, String>,
-        llamadas: Cell<u32>,
-        cmds: RefCell<Vec<String>>,
+    /// Respuesta de `podman` de mentira: un código con su salida, o un fallo de infraestructura.
+    #[derive(Clone)]
+    enum Resp {
+        Codigo(i32, &'static str),
+        Error(&'static str),
     }
 
-    impl Falso {
-        /// Ejecutor que dice que el script arrancó: agrega el marcador de arranque (M20) a `archivos`.
-        fn con(archivos: &[(&str, &str)]) -> Self {
-            let mut todos = vec![(ARCHIVO_ARRANQUE, "ok\n")];
-            todos.extend_from_slice(archivos);
-            Falso::sin_marcador(&todos)
-        }
+    /// Ejecutor de mentira de la sesión. Guarda cada llamada en orden: `exec`, `lanzar` y `terminar`.
+    /// Responde con la cola si queda algo. Si no, con la primera regla cuyo texto está en el último
+    /// argumento. Si no, con el valor por defecto: arranque e `inspect` sanos, lo demás código 0.
+    struct ExecFalso {
+        llamadas: Rc<RefCell<Vec<Vec<String>>>>,
+        cola: RefCell<VecDeque<Result<SalidaPodman, ErrorOraculo>>>,
+        reglas: Vec<(&'static str, Resp)>,
+        proceso_vivo: bool,
+        proceso_log: &'static str,
+    }
 
-        /// Ejecutor con `archivos` tal cual, sin marcador de arranque.
-        fn sin_marcador(archivos: &[(&str, &str)]) -> Self {
-            let mut s = SalidaHerramienta::default();
-            for (nombre, texto) in archivos {
-                s.archivos.insert((*nombre).into(), (*texto).into());
+    impl ExecFalso {
+        fn vacio() -> Self {
+            ExecFalso {
+                llamadas: Rc::new(RefCell::new(Vec::new())),
+                cola: RefCell::new(VecDeque::new()),
+                reglas: Vec::new(),
+                proceso_vivo: true,
+                proceso_log: "",
             }
-            Falso {
-                salida: Ok(s),
-                llamadas: Cell::new(0),
-                cmds: RefCell::new(Vec::new()),
+        }
+
+        /// Ejecutor que responde `respuestas` en orden, antes que cualquier regla.
+        fn con(respuestas: Vec<Result<SalidaPodman, ErrorOraculo>>) -> Self {
+            let ejecutor = Self::vacio();
+            *ejecutor.cola.borrow_mut() = respuestas.into();
+            ejecutor
+        }
+
+        /// Un código de salida por llamada, sin stdout.
+        fn con_codigos(codigos: &[i32]) -> Self {
+            Self::con(codigos.iter().map(|&c| Ok(salida(c, ""))).collect())
+        }
+
+        /// Regla: si el último argumento contiene `texto`, responde `resp`.
+        fn responde(mut self, texto: &'static str, resp: Resp) -> Self {
+            self.reglas.push((texto, resp));
+            self
+        }
+
+        /// Proceso que `lanzar` da: `vivo` dice si sigue corriendo; `log` es lo que da al terminar.
+        fn proceso(mut self, vivo: bool, log: &'static str) -> Self {
+            self.proceso_vivo = vivo;
+            self.proceso_log = log;
+            self
+        }
+
+        fn llamadas(&self) -> Vec<Vec<String>> {
+            self.llamadas.borrow().clone()
+        }
+
+        /// Índice de la primera llamada cuyos argumentos unidos contienen `texto`. Sin ella, falla.
+        fn posicion(&self, texto: &str) -> usize {
+            self.llamadas()
+                .iter()
+                .position(|l| l.join(" ").contains(texto))
+                .unwrap_or_else(|| panic!("no hubo llamada con {texto:?}: {:?}", self.llamadas()))
+        }
+
+        /// Verdadero si alguna llamada contiene `texto`.
+        fn hubo(&self, texto: &str) -> bool {
+            self.llamadas().iter().any(|l| l.join(" ").contains(texto))
+        }
+    }
+
+    impl Exec for ExecFalso {
+        fn exec(&self, args: &[&str], _plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+            self.llamadas
+                .borrow_mut()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            if let Some(respuesta) = self.cola.borrow_mut().pop_front() {
+                return respuesta;
             }
+            let ultimo = args.last().copied().unwrap_or_default();
+            if let Some((_, resp)) = self
+                .reglas
+                .iter()
+                .find(|(texto, _)| ultimo.contains(*texto))
+            {
+                return match resp {
+                    Resp::Codigo(codigo, stdout) => Ok(salida(*codigo, stdout)),
+                    Resp::Error(motivo) => Err(ErrorOraculo::Infra((*motivo).into())),
+                };
+            }
+            let stdout = if args.first() == Some(&"container") {
+                "true\n"
+            } else {
+                ""
+            };
+            Ok(salida(0, stdout))
         }
 
-        /// Ejecutor sano: instalar y correr salen 0.
-        fn sano() -> Self {
-            Falso::con(&[("entrega-instalar.rc", "0\n"), ("entrega-correr.rc", "0\n")])
+        fn lanzar(&self, args: &[&str]) -> Result<Box<dyn ProcesoVivo>, ErrorOraculo> {
+            let mut anotada = vec!["lanzar".to_string()];
+            anotada.extend(args.iter().map(|a| a.to_string()));
+            self.llamadas.borrow_mut().push(anotada);
+            Ok(Box::new(ProcesoFalso {
+                llamadas: Rc::clone(&self.llamadas),
+                vivo: self.proceso_vivo,
+                log: self.proceso_log.into(),
+            }))
+        }
+    }
+
+    /// Proceso de mentira que `lanzar` da. `terminado` dice si ya murió. `terminar` anota y da su log.
+    struct ProcesoFalso {
+        llamadas: Rc<RefCell<Vec<Vec<String>>>>,
+        vivo: bool,
+        log: String,
+    }
+
+    impl ProcesoVivo for ProcesoFalso {
+        fn terminado(&mut self) -> Result<bool, ErrorOraculo> {
+            Ok(!self.vivo)
         }
 
-        fn infra(msg: &str) -> Self {
-            Falso {
-                salida: Err(msg.into()),
-                llamadas: Cell::new(0),
-                cmds: RefCell::new(Vec::new()),
+        fn terminar(&mut self) -> String {
+            self.llamadas.borrow_mut().push(vec!["terminar".into()]);
+            self.log.clone()
+        }
+    }
+
+    /// Fábrica de evaluación de mentira. El arranque y cada paso salen por su `ExecFalso`. Con `arranque`
+    /// no arranca nada y da ese motivo. `archivos` se escriben en la salida al arrancar: un producto que
+    /// escribe `.rc` no debe cambiar el resultado.
+    struct FabricaEvalFalsa {
+        exec: ExecFalso,
+        arranque: Option<&'static str>,
+        archivos: Vec<(&'static str, &'static str)>,
+        aperturas: Cell<u32>,
+    }
+
+    impl FabricaEvalFalsa {
+        fn con(exec: ExecFalso) -> Self {
+            FabricaEvalFalsa {
+                exec,
+                arranque: None,
+                archivos: Vec::new(),
+                aperturas: Cell::new(0),
             }
         }
     }
 
-    impl EjecutorHerramienta for Falso {
-        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
-            self.llamadas.set(self.llamadas.get() + 1);
-            self.cmds.borrow_mut().push(cmd.to_string());
-            match &self.salida {
-                Ok(s) => Ok(s.clone()),
-                Err(m) => Err(ErrorOraculo::Infra(m.clone())),
+    impl FabricaEscenarios for FabricaEvalFalsa {
+        fn iniciar(
+            &self,
+            _imagen: &str,
+            _escenarios: Option<&Path>,
+        ) -> Result<Box<dyn CorredorDeEscenario + '_>, String> {
+            Err("sin contenedor de escenario en esta prueba".into())
+        }
+
+        fn iniciar_evaluacion(&self, ejecucion: &Ejecucion) -> Result<Sesion<'_>, String> {
+            self.aperturas.set(self.aperturas.get() + 1);
+            if let Some(motivo) = self.arranque {
+                return Err(motivo.into());
             }
+            for (nombre, texto) in &self.archivos {
+                fs::write(ejecucion.salida.join(nombre), texto).expect("escribe el .rc");
+            }
+            let nombre = "eval-falsa";
+            let arranque = |comando: &[&str]| {
+                crate::oracle::contenedor::argumentos_separado(ejecucion, nombre, comando)
+            };
+            Sesion::iniciar(&self.exec, nombre, &arranque)
+        }
+    }
+
+    /// Fábrica sana: el arranque sale bien y cada paso da código 0.
+    fn sana() -> FabricaEvalFalsa {
+        FabricaEvalFalsa::con(ExecFalso::vacio())
+    }
+
+    /// Sonda de entrega con una fábrica de mentira. La carpeta `home` vive hasta que termina la función.
+    fn sonda_con(fabrica: &dyn FabricaEscenarios, repo: &Path, tarea: &Tarea) -> ResultadoEntrega {
+        let home = tempfile::tempdir().expect("home");
+        sonda_entrega_con(fabrica, repo, tarea, home.path(), true)
+    }
+
+    /// Salida de podman con `codigo` y `stdout`, sin stderr ni paso.
+    fn salida(codigo: i32, stdout: &str) -> SalidaPodman {
+        SalidaPodman {
+            codigo,
+            stdout: stdout.into(),
+            stderr: String::new(),
+            paso: None,
         }
     }
 
     const ENTREGA: &str = "[entrega]\ninstalar = \"make\"\ncorrer = \"./run\"\n\
-        archivos = [\"README.md\", \"Dockerfile\"]\n";
+        espera_segundos = 0\narchivos = [\"README.md\", \"Dockerfile\"]\n";
 
     const REQUISITOS: &str = "[[requisito]]\nid = \"R1\"\ntitulo = \"uno\"\n\
         escenarios = [\"b\"]\nmodulos = [\"protocolo\"]\n\n\
@@ -1754,131 +2073,62 @@ pub(crate) mod tests {
         r.sonda.hallazgos.is_empty()
     }
 
-    #[test]
-    fn entrega_script_incluye_preludio_solo_para_rust() {
-        let rust = tarea_de("rust", ENTREGA);
-        assert!(construir_script(&rust).contains(PRELUDIO));
-        let shell = tarea_de("shell", ENTREGA);
-        assert!(!construir_script(&shell).contains("CARGO_HOME"));
-    }
+    // Migrados a la sesión de evaluación (parte 2b). Los que miraban texto del script o los `.rc`
+    // se borraron: su intención la cubren los tests de pasos de más abajo.
 
     #[test]
-    fn entrega_script_tiene_un_timeout_por_escenario() {
-        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}"));
-        let s = construir_script(&t);
-        assert_eq!(s.matches("timeout 120").count(), 2);
-    }
-
-    #[test]
-    fn entrega_script_sin_entrega_no_copia_ni_instala() {
-        let t = tarea_de("shell", &format!("\n{ESCENARIOS}"));
-        let s = construir_script(&t);
-        assert!(!s.contains("cp -a"), "sin entrega no hay copia");
-        assert!(!s.contains("entrega-instalar"), "sin entrega no instala");
-        assert!(!s.contains("setsid"), "sin entrega no arranca");
-        assert!(s.contains("cd /repo"), "los escenarios corren sobre /repo");
-    }
-
-    #[test]
-    fn entrega_script_con_entrega_copia_instala_y_arranca_con_espera_5() {
-        let s = construir_script(&tarea_de("shell", ENTREGA));
-        assert!(s.contains("cp -a /repo /salida/work"));
-        assert!(s.contains("/salida/entrega-instalar.rc"));
-        assert!(s.contains("sleep 5"), "espera por defecto de 5 s");
-        assert!(s.contains("/salida/entrega-correr.rc"));
-    }
-
-    #[test]
-    fn entrega_script_empieza_con_el_marcador_de_arranque() {
-        for lenguaje in ["shell", "rust", "python"] {
-            let s = construir_script(&tarea_de(lenguaje, ENTREGA));
-            assert!(
-                s.starts_with("echo ok > /salida/entrega-arranque.ok || exit 1\n"),
-                "{lenguaje}: el marcador es la primera acción"
+    fn entrega_eval_preludio_solo_para_rust() {
+        let repo = repo_completo();
+        for (lenguaje, esperado) in [("rust", true), ("shell", false)] {
+            let fabrica = sana();
+            sonda_con(&fabrica, repo.path(), &tarea_de(lenguaje, ENTREGA));
+            assert_eq!(
+                fabrica.exec.hubo("export CARGO_HOME"),
+                esperado,
+                "{lenguaje}"
             );
         }
     }
 
     #[test]
-    fn entrega_sin_marcador_de_arranque_da_sin_veredicto_y_ningun_hallazgo() {
+    fn entrega_eval_python_aplica_el_preludio_antes_de_la_copia() {
         let repo = repo_completo();
-        let ej = Falso::sin_marcador(&[
-            ("entrega-instalar.rc", "0\n"),
-            ("entrega-correr.rc", "0\n"),
-            ("entrega-escenario-a.rc", "1\n"),
-        ]);
-        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}\n{REQUISITOS}"));
-        let r = sonda_entrega(&ej, repo.path(), &t);
-        assert_eq!(r.sonda.valor, None);
+        let fabrica = sana();
+        sonda_con(&fabrica, repo.path(), &tarea_de("python", ENTREGA));
+        let pre = fabrica.exec.posicion("mkdir -p /tmp/fuentes");
+        let cp = fabrica.exec.posicion("cp -a /repo");
+        assert!(pre < cp, "el preludio corre antes de la copia");
         assert!(
-            r.sonda
-                .motivo
-                .as_deref()
-                .unwrap_or_default()
-                .contains("arranc"),
-            "el motivo nombra el arranque"
+            !fabrica.exec.hubo("export CARGO_HOME"),
+            "no aplica el de Rust"
         );
-        assert!(sin_hallazgos_de_entrega(&r), "sin no instala ni escenarios");
-        assert!(r.escenarios.is_empty(), "no inventa escenarios");
+        let shell = sana();
+        sonda_con(&shell, repo.path(), &tarea_de("shell", ENTREGA));
+        assert!(!shell.exec.hubo("mkdir -p /tmp/fuentes"));
     }
 
     #[test]
-    fn entrega_marcador_sin_instalar_rc_da_sin_veredicto_y_no_no_instala() {
+    fn entrega_eval_sin_entrega_copia_nada_y_corre_sobre_repo() {
         let repo = repo_completo();
-        let ej = Falso::con(&[("entrega-correr.rc", "0\n")]);
-        let r = sonda_entrega(&ej, repo.path(), &tarea_de("shell", ENTREGA));
-        assert_eq!(r.sonda.valor, None);
+        let fabrica = sana();
+        let t = tarea_de("shell", &format!("\n{ESCENARIOS}"));
+        sonda_con(&fabrica, repo.path(), &t);
+        assert!(!fabrica.exec.hubo("cp -a"), "sin entrega no hay copia");
+        assert!(!fabrica.exec.hubo("make"), "sin entrega no instala");
+        assert!(!fabrica.exec.hubo("./run"), "sin entrega no arranca");
         assert!(
-            r.sonda
-                .motivo
-                .as_deref()
-                .unwrap_or_default()
-                .contains("instalar nunca corrió"),
-            "el motivo dice que instalar no corrió"
-        );
-        assert!(
-            sin_hallazgos_de_entrega(&r),
-            "instalar que nunca corrió no es rojo"
+            fabrica.exec.hubo("-w /repo"),
+            "los escenarios corren sobre /repo"
         );
     }
 
     #[test]
-    fn entrega_marcador_e_instalar_fallido_sigue_siendo_no_instala() {
+    fn entrega_eval_python_preludio_con_codigo_1_da_sin_veredicto_sin_hallazgos() {
         let repo = repo_completo();
-        let ej = Falso::con(&[("entrega-instalar.rc", "1\n")]);
-        let r = sonda_entrega(&ej, repo.path(), &tarea_de("shell", ENTREGA));
-        assert_eq!(r.sonda.motivo, None, "con código de salida hay veredicto");
-        assert!(r.sonda.valor.is_some());
-        assert!(
-            r.sonda
-                .hallazgos
-                .iter()
-                .any(|h| h.detalle.contains("no instala")),
-            "instalar con código != 0 sigue siendo rojo"
+        let fabrica = FabricaEvalFalsa::con(
+            ExecFalso::vacio().responde("mkdir -p /tmp/fuentes", Resp::Codigo(1, "")),
         );
-    }
-
-    #[test]
-    fn entrega_python_script_aplica_el_preludio_de_python_antes_del_cp() {
-        let s = construir_script(&tarea_de("python", ENTREGA));
-        let pos_preludio = s
-            .find(descarga::PRELUDIO_PYTHON)
-            .expect("el script lleva el preludio de Python");
-        let pos_cp = s.find("cp -a /repo").expect("hay copia");
-        assert!(pos_preludio < pos_cp, "el preludio corre antes de la copia");
-        assert!(!s.contains(PRELUDIO), "no aplica el preludio de Rust");
-        let shell = construir_script(&tarea_de("shell", ENTREGA));
-        assert!(!shell.contains(descarga::PRELUDIO_PYTHON));
-        let rust = construir_script(&tarea_de("rust", ENTREGA));
-        assert!(!rust.contains(descarga::PRELUDIO_PYTHON));
-        assert!(rust.contains(PRELUDIO));
-    }
-
-    #[test]
-    fn entrega_python_preludio_con_codigo_1_da_sin_veredicto_sin_hallazgos() {
-        let repo = repo_completo();
-        let ej = Falso::con(&[("entrega-preludio.rc", "1\n")]);
-        let r = sonda_entrega(&ej, repo.path(), &tarea_de("python", ENTREGA));
+        let r = sonda_con(&fabrica, repo.path(), &tarea_de("python", ENTREGA));
         assert_eq!(r.sonda.valor, None);
         assert!(
             r.sonda
@@ -1890,33 +2140,16 @@ pub(crate) mod tests {
         );
         assert!(sin_hallazgos_de_entrega(&r), "no es un rojo falso");
         assert!(r.escenarios.is_empty());
-    }
-
-    #[test]
-    fn entrega_python_sin_preludio_rc_da_sin_veredicto() {
-        let repo = repo_completo();
-        let ej = Falso::con(&[("entrega-instalar.rc", "0\n"), ("entrega-correr.rc", "0\n")]);
-        let r = sonda_entrega(&ej, repo.path(), &tarea_de("python", ENTREGA));
-        assert_eq!(r.sonda.valor, None);
         assert!(
-            r.sonda
-                .motivo
-                .as_deref()
-                .unwrap_or_default()
-                .contains("preludio de Python")
+            !fabrica.exec.hubo("make"),
+            "nada se instala tras el preludio roto"
         );
-        assert!(sin_hallazgos_de_entrega(&r));
     }
 
     #[test]
-    fn entrega_python_con_preludio_ok_sigue_el_flujo_normal() {
+    fn entrega_eval_python_con_preludio_ok_sigue_el_flujo_normal() {
         let repo = repo_completo();
-        let ej = Falso::con(&[
-            ("entrega-preludio.rc", "0\n"),
-            ("entrega-instalar.rc", "0\n"),
-            ("entrega-correr.rc", "0\n"),
-        ]);
-        let r = sonda_entrega(&ej, repo.path(), &tarea_de("python", ENTREGA));
+        let r = sonda_con(&sana(), repo.path(), &tarea_de("python", ENTREGA));
         assert_eq!(r.sonda.valor, Some(1.0));
         assert_eq!(r.sonda.motivo, None);
     }
@@ -1933,7 +2166,7 @@ pub(crate) mod tests {
     fn entrega_sin_readme_da_un_hallazgo_de_archivo_faltante() {
         let repo = tempfile::tempdir().expect("temp dir");
         fs::write(repo.path().join("Dockerfile"), "FROM x\nUSER app\n").expect("escribe");
-        let r = sonda_entrega(&Falso::sano(), repo.path(), &tarea_de("shell", ENTREGA));
+        let r = sonda_con(&sana(), repo.path(), &tarea_de("shell", ENTREGA));
         assert_eq!(r.sonda.hallazgos.len(), 1);
         let h = &r.sonda.hallazgos[0];
         assert_eq!(h.dimension, Dimension::Entrega);
@@ -1950,7 +2183,7 @@ pub(crate) mod tests {
     #[test]
     fn entrega_con_readme_y_dockerfile_con_user_da_cero() {
         let repo = repo_completo();
-        let r = sonda_entrega(&Falso::sano(), repo.path(), &tarea_de("shell", ENTREGA));
+        let r = sonda_con(&sana(), repo.path(), &tarea_de("shell", ENTREGA));
         assert!(sin_hallazgos_de_entrega(&r));
         assert_eq!(r.sonda.valor, Some(1.0));
         assert_eq!(r.sonda.motivo, None);
@@ -1965,7 +2198,7 @@ pub(crate) mod tests {
             "FROM debian:bookworm-slim\n",
         )
         .expect("escribe");
-        let r = sonda_entrega(&Falso::sano(), repo.path(), &tarea_de("shell", ENTREGA));
+        let r = sonda_con(&sana(), repo.path(), &tarea_de("shell", ENTREGA));
         assert_eq!(r.sonda.hallazgos.len(), 1);
         let h = &r.sonda.hallazgos[0];
         assert_eq!(h.dimension, Dimension::Entrega);
@@ -1975,11 +2208,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn entrega_sin_entrega_ni_escenarios_no_corre_nada() {
+    fn entrega_sin_entrega_ni_escenarios_no_abre_contenedor() {
         let repo = repo_completo();
-        let ej = Falso::sano();
-        let r = sonda_entrega(&ej, repo.path(), &tarea_de("shell", ""));
-        assert_eq!(ej.llamadas.get(), 0);
+        let fabrica = sana();
+        let r = sonda_con(&fabrica, repo.path(), &tarea_de("shell", ""));
+        assert_eq!(fabrica.aperturas.get(), 0, "no abre contenedor");
+        assert!(fabrica.exec.llamadas().is_empty());
         assert!(r.escenarios.is_empty());
         assert_eq!(r.sonda.valor, Some(1.0));
     }
@@ -1987,14 +2221,10 @@ pub(crate) mod tests {
     #[test]
     fn entrega_escenario_con_codigo_1_queda_false_y_con_hallazgo_de_su_requisito() {
         let repo = repo_completo();
-        let ej = Falso::con(&[
-            ("entrega-instalar.rc", "0\n"),
-            ("entrega-correr.rc", "0\n"),
-            ("entrega-escenario-a.rc", "0\n"),
-            ("entrega-escenario-b.rc", "1\n"),
-        ]);
+        let fabrica =
+            FabricaEvalFalsa::con(ExecFalso::vacio().responde("exit 1", Resp::Codigo(1, "")));
         let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}\n{REQUISITOS}"));
-        let r = sonda_entrega(&ej, repo.path(), &t);
+        let r = sonda_con(&fabrica, repo.path(), &t);
         let esperado: BTreeMap<String, bool> =
             [("a".to_string(), true), ("b".to_string(), false)].into();
         assert_eq!(r.escenarios, esperado);
@@ -2009,24 +2239,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn entrega_escenario_sin_archivo_rc_queda_false() {
-        let repo = repo_completo();
-        let ej = Falso::con(&[("entrega-instalar.rc", "0\n"), ("entrega-correr.rc", "0\n")]);
-        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}\n{REQUISITOS}"));
-        let r = sonda_entrega(&ej, repo.path(), &t);
-        assert_eq!(r.escenarios.get("a"), Some(&false));
-        assert_eq!(r.escenarios.get("b"), Some(&false));
-    }
-
-    #[test]
     fn entrega_instalar_fallido_da_no_instala_y_escenarios_en_false() {
         let repo = repo_completo();
-        let ej = Falso::con(&[
-            ("entrega-instalar.rc", "2\n"),
-            ("entrega-instalar.log", "compilando\nerror final\n"),
-        ]);
+        let fabrica = FabricaEvalFalsa::con(
+            ExecFalso::vacio().responde("make", Resp::Codigo(2, "compilando\nerror final\n")),
+        );
         let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}\n{REQUISITOS}"));
-        let r = sonda_entrega(&ej, repo.path(), &t);
+        let r = sonda_con(&fabrica, repo.path(), &t);
         let no_instala = r
             .sonda
             .hallazgos
@@ -2050,12 +2269,10 @@ pub(crate) mod tests {
     #[test]
     fn entrega_correr_que_muere_da_no_arranca_con_la_ultima_linea() {
         let repo = repo_completo();
-        let ej = Falso::con(&[
-            ("entrega-instalar.rc", "0\n"),
-            ("entrega-correr.rc", "1\n"),
-            ("entrega-correr.log", "arrancando\npuerto ocupado\n"),
-        ]);
-        let r = sonda_entrega(&ej, repo.path(), &tarea_de("shell", ENTREGA));
+        let fabrica = FabricaEvalFalsa::con(
+            ExecFalso::vacio().proceso(false, "arrancando\npuerto ocupado\n"),
+        );
+        let r = sonda_con(&fabrica, repo.path(), &tarea_de("shell", ENTREGA));
         let h = r
             .sonda
             .hallazgos
@@ -2068,8 +2285,10 @@ pub(crate) mod tests {
     #[test]
     fn entrega_error_de_infraestructura_da_sin_veredicto_y_escenarios_vacios() {
         let repo = repo_completo();
+        let fabrica =
+            FabricaEvalFalsa::con(ExecFalso::vacio().responde("make", Resp::Error("podman caído")));
         let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}"));
-        let r = sonda_entrega(&Falso::infra("podman caído"), repo.path(), &t);
+        let r = sonda_con(&fabrica, repo.path(), &t);
         assert_eq!(r.sonda.valor, None);
         assert!(r.sonda.motivo.unwrap_or_default().contains("podman caído"));
         assert!(r.escenarios.is_empty(), "no inventa falsos");
@@ -2078,46 +2297,19 @@ pub(crate) mod tests {
     #[test]
     fn entrega_valor_es_puntuar_de_los_hallazgos() {
         let repo = tempfile::tempdir().expect("temp dir");
-        let r = sonda_entrega(&Falso::sano(), repo.path(), &tarea_de("shell", ENTREGA));
+        let r = sonda_con(&sana(), repo.path(), &tarea_de("shell", ENTREGA));
         let esperado = puntuar_hallazgos(&r.sonda.hallazgos, &[]);
         assert_eq!(r.sonda.valor, Some(esperado));
     }
 
     #[test]
-    fn entrega_script_correr_escribe_el_log_completo_en_tmp_y_deja_la_cola() {
-        let s = construir_script(&tarea_de("shell", ENTREGA));
-        assert!(s.contains("> /tmp/entrega-correr.full.log 2>&1 &"));
-        let cola = "tail -n 40 /tmp/entrega-correr.full.log > /salida/entrega-correr.log";
-        let pos_cola = s.find(cola).expect("la cola de correr va a /salida");
-        let pos_kill = s.find("kill -KILL").expect("mata correr");
-        assert!(
-            pos_kill < pos_cola,
-            "la cola se escribe después de matar correr"
-        );
-        assert!(!s.contains("> /salida/entrega-correr.log 2>&1"));
-    }
-
-    #[test]
-    fn entrega_script_instalar_y_escenarios_guardan_solo_la_cola() {
-        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}"));
-        let s = construir_script(&t);
-        assert!(s.contains("| tail -n 40 > /salida/entrega-instalar.log"));
-        assert!(s.contains("| tail -n 20 > /salida/entrega-escenario-a.log"));
-        assert!(s.contains("| tail -n 20 > /salida/entrega-escenario-b.log"));
-    }
-
-    #[test]
-    fn entrega_escenario_cita_sale_de_la_ultima_linea_de_su_log() {
+    fn entrega_escenario_cita_sale_de_la_ultima_linea_de_su_salida() {
         let repo = repo_completo();
-        let ej = Falso::con(&[
-            ("entrega-instalar.rc", "0\n"),
-            ("entrega-correr.rc", "0\n"),
-            ("entrega-escenario-a.rc", "0\n"),
-            ("entrega-escenario-b.rc", "1\n"),
-            ("entrega-escenario-b.log", "paso 1\nel login falló\n\n"),
-        ]);
+        let fabrica = FabricaEvalFalsa::con(
+            ExecFalso::vacio().responde("exit 1", Resp::Codigo(1, "paso 1\nel login falló\n\n")),
+        );
         let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}\n{REQUISITOS}"));
-        let r = sonda_entrega(&ej, repo.path(), &t);
+        let r = sonda_con(&fabrica, repo.path(), &t);
         assert_eq!(r.sonda.hallazgos.len(), 1);
         let h = &r.sonda.hallazgos[0];
         assert_eq!(h.cita, "el login falló");
@@ -3758,24 +3950,18 @@ pub(crate) mod tests {
         )
         .expect("escribe tarea.toml");
         let t = Tarea::cargar_de(dir.path()).expect("carga la tarea");
-        let ej = Falso::sano();
         let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
         let fabrica = FabricaFalsa {
             imagenes: RefCell::new(Vec::new()),
         };
-        let r = entregar_con(&ej, repo.path(), &t, home.path(), &[], &podman, &fabrica)
-            .expect("entrega");
+        let r =
+            entregar_con(repo.path(), &t, home.path(), &[], &podman, &fabrica).expect("entrega");
         assert_eq!(r.escenarios.get("a"), Some(&true), "{:?}", r.escenarios);
         assert_eq!(r.lugar_escenarios.get("a"), Some(&LugarEscenario::Imagen));
         assert_eq!(
             fabrica.imagenes.borrow().len(),
             1,
             "un contenedor de escenario"
-        );
-        assert_eq!(
-            ej.llamadas.get(),
-            0,
-            "el escenario corre una sola vez, en la imagen"
         );
         assert!(r.sin_veredicto.is_empty(), "{:?}", r.sin_veredicto);
     }
@@ -3797,7 +3983,6 @@ pub(crate) mod tests {
         ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
-            &Falso::sano(),
             repo.path(),
             &tarea_de("shell", ""),
             home.path(),
@@ -3827,7 +4012,6 @@ pub(crate) mod tests {
         let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
-            &Falso::sano(),
             repo.path(),
             &tarea_de("shell", ""),
             home.path(),
@@ -3863,7 +4047,6 @@ pub(crate) mod tests {
         let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
-            &Falso::sano(),
             repo.path(),
             &tarea_de("shell", ""),
             home.path(),
@@ -3891,7 +4074,6 @@ pub(crate) mod tests {
         let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
-            &Falso::sano(),
             repo.path(),
             &tarea_de("shell", ""),
             home.path(),
@@ -3917,7 +4099,6 @@ pub(crate) mod tests {
         ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
-            &Falso::sano(),
             repo.path(),
             &tarea_de("shell", ""),
             home.path(),
@@ -3948,7 +4129,6 @@ pub(crate) mod tests {
         ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
-            &Falso::sano(),
             repo.path(),
             &tarea_de("shell", ""),
             home.path(),
@@ -3977,7 +4157,6 @@ pub(crate) mod tests {
         ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
-            &Falso::sano(),
             repo.path(),
             &tarea_de("shell", ""),
             home.path(),
@@ -4076,5 +4255,532 @@ pub(crate) mod tests {
             ),
             otro => panic!("debía dar hallazgo, no {}", nombre(&otro)),
         }
+    }
+
+    // ---- Tarea 91, parte 2a: `Sesion` sobre un `Exec` inyectable ----
+
+    fn escenario_de(cmd: &str) -> Escenario {
+        Escenario {
+            id: "e".into(),
+            cmd: cmd.into(),
+        }
+    }
+
+    /// Sesión de prueba con nombre `n` sobre `exec`.
+    fn sesion_de_prueba(exec: &dyn Exec, tiene_timeout: bool) -> Sesion<'_> {
+        Sesion {
+            nombre: "n".into(),
+            exec,
+            tiene_timeout,
+        }
+    }
+
+    #[test]
+    fn sesion_paso_args_de_la_imagen_con_timeout() {
+        let exec = ExecFalso::con_codigos(&[]);
+        let s = sesion_de_prueba(&exec, true);
+        assert_eq!(
+            s.paso_args(&Entorno::default(), "exit 0", true),
+            ["exec", "n", "timeout", "120", "sh", "-c", "exit 0"]
+        );
+    }
+
+    #[test]
+    fn sesion_paso_args_de_la_imagen_sin_timeout() {
+        let exec = ExecFalso::con_codigos(&[]);
+        let sin_pedirlo = sesion_de_prueba(&exec, true);
+        assert_eq!(
+            sin_pedirlo.paso_args(&Entorno::default(), "exit 0", false),
+            ["exec", "n", "sh", "-c", "exit 0"]
+        );
+        // La imagen sin `timeout` no lo lleva, aunque se pida.
+        let sin_imagen = sesion_de_prueba(&exec, false);
+        assert_eq!(
+            sin_imagen.paso_args(&Entorno::default(), "exit 0", true),
+            ["exec", "n", "sh", "-c", "exit 0"]
+        );
+    }
+
+    #[test]
+    fn sesion_paso_args_con_entorno_lleva_directorio_y_activacion() {
+        let exec = ExecFalso::con_codigos(&[]);
+        let entorno = Entorno {
+            dir: Some("/salida/work".into()),
+            activar: "export A=1;".into(),
+        };
+        let s = sesion_de_prueba(&exec, true);
+        assert_eq!(
+            s.paso_args(&entorno, "pytest -q", true),
+            [
+                "exec",
+                "-w",
+                "/salida/work",
+                "n",
+                "timeout",
+                "120",
+                "sh",
+                "-c",
+                "export A=1; exec sh -c \"$1\"",
+                "_",
+                "pytest -q",
+            ]
+        );
+    }
+
+    #[test]
+    fn sesion_correr_escenario_con_codigo_0_pasa() {
+        let exec = ExecFalso::con_codigos(&[0]);
+        let s = sesion_de_prueba(&exec, true);
+        let r = s
+            .correr_escenario(&Entorno::default(), &escenario_de("exit 0"))
+            .expect("corre");
+        assert!(matches!(r, Prueba::Paso));
+    }
+
+    #[test]
+    fn sesion_correr_escenario_con_fallo_cita_la_ultima_linea() {
+        let exec = ExecFalso::con(vec![Ok(salida(1, "boom\n"))]);
+        let s = sesion_de_prueba(&exec, true);
+        match s
+            .correr_escenario(&Entorno::default(), &escenario_de("false"))
+            .expect("corre")
+        {
+            Prueba::Fallo { codigo, cita } => {
+                assert_eq!(codigo, 1);
+                assert_eq!(cita, "boom");
+            }
+            _ => panic!("debía fallar"),
+        }
+    }
+
+    #[test]
+    fn sesion_correr_escenario_con_codigo_125_es_infraestructura() {
+        let exec = ExecFalso::con_codigos(&[125]);
+        let s = sesion_de_prueba(&exec, true);
+        let r = s.correr_escenario(&Entorno::default(), &escenario_de("exit 0"));
+        assert!(matches!(r, Err(ErrorOraculo::Infra(_))));
+    }
+
+    #[test]
+    fn sesion_correr_escenario_sin_red_queda_pendiente() {
+        let exec = ExecFalso::con(vec![Ok(salida(6, "Could not resolve host: x\n"))]);
+        let s = sesion_de_prueba(&exec, true);
+        match s
+            .correr_escenario(&Entorno::default(), &escenario_de("wget x"))
+            .expect("corre")
+        {
+            Prueba::Pendiente(motivo) => assert!(motivo.contains("necesita red"), "{motivo}"),
+            _ => panic!("debía quedar pendiente"),
+        }
+    }
+
+    #[test]
+    fn sesion_correr_escenario_que_supera_el_plazo_da_124() {
+        let exec = ExecFalso::con(vec![Err(ErrorOraculo::Infra(
+            "podman exec superó 120 s".into(),
+        ))]);
+        let s = sesion_de_prueba(&exec, true);
+        match s
+            .correr_escenario(&Entorno::default(), &escenario_de("sleep 999"))
+            .expect("corre")
+        {
+            Prueba::Fallo { codigo, cita } => {
+                assert_eq!(codigo, CODIGO_TIEMPO);
+                assert!(cita.contains("120"), "{cita}");
+            }
+            _ => panic!("debía fallar por tiempo"),
+        }
+    }
+
+    #[test]
+    fn sesion_correr_escenario_de_la_imagen_manda_los_mismos_argumentos() {
+        // GUARDA: el camino de la imagen no cambia sus argumentos al pasar por `Exec`.
+        let exec = ExecFalso::con(vec![Ok(salida(0, ""))]);
+        let s = sesion_de_prueba(&exec, true);
+        s.correr_escenario(&Entorno::default(), &escenario_de("exit 0"))
+            .expect("corre");
+        assert_eq!(
+            exec.llamadas()[0],
+            ["exec", "n", "timeout", "120", "sh", "-c", "exit 0"]
+        );
+    }
+
+    #[test]
+    fn sesion_iniciar_detecta_sh_y_timeout_por_el_ejecutor() {
+        let exec = ExecFalso::con(vec![
+            Ok(salida(0, "")),
+            Ok(salida(0, "true\n")),
+            Ok(salida(0, "")),
+            Ok(salida(0, "")),
+        ]);
+        let arranque = |c: &[&str]| vec!["run".to_string(), c[0].to_string()];
+        let s = Sesion::iniciar(&exec, "n", &arranque).expect("arranca");
+        assert!(s.tiene_timeout);
+        assert_eq!(exec.llamadas()[0], ["run", "sleep"]);
+    }
+
+    #[test]
+    fn sesion_iniciar_sin_sh_da_el_motivo_y_quita_el_contenedor() {
+        let exec = ExecFalso::con(vec![
+            Ok(salida(0, "")),
+            Ok(salida(0, "true\n")),
+            Ok(salida(127, "")),
+            Ok(salida(0, "")),
+        ]);
+        let arranque = |c: &[&str]| vec!["run".to_string(), c[0].to_string()];
+        match Sesion::iniciar(&exec, "n", &arranque) {
+            Err(motivo) => assert_eq!(motivo, "la imagen no trae sh"),
+            Ok(_) => panic!("sin sh no debe arrancar"),
+        }
+        let ultima = exec.llamadas().pop().expect("hay llamadas");
+        assert_eq!(ultima, ["rm", "-f", "-t", "0", "n"]);
+    }
+
+    // ---- Tarea 91, parte 2b: la evaluación corre por pasos, cada uno con su `podman exec` ----
+
+    #[test]
+    fn eval_entorno_usa_work_con_entrega_y_repo_sin_ella() {
+        let con = entorno_de_evaluacion(&tarea_de("python", ENTREGA));
+        assert_eq!(con.dir.as_deref(), Some("/salida/work"));
+        assert!(con.activar.contains("venv-eval/bin/activate"));
+        let sin = entorno_de_evaluacion(&tarea_de("rust", ESCENARIOS));
+        assert_eq!(sin.dir.as_deref(), Some("/repo"));
+        assert_eq!(sin.activar, ACTIVAR_RUST);
+        assert_eq!(
+            entorno_de_evaluacion(&tarea_de("shell", ENTREGA)).activar,
+            ""
+        );
+    }
+
+    #[test]
+    fn eval_orden_de_los_pasos_con_entrega_y_escenarios() {
+        let repo = repo_completo();
+        let fabrica =
+            FabricaEvalFalsa::con(ExecFalso::vacio().responde("exit 1", Resp::Codigo(1, "")));
+        let t = tarea_de("python", &format!("{ENTREGA}\n{ESCENARIOS}"));
+        let r = sonda_con(&fabrica, repo.path(), &t);
+        let e = &fabrica.exec;
+        let orden = [
+            e.posicion("mkdir -p /tmp/fuentes"),
+            e.posicion("cp -a /repo /salida/work"),
+            e.posicion("make"),
+            e.posicion("./run"),
+            e.posicion("exit 0"),
+            e.posicion("exit 1"),
+            e.posicion("terminar"),
+            e.posicion("rm -f"),
+        ];
+        assert!(
+            orden.windows(2).all(|p| p[0] < p[1]),
+            "orden {orden:?}: {:?}",
+            e.llamadas()
+        );
+        assert_eq!(r.escenarios.get("a"), Some(&true));
+        assert_eq!(r.escenarios.get("b"), Some(&false));
+    }
+
+    #[test]
+    fn eval_cada_escenario_repite_la_activacion_de_python() {
+        let repo = repo_completo();
+        let fabrica = sana();
+        sonda_con(
+            &fabrica,
+            repo.path(),
+            &tarea_de("python", &format!("{ENTREGA}\n{ESCENARIOS}")),
+        );
+        let escenario_a = fabrica
+            .exec
+            .llamadas()
+            .into_iter()
+            .find(|l| l.join(" ").contains("exit 0"))
+            .expect("corre el escenario a");
+        assert!(
+            escenario_a.join(" ").contains("venv-eval"),
+            "{escenario_a:?}"
+        );
+    }
+
+    #[test]
+    fn eval_arranque_usa_el_contenedor_separado_sin_red_y_sin_rm() {
+        let repo = repo_completo();
+        let fabrica = sana();
+        sonda_con(&fabrica, repo.path(), &tarea_de("shell", ENTREGA));
+        let arranque = &fabrica.exec.llamadas()[0];
+        assert_eq!(arranque[0], "run");
+        assert!(arranque.contains(&"-d".to_string()), "{arranque:?}");
+        assert!(arranque.contains(&"sleep".to_string()), "{arranque:?}");
+        assert!(
+            arranque.contains(&"none".to_string()),
+            "sin red: {arranque:?}"
+        );
+        assert!(!arranque.contains(&"--rm".to_string()), "lo quita Root");
+    }
+
+    #[test]
+    fn eval_producto_que_escribe_rc_no_cambia_el_resultado() {
+        // El producto escribe 0 en el `.rc` del escenario `a`, pero su código de salida es 1.
+        let repo = repo_completo();
+        let fabrica = FabricaEvalFalsa {
+            exec: ExecFalso::vacio().responde("exit 0", Resp::Codigo(1, "fallo\n")),
+            arranque: None,
+            archivos: vec![
+                ("entrega-escenario-a.rc", "0\n"),
+                ("entrega-escenario-b.rc", "0\n"),
+            ],
+            aperturas: Cell::new(0),
+        };
+        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}"));
+        let r = sonda_con(&fabrica, repo.path(), &t);
+        assert_eq!(
+            r.escenarios.get("a"),
+            Some(&false),
+            "manda el código del exec"
+        );
+        assert!(fabrica.exec.hubo("exit 0"));
+    }
+
+    #[test]
+    fn eval_correr_que_termina_antes_da_no_arranca_y_los_escenarios_siguen() {
+        let repo = repo_completo();
+        let fabrica =
+            FabricaEvalFalsa::con(ExecFalso::vacio().proceso(false, "arrancando\nadios\n"));
+        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}"));
+        let r = sonda_con(&fabrica, repo.path(), &t);
+        let h = r
+            .sonda
+            .hallazgos
+            .iter()
+            .find(|h| h.detalle.contains("no arranca"))
+            .expect("hallazgo de no arranca");
+        assert_eq!((h.severidad, h.cita.as_str()), (3, "adios"));
+        assert!(r.escenarios.contains_key("a") && r.escenarios.contains_key("b"));
+    }
+
+    #[test]
+    fn eval_correr_vivo_no_da_hallazgo_y_se_termina_al_final() {
+        let repo = repo_completo();
+        let fabrica = sana();
+        let r = sonda_con(&fabrica, repo.path(), &tarea_de("shell", ENTREGA));
+        assert!(
+            !r.sonda
+                .hallazgos
+                .iter()
+                .any(|h| h.detalle.contains("no arranca"))
+        );
+        assert!(fabrica.exec.hubo("terminar"), "el hijo se termina");
+        assert_eq!(r.sonda.valor, Some(1.0));
+    }
+
+    #[test]
+    fn eval_instalar_que_falla_corta_escenarios_y_correr() {
+        let repo = repo_completo();
+        let fabrica =
+            FabricaEvalFalsa::con(ExecFalso::vacio().responde("make", Resp::Codigo(1, "roto\n")));
+        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}"));
+        let r = sonda_con(&fabrica, repo.path(), &t);
+        assert!(!fabrica.exec.hubo("./run"), "correr no se lanza");
+        assert!(!fabrica.exec.hubo("exit 0"), "ningún escenario corre");
+        assert!(fabrica.exec.hubo("rm -f"), "el contenedor se quita igual");
+        assert_eq!(r.sonda.motivo, None);
+        assert!(r.escenarios.values().all(|v| !v));
+        assert!(
+            r.sonda
+                .hallazgos
+                .iter()
+                .any(|h| h.detalle.contains("no instala") && h.cita == "roto")
+        );
+        let no_corrio = r
+            .sonda
+            .hallazgos
+            .iter()
+            .filter(|h| h.detalle.contains("el producto no instala"))
+            .count();
+        assert_eq!(no_corrio, 2);
+    }
+
+    #[test]
+    fn eval_instalar_con_codigo_125_es_infraestructura() {
+        let repo = repo_completo();
+        let fabrica =
+            FabricaEvalFalsa::con(ExecFalso::vacio().responde("make", Resp::Codigo(125, "")));
+        let r = sonda_con(&fabrica, repo.path(), &tarea_de("shell", ENTREGA));
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("instalar")
+        );
+        assert!(
+            !r.sonda
+                .hallazgos
+                .iter()
+                .any(|h| h.detalle.contains("no instala"))
+        );
+        assert!(!fabrica.exec.hubo("./run"));
+    }
+
+    #[test]
+    fn eval_copia_que_falla_es_infraestructura_sin_instalar() {
+        let repo = repo_completo();
+        let fabrica =
+            FabricaEvalFalsa::con(ExecFalso::vacio().responde("cp -a", Resp::Codigo(1, "")));
+        let r = sonda_con(&fabrica, repo.path(), &tarea_de("shell", ENTREGA));
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("instalar nunca corrió")
+        );
+        assert!(!fabrica.exec.hubo("make"));
+    }
+
+    #[test]
+    fn eval_arranque_fallido_da_sin_veredicto_con_el_motivo() {
+        let repo = repo_completo();
+        let fabrica = FabricaEvalFalsa {
+            arranque: Some("la imagen no trae sh"),
+            ..FabricaEvalFalsa::con(ExecFalso::vacio())
+        };
+        let r = sonda_con(&fabrica, repo.path(), &tarea_de("shell", ENTREGA));
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("el contenedor no arrancó el script de entrega: la imagen no trae sh")
+        );
+        assert!(sin_hallazgos_de_entrega(&r));
+        assert_eq!(fabrica.aperturas.get(), 1);
+    }
+
+    #[test]
+    fn eval_escenario_con_red_queda_pendiente_fuera_del_mapa() {
+        let repo = repo_completo();
+        let fabrica = FabricaEvalFalsa::con(
+            ExecFalso::vacio().responde("exit 1", Resp::Codigo(6, "Could not resolve host: x\n")),
+        );
+        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}"));
+        let r = sonda_con(&fabrica, repo.path(), &t);
+        assert!(
+            !r.escenarios.contains_key("b"),
+            "pendiente no entra al mapa"
+        );
+        assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
+        assert_eq!(r.pendientes[0].test, "tarea.toml::escenario-b");
+        assert!(r.pendientes[0].motivo.contains("red"));
+    }
+
+    #[test]
+    fn eval_escenario_con_error_de_podman_da_sin_veredicto() {
+        let repo = repo_completo();
+        let fabrica = FabricaEvalFalsa::con(
+            ExecFalso::vacio().responde("exit 0", Resp::Error("podman caído")),
+        );
+        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}"));
+        let r = sonda_con(&fabrica, repo.path(), &t);
+        assert_eq!(r.sonda.valor, None);
+        assert!(r.sonda.motivo.unwrap_or_default().contains("podman caído"));
+    }
+
+    #[test]
+    fn entrega_escenario_fallido_deja_requisito_en_parcial() {
+        let repo = tempfile::tempdir().expect("temp dir");
+        fs::write(repo.path().join("README.md"), "x").expect("escribe");
+        fs::write(repo.path().join("Dockerfile"), "FROM x\nUSER app\n").expect("escribe");
+        let tarea = tarea_de(
+            "shell",
+            "[entrega]\ninstalar = \"make\"\ncorrer = \"./run\"\nespera_segundos = 0\n\
+             archivos = [\"README.md\", \"Dockerfile\"]\n\n\
+             [[escenario]]\nid = \"set-get\"\ncmd = \"false\"\n\n\
+             [[requisito]]\nid = \"R1\"\ntitulo = \"Guardar y leer\"\npeso = 3\n\
+             pruebas = [\"tests/entrega.rs::test_a\"]\nescenarios = [\"set-get\"]\n",
+        );
+        let fabrica =
+            FabricaEvalFalsa::con(ExecFalso::vacio().responde("false", Resp::Codigo(1, "")));
+        let r = sonda_con(&fabrica, repo.path(), &tarea);
+        assert_eq!(r.sonda.hallazgos.len(), 1, "solo el escenario falla");
+
+        let mut tests = BTreeMap::new();
+        tests.insert(
+            "tests/entrega.rs::test_a".to_string(),
+            crate::oracle::junit::ResultadoTest::Pasa,
+        );
+        let resultados = crate::oracle::requisitos::ResultadosTests {
+            tests,
+            inestables: Default::default(),
+            tasas: Default::default(),
+        };
+        let estados = crate::oracle::requisitos::evaluar_requisitos(
+            &tarea.requisito,
+            &resultados,
+            &r.escenarios,
+            &[],
+            &[],
+            &BTreeMap::new(),
+        );
+        assert_eq!(estados[0].nivel, Some(2));
+        assert_eq!(estados[0].cumplimiento, crate::tipos::Cumplimiento::Parcial);
+        assert_eq!(r.sonda.hallazgos[0].dimension, Dimension::Entrega);
+        assert_eq!(
+            r.sonda.hallazgos[0].fuente,
+            crate::tipos::Fuente::Sonda("entrega".into())
+        );
+    }
+
+    /// Ejecutor sin hadolint: `command -v` falla y la entrega sale bien.
+    struct SinHadolint;
+
+    impl EjecutorHerramienta for SinHadolint {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            Ok(SalidaHerramienta {
+                codigo: if cmd.starts_with("command -v") { 1 } else { 0 },
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn entrega_dockerfile_sin_user_da_un_solo_hallazgo_entre_configs_y_entrega() {
+        let repo = tempfile::tempdir().expect("temp dir");
+        fs::write(repo.path().join("README.md"), "# x\n").expect("escribe README");
+        fs::write(
+            repo.path().join("Dockerfile"),
+            "FROM debian:bookworm-slim\n",
+        )
+        .expect("escribe Dockerfile");
+        let tarea = tarea_de(
+            "shell",
+            "[entrega]\ninstalar = \"make\"\ncorrer = \"./run\"\nespera_segundos = 0\n\
+             archivos = [\"README.md\", \"Dockerfile\"]\n",
+        );
+        let ej = SinHadolint;
+        let configs: Vec<Hallazgo> =
+            crate::oracle::configs::sondas_configs(repo.path(), &ej, &tarea)
+                .into_iter()
+                .flat_map(|r| r.hallazgos)
+                .collect();
+        let entrega = sonda_con(&sana(), repo.path(), &tarea).sonda.hallazgos;
+        let todos: Vec<Hallazgo> = configs.into_iter().chain(entrega).collect();
+        // La unión ya trae el hallazgo una sola vez: solo la sonda de entrega emite la regla de USER.
+        assert_eq!(todos.len(), 1, "{todos:?}");
+        // Red de seguridad: la sonda dueña es la que nombra la tabla de rúbricas.
+        let hallazgos = crate::oracle::perfiles::deduplicar_hallazgos(todos);
+        assert_eq!(hallazgos.len(), 1, "{hallazgos:?}");
+        assert_eq!(hallazgos[0].dimension, Dimension::Entrega);
+        assert!(hallazgos[0].detalle.contains("USER"));
+    }
+
+    #[test]
+    fn entrega_script_de_la_evaluacion_de_memo_son_textos_distintos() {
+        let tarea = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}"));
+        assert_ne!(
+            construir_script_con(&tarea, true),
+            construir_script_con(&tarea, false)
+        );
     }
 }
