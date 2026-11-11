@@ -628,6 +628,7 @@ pub fn juzgar(
         pedidos: &pedidos,
         catalogo: &catalogo,
         modelo: nombre_modelo,
+        leidos: &guardados,
     };
     let mut lectura = leer_items(respuesta.items, &cx);
     let mut hallazgos = Vec::new();
@@ -729,6 +730,7 @@ fn reintentar(
         pedidos: &pedidos,
         catalogo: cx.catalogo,
         modelo: cx.modelo,
+        leidos: cx.leidos,
     };
     leer_items(respuesta.items, &cx_reintento)
 }
@@ -805,6 +807,8 @@ struct Contexto<'a> {
     pedidos: &'a BTreeMap<String, Dimension>,
     catalogo: &'a BTreeMap<String, Mide>,
     modelo: &'a str,
+    /// Extractos que el juez leyó. Los hallazgos deben caer dentro de alguno.
+    leidos: &'a [ExtractoGuardado],
 }
 
 impl Contexto<'_> {
@@ -1148,8 +1152,21 @@ fn descartar_hallazgo(
     descarte(format!("hallazgo sobre {item}"), motivo)
 }
 
-/// Valida un hallazgo: requisito real, severidad 1 a 3, cita en el repo. Los rechazos por requisito o cita
-/// también van a `rechazados`.
+/// Motivo de un hallazgo cuya línea no cae en ningún extracto leído de su archivo.
+const MOTIVO_LINEA_FUERA: &str = "línea fuera de lo leído";
+
+/// Vale si la línea cae en un extracto leído del mismo archivo.
+/// Sin extractos no hay contra qué validar. Ese caso no descarta nada.
+fn linea_leida(cx: &Contexto, archivo: &str, linea: u32) -> bool {
+    cx.leidos.is_empty()
+        || cx
+            .leidos
+            .iter()
+            .any(|e| e.archivo == archivo && e.desde <= linea && linea <= e.hasta)
+}
+
+/// Valida un hallazgo: requisito real, severidad 1 a 3, línea leída, cita en el repo. Los rechazos por
+/// requisito, línea o cita también van a `rechazados`.
 fn procesar_hallazgo(
     valor: Value,
     cx: &Contexto,
@@ -1185,6 +1202,15 @@ fn procesar_hallazgo(
             cruda.linea,
             &cruda.item,
             format!("sin requisito afectado: {id} no existe"),
+            rechazados,
+        ));
+    }
+    if !linea_leida(cx, &cruda.archivo, cruda.linea) {
+        return Err(descartar_hallazgo(
+            &cruda.archivo,
+            cruda.linea,
+            &cruda.item,
+            MOTIVO_LINEA_FUERA.into(),
             rechazados,
         ));
     }
@@ -1440,6 +1466,7 @@ mod tests {
             pedidos: &pedidos,
             catalogo: &catalogo,
             modelo: MODELO,
+            leidos: &[],
         };
         leer_items(lista, &cx)
     }
@@ -2000,6 +2027,131 @@ mod tests {
         assert!(r.descartes.iter().any(|d| d.motivo.contains("severidad")));
         assert!(
             r.hallazgos_descartados.is_empty(),
+            "{:?}",
+            r.hallazgos_descartados
+        );
+    }
+
+    // Validación de línea: el hallazgo debe caer dentro de un extracto leído del mismo archivo.
+
+    /// Caso con `src/almacen.rs` de 150 líneas. La línea 100 tiene la cita real.
+    fn caso_de_150_lineas() -> Caso {
+        let repo = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(repo.path().join("src")).expect("crea src");
+        let texto: String = (1..=150)
+            .map(|n| {
+                if n == 100 {
+                    format!("{CITA_REAL}\n")
+                } else {
+                    format!("fn f{n}() {{}}\n")
+                }
+            })
+            .collect();
+        fs::write(repo.path().join("src/almacen.rs"), texto).expect("escribe");
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        Caso {
+            repo,
+            mapa,
+            requisitos: vec![requisito("R1", 3)],
+            rubricas: vec![rubrica_valida()],
+            sondas: vec![],
+        }
+    }
+
+    /// Hallazgo del juez sobre `archivo:linea`, con requisito R1 y severidad 2.
+    fn hallazgo_en(archivo: &str, linea: u32, cita: &str) -> Value {
+        json!({
+            "item": MODULARIDAD,
+            "severidad": 2,
+            "archivo": archivo,
+            "linea": linea,
+            "cita": cita,
+            "detalle": DETALLE,
+            "impacto": ["R1"],
+        })
+    }
+
+    #[test]
+    fn juez_hallazgo_fuera_de_lo_leido_queda_en_descartados() {
+        let c = caso_de_150_lineas();
+        let texto = respuesta(
+            json!([]),
+            json!([hallazgo_en("src/almacen.rs", 500, CITA_REAL)]),
+        );
+        let r = juzgar_con(&c, texto);
+        // Premisa: el extracto cubre 1..=150, así que la línea 500 queda fuera.
+        assert_eq!(r.extractos.len(), 1, "{:?}", r.extractos);
+        assert_eq!((r.extractos[0].desde, r.extractos[0].hasta), (1, 150));
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(
+            r.hallazgos_descartados.len(),
+            1,
+            "{:?}",
+            r.hallazgos_descartados
+        );
+        let d = &r.hallazgos_descartados[0];
+        assert_eq!((d.archivo.as_str(), d.linea), ("src/almacen.rs", 500));
+        assert_eq!(d.item, MODULARIDAD);
+        assert_eq!(d.motivo, "línea fuera de lo leído");
+    }
+
+    #[test]
+    fn juez_hallazgo_dentro_de_lo_leido_sigue_valido() {
+        let c = caso_de_150_lineas();
+        let texto = respuesta(
+            json!([]),
+            json!([hallazgo_en("src/almacen.rs", 100, CITA_REAL)]),
+        );
+        let r = juzgar_con(&c, texto);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.descartes);
+        assert!(
+            r.hallazgos_descartados.is_empty(),
+            "{:?}",
+            r.hallazgos_descartados
+        );
+    }
+
+    #[test]
+    fn juez_hallazgo_de_archivo_sin_extracto_queda_en_descartados() {
+        let c = caso_de_150_lineas();
+        let texto = respuesta(
+            json!([]),
+            json!([hallazgo_en("src/otro.rs", 100, CITA_REAL)]),
+        );
+        let r = juzgar_con(&c, texto);
+        assert!(r.hallazgos.is_empty());
+        assert_eq!(
+            r.hallazgos_descartados.len(),
+            1,
+            "{:?}",
+            r.hallazgos_descartados
+        );
+        assert_eq!(r.hallazgos_descartados[0].motivo, "línea fuera de lo leído");
+    }
+
+    #[test]
+    fn juez_sin_extractos_no_descarta_por_linea() {
+        // Repo sin archivos legibles: no hay extractos. La línea no se valida; cae en el gate.
+        let repo = tempfile::tempdir().expect("tempdir");
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let c = Caso {
+            repo,
+            mapa,
+            requisitos: vec![requisito("R1", 3)],
+            rubricas: vec![rubrica_valida()],
+            sondas: vec![],
+        };
+        let texto = respuesta(
+            json!([]),
+            json!([hallazgo_en("src/almacen.rs", 500, CITA_REAL)]),
+        );
+        let r = juzgar_con(&c, texto);
+        assert!(r.extractos.is_empty());
+        assert_eq!(r.hallazgos_descartados.len(), 1, "{:?}", r.descartes);
+        assert!(
+            !r.hallazgos_descartados[0]
+                .motivo
+                .contains("línea fuera de lo leído"),
             "{:?}",
             r.hallazgos_descartados
         );
