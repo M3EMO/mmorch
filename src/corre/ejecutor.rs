@@ -5,9 +5,9 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -182,6 +182,12 @@ impl EjecutorContenedorBuilder {
 
 impl EjecutorBuilder for EjecutorContenedorBuilder {
     fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+        // Con el ejecutor terminando no se crea copia ni se lanza nada.
+        if terminando() {
+            return Err(ErrorCorre::Ejecutor(
+                "no se lanza el builder: el ejecutor está terminando".into(),
+            ));
+        }
         // La credencial va primero: sin ella no se valida, no se crea nada y no se busca podman.
         revisar_credencial(&self.credencial)?;
         if let Some(plugin) = &l.plugin {
@@ -303,38 +309,60 @@ fn revisar_plugin(plugin: &Path) -> Result<(), ErrorCorre> {
     }
 }
 
-/// Pid del hijo en curso de `correr_proceso_con_tope`. Sin valor si no hay hijo.
-static HIJO_EN_CURSO: Mutex<Option<u32>> = Mutex::new(None);
+/// Estado del hijo que corre `correr_hijo`. Va bajo un solo cerrojo: el spawn y el registro del pid
+/// ocurren juntos frente a `terminar_hijo_en_curso`.
+struct EstadoHijo {
+    /// Pid del hijo en curso. Sin valor si no hay hijo registrado.
+    pid: Option<u32>,
+    /// Lo pone `terminar_hijo_en_curso`. Un spawn pedido después no lanza nada.
+    terminando: bool,
+}
 
-/// Registra el pid de un hijo mientras vive. Al soltarlo, borra el registro.
-struct HijoRegistrado;
+static ESTADO_HIJO: Mutex<EstadoHijo> = Mutex::new(EstadoHijo {
+    pid: None,
+    terminando: false,
+});
 
-impl HijoRegistrado {
-    fn nuevo(pid: u32) -> HijoRegistrado {
-        *HIJO_EN_CURSO.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
-        HijoRegistrado
-    }
+/// Toma el cerrojo del estado del hijo. Un pánico previo no lo deja inservible.
+fn estado_hijo() -> MutexGuard<'static, EstadoHijo> {
+    ESTADO_HIJO.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Dice si el ejecutor está terminando por una señal. Un lanzamiento nuevo no debe empezar.
+pub(crate) fn terminando() -> bool {
+    estado_hijo().terminando
+}
+
+/// Registro del pid de un hijo mientras vive. Quien lo tiene lo suelta justo después del `wait`.
+/// Si se sale antes por error, el `Drop` también lo borra.
+struct HijoRegistrado {
+    pid: u32,
 }
 
 impl Drop for HijoRegistrado {
     fn drop(&mut self) {
-        *HIJO_EN_CURSO.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let mut estado = estado_hijo();
+        if estado.pid == Some(self.pid) {
+            estado.pid = None;
+        }
     }
 }
 
-/// Termina con SIGKILL el hijo en curso, si lo hay. Sin hijo, no hace nada.
+/// Termina con SIGKILL el hijo en curso, si lo hay. Marca `terminando` antes de leer el pid.
+/// Sin hijo, no mata nada. El cerrojo sigue tomado mientras corre `kill`.
 pub fn terminar_hijo_en_curso() -> Result<(), ErrorCorre> {
-    let guardia = HIJO_EN_CURSO.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(pid) = *guardia else {
+    let mut estado = estado_hijo();
+    estado.terminando = true;
+    let Some(pid) = estado.pid else {
         return Ok(());
     };
-    let estado = Command::new("kill")
+    let salida_kill = Command::new("kill")
         .args(["-KILL", &pid.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map_err(|e| ErrorCorre::Ejecutor(format!("no se pudo correr kill: {e}")))?;
-    if estado.success() {
+    if salida_kill.success() {
         Ok(())
     } else {
         Err(ErrorCorre::Ejecutor(format!(
@@ -346,14 +374,60 @@ pub fn terminar_hijo_en_curso() -> Result<(), ErrorCorre> {
 /// Pid del hijo en curso, para los tests.
 #[cfg(test)]
 pub(crate) fn pid_en_curso() -> Option<u32> {
-    *HIJO_EN_CURSO.lock().unwrap_or_else(|e| e.into_inner())
+    estado_hijo().pid
+}
+
+/// Función que corre en un punto de `correr_proceso_con_tope`, solo en tests.
+#[cfg(test)]
+type Costura = Box<dyn Fn() + Send + Sync>;
+
+/// Costura entre el spawn y el registro del pid. Corre tras el spawn y antes de registrar.
+#[cfg(test)]
+static COSTURA_ENTRE_SPAWN_Y_REGISTRO: Mutex<Option<Costura>> = Mutex::new(None);
+
+/// Costura tras la espera del hijo. Corre después de matarlo y recogerlo, si hace falta.
+#[cfg(test)]
+static COSTURA_TRAS_ESPERA: Mutex<Option<Costura>> = Mutex::new(None);
+
+/// Corre la costura guardada en `costura`, si la hay.
+#[cfg(test)]
+fn llamar_costura(costura: &Mutex<Option<Costura>>) {
+    let guardia = costura.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(f) = guardia.as_ref() {
+        f();
+    }
 }
 
 /// Cerrojo de los tests que corren hijos o señales. Así una señal de un test no mata el hijo de otro.
+/// Al tomarlo y al soltarlo, borra la marca `terminando` y las costuras. Ningún test hereda una señal.
 #[cfg(test)]
-pub(crate) fn serie_de_pruebas() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn serie_de_pruebas() -> SeriePruebas {
     static SERIE: Mutex<()> = Mutex::new(());
-    SERIE.lock().unwrap_or_else(|e| e.into_inner())
+    let guardia = SERIE.lock().unwrap_or_else(|e| e.into_inner());
+    reiniciar_estado_de_pruebas();
+    SeriePruebas { _guardia: guardia }
+}
+
+/// Guardia de `serie_de_pruebas`. Al soltarlo, deja el estado del hijo limpio para el siguiente test.
+#[cfg(test)]
+pub(crate) struct SeriePruebas {
+    _guardia: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for SeriePruebas {
+    fn drop(&mut self) {
+        reiniciar_estado_de_pruebas();
+    }
+}
+
+/// Quita la marca `terminando` y las costuras. No toca el pid registrado.
+#[cfg(test)]
+fn reiniciar_estado_de_pruebas() {
+    estado_hijo().terminando = false;
+    for costura in [&COSTURA_ENTRE_SPAWN_Y_REGISTRO, &COSTURA_TRAS_ESPERA] {
+        *costura.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
 }
 
 /// Quita los contenedores del builder que lanzó este proceso: los que llevan `root-builder-<pid>-` en
@@ -396,7 +470,7 @@ fn correr_paso_de_quitar(
     plazo: Duration,
     paso: &str,
 ) -> Result<SalidaClaude, ErrorCorre> {
-    match correr_proceso(programa, args, plazo)? {
+    match correr_hijo(programa, args, plazo, TOPE_SALIDA_BUILDER, false)? {
         Fin::Termino(salida) if salida.codigo == 0 => Ok(salida),
         Fin::Termino(salida) => Err(ErrorCorre::Ejecutor(format!(
             "{paso} de los contenedores salió con código {}: {}",
@@ -448,29 +522,28 @@ fn correr_proceso_con_tope(
     plazo: Duration,
     tope: usize,
 ) -> Result<Fin, ErrorCorre> {
-    let mut hijo = Command::new(programa)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            ErrorCorre::Ejecutor(format!(
-                "no se pudo lanzar {programa} (¿está instalado y en PATH?): {e}"
-            ))
-        })?;
-    let _registro = HijoRegistrado::nuevo(hijo.id());
+    correr_hijo(programa, args, plazo, tope, true)
+}
+
+/// Corre `programa` como `correr_proceso_con_tope`. Con `registrar`, el pid queda en el registro de
+/// `terminar_hijo_en_curso`, y no lanza nada si el ejecutor ya termina. Sin `registrar`, no toca el
+/// registro ni lo frena `terminando`: lo usan los comandos que corre la señal.
+fn correr_hijo(
+    programa: &str,
+    args: &[String],
+    plazo: Duration,
+    tope: usize,
+    registrar: bool,
+) -> Result<Fin, ErrorCorre> {
+    let (mut hijo, registro) = lanzar_hijo(programa, args, registrar)?;
     let salida = hijo.stdout.take().map(|f| leer_en_hilo_con(f, tope));
     let error = hijo.stderr.take().map(|f| leer_en_hilo_con(f, tope));
-    let estado = esperar(&mut hijo, plazo).map_err(|e| {
-        ErrorCorre::Ejecutor(match e {
-            ErrorOraculo::Infra(m) => m,
-            otro => otro.to_string(),
-        })
-    })?;
-    let Some(estado) = estado else {
-        let _ = hijo.kill();
-        let _ = hijo.wait();
+    let espera = esperar_o_matar(&mut hijo, plazo);
+    // El pid se borra apenas el hijo queda recogido. Así la señal nunca mata un pid reciclado.
+    drop(registro);
+    #[cfg(test)]
+    llamar_costura(&COSTURA_TRAS_ESPERA);
+    let Some(estado) = espera? else {
         return Ok(Fin::Vencio {
             stdout: lectura_tras_corte(salida).bytes,
             stderr: lectura_tras_corte(error).bytes,
@@ -493,6 +566,60 @@ fn correr_proceso_con_tope(
         stdout: stdout.bytes,
         stderr: lectura_de(error).bytes,
     }))
+}
+
+/// Lanza el hijo. Con `registrar`, el spawn y el registro del pid van juntos bajo el cerrojo.
+/// Con `terminando` puesto, no lanza nada y da error.
+fn lanzar_hijo(
+    programa: &str,
+    args: &[String],
+    registrar: bool,
+) -> Result<(Child, Option<HijoRegistrado>), ErrorCorre> {
+    if !registrar {
+        return Ok((spawn_hijo(programa, args)?, None));
+    }
+    let mut estado = estado_hijo();
+    if estado.terminando {
+        return Err(ErrorCorre::Ejecutor(format!(
+            "no se lanza {programa}: el ejecutor está terminando"
+        )));
+    }
+    let hijo = spawn_hijo(programa, args)?;
+    let pid = hijo.id();
+    #[cfg(test)]
+    llamar_costura(&COSTURA_ENTRE_SPAWN_Y_REGISTRO);
+    estado.pid = Some(pid);
+    Ok((hijo, Some(HijoRegistrado { pid })))
+}
+
+/// Lanza `programa` con sus flujos de salida en pipe. Sin registro ni cerrojo.
+fn spawn_hijo(programa: &str, args: &[String]) -> Result<Child, ErrorCorre> {
+    Command::new(programa)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            ErrorCorre::Ejecutor(format!(
+                "no se pudo lanzar {programa} (¿está instalado y en PATH?): {e}"
+            ))
+        })
+}
+
+/// Espera al hijo hasta `plazo`. Si vence, lo mata y lo recoge. Da `None` si venció.
+fn esperar_o_matar(hijo: &mut Child, plazo: Duration) -> Result<Option<ExitStatus>, ErrorCorre> {
+    let estado = esperar(hijo, plazo).map_err(|e| {
+        ErrorCorre::Ejecutor(match e {
+            ErrorOraculo::Infra(m) => m,
+            otro => otro.to_string(),
+        })
+    })?;
+    if estado.is_none() {
+        let _ = hijo.kill();
+        let _ = hijo.wait();
+    }
+    Ok(estado)
 }
 
 /// Lectura de un flujo leído en otro hilo. Sin flujo o con un hilo caído, vacía.
@@ -745,6 +872,8 @@ mod tests {
 
     #[test]
     fn corre_contenedor_sin_credencial_no_lanza_y_nombra_la_ruta() {
+        // Toma la serie: un test de señal no debe dejar puesta la marca `terminando` aquí.
+        let _serie = serie_de_pruebas();
         // Sin credencial en el host, el error sale antes de buscar o correr podman.
         let tmp = TempDir::new().expect("tmp");
         let (ejecutor, credencial) = ejecutor_real(&tmp, false);
@@ -764,6 +893,8 @@ mod tests {
 
     #[test]
     fn corre_contenedor_repo_dentro_de_root_home_no_lanza() {
+        // Toma la serie: un test de señal no debe dejar puesta la marca `terminando` aquí.
+        let _serie = serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
         let (ejecutor, _) = ejecutor_real(&tmp, true);
         let repo = tmp.path().join("root").join("corrida").join("repo");
@@ -790,6 +921,8 @@ mod tests {
 
     #[test]
     fn corre_contenedor_plugin_inexistente_es_error_que_nombra_la_ruta() {
+        // Toma la serie: un test de señal no debe dejar puesta la marca `terminando` aquí.
+        let _serie = serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
         let (ejecutor, _) = ejecutor_real(&tmp, true);
         let plugin = tmp.path().join("no-existe-ecc");
@@ -811,6 +944,8 @@ mod tests {
 
     #[test]
     fn corre_contenedor_plugin_que_es_archivo_es_error() {
+        // Toma la serie: un test de señal no debe dejar puesta la marca `terminando` aquí.
+        let _serie = serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
         let (ejecutor, _) = ejecutor_real(&tmp, true);
         let plugin = tmp.path().join("plugin-archivo");
@@ -826,6 +961,8 @@ mod tests {
 
     #[test]
     fn corre_contenedor_plugin_dentro_de_root_home_no_lanza() {
+        // Toma la serie: un test de señal no debe dejar puesta la marca `terminando` aquí.
+        let _serie = serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
         let (ejecutor, _) = ejecutor_real(&tmp, true);
         let plugin = tmp.path().join("root").join("ecc-plugin");
@@ -913,6 +1050,7 @@ mod tests {
 
     #[test]
     fn corre_proceso_con_tope_stderr_recortado_no_falla() {
+        let _serie = serie_de_pruebas();
         let args = vec![
             "-c".to_string(),
             "head -c 5000 /dev/zero | tr '\\0' x >&2; echo ok".to_string(),
@@ -928,6 +1066,7 @@ mod tests {
 
     #[test]
     fn corre_proceso_con_tope_amplio_y_salida_chica_igual_que_hoy() {
+        let _serie = serie_de_pruebas();
         let args = vec!["-c".to_string(), "echo hola".to_string()];
         let Fin::Termino(salida) =
             correr_proceso_con_tope("sh", &args, Duration::from_secs(20), 1000).expect("corre")
@@ -1210,5 +1349,126 @@ mod tests {
             "no espera el plazo"
         );
         assert_eq!(pid_en_curso(), None, "el registro se limpia al terminar");
+    }
+
+    #[test]
+    fn senal_en_la_ventana_entre_spawn_y_registro_termina_el_hijo() {
+        let _serie = serie_de_pruebas();
+        // La costura avisa que el spawn ocurrió y espera un instante, antes de registrar el pid.
+        let (aviso, avisado) = std::sync::mpsc::channel::<()>();
+        *COSTURA_ENTRE_SPAWN_Y_REGISTRO.lock().expect("costura") = Some(Box::new(move || {
+            let _ = aviso.send(());
+            std::thread::sleep(Duration::from_millis(100));
+        }));
+        let senal = std::thread::spawn(move || {
+            avisado
+                .recv_timeout(Duration::from_secs(5))
+                .expect("la costura avisa el spawn");
+            terminar_hijo_en_curso()
+        });
+        let args = vec!["-c".to_string(), "exec sleep 30".to_string()];
+        let inicio = Instant::now();
+        let resultado = correr_proceso("sh", &args, Duration::from_secs(10));
+        assert!(
+            senal.join().expect("hilo de la señal").is_ok(),
+            "la señal termina sin error"
+        );
+        assert!(
+            resultado.is_err(),
+            "el hijo debe morir por la señal, no vencer por su plazo"
+        );
+        assert!(
+            inicio.elapsed() < Duration::from_secs(5),
+            "no espera el plazo"
+        );
+    }
+
+    #[test]
+    fn spawn_pedido_despues_de_terminando_no_lanza_nada() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let marcador = tmp.path().join("lanzado.txt");
+        terminar_hijo_en_curso().expect("marca terminando");
+        let args = vec![
+            "-c".to_string(),
+            format!("echo x > '{}'", marcador.display()),
+        ];
+        let resultado = correr_proceso("sh", &args, Duration::from_secs(10));
+        assert!(
+            matches!(resultado, Err(ErrorCorre::Ejecutor(_))),
+            "con terminando no se lanza el proceso"
+        );
+        assert!(!marcador.exists(), "el proceso no debe correr");
+    }
+
+    #[test]
+    fn lanzar_con_terminando_no_crea_copia_ni_lanza() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, credencial) = ejecutor_real(&tmp, false);
+        escribir_credencial(&credencial, &credencial_con_mcp(VENCE_LEJOS_MS));
+        // Imagen vacía: si el código viejo llega a podman, podman falla sin bajar nada.
+        let ejecutor = EjecutorContenedorBuilder {
+            imagen: String::new(),
+            ..ejecutor
+        };
+        terminar_hijo_en_curso().expect("marca terminando");
+        let repo = tmp.path().join("usuario/.cache/root/corridas/corre-1/repo");
+        let error = ejecutor
+            .lanzar(&lanzamiento(repo, Vec::new()))
+            .expect_err("con terminando no hay lanzamiento");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        let copia = tmp
+            .path()
+            .join("usuario/.cache/root/corridas/corre-1/claude-estado/.credentials.json");
+        assert!(!copia.exists(), "no debe crear la copia de la credencial");
+    }
+
+    #[test]
+    fn quitar_builders_no_registra_su_pid_ni_pisa_el_del_hijo() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let hilo = lanzar_hijo_en_curso();
+        esperar_hijo_registrado();
+        let pid_hijo = pid_en_curso();
+        let programa = programa_falso(tmp.path(), "exit 0");
+        let resultado = quitar_builders_de_este_proceso(
+            programa.to_str().expect("ruta"),
+            Duration::from_secs(10),
+        );
+        let despues = pid_en_curso();
+        // Limpieza antes de los asserts: el hijo de la prueba no debe quedar vivo si uno falla.
+        terminar_hijo_en_curso().expect("termina el hijo de la prueba");
+        let _ = hilo.join();
+        assert!(resultado.is_ok(), "quitar sin nombres no falla");
+        assert_eq!(
+            despues, pid_hijo,
+            "quitar no debe cambiar el pid registrado del hijo"
+        );
+    }
+
+    #[test]
+    fn registro_del_hijo_se_borra_al_recoger_el_wait() {
+        let _serie = serie_de_pruebas();
+        // Un hijo que sale solo y otro que vence el plazo: los dos caminos del wait.
+        let vistos = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let copia = std::sync::Arc::clone(&vistos);
+        *COSTURA_TRAS_ESPERA.lock().expect("costura") = Some(Box::new(move || {
+            copia.lock().expect("vistos").push(pid_en_curso());
+        }));
+        for (script, plazo) in [
+            ("exit 0", Duration::from_secs(20)),
+            ("exec sleep 5", Duration::from_millis(100)),
+        ] {
+            vistos.lock().expect("vistos").clear();
+            let args = vec!["-c".to_string(), script.to_string()];
+            correr_proceso("sh", &args, plazo).expect("corre");
+            let registros = vistos.lock().expect("vistos").clone();
+            assert_eq!(
+                registros,
+                vec![None],
+                "tras el wait no debe quedar pid registrado: {script}"
+            );
+        }
     }
 }
