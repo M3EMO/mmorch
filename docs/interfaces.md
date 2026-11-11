@@ -643,7 +643,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "minimum": 0
         },
         "limpios_sin_veredicto": {
-          "description": "Casos limpios medidos con `sin_veredicto`: la dimensión no emitió veredicto en la copia. No detectan, así\nque entran a `especificidad` como no detectados. No son falsas alarmas. Una fila sin el campo vale 0.",
+          "description": "Copias limpias sin veredicto de la dimensión. No entran a `especificidad`: no hay veredicto que medir.\nNo son falsas alarmas. Una fila sin el campo vale 0.",
           "type": "integer",
           "format": "uint32",
           "default": 0,
