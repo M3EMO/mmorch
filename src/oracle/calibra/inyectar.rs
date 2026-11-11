@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::borrado;
 use crate::oracle::mutacion::MutanteMuerto;
-use crate::oracle::perfiles::rust::LimitesEstructura;
+use crate::oracle::perfiles::rust::{LimitesEstructura, analizar};
 use crate::tipos::Dimension;
 
 /// Defecto que se inyecta en una copia. Cada uno apunta a una dimensión y a un ítem de rúbrica.
@@ -673,12 +673,12 @@ struct Cuerpo {
 
 /// Cuerpo de la función que declara la línea `firma`. La firma puede ocupar varias líneas: el cuerpo empieza en la
 /// primera `{` fuera de paréntesis y corchetes. `None` si la firma termina en `;` (declaración), si no cierra, o si
-/// abre y cierra en la misma línea.
-fn cuerpo_de(lineas: &[String], firma: usize) -> Option<Cuerpo> {
+/// abre y cierra en la misma línea. `limpias` es el archivo entero de `limpias_de`: sin comentarios ni cadenas.
+fn cuerpo_de(limpias: &[String], firma: usize) -> Option<Cuerpo> {
     let mut nivel = 0i32;
     let mut apertura = None;
-    'firma: for (j, linea) in lineas.iter().enumerate().skip(firma) {
-        for (p, c) in linea_limpia(linea).char_indices() {
+    'firma: for (j, limpia) in limpias.iter().enumerate().skip(firma) {
+        for (p, c) in limpia.char_indices() {
             match c {
                 '(' | '[' => nivel += 1,
                 ')' | ']' => nivel -= 1,
@@ -693,8 +693,7 @@ fn cuerpo_de(lineas: &[String], firma: usize) -> Option<Cuerpo> {
     }
     let (abre, abre_pos) = apertura?;
     let mut profundidad = 0i32;
-    for (k, linea) in lineas.iter().enumerate().skip(abre) {
-        let limpia = linea_limpia(linea);
+    for (k, limpia) in limpias.iter().enumerate().skip(abre) {
         let desde = if k == abre { abre_pos } else { 0 };
         for (p, c) in limpia.char_indices().skip_while(|(p, _)| *p < desde) {
             match c {
@@ -753,6 +752,7 @@ fn cuerpo_vaciado(
             Some(_) => Some(String::new()),
             None => None,
         };
+        let limpias = limpias_de(&lineas);
         let limite = limite_de_produccion(&lineas);
         for firma in 0..limite {
             let Some(nombre) = nombre_de_funcion(&lineas[firma]) else {
@@ -761,7 +761,7 @@ fn cuerpo_vaciado(
             if previo.as_ref().is_some_and(|p| !declara_fn(p, nombre)) {
                 continue;
             }
-            let Some(cuerpo) = cuerpo_de(&lineas, firma).filter(|c| c.cierra < limite) else {
+            let Some(cuerpo) = cuerpo_de(&limpias, firma).filter(|c| c.cierra < limite) else {
                 continue;
             };
             let cruza =
@@ -1149,34 +1149,23 @@ fn es_parte_de_palabra(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// La línea con el contenido de cadenas, de caracteres y de comentarios `//` en espacios. Mismo largo en bytes y
-/// mismas posiciones: un operador que aparece aquí está en esa posición del código real.
-fn linea_limpia(linea: &str) -> String {
-    let cars: Vec<char> = linea.chars().collect();
+/// Texto limpio de cada línea del archivo, en el mismo orden. `analizar` lleva el estado entre líneas: un
+/// comentario de bloque o una cadena cruda que sigue de una línea a otra quedan en blanco en todas sus líneas.
+fn limpias_de(lineas: &[String]) -> Vec<String> {
+    analizar(lineas)
+        .into_iter()
+        .map(|l| sin_caracteres(&l.limpia))
+        .collect()
+}
+
+/// Pone en blanco los literales de carácter (`'{'`, `'\n'`) de una línea limpia. Mismo largo en bytes.
+/// `analizar` copia esos literales tal cual, y una llave dentro de `'{'` no abre ni cierra bloque.
+fn sin_caracteres(limpia: &str) -> String {
+    let cars: Vec<char> = limpia.chars().collect();
     let mut oculto = vec![false; cars.len()];
-    let mut en_cadena = false;
     let mut i = 0;
     while i < cars.len() {
-        if en_cadena {
-            oculto[i] = true;
-            match cars[i] {
-                '\\' => {
-                    if let Some(o) = oculto.get_mut(i + 1) {
-                        *o = true;
-                    }
-                    i += 2;
-                    continue;
-                }
-                '"' => en_cadena = false,
-                _ => {}
-            }
-        } else if cars[i] == '/' && cars.get(i + 1) == Some(&'/') {
-            oculto[i..].fill(true);
-            break;
-        } else if cars[i] == '"' {
-            en_cadena = true;
-            oculto[i] = true;
-        } else if cars[i] == '\''
+        if cars[i] == '\''
             && let Some(fin) = fin_de_caracter(&cars, i)
         {
             oculto[i..=fin].fill(true);
@@ -1202,12 +1191,6 @@ fn fin_de_caracter(cars: &[char], i: usize) -> Option<usize> {
         '\\' => (i + 3..cars.len()).find(|&j| cars[j] == '\''),
         _ => (cars.get(i + 2) == Some(&'\'')).then_some(i + 2),
     }
-}
-
-/// `true` si la línea empieza con `//`, `/*` o `* `: no tiene código que mutar.
-fn es_comentario(linea: &str) -> bool {
-    let t = linea.trim_start();
-    t.starts_with("//") || t.starts_with("/*") || t.starts_with("* ")
 }
 
 /// Cambios de operador de comparación o lógico en la línea limpia.
@@ -1270,24 +1253,25 @@ fn ediciones_de_condicion(linea: &str, limpia: &str) -> Vec<Edicion> {
     let Some(llave) = condicion.find('{') else {
         return Vec::new();
     };
-    let fin = c + condicion[..llave].trim_end().len();
+    // La línea limpia y la original tienen las mismas posiciones en bytes: `limpias_de` no las mueve.
+    // El fin se mide en la original: en la limpia, un `'{'` queda en blanco y el `trim_end` lo corta.
+    let fin = c + linea[c..c + llave].trim_end().len();
     if fin == c {
         return Vec::new();
     }
-    // La línea limpia y la original tienen las mismas posiciones en bytes: `linea_limpia` no las mueve.
     let nuevo = format!("!({})", &linea[c..fin]);
     vec![cambio(c, fin, &nuevo, "if: agregar !".to_string())]
 }
 
-/// Todos los cambios posibles de `ComportamientoRoto` en una línea de producción. Vacío en comentarios.
-fn candidatos_de_linea(linea: &str) -> Vec<Edicion> {
-    if es_comentario(linea) {
+/// Todos los cambios posibles de `ComportamientoRoto` en una línea de producción. `limpia` sale de `limpias_de`.
+/// Una línea limpia en blanco, como un comentario o el interior de una cadena, no ofrece ninguno.
+fn candidatos_de_linea(linea: &str, limpia: &str) -> Vec<Edicion> {
+    if limpia.trim().is_empty() {
         return Vec::new();
     }
-    let limpia = linea_limpia(linea);
-    let mut salida = ediciones_de_operador(&limpia);
-    salida.extend(ediciones_de_valor(&limpia));
-    salida.extend(ediciones_de_condicion(linea, &limpia));
+    let mut salida = ediciones_de_operador(limpia);
+    salida.extend(ediciones_de_valor(limpia));
+    salida.extend(ediciones_de_condicion(linea, limpia));
     salida
 }
 
@@ -1314,13 +1298,14 @@ fn comportamiento_con_inicial(
     let mut candidatos: Vec<(String, usize, Edicion)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
+        let limpias = limpias_de(&lineas);
         let previas = lineas_del_inicial(inicial, &archivo)?;
         let limite = limite_de_produccion(&lineas);
         for (i, linea) in lineas[..limite].iter().enumerate() {
             if !en_el_cambio(cambios, &archivo, i as u32 + 1) {
                 continue;
             }
-            for edicion in candidatos_de_linea(linea) {
+            for edicion in candidatos_de_linea(linea, &limpias[i]) {
                 if !previas.contains(edicion.aplicar(linea).trim()) {
                     candidatos.push((archivo.clone(), i, edicion));
                 }
@@ -2969,11 +2954,23 @@ pub fn dos(x: u32) -> bool {
     #[test]
     fn agregar_negacion_envuelve_la_condicion_con_parentesis() {
         let linea = "    if x == 1 {";
-        let agregar = candidatos_de_linea(linea)
+        let limpia = limpias_de(&[linea.to_string()]).remove(0);
+        let agregar = candidatos_de_linea(linea, &limpia)
             .into_iter()
             .find(|e| e.operador == "if: agregar !")
             .expect("ofrece agregar !");
         assert_eq!(agregar.aplicar(linea), "    if !(x == 1) {");
+    }
+
+    #[test]
+    fn agregar_negacion_no_confunde_una_llave_de_caracter_con_la_del_bloque() {
+        let linea = "    if c == '{' {";
+        let limpia = limpias_de(&[linea.to_string()]).remove(0);
+        let agregar = candidatos_de_linea(linea, &limpia)
+            .into_iter()
+            .find(|e| e.operador == "if: agregar !")
+            .expect("ofrece agregar !");
+        assert_eq!(agregar.aplicar(linea), "    if !(c == '{') {");
     }
 
     #[test]
@@ -3022,6 +3019,42 @@ pub fn dos(x: u32) -> bool {
             assert_eq!(inyeccion, None, "semilla {semilla}");
         }
         assert_eq!(arbol(dir.path()), antes);
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_no_muta_lineas_de_comentario_de_bloque() {
+        let codigo =
+            "pub fn uno(a: u32, b: u32) -> bool {\n    /*\n    a > b\n    */\n    a == b\n}\n";
+        let cambios = rangos_de("src/lib.rs", &[(1, 6)]);
+        let inicial = repo_de(&[]);
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/lib.rs", codigo)]);
+            let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), semilla)
+                .expect("E/S")
+                .expect("aplica en `a == b`");
+            assert_ne!(
+                inyeccion.linea, 3,
+                "semilla {semilla}: la línea 3 está en /* */"
+            );
+        }
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_no_muta_lineas_de_cadena_cruda() {
+        let codigo =
+            "pub fn uno(a: u32, b: u32) -> bool {\n    let t = r#\"\na > b\n\"#;\n    a == b\n}\n";
+        let cambios = rangos_de("src/lib.rs", &[(1, 6)]);
+        let inicial = repo_de(&[]);
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/lib.rs", codigo)]);
+            let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), semilla)
+                .expect("E/S")
+                .expect("aplica en `a == b`");
+            assert_ne!(
+                inyeccion.linea, 3,
+                "semilla {semilla}: la línea 3 está en r#\"\"#"
+            );
+        }
     }
 
     /// Guarda: sin `inicial` la elección sigue siendo la de siempre. Mismo PRNG sobre las líneas de igualdad, en orden.
