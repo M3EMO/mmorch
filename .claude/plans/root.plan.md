@@ -7344,3 +7344,85 @@ Brief: `docs/builds/brief-local-90.md`, con base af2ab61 y rama `laptop/tarea-90
 Los siete puntos no comparten archivos, y corren en paralelo.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
+
+## Vuelta del 2026-11-11 (12): diseño para los MEDIUM 15 y 12, y Tarea 91
+
+**Estado.** La Tarea 90 corre sobre af2ab61. Las mezclas de la 84 a la 89 y P95 a P101 esperan al usuario.
+
+## 1. Qué puede falsificar el código evaluado hoy
+
+Leí `src/oracle/entrega.rs`, `src/oracle/pendientes.rs` y `src/oracle/contenedor.rs` en af2ab61.
+
+**Escenarios en la imagen construida: no se pueden falsificar.** `ContenedorEscenario` corre cada escenario con `podman exec` (`entrega.rs:1118`). Root lee el código de salida del proceso que lanzó. Ningún archivo interviene.
+
+**Escenarios en el contenedor de evaluación: sí se pueden falsificar.** `construir_script_con` (`entrega.rs:1259`) arma un solo script de `sh`:
+- El script lanza `correr` en segundo plano, con el producto vivo durante los escenarios.
+- Cada escenario escribe su código en `/salida/entrega-escenario-<id>.rc`.
+- `/salida` es escribible, y el producto corre con el mismo usuario.
+- Un proceso del producto puede escribir `0` en cada `.rc` después del escenario. Root lee `0` y da el escenario por bueno.
+- Lo mismo vale para `entrega-instalar.rc`, `entrega-correr.rc`, el marcador `.fin` y el marcador de arranque.
+
+**Junit de los tests ocultos y del contrato: se puede falsificar en parte.** El runner escribe el junit en `/salida`. El código del builder corre dentro de los tests, con el mismo usuario. Un test puede dejar un proceso vivo que reescriba el junit cuando el runner termina.
+
+**Clasificación del build: se puede falsificar.** `clasificar_fallo` (`entrega.rs:633`) busca la última línea `STEP` en toda la salida. La salida de un `RUN` es texto que imprime el repo. Con eso, el repo puede:
+- imprimir una línea `STEP` falsa, y mover el paso que falló;
+- imprimir "could not resolve host" y pasar de rojo a `PendienteRed`.
+
+**El build con red tampoco cierra el caso.** Ante un `PendienteRed`, Root repite el build con red (`entrega.rs:431`). Si falla otra vez y el texto vuelve a parecer de red, queda pendiente con `AVISO_RED_TAMPOCO`. Un `RUN` que falla siempre e imprime ese texto nunca da rojo.
+
+**Modelo de amenaza.** El builder es un modelo. Un modelo optimizado contra Root puede encontrar estos atajos sin intención maliciosa. El daño es una decisión "listo" falsa.
+
+## 2. El diseño
+
+**Regla 1: un resultado viaja por el código de salida de un proceso que Root lanzó. Nunca por un archivo que el código evaluado puede escribir.**
+
+**Regla 2: un archivo que escribe el código evaluado se lee recién con el contenedor muerto, y se cruza con un código de salida de la regla 1.**
+
+**Regla 3: un texto que imprime el repo nunca decide la clasificación. Solo cuenta el texto que imprime podman después de que el proceso del repo terminó.**
+
+### D1. Escenarios en el contenedor de evaluación, por `podman exec`
+
+1. El contenedor de evaluación arranca en modo separado, con un proceso que lo mantiene vivo, igual que `ContenedorEscenario::iniciar`.
+2. Cada paso corre con su propio `podman exec`: el marcador de arranque, el preludio, la copia de `/repo`, `instalar` y cada escenario.
+3. **El código de cada paso es el código de salida de su `podman exec`.** Los `.rc` desaparecen.
+4. **`correr` es un `podman exec` que Root mantiene como hijo.** Después de `espera_segundos`, Root mira ese hijo con `try_wait`. Si terminó, `correr` murió. Si sigue, está vivo. El marcador `.fin` desaparece.
+5. Los logs de cada paso salen del stdout y stderr del `podman exec`, con el lector con tope de la Tarea 85.
+6. Al final, Root termina el hijo de `correr` y quita el contenedor, como hoy.
+7. Con la misma función de escenario, los dos caminos quedan iguales: el de la imagen y el de evaluación.
+
+### D2. Junit cruzado con el código del runner
+
+**Ya existe casi entero.** `juzgar_junit` (`src/oracle/mod.rs:2341`) cruza el junit con el código del runner (M6):
+- Con pytest, el código 0 exige un junit sin fallos, y el código 1 exige fallos.
+- Con otro runner, un código distinto de 0 con un junit verde no vale. Es la falsificación que importa: un rojo que se hace pasar por verde.
+- Un código 0 con fallos en el junit sigue valiendo. Falsificar fallos solo empeora al builder, así que no hay incentivo.
+- El chequeo de ids esperados también existe.
+
+**Lo único que falta comprobar:** que Root lee el junit recién con el contenedor del runner muerto. Si un proceso sigue vivo durante la lectura, puede escribir después. La Tarea 91 lo verifica con un test. Si no se cumple, lo arregla.
+
+**Riesgo que queda, y se acepta por ahora.** Un proceso puede cambiar un test de rojo a verde y dejar otro en rojo. El código sigue distinto de 0, y el junit sigue con fallos. El cruce no lo ve. Cerrarlo pide correr cada test en un proceso propio, y eso multiplica el tiempo de la suite. Lo vuelvo a mirar si D3 de dataset muestra tareas con un solo test oculto, porque ahí el cruce sí alcanza.
+
+### D3. Clasificación del build con texto de podman
+
+1. **El paso que falló sale de la última línea no vacía del stderr,** si tiene la forma `Error: building at STEP "<instrucción>": <causa>`. podman la imprime después de que terminó el `RUN`. El repo no puede escribir después.
+2. Las líneas `STEP` del medio y el campo `paso` de la Tarea 85 ya no deciden. Se informan como contexto.
+3. Sin esa línea final, el build queda sin veredicto, como hoy cuando no se ubica el paso.
+4. **La imagen base ausente** se busca solo en la causa de esa línea final.
+5. **Con red disponible, un fallo es rojo.** Si el build con red falla en un paso, el texto de red ya no cuenta, y el resultado es "la imagen no construye". Solo queda pendiente si podman no pudo configurar la red (`red_no_configurada`), que es un texto de podman.
+
+**¿Pide una decisión del usuario? No.** Las tres reglas cambian cómo mide Root, no qué promete. Un "listo" falsificable contradice la promesa de hoy. El riesgo aceptado de D2 queda escrito arriba, con su motivo y su revisión.
+
+## 3. Tarea 91
+
+Brief: `docs/builds/brief-local-91.md`. Base: punta de `laptop/tarea-90`, que completa el orquestador. Rama `laptop/tarea-91`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | D3: clasificación del build | `src/oracle/entrega.rs` |
+| 2 | D1: escenarios por `podman exec` en el contenedor de evaluación | `src/oracle/entrega.rs`, `src/oracle/contenedor.rs` |
+| 3 | D2: el junit se lee con el contenedor del runner muerto | `src/oracle/mod.rs` |
+
+- Los puntos 1 y 2 comparten `entrega.rs`. Van en serie: primero el 1, que es más chico.
+- El punto 3 corre en paralelo.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
