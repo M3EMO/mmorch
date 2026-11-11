@@ -12,7 +12,7 @@ use serde_json::Value;
 use thiserror::Error as ErrorDerive;
 
 use crate::config::Config;
-use crate::observe::jsonl;
+use crate::observe::{self, ErrorObserve, jsonl};
 use crate::route::politica::{
     Diferencia, Evidencia, EvidenciaForma, EvidenciaModelo, Propuesta, PropuestaForma, nombre_rol,
 };
@@ -543,22 +543,41 @@ fn rol_de_extra(ev: &Evento) -> Option<Rol> {
 }
 
 /// Lee `eventos.jsonl` y sus archivos rotados, en orden. Una línea inválida es error.
+/// Lee con `observe::uso::leer_eventos`, que toma el lock común antes de listar los archivos.
 pub fn leer_eventos(ruta: &Path) -> Result<Vec<Evento>, ErrorAprende> {
-    let mut eventos = Vec::new();
-    for archivo in jsonl::archivos_en_orden(ruta)? {
-        for (indice, linea) in jsonl::leer_texto(&archivo)?.lines().enumerate() {
+    observe::uso::leer_eventos(ruta).map_err(|e| match e {
+        ErrorObserve::Io(e) => ErrorAprende::Io(e),
+        ErrorObserve::Json(fuente) => linea_invalida(ruta, fuente),
+        // `leer_eventos` no produce este error. Si llegara, sale como E/S.
+        otro => ErrorAprende::Io(io::Error::other(otro.to_string())),
+    })
+}
+
+/// Error de la primera línea inválida, con su archivo y su número, como antes.
+/// `observe` no da esos datos, así que se buscan otra vez. Si la línea ya no está
+/// (una rotación en medio), sale el error de JSON sin ubicación.
+fn linea_invalida(ruta: &Path, fuente: serde_json::Error) -> ErrorAprende {
+    for archivo in jsonl::archivos_en_orden(ruta).unwrap_or_default() {
+        let Ok(texto) = jsonl::leer_texto(&archivo) else {
+            continue;
+        };
+        for (indice, linea) in texto.lines().enumerate() {
             if linea.trim().is_empty() {
                 continue;
             }
-            let ev = serde_json::from_str(linea).map_err(|fuente| ErrorAprende::Linea {
-                archivo: archivo.display().to_string(),
-                linea: indice + 1,
-                fuente,
-            })?;
-            eventos.push(ev);
+            if let Err(fuente) = serde_json::from_str::<Evento>(linea) {
+                return ErrorAprende::Linea {
+                    archivo: archivo.display().to_string(),
+                    linea: indice + 1,
+                    fuente,
+                };
+            }
         }
     }
-    Ok(eventos)
+    ErrorAprende::Json {
+        ruta: ruta.display().to_string(),
+        fuente,
+    }
 }
 
 /// Escribe `politica.json` en `home` de forma atómica: archivo temporal y `rename`.
@@ -1695,5 +1714,56 @@ mod tests {
         .expect("escribe");
         let pol = leer_politica(dir.path()).expect("lee");
         assert!(pol.propuestas_forma.is_empty());
+    }
+
+    #[test]
+    fn leer_eventos_toma_el_lock_antes_de_listar_los_archivos() {
+        use std::fs::OpenOptions;
+        use std::thread;
+        use std::time::Duration;
+
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("eventos.jsonl");
+        let linea = |ts: f64| {
+            let ev = Evento {
+                ts,
+                ..Evento::default()
+            };
+            serde_json::to_string(&ev).expect("serializa")
+        };
+        fs::write(&ruta, format!("{}\n", linea(1.0))).expect("vigente");
+        // Otro hilo toma el lock exclusivo. `leer_eventos` debe esperar detrás de él.
+        let escritor = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.path().join("eventos.jsonl.lock"))
+            .expect("candado");
+        fs4::FileExt::lock(&escritor).expect("lock exclusivo");
+        let ruta_lector = ruta.clone();
+        let lector = thread::spawn(move || leer_eventos(&ruta_lector));
+        // Tiempo para que el lector liste los archivos, si los lista antes de tomar el lock.
+        thread::sleep(Duration::from_millis(200));
+        // El escritor rota el log con el lock tomado, como en `jsonl::agregar`.
+        fs::rename(&ruta, dir.path().join("eventos.jsonl.1")).expect("rota");
+        fs::write(&ruta, format!("{}\n", linea(2.0))).expect("vigente nuevo");
+        drop(escritor);
+        let eventos = lector.join().expect("hilo").expect("lee");
+        assert_eq!(eventos.len(), 2, "el evento rotado no debe perderse");
+    }
+
+    #[test]
+    fn leer_eventos_linea_invalida_nombra_archivo_y_linea() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("eventos.jsonl");
+        let valida = serde_json::to_string(&Evento::default()).expect("serializa");
+        fs::write(&ruta, format!("{valida}\n\nno es json\n")).expect("escribe");
+        let err = leer_eventos(&ruta).expect_err("una línea inválida es error");
+        let texto = err.to_string();
+        assert_eq!(
+            texto,
+            format!("{}: la línea 3 es inválida", ruta.display()),
+            "el mensaje no debe cambiar"
+        );
     }
 }
