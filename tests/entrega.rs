@@ -38,7 +38,7 @@ fn tarea_con(extra: &str) -> Tarea {
         .expect("temp dir")
         .keep();
     let texto = format!(
-        "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"i\"\nspec = \"s\"\n\
+        "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"docker.io/library/alpine:3.20\"\nspec = \"s\"\n\
          [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n{extra}"
     );
     fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
@@ -879,7 +879,7 @@ fn entrega_escenario_con_red_queda_pendiente_y_no_false() {
 /// Tarea cuyo `tarea.toml` vive en `dir`, que el test conserva vivo.
 fn tarea_en(dir: &Path, extra: &str) -> Tarea {
     let texto = format!(
-        "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"i\"\nspec = \"s\"\n\
+        "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"docker.io/library/alpine:3.20\"\nspec = \"s\"\n\
          [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n{extra}"
     );
     fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
@@ -1064,7 +1064,7 @@ fn tarea_con_containerfile(containerfile: &str, extra: &str) -> Tarea {
         .expect("temp dir")
         .keep();
     let texto = format!(
-        "containerfile = \"{containerfile}\"\nnombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"i\"\n\
+        "containerfile = \"{containerfile}\"\nnombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"docker.io/library/alpine:3.20\"\n\
          spec = \"s\"\n[contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n{extra}"
     );
     fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");

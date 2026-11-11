@@ -398,7 +398,7 @@ fn recoger_antes(hilo: Option<JoinHandle<Vec<u8>>>, limite: Instant) -> String {
 }
 
 /// Falla antes de lanzar podman si falta alguna ruta montada.
-fn validar_rutas(e: &Ejecucion) -> Result<(), ErrorOraculo> {
+pub(crate) fn validar_rutas(e: &Ejecucion) -> Result<(), ErrorOraculo> {
     let rutas = e
         .repo
         .iter()

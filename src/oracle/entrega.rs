@@ -204,6 +204,7 @@ impl FabricaEscenarios for FabricaReal {
     }
 
     fn iniciar_evaluacion(&self, ejecucion: &Ejecucion) -> Result<Sesion<'_>, String> {
+        crate::oracle::contenedor::validar_rutas(ejecucion).map_err(|e| e.to_string())?;
         let nombre = format!(
             "root-entrega-eval-{}-{}",
             std::process::id(),
@@ -1277,10 +1278,12 @@ impl<'a> Sesion<'a> {
         nombre: &str,
         arranque: &dyn Fn(&[&str]) -> Vec<String>,
     ) -> Result<Self, String> {
+        let mut motivos = Vec::new();
         for comando in [vec!["sleep", "600"], vec!["tail", "-f", "/dev/null"]] {
             let args = arranque(comando.as_slice());
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            let arranco = exec.exec(&refs, PLAZO_CORTO).is_ok_and(|s| s.codigo == 0);
+            let salida = exec.exec(&refs, PLAZO_CORTO);
+            let arranco = salida.as_ref().is_ok_and(|s| s.codigo == 0);
             if arranco && corriendo(exec, nombre) {
                 let sh = exec.exec(&["exec", nombre, "sh", "-c", "true"], PLAZO_CORTO);
                 if sh.is_ok_and(|s| s.codigo == 0) {
@@ -1299,9 +1302,13 @@ impl<'a> Sesion<'a> {
                 quitar(exec, nombre);
                 return Err("la imagen no trae sh".into());
             }
+            motivos.push(format!("{}: {}", comando.join(" "), motivo_de_run(&salida)));
             quitar(exec, nombre);
         }
-        Err("la imagen no trae sleep ni tail: no arranca el contenedor".into())
+        Err(format!(
+            "la imagen no trae sleep ni tail: no arranca el contenedor ({})",
+            motivos.join("; ")
+        ))
     }
 
     /// Argumentos de `podman exec` para `cmd`. Con `con_timeout` y si la imagen trae `timeout`, lo pone antes.
@@ -1399,6 +1406,24 @@ impl Drop for Sesion<'_> {
     fn drop(&mut self) {
         quitar(self.exec, &self.nombre);
     }
+}
+
+/// Motivo corto de un `run` que no dejó el contenedor corriendo. Toma la última línea no vacía del
+/// stderr, o del stdout si el stderr está vacío. Recorta a 300 caracteres.
+fn motivo_de_run(salida: &Result<SalidaPodman, ErrorOraculo>) -> String {
+    let texto = match salida {
+        Ok(s) if s.codigo == 0 => return "no quedó corriendo".into(),
+        Ok(s) if s.stderr.trim().is_empty() => s.stdout.clone(),
+        Ok(s) => s.stderr.clone(),
+        Err(ErrorOraculo::Infra(motivo)) => motivo.clone(),
+        Err(otro) => otro.to_string(),
+    };
+    let linea = texto
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("sin salida");
+    linea.trim().chars().take(300).collect()
 }
 
 /// Borra un contenedor por nombre, sin esperar la parada. Un fallo no importa: ya hay un resultado.
@@ -4434,6 +4459,64 @@ pub(crate) mod tests {
         }
         let ultima = exec.llamadas().pop().expect("hay llamadas");
         assert_eq!(ultima, ["rm", "-f", "-t", "0", "n"]);
+    }
+
+    #[test]
+    fn sesion_iniciar_incluye_el_stderr_de_cada_run_fallido() {
+        let error = |stderr: &str| -> Result<SalidaPodman, ErrorOraculo> {
+            Ok(SalidaPodman {
+                codigo: 125,
+                stdout: String::new(),
+                stderr: stderr.into(),
+                paso: None,
+            })
+        };
+        // Cada `run` fallido va seguido de su `rm -f` de `quitar`.
+        let exec = ExecFalso::con(vec![
+            error("Error: no such file or directory"),
+            Ok(salida(0, "")),
+            error("Error: no such file or directory"),
+            Ok(salida(0, "")),
+        ]);
+        let arranque = |c: &[&str]| vec!["run".to_string(), c[0].to_string()];
+        match Sesion::iniciar(&exec, "n", &arranque) {
+            Err(motivo) => {
+                assert!(motivo.contains("no such file or directory"), "{motivo}");
+                assert!(motivo.contains("sleep 600"), "{motivo}");
+                assert!(motivo.contains("tail -f /dev/null"), "{motivo}");
+                assert!(
+                    motivo.contains("la imagen no trae sleep ni tail"),
+                    "{motivo}"
+                );
+            }
+            Ok(_) => panic!("sin arranque no debe haber sesión"),
+        }
+    }
+
+    #[test]
+    fn iniciar_evaluacion_valida_rutas_antes_de_podman() {
+        let trabajo = tempfile::tempdir().expect("temp dir");
+        let faltante = trabajo.path().join("no-existe");
+        let ejecucion = Ejecucion {
+            imagen: "docker.io/library/alpine:3.20".into(),
+            repo: None,
+            oraculo: None,
+            oraculo_destino: None,
+            salida: trabajo.path().to_path_buf(),
+            cmd: String::new(),
+            env: Vec::new(),
+            timeout: Duration::from_secs(60),
+            red: false,
+            cache: Some(faltante.clone()),
+            cache_rw: false,
+            rustsec: None,
+            trabajo: None,
+            secretos: Vec::new(),
+        };
+        match FabricaReal.iniciar_evaluacion(&ejecucion) {
+            Err(motivo) => assert!(motivo.contains(&faltante.display().to_string()), "{motivo}"),
+            Ok(_) => panic!("una ruta que no existe no debe arrancar"),
+        }
     }
 
     // ---- Tarea 91, parte 2b: la evaluación corre por pasos, cada uno con su `podman exec` ----
