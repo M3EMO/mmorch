@@ -790,6 +790,32 @@ fn evaluar_con(
             avisos.push(format!("{AVISO_TARGET_FRIO} {motivo}"));
         }
     }
+    // La línea base de Seguridad sale del estado inicial (`bootstrap/`), con su ejecutor propio: sin memo ni reuso.
+    let bootstrap = tarea.dir.join("bootstrap");
+    let base_previa = if !partes.mide(Dimension::Seguridad) {
+        None
+    } else if bootstrap.is_dir() {
+        let inicial = Preparada {
+            repo: bootstrap.clone(),
+            cache: cache.clone(),
+            rustsec: rustsec.clone(),
+        };
+        let ej_inicial = (deps.herramientas)(&inicial);
+        Some(previos::linea_base(
+            &home,
+            tarea,
+            &bootstrap,
+            ej_inicial.as_ref(),
+        ))
+    } else {
+        if !avisos
+            .iter()
+            .any(|a| a == previos::AVISO_SIN_ESTADO_INICIAL)
+        {
+            avisos.push(previos::AVISO_SIN_ESTADO_INICIAL.into());
+        }
+        None
+    };
     let preparada = Preparada {
         repo: repo_copia.clone(),
         cache,
@@ -845,6 +871,7 @@ fn evaluar_con(
         &partes,
         deps.calibracion,
         no_compila,
+        base_previa.as_ref(),
     )?;
     let mut tasas = BTreeMap::new();
     for (id, tasa) in &contrato.tasas {
@@ -1035,6 +1062,7 @@ fn medir(
     partes: &Partes,
     calibracion: &Calibraciones,
     no_compila: bool,
+    base: Option<&previos::LineaBase>,
 ) -> Result<Medicion, ErrorOraculo> {
     let resultados = requisitos::desde_clasificaciones(contrato, oculto);
     let estados = requisitos::evaluar_requisitos(
@@ -1048,18 +1076,28 @@ fn medir(
     // El orden de las sondas es el de siempre: la Entrega, la mutación, las nativas y las de herramientas.
     let mut sondas = vec![entrega.sonda.clone()];
     let mut avisos_de_mutacion = Vec::new();
+    // Los rangos que cambió el repo frente a `bootstrap/`: los usan la mutación y las sondas nativas.
+    let bootstrap = tarea.dir.join("bootstrap");
+    let cambios = bootstrap
+        .is_dir()
+        .then(|| cambios::rangos_cambiados(&bootstrap, repo));
     if partes.mutacion {
-        let bootstrap = tarea.dir.join("bootstrap");
-        let cambios = bootstrap
-            .is_dir()
-            .then(|| cambios::rangos_cambiados(&bootstrap, repo));
         let mutacion = mutacion::sonda_mutacion_en(ej, tarea, cambios.as_ref());
         // Los mutantes de más no cuentan en el puntaje. El veredicto avisa cuántos corrieron.
         avisos_de_mutacion.extend(mutacion::aviso_de_mas(&mutacion.fuera_de_la_muestra));
         sondas.push(mutacion.sonda);
     }
     if partes.nativas {
-        sondas.extend(perfiles::sondas_nativas(repo, tarea));
+        let mut nativas = perfiles::sondas_nativas(repo, tarea);
+        if let Some(base) = base {
+            for sonda in nativas
+                .iter_mut()
+                .filter(|s| s.dimension == Dimension::Seguridad)
+            {
+                previos::marcar(&mut sonda.hallazgos, &base.nativas, cambios.as_ref());
+            }
+        }
+        sondas.extend(nativas);
     }
     let pedidas: Vec<perfiles::herramientas::Herramienta> = [
         (
@@ -1080,7 +1118,11 @@ fn medir(
     .filter(|(pedida, _)| *pedida)
     .map(|(_, herramienta)| herramienta)
     .collect();
-    sondas.extend(perfiles::herramientas::sondas_de(ej, tarea, repo, &pedidas));
+    let mut herramientas = perfiles::herramientas::sondas_de(ej, tarea, repo, &pedidas);
+    if let Some(base) = base {
+        previos::marcar_herramientas(&mut herramientas, base);
+    }
+    sondas.extend(herramientas);
     // Las sondas de configs van después de las de herramientas (Tarea 31). Hadolint es la única que llama
     // al ejecutor.
     if partes.configs {
@@ -1164,11 +1206,17 @@ fn medir(
                     juez.rubricas,
                     dimension,
                 );
-                let de_la_dimension = sondas
+                let de_la_dimension: Vec<ResultadoSonda> = sondas
                     .iter()
                     .filter(|s| s.dimension == dimension)
                     .cloned()
                     .collect();
+                // Seguridad: un aviso previo no baja el puntaje (Tarea 103). Los hallazgos del veredicto no cambian.
+                let de_la_dimension = if dimension == Dimension::Seguridad {
+                    previos::quitar_previos(&de_la_dimension, &tarea.requisito)
+                } else {
+                    de_la_dimension
+                };
                 let extra = descarga
                     .iter()
                     .filter(|h| h.dimension == dimension)
@@ -5267,6 +5315,150 @@ mod tests {
         .expect("evalúa");
         let aviso = "cargo-mutants corrió 2 mutantes que no estaban en la muestra";
         assert!(v.avisos.iter().any(|a| a == aviso), "{:?}", v.avisos);
+    }
+
+    /// Cargo.lock con `time 0.1.43`, el crate que el reporte de cargo audit del fixture marca.
+    const LOCK_CON_TIME: &str = include_str!("../../tests/fixtures/sondas/cargo-lock.txt");
+    /// Reporte de cargo audit del fixture: un aviso de `time 0.1.43` y uno de `atty`.
+    const AUDIT_CON_TIME: &str = include_str!("../../tests/fixtures/sondas/cargo-audit.json");
+    const AUDIT_SANO: &str = r#"{"vulnerabilities":{"found":false,"list":[]}}"#;
+
+    /// Herramientas sanas, salvo que cargo audit da `reporte`.
+    struct HerramientasConAuditoria {
+        base: HerramientasSanas,
+        reporte: &'static str,
+    }
+
+    impl EjecutorHerramienta for HerramientasConAuditoria {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            let mut salida = self.base.ejecutar(cmd)?;
+            if cmd.contains("cargo audit") {
+                salida
+                    .archivos
+                    .insert("audit.json".into(), self.reporte.into());
+            }
+            Ok(salida)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            true
+        }
+    }
+
+    /// Cada copia que recibe el ejecutor decide su reporte por su `Cargo.lock`: el estado inicial y el repo
+    /// pueden traer locks distintos.
+    fn herramientas_con_auditoria() -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
+        |p: &Preparada| {
+            let lock = fs::read_to_string(p.repo.join("Cargo.lock")).unwrap_or_default();
+            let reporte = if lock.contains("name = \"time\"") {
+                AUDIT_CON_TIME
+            } else {
+                AUDIT_SANO
+            };
+            Box::new(HerramientasConAuditoria {
+                base: HerramientasSanas {
+                    faltan: Vec::new(),
+                    fuga: false,
+                },
+                reporte,
+            })
+        }
+    }
+
+    /// Evaluación de la tarea de Rust con `lock` en el repo y, si `inicial` es `Some`, un `bootstrap/` con ese lock.
+    fn evaluar_con_estado_inicial(base: &Path, lock: &str, inicial: Option<&str>) -> Veredicto {
+        let tarea = tarea_rust(base);
+        if let Some(lock_inicial) = inicial {
+            let bootstrap = tarea.dir.join("bootstrap");
+            fs::create_dir_all(&bootstrap).expect("bootstrap");
+            fs::write(bootstrap.join("Cargo.lock"), lock_inicial).expect("lock inicial");
+        }
+        let repo = repo_rust(base, lock);
+        let home = home_con_cache(base, lock);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        evaluar_falso(&repo, &tarea, &home, &correr, &herramientas_con_auditoria()).expect("evalúa")
+    }
+
+    /// El hallazgo de cargo audit de `time 0.1.43` del veredicto.
+    fn aviso_de_time(v: &Veredicto) -> &Hallazgo {
+        v.hallazgos
+            .iter()
+            .find(|h| h.cita == "time 0.1.43")
+            .expect("el veredicto trae el aviso de time")
+    }
+
+    #[test]
+    fn oraculo_aviso_de_cargo_audit_del_estado_inicial_sale_previo() {
+        let base = tempfile::tempdir().expect("base");
+        let v = evaluar_con_estado_inicial(base.path(), LOCK_CON_TIME, Some(LOCK_CON_TIME));
+        assert!(aviso_de_time(&v).previo, "{:?}", v.hallazgos);
+    }
+
+    #[test]
+    fn oraculo_aviso_de_cargo_audit_que_el_cambio_introduce_no_es_previo() {
+        let base = tempfile::tempdir().expect("base");
+        // El estado inicial no tenía `time`: el repo lo agrega y el aviso es nuevo.
+        let v = evaluar_con_estado_inicial(base.path(), LOCK_CON_TIME, Some(LOCK_SANO));
+        assert!(!aviso_de_time(&v).previo, "{:?}", v.hallazgos);
+    }
+
+    #[test]
+    fn oraculo_sin_bootstrap_da_el_aviso_y_ningun_hallazgo_es_previo() {
+        let base = tempfile::tempdir().expect("base");
+        let v = evaluar_con_estado_inicial(base.path(), LOCK_CON_TIME, None);
+        assert!(
+            v.avisos
+                .iter()
+                .any(|a| a == previos::AVISO_SIN_ESTADO_INICIAL),
+            "{:?}",
+            v.avisos
+        );
+        assert!(v.hallazgos.iter().all(|h| !h.previo), "{:?}", v.hallazgos);
+    }
+
+    #[test]
+    fn oraculo_aviso_previo_no_baja_el_puntaje_de_seguridad() {
+        let base = tempfile::tempdir().expect("base");
+        let con_inicial =
+            evaluar_con_estado_inicial(base.path(), LOCK_CON_TIME, Some(LOCK_CON_TIME));
+        let sin_inicial = evaluar_con_estado_inicial(&base.path().join("sin"), LOCK_CON_TIME, None);
+        let previo = puntaje_de_prueba(&con_inicial, Dimension::Seguridad).valor;
+        let nuevo = puntaje_de_prueba(&sin_inicial, Dimension::Seguridad).valor;
+        assert_eq!(previo, 1.0, "el aviso previo no cuenta");
+        assert!(
+            nuevo < 1.0,
+            "sin estado inicial el aviso sí cuenta: {nuevo}"
+        );
+    }
+
+    #[test]
+    fn oraculo_secreto_previo_de_gitleaks_si_baja_el_puntaje_de_seguridad() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let bootstrap = tarea.dir.join("bootstrap");
+        fs::create_dir_all(&bootstrap).expect("bootstrap");
+        fs::write(bootstrap.join("Cargo.lock"), LOCK_SANO).expect("lock inicial");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        // Con fuga, gitleaks reporta el mismo secreto en el estado inicial y en el repo.
+        let con_fuga = |_: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(HerramientasSanas {
+                faltan: Vec::new(),
+                fuga: true,
+            })
+        };
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &con_fuga).expect("evalúa");
+        let secreto = v
+            .hallazgos
+            .iter()
+            .find(|h| h.fuente == Fuente::Sonda("gitleaks".into()))
+            .expect("el veredicto trae el secreto");
+        assert!(secreto.previo, "{:?}", v.hallazgos);
+        assert!(
+            puntaje_de_prueba(&v, Dimension::Seguridad).valor < 1.0,
+            "un secreto previo sigue en el puntaje"
+        );
     }
 
     fn opciones(home: &Path) -> OpcionesOraculo {

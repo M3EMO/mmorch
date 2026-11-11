@@ -12,7 +12,8 @@ use crate::oracle::historial;
 use crate::oracle::pendientes;
 use crate::oracle::perfiles;
 use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, Herramienta, sondas_de};
-use crate::oracle::tarea::Tarea;
+use crate::oracle::perfiles::{ResultadoSonda, puntuar_hallazgos};
+use crate::oracle::tarea::{Requisito, Tarea};
 use crate::tipos::{Dimension, Fuente, Hallazgo};
 
 /// Sube cuando cambia una sonda de Seguridad. Cambia la clave de la línea base guardada.
@@ -145,6 +146,31 @@ pub fn marcar(
     base: &BTreeMap<String, Vec<u32>>,
     cambios: Option<&BTreeMap<String, Vec<(u32, u32)>>>,
 ) {
+    let mut refs: Vec<&mut Hallazgo> = hallazgos.iter_mut().collect();
+    marcar_refs(&mut refs, base, cambios);
+}
+
+/// Marca los hallazgos de gitleaks con `base.gitleaks` y los de cargo audit con `base.cargo_audit`.
+/// Los demás hallazgos de herramientas no se marcan.
+pub fn marcar_herramientas(sondas: &mut [ResultadoSonda], base: &LineaBase) {
+    let mut gitleaks = Vec::new();
+    let mut cargo = Vec::new();
+    for h in sondas.iter_mut().flat_map(|s| s.hallazgos.iter_mut()) {
+        if es_sonda(&h.fuente, "gitleaks") {
+            gitleaks.push(h);
+        } else if es_sonda(&h.fuente, "cargo-audit") {
+            cargo.push(h);
+        }
+    }
+    marcar_refs(&mut gitleaks, &base.gitleaks, None);
+    marcar_refs(&mut cargo, &base.cargo_audit, None);
+}
+
+fn marcar_refs(
+    hallazgos: &mut [&mut Hallazgo],
+    base: &BTreeMap<String, Vec<u32>>,
+    cambios: Option<&BTreeMap<String, Vec<(u32, u32)>>>,
+) {
     let mut grupos: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, h) in hallazgos.iter().enumerate() {
         grupos.entry(h.id.clone()).or_default().push(i);
@@ -158,12 +184,16 @@ pub fn marcar(
         };
         let candidatos: Vec<usize> = indices
             .into_iter()
-            .filter(|&i| !en_cambio(&hallazgos[i], cambios))
+            .filter(|&i| !en_cambio(hallazgos[i], cambios))
             .collect();
         for &i in candidatos.iter().take(lineas.len()) {
             hallazgos[i].previo = true;
         }
     }
+}
+
+fn es_sonda(fuente: &Fuente, nombre: &str) -> bool {
+    matches!(fuente, Fuente::Sonda(n) if n == nombre)
 }
 
 /// Verdadero si la línea del hallazgo cae en un rango cambiado de su archivo.
@@ -177,14 +207,32 @@ fn en_cambio(h: &Hallazgo, cambios: Option<&BTreeMap<String, Vec<(u32, u32)>>>) 
         })
 }
 
+/// Copia de las sondas de Seguridad sin sus hallazgos previos, salvo los de gitleaks. Un secreto que
+/// ya estaba cuenta en el puntaje. El valor de cada sonda que lo tenga sale de sus hallazgos que quedan.
+pub fn quitar_previos(sondas: &[ResultadoSonda], reqs: &[Requisito]) -> Vec<ResultadoSonda> {
+    sondas
+        .iter()
+        .map(|sonda| {
+            let mut copia = sonda.clone();
+            copia
+                .hallazgos
+                .retain(|h| !h.previo || es_sonda(&h.fuente, "gitleaks"));
+            if copia.valor.is_some() {
+                copia.valor = Some(puntuar_hallazgos(&copia.hallazgos, reqs));
+            }
+            copia
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::oracle::ErrorOraculo;
-    use crate::oracle::perfiles::crear_hallazgo;
     use crate::oracle::perfiles::herramientas::{
         COMANDO_CARGO_AUDIT, COMANDO_GITLEAKS, SalidaHerramienta,
     };
+    use crate::oracle::perfiles::{crear_hallazgo, puntuar_hallazgos};
     use crate::oracle::tarea::Tarea;
     use crate::tipos::Dimension;
     use std::cell::RefCell;
@@ -359,5 +407,59 @@ mod tests {
         let segunda = linea_base(home.path(), &tarea, bootstrap.path(), &ej);
         assert_eq!(ej.cuantos(), corridos, "la segunda no corre sondas");
         assert_eq!(primera, segunda);
+    }
+
+    #[test]
+    fn previos_quitar_previos_saca_el_aviso_previo_y_recalcula_el_valor() {
+        let mut previo = cargo_audit_de("Cargo.lock", 16, "time 0.1.43");
+        previo.previo = true;
+        let valor = puntuar_hallazgos(std::slice::from_ref(&previo), &[]);
+        let sonda = ResultadoSonda {
+            dimension: Dimension::Seguridad,
+            valor: Some(valor),
+            motivo: None,
+            hallazgos: vec![previo],
+        };
+        let limpia = quitar_previos(&[sonda], &[]);
+        assert_eq!(limpia[0].valor, Some(1.0));
+        assert!(limpia[0].hallazgos.is_empty());
+    }
+
+    #[test]
+    fn previos_quitar_previos_deja_el_aviso_nuevo_y_su_valor() {
+        let nuevo = cargo_audit_de("Cargo.lock", 16, "time 0.1.44");
+        let valor = puntuar_hallazgos(std::slice::from_ref(&nuevo), &[]);
+        let sonda = ResultadoSonda {
+            dimension: Dimension::Seguridad,
+            valor: Some(valor),
+            motivo: None,
+            hallazgos: vec![nuevo],
+        };
+        let limpia = quitar_previos(std::slice::from_ref(&sonda), &[]);
+        assert_eq!(limpia, vec![sonda]);
+    }
+
+    #[test]
+    fn previos_quitar_previos_deja_el_secreto_previo_de_gitleaks() {
+        let mut secreto = crear_hallazgo(
+            Dimension::Seguridad,
+            3,
+            "src/lib.rs",
+            1,
+            "clave",
+            "clave en el código",
+            "gitleaks",
+            &[],
+        );
+        secreto.previo = true;
+        let valor = puntuar_hallazgos(std::slice::from_ref(&secreto), &[]);
+        let sonda = ResultadoSonda {
+            dimension: Dimension::Seguridad,
+            valor: Some(valor),
+            motivo: None,
+            hallazgos: vec![secreto],
+        };
+        let limpia = quitar_previos(std::slice::from_ref(&sonda), &[]);
+        assert_eq!(limpia, vec![sonda], "un secreto previo sigue en el puntaje");
     }
 }
