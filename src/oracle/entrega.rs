@@ -37,7 +37,8 @@ const TIMEOUT_ESCENARIO: u32 = 120;
 const PLAZO_ESCENARIO: Duration = Duration::from_secs(TIMEOUT_ESCENARIO as u64);
 /// Código que se registra cuando un escenario supera su plazo (el mismo que devuelve `timeout`).
 const CODIGO_TIEMPO: i32 = 124;
-/// Código con que podman sale ante un error propio (imagen, contenedor o uso).
+/// Código con que podman sale ante un error propio (imagen, contenedor o uso). Es infraestructura.
+/// El envoltorio de cada paso convierte el 125 del producto en 1, así que este código siempre es de podman.
 const CODIGO_PODMAN: i32 = 125;
 /// Plazo de cada paso de la evaluación en el contenedor: preludio, copia, instalar y escenarios de evaluación.
 const PLAZO_PASO_ENTREGA: Duration = Duration::from_secs(15 * 60);
@@ -1243,6 +1244,30 @@ fn entorno_de_evaluacion(tarea: &Tarea) -> Entorno {
     }
 }
 
+/// PATH del sistema. Va primero en cada paso: un archivo del producto en `bin/` no tapa una herramienta del sistema.
+const PATH_DEL_SISTEMA: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// Línea de `sh` que envuelve cada paso: la activación (si hay), el PATH del sistema, el `cmd` como `$1`
+/// y el código de salida. No usa `exec`: el `sh` de afuera vive para leer `$?`.
+/// Con `con_timeout`, el `timeout 120` va DENTRO, antes del `sh` del `cmd`. Así el `sh` de afuera no
+/// se muere con el plazo y siempre llega a leer `$?`.
+/// El 125 del producto pasa a 1. Así un 125 que sale de `podman exec` siempre es de podman.
+fn envoltorio_de(activar: &str, con_timeout: bool) -> String {
+    let previa = if activar.is_empty() {
+        String::new()
+    } else {
+        format!("{activar} ")
+    };
+    let plazo = if con_timeout {
+        format!("timeout {TIMEOUT_ESCENARIO} ")
+    } else {
+        String::new()
+    };
+    format!(
+        "{previa}export PATH={PATH_DEL_SISTEMA}:$PATH; {plazo}sh -c \"$1\"; s=$?; [ \"$s\" -eq {CODIGO_PODMAN} ] && s=1; exit \"$s\""
+    )
+}
+
 /// Contenedor vivo, donde los pasos corren con `podman exec`. Cada paso lleva su `Entorno`.
 /// Su `Drop` lo borra con `podman rm -f -t 0`, pase lo que pase.
 pub(crate) struct Sesion<'a> {
@@ -1312,28 +1337,23 @@ impl<'a> Sesion<'a> {
     }
 
     /// Argumentos de `podman exec` para `cmd`. Con `con_timeout` y si la imagen trae `timeout`, lo pone antes.
-    /// Con `activar`, el comando corre dentro de un `sh` que antes ejecuta esa línea.
+    /// Todo paso corre dentro de un `sh` envoltorio: primero la activación (si hay), después el PATH del
+    /// sistema y el `cmd` como `$1`. Con `con_timeout` y si la imagen trae `timeout`, el `timeout` va dentro
+    /// del envoltorio. El envoltorio convierte el 125 del producto en 1 (ver `CODIGO_PODMAN`).
     pub(crate) fn paso_args(&self, entorno: &Entorno, cmd: &str, con_timeout: bool) -> Vec<String> {
         let mut args: Vec<String> = vec!["exec".into()];
         if let Some(dir) = &entorno.dir {
             args.extend(["-w".to_string(), dir.clone()]);
         }
         args.push(self.nombre.clone());
-        if con_timeout && self.tiene_timeout {
-            args.extend(["timeout".to_string(), TIMEOUT_ESCENARIO.to_string()]);
-        }
-        if entorno.activar.is_empty() {
-            args.extend(["sh".to_string(), "-c".to_string(), cmd.to_string()]);
-        } else {
-            let envoltorio = format!("{} exec sh -c \"$1\"", entorno.activar);
-            args.extend([
-                "sh".to_string(),
-                "-c".to_string(),
-                envoltorio,
-                "_".to_string(),
-                cmd.to_string(),
-            ]);
-        }
+        let con_plazo = con_timeout && self.tiene_timeout;
+        args.extend([
+            "sh".to_string(),
+            "-c".to_string(),
+            envoltorio_de(&entorno.activar, con_plazo),
+            "_".to_string(),
+            cmd.to_string(),
+        ]);
         args
     }
 
@@ -1378,6 +1398,7 @@ impl<'a> Sesion<'a> {
             }
             Err(otro) => return Err(otro),
         };
+        // Un 125 aquí es de podman: el envoltorio ya convirtió el 125 del producto en 1.
         if salida.codigo == CODIGO_PODMAN {
             return Err(ErrorOraculo::Infra(format!(
                 "podman no pudo correr el escenario {}",
@@ -1751,7 +1772,7 @@ fn correr_pasos(
     let a_texto = |e: ErrorOraculo| e.to_string();
 
     // Preludio: sin activación y sin timeout. En Python cualquier código distinto de 0 es infraestructura.
-    // En Rust solo cuenta el 125 de podman: el `true` del final aísla el resto.
+    // En Rust solo cuenta el 125: el envoltorio ya dejó el 125 del producto en 1, así que sale de podman.
     if let Some(preludio) = preludio_de(&tarea.lenguaje) {
         let salida = sesion
             .paso(&sin_entorno, &preludio, PLAZO_PASO_ENTREGA, false)
@@ -1782,6 +1803,7 @@ fn correr_pasos(
         let instalado = sesion
             .paso(&entorno, &entrega.instalar, PLAZO_PASO_ENTREGA, false)
             .map_err(a_texto)?;
+        // Un 125 aquí es de podman, no del producto: el envoltorio dejó el del producto en 1.
         if instalado.codigo == CODIGO_PODMAN {
             return Err(
                 "instalar no corrió: podman no pudo correr el comando de instalación".into(),
@@ -4300,14 +4322,59 @@ pub(crate) mod tests {
         }
     }
 
+    /// Envoltorio de cada paso sin activación: PATH del sistema primero, `125` pasa a `1`.
+    const ENVOLTORIO_SIN_ACTIVAR: &str = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"";
+
+    /// Envoltorio con plazo: el `timeout 120` va dentro, antes del `sh` que corre el `cmd`.
+    const ENVOLTORIO_CON_TIMEOUT: &str = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; timeout 120 sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"";
+
+    /// Corre el envoltorio de `paso_args` de verdad, en el `sh` local, y da su código de salida.
+    /// Sirve para probar el 125 del producto sin `podman`: el `sh` local recibe los mismos argumentos.
+    fn codigo_del_envoltorio(cmd: &str) -> i32 {
+        let exec = ExecFalso::con_codigos(&[]);
+        let s = sesion_de_prueba(&exec, false);
+        let args = s.paso_args(&Entorno::default(), cmd, false);
+        // Quita `exec` y el nombre del contenedor: queda `sh -c <envoltorio> _ <cmd>`.
+        let (programa, resto) = args[2..].split_first().expect("hay argumentos");
+        let salida = std::process::Command::new(programa)
+            .args(resto)
+            .output()
+            .expect("corre el envoltorio con sh");
+        salida.status.code().expect("sin código de salida")
+    }
+
+    /// Ejecutor de mentira que responde con el código real del envoltorio para `cmd`.
+    fn exec_con_envoltorio(cmd: &str) -> ExecFalso {
+        ExecFalso::con_codigos(&[codigo_del_envoltorio(cmd)])
+    }
+
     #[test]
     fn sesion_paso_args_de_la_imagen_con_timeout() {
         let exec = ExecFalso::con_codigos(&[]);
         let s = sesion_de_prueba(&exec, true);
         assert_eq!(
             s.paso_args(&Entorno::default(), "exit 0", true),
-            ["exec", "n", "timeout", "120", "sh", "-c", "exit 0"]
+            [
+                "exec",
+                "n",
+                "sh",
+                "-c",
+                ENVOLTORIO_CON_TIMEOUT,
+                "_",
+                "exit 0",
+            ]
         );
+    }
+
+    #[test]
+    fn sesion_paso_args_con_timeout_lo_pone_dentro_del_envoltorio() {
+        // El `timeout` va DENTRO del envoltorio. Así el `sh` de afuera sigue vivo para leer `$?`.
+        let exec = ExecFalso::con_codigos(&[]);
+        let s = sesion_de_prueba(&exec, true);
+        let args = s.paso_args(&Entorno::default(), "exit 0", true);
+        assert_eq!(args[2], "sh", "{args:?}");
+        assert!(!args.iter().any(|a| a == "timeout"), "{args:?}");
+        assert!(args[4].contains("timeout 120 sh -c \"$1\""), "{args:?}");
     }
 
     #[test]
@@ -4316,13 +4383,29 @@ pub(crate) mod tests {
         let sin_pedirlo = sesion_de_prueba(&exec, true);
         assert_eq!(
             sin_pedirlo.paso_args(&Entorno::default(), "exit 0", false),
-            ["exec", "n", "sh", "-c", "exit 0"]
+            [
+                "exec",
+                "n",
+                "sh",
+                "-c",
+                ENVOLTORIO_SIN_ACTIVAR,
+                "_",
+                "exit 0"
+            ]
         );
         // La imagen sin `timeout` no lo lleva, aunque se pida.
         let sin_imagen = sesion_de_prueba(&exec, false);
         assert_eq!(
             sin_imagen.paso_args(&Entorno::default(), "exit 0", true),
-            ["exec", "n", "sh", "-c", "exit 0"]
+            [
+                "exec",
+                "n",
+                "sh",
+                "-c",
+                ENVOLTORIO_SIN_ACTIVAR,
+                "_",
+                "exit 0"
+            ]
         );
     }
 
@@ -4341,15 +4424,55 @@ pub(crate) mod tests {
                 "-w",
                 "/salida/work",
                 "n",
-                "timeout",
-                "120",
                 "sh",
                 "-c",
-                "export A=1; exec sh -c \"$1\"",
+                "export A=1; export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; timeout 120 sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"",
                 "_",
                 "pytest -q",
             ]
         );
+    }
+
+    #[test]
+    fn sesion_paso_args_pone_el_path_del_sistema_despues_de_la_activacion() {
+        // El PATH del sistema va primero, y los directorios del producto (venv, pydeps) quedan detrás.
+        let exec = ExecFalso::con_codigos(&[]);
+        let s = sesion_de_prueba(&exec, false);
+        let entorno = Entorno {
+            dir: None,
+            activar: "export PATH=/tmp/pydeps/bin:$PATH;".into(),
+        };
+        let args = s.paso_args(&entorno, "curl --version", false);
+        let envoltorio = &args[4];
+        let activacion = envoltorio
+            .find("export PATH=/tmp/pydeps/bin:$PATH;")
+            .expect("la activación va en el envoltorio");
+        let sistema = envoltorio
+            .find("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH")
+            .expect("el PATH del sistema va en el envoltorio");
+        assert!(activacion < sistema, "{envoltorio}");
+    }
+
+    #[test]
+    fn sesion_correr_escenario_con_125_del_producto_es_fallo() {
+        // El 125 del producto sale como 1 por el envoltorio: es rojo del producto, no de podman.
+        let exec = exec_con_envoltorio("exit 125");
+        let s = sesion_de_prueba(&exec, false);
+        match s
+            .correr_escenario(&Entorno::default(), &escenario_de("exit 125"))
+            .expect("corre")
+        {
+            Prueba::Fallo { codigo, .. } => assert_eq!(codigo, 1),
+            _ => panic!("el 125 del producto debe ser un fallo"),
+        }
+    }
+
+    #[test]
+    fn envoltorio_deja_pasar_126_y_127_como_codigos_del_producto() {
+        assert_eq!(codigo_del_envoltorio("exit 0"), 0);
+        assert_eq!(codigo_del_envoltorio("exit 1"), 1);
+        assert_eq!(codigo_del_envoltorio("exit 126"), 126);
+        assert_eq!(codigo_del_envoltorio("exit 127"), 127);
     }
 
     #[test]
@@ -4419,14 +4542,22 @@ pub(crate) mod tests {
 
     #[test]
     fn sesion_correr_escenario_de_la_imagen_manda_los_mismos_argumentos() {
-        // GUARDA: el camino de la imagen no cambia sus argumentos al pasar por `Exec`.
+        // GUARDA: el camino de la imagen manda el envoltorio por `Exec`, con el `timeout` dentro.
         let exec = ExecFalso::con(vec![Ok(salida(0, ""))]);
         let s = sesion_de_prueba(&exec, true);
         s.correr_escenario(&Entorno::default(), &escenario_de("exit 0"))
             .expect("corre");
         assert_eq!(
             exec.llamadas()[0],
-            ["exec", "n", "timeout", "120", "sh", "-c", "exit 0"]
+            [
+                "exec",
+                "n",
+                "sh",
+                "-c",
+                ENVOLTORIO_CON_TIMEOUT,
+                "_",
+                "exit 0"
+            ]
         );
     }
 
@@ -4683,6 +4814,7 @@ pub(crate) mod tests {
 
     #[test]
     fn eval_instalar_con_codigo_125_es_infraestructura() {
+        // GUARDA: un 125 que llega sin pasar por el envoltorio sale de podman, así que es infraestructura.
         let repo = repo_completo();
         let fabrica =
             FabricaEvalFalsa::con(ExecFalso::vacio().responde("make", Resp::Codigo(125, "")));
@@ -4702,6 +4834,82 @@ pub(crate) mod tests {
                 .any(|h| h.detalle.contains("no instala"))
         );
         assert!(!fabrica.exec.hubo("./run"));
+    }
+
+    #[test]
+    fn eval_instalar_con_125_del_producto_no_instala() {
+        // El `exit 125` del producto sale como 1 por el envoltorio: es un hallazgo de "no instala".
+        let repo = repo_completo();
+        let entrega = "[entrega]\ninstalar = \"exit 125\"\ncorrer = \"./run\"\n\
+            espera_segundos = 0\narchivos = [\"README.md\", \"Dockerfile\"]\n";
+        let fabrica = FabricaEvalFalsa::con(ExecFalso::vacio().responde(
+            "exit 125",
+            Resp::Codigo(codigo_del_envoltorio("exit 125"), ""),
+        ));
+        let r = sonda_con(&fabrica, repo.path(), &tarea_de("shell", entrega));
+        assert!(
+            r.sonda
+                .hallazgos
+                .iter()
+                .any(|h| h.detalle.contains("no instala")),
+            "{:?}",
+            r.sonda.hallazgos
+        );
+        assert!(!fabrica.exec.hubo("./run"));
+    }
+
+    #[test]
+    fn eval_preludio_de_rust_con_codigo_125_es_infraestructura() {
+        // GUARDA: el 125 del preludio sale de podman. El envoltorio ya convierte el del producto en 1.
+        let repo = repo_completo();
+        let fabrica = FabricaEvalFalsa::con(
+            ExecFalso::vacio().responde("config.toml", Resp::Codigo(125, "")),
+        );
+        let r = sonda_con(&fabrica, repo.path(), &tarea_de("rust", ESCENARIOS));
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("preludio de Rust"),
+            "{:?}",
+            r.sonda.motivo
+        );
+    }
+
+    // ---- Tarea 91, parte 2c: el envoltorio de cada paso aísla el 125 del producto ----
+
+    /// Imagen de los tests con podman real. Debe estar construida o descargada localmente.
+    const ALPINE: &str = "docker.io/library/alpine:3.20";
+
+    #[test]
+    fn guarda_podman_envoltorio_el_wget_del_sistema_gana_al_wget_falso_del_producto() {
+        crate::saltar_sin_podman!();
+        // GUARDA con podman real: el producto deja un `wget` falso (exit 0) en /tmp/pydeps/bin.
+        // Alpine sí trae `wget` en el sistema (busybox). Con el PATH del sistema primero, el escenario
+        // usa el wget real, que falla al conectar a 127.0.0.1:1. El falso solo tapa herramientas que el
+        // sistema NO tiene; no tapa una que el sistema sí tiene.
+        let sesion = Sesion::de_imagen(&EXEC_REAL, ALPINE, None).expect("arranca el contenedor");
+        let entorno = Entorno {
+            dir: None,
+            activar: "export PATH=/tmp/pydeps/bin:$PATH;".into(),
+        };
+        let instalar = "mkdir -p /tmp/pydeps/bin && printf '#!/bin/sh\\nexit 0\\n' > /tmp/pydeps/bin/wget && chmod +x /tmp/pydeps/bin/wget";
+        let paso = sesion
+            .paso(&entorno, instalar, PLAZO_CORTO, false)
+            .expect("corre el paso del producto");
+        assert_eq!(paso.codigo, 0, "{paso:?}");
+        let r = sesion
+            .correr_escenario(
+                &entorno,
+                &Escenario {
+                    id: "wget".into(),
+                    cmd: "wget -q -T 1 http://127.0.0.1:1/x".into(),
+                },
+            )
+            .expect("corre el escenario");
+        assert!(matches!(r, Prueba::Fallo { .. }), "el wget falso pasó");
     }
 
     #[test]
