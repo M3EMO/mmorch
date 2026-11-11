@@ -1996,10 +1996,12 @@ const MOTIVO_SIN_EJECUTAR: &str =
 const MOTIVOS_DE_CONSTRUCCION: [&str; 2] = ["no compila", "fallan sin mutaciones"];
 
 /// Si el defecto rompe la construcción: `dimension` queda sin veredicto, o con ítems faltantes, por un
-/// motivo de construcción fallida que la base no tiene. Completitud y Funciona nunca cuentan.
+/// motivo de construcción fallida que la base no tiene. En Completitud y Funciona también cuenta un
+/// `no_compila` que la base no tiene: un build roto da 0 con veredicto y no trae marcador en el puntaje.
 fn rompe_la_compilacion(base: &Veredicto, veredicto: &Veredicto, dimension: Dimension) -> bool {
-    if matches!(dimension, Dimension::Completitud | Dimension::Funciona) {
-        return false;
+    let sin_build = veredicto.no_compila && !base.no_compila;
+    if matches!(dimension, Dimension::Completitud | Dimension::Funciona) && sin_build {
+        return true;
     }
     let en_base = motivos_de_construccion(base, dimension);
     motivos_de_construccion(veredicto, dimension)
@@ -5279,10 +5281,35 @@ mod tests {
     }
 
     #[test]
-    fn rompe_la_compilacion_completitud_y_funciona_son_falsas() {
+    fn rompe_la_compilacion_funciona_y_completitud_con_marcador_nuevo_es_verdadero() {
         for dimension in [Dimension::Completitud, Dimension::Funciona] {
             let base = veredicto_de(dimension, 1.0, None);
             let veredicto = con_motivo(&base, NO_COMPILA);
+            assert!(rompe_la_compilacion(&base, &veredicto, dimension));
+        }
+    }
+
+    #[test]
+    fn rompe_la_compilacion_funciona_y_completitud_con_no_compila_nuevo_es_verdadero() {
+        // Un build roto da Funciona y Completitud en 0 y deja `no_compila`, sin marcador en el puntaje.
+        for dimension in [Dimension::Completitud, Dimension::Funciona] {
+            let base = veredicto_de(dimension, 1.0, None);
+            let veredicto = Veredicto {
+                no_compila: true,
+                ..bajada(&base)
+            };
+            assert!(rompe_la_compilacion(&base, &veredicto, dimension));
+        }
+    }
+
+    #[test]
+    fn rompe_la_compilacion_no_compila_que_la_base_ya_tiene_es_falso() {
+        for dimension in [Dimension::Completitud, Dimension::Funciona] {
+            let base = Veredicto {
+                no_compila: true,
+                ..veredicto_de(dimension, 1.0, None)
+            };
+            let veredicto = bajada(&base);
             assert!(!rompe_la_compilacion(&base, &veredicto, dimension));
         }
     }
@@ -6770,8 +6797,9 @@ mod tests {
         assert!(medida.fila.is_none(), "sin casos no hay fila");
     }
 
+    /// Tarea 101, A1: una copia que no compila en Completitud es inválida. Reemplaza hasta agotar y no mide.
     #[test]
-    fn calibra_completitud_con_no_compila_mide_y_no_reemplaza() {
+    fn calibra_completitud_con_no_compila_reemplaza_y_no_mide() {
         let base = veredicto_de(Dimension::Completitud, 1.0, None);
         let (_t, tarea) = tarea_prueba();
         let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
@@ -6790,11 +6818,15 @@ mod tests {
             &ev,
         )
         .expect("calibra");
-        assert_eq!((fila.defectos, fila.limpios, fila.reemplazos), (1, 1, 0));
         assert_eq!(
-            fila.sensibilidad,
-            Some(0.0),
-            "sin veredicto cuenta como falso negativo"
+            (
+                fila.defectos,
+                fila.limpios,
+                fila.no_aplicable,
+                fila.reemplazos
+            ),
+            (0, 1, 1, MAX_REEMPLAZOS + 1),
+            "el defecto agota sus reemplazos y no cuenta como medido"
         );
     }
 
