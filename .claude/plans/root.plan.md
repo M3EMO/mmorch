@@ -7273,3 +7273,74 @@ Brief: `docs/builds/brief-local-89.md`, con base 76f95c6 y rama `laptop/tarea-89
 Los tres puntos no comparten archivos, y corren en paralelo.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
+
+## Vuelta del 2026-11-11 (11): Tarea 89, capas con la sonda nueva y Tarea 90
+
+**Estado.** La Tarea 89 está en `laptop/tarea-89` (af2ab61), con 2990, 0 y 4 con podman. Las mezclas de la 84 a la 89 y P95 a P101 esperan al usuario.
+
+## 1. La Tarea 89
+
+**El arreglo de (h) funciona.** En broot, en el commit de t1, la sonda veía 15 aristas, y ahora ve 219. Antes veía el 7 %. Ahora aparece un ciclo real.
+
+**Archivos fuera de la tabla: se acepta.** `aplicar` y `motivo_sin_calibrar` necesitan el hash actual, y `evaluar_con` los llama desde `oracle/mod.rs`. No había otra forma. El error es del brief.
+
+**Las 4 preguntas:**
+1. **Tocar `oracle/mod.rs` y `compartidos.rs`:** acepto, como arriba.
+2. **`inestables_de` debe mirar `tarea_hash`: sí.** Una fila de otro `tarea.toml` no debe excluir ítems. Es la misma regla que `aplicar`. Va a la Tarea 90.
+3. **Versión de sondas solo si es mayor que 1:** acepto. Así solo Arquitectura pierde sus filas, y las otras ocho no se recalibran con gasto.
+4. **Mensaje con el nombre repetido:** acepto.
+
+**Un detalle del informe que se corrige:** `pub(in crate::x) use ...` cuenta `x` como destino. Un camino de visibilidad no es una dependencia. Una arista falsa puede inventar un ciclo. Va a la Tarea 90.
+
+## 2. Capas con la sonda nueva
+
+**Las tres tareas dan 3 capas.** La primera junta un ciclo de 27 a 29 módulos. La segunda tiene `content_search` y `git`. La tercera tiene los módulos hoja.
+
+**¿Sirve una capa con un ciclo tan grande? Sirve para lo que mide hoy.**
+- El ciclo es una propiedad real de broot. La sonda ya lo marca en la base, con severidad 3.
+- La calibración solo cuenta hallazgos nuevos. El ciclo de la base no cuenta como detección ni como falsa alarma.
+- `CicloEntreCapas` toma un módulo de una capa de abajo y le agrega un uso hacia la primera capa. Eso da un hallazgo nuevo: el uso hacia una capa anterior. También extiende el ciclo hasta ese módulo, con otro id.
+- Con 9 módulos fuera del ciclo, el inyector tiene de dónde elegir.
+
+**Lo que no mide, y ya estaba dicho en la vuelta (9):** este defecto lo detecta la sonda. Medir Arquitectura en t1 no dice nada del juez.
+
+**Decisión: se aplican así al `ROOT_HOME` real, después de la mezcla de la 89.**
+- Quitan la alarma falsa de `capas = [["patron"]]`, el defecto (d).
+- Pasaron la verificación con el binario nuevo.
+- Con `tarea_hash`, las filas viejas de Arquitectura dejan de valer solas cuando cambia el `tarea.toml`.
+
+## 3. Los MEDIUM abiertos, en orden
+
+**Modelo de amenaza.** Root evalúa código que escribe un builder, que es un modelo. El riesgo no es solo un repo malicioso. Un builder puede aprender a engañar al evaluador. Por eso cuentan dos clases: daño al host, y falsificación del resultado.
+
+| Orden | MEDIUM | Clase | Decisión |
+|---|---|---|---|
+| 1 | 11: build y escenarios sin `--cap-drop`, `no-new-privileges`, pids ni memoria | Host | **Tarea 90** |
+| 2 | 14: nada controla `RUN --network=host` | Host | **Tarea 90** |
+| 3 | 22: un evento `humano` o `plan-aprobado` por MCP no tiene marca de origen | Falsificación | **Tarea 90** |
+| 4 | 15: nombres `.rc` fijos; un proceso de fondo falsifica escenarios | Falsificación | Tarea 91, con diseño propio |
+| 5 | 12: la clasificación del build confía en `STEP` y en textos que imprime el repo | Falsificación | Tarea 91, con el 15 |
+| 6 | 21: `leer_eventos` de `aprende.rs` sin lock | Datos | **Tarea 90** |
+| 7 | 17: `zip` sin comprobar largos en el redactor | Datos | **Tarea 90** |
+| 8 | 9: `content_filter` y `refusal` pasan como respuesta completa | Datos | **Tarea 90** |
+| 9 | 8: el cupo no se revisa por rol ni por vuelta | Costo de cupo | Después |
+
+**Por qué el 15 y el 12 no entran ahora.** Los dos piden separar lo que escribe Root de lo que puede escribir el código evaluado, dentro del mismo contenedor. Eso necesita un diseño, no un parche. Lo escribo en una vuelta propia.
+
+## 4. Tarea 90
+
+Brief: `docs/builds/brief-local-90.md`, con base af2ab61 y rama `laptop/tarea-90`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | MEDIUM 11 y 14: endurecer build y escenarios, y rechazar `RUN --network` | `src/oracle/entrega.rs` |
+| 2 | MEDIUM 9: `refusal` y `content_filter` no son respuestas completas | `src/proveedores/deepseek.rs`, `src/proveedores/anthropic.rs` |
+| 3 | MEDIUM 17: redactor por id, no por posición | `src/oracle/informe.rs` |
+| 4 | MEDIUM 21: `leer_eventos` con lock | `src/aprende.rs` |
+| 5 | MEDIUM 22: origen de los eventos por MCP | `src/mcp.rs`, `src/observe/mod.rs` |
+| 6 | `inestables_de` con `tarea_hash` | `src/oracle/calibra.rs`, `src/oracle/mod.rs` |
+| 7 | `pub(in ...)` no es arista | `src/oracle/perfiles/rust.rs` |
+
+Los siete puntos no comparten archivos, y corren en paralelo.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
