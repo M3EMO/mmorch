@@ -163,6 +163,8 @@ Las cuatro herramientas:
 }
 ```
 
+Cada evento que crea `root_registrar` lleva `extra.origen = "mcp"`. `resumir_eventos` no cuenta esos eventos como humanos ni como planes aprobados. `contar_declarados_mcp` los cuenta aparte. Un evento sin `origen` cuenta como antes.
+
 ## Archivos de ROOT_HOME
 
 `ROOT_HOME` vale `~/.local/share/root/` por defecto. Si la variable `ROOT_HOME` existe y no está vacía, Root usa esa ruta.

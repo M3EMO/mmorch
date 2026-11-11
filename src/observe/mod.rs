@@ -67,11 +67,22 @@ pub fn resumir_en(ruta: &Path, corrida: &str) -> Result<Resumen, ErrorObserve> {
     Ok(resumir_eventos(&de_la_corrida))
 }
 
+/// Sí si el evento lo declaró MCP (`root_registrar`). Lleva `extra["origen"] = "mcp"`.
+fn es_declarado_mcp(ev: &Evento) -> bool {
+    ev.extra.get("origen").and_then(Value::as_str) == Some("mcp")
+}
+
+/// Cuántos eventos declaró MCP. Estos no cuentan como humanos ni como planes aprobados.
+pub fn contar_declarados_mcp(eventos: &[Evento]) -> usize {
+    eventos.iter().filter(|ev| es_declarado_mcp(ev)).count()
+}
+
 /// Resumen de una lista de eventos de una corrida. Función pura.
 pub fn resumir_eventos(eventos: &[Evento]) -> Resumen {
+    // Un plan declarado por MCP no fija el plan aprobado.
     let plan_aprobado = eventos
         .iter()
-        .find(|ev| ev.tipo == TipoEvento::PlanAprobado)
+        .find(|ev| ev.tipo == TipoEvento::PlanAprobado && !es_declarado_mcp(ev))
         .map(|ev| ev.ts);
     let mut resumen = Resumen::default();
     for ev in eventos {
@@ -89,7 +100,11 @@ pub fn resumir_eventos(eventos: &[Evento]) -> Resumen {
         if ev.tipo == TipoEvento::Sesion {
             resumen.turnos = resumen.turnos.saturating_add(turnos_de(ev));
         }
-        if ev.tipo == TipoEvento::Humano && plan_aprobado.is_some_and(|t| ev.ts > t) {
+        // Un humano declarado por MCP no es una intervención de una persona.
+        if ev.tipo == TipoEvento::Humano
+            && !es_declarado_mcp(ev)
+            && plan_aprobado.is_some_and(|t| ev.ts > t)
+        {
             resumen.intervenciones += 1;
         }
         resumen.invalida |= ev.tipo == TipoEvento::OraculoLeido;
@@ -247,6 +262,54 @@ mod tests {
             evento(TipoEvento::PlanAprobado, 100.0),
         ];
         assert_eq!(resumir_eventos(&eventos).intervenciones, 0);
+    }
+
+    /// Evento escrito por `root_registrar` por MCP: lleva `extra["origen"] = "mcp"`.
+    fn evento_mcp(tipo: TipoEvento, ts: f64) -> Evento {
+        let mut ev = evento(tipo, ts);
+        ev.extra.insert("origen".into(), json!("mcp"));
+        ev
+    }
+
+    #[test]
+    fn observe_humano_por_mcp_despues_de_plan_no_cuenta_como_humano() {
+        let eventos = [
+            evento(TipoEvento::PlanAprobado, 100.0),
+            evento_mcp(TipoEvento::Humano, 101.0),
+        ];
+        assert_eq!(resumir_eventos(&eventos).intervenciones, 0);
+    }
+
+    #[test]
+    fn observe_plan_aprobado_por_mcp_no_fija_el_plan() {
+        // Un plan declarado por MCP no cuenta como aprobación de una persona.
+        let eventos = [
+            evento_mcp(TipoEvento::PlanAprobado, 100.0),
+            evento(TipoEvento::Humano, 101.0),
+        ];
+        assert_eq!(resumir_eventos(&eventos).intervenciones, 0);
+    }
+
+    #[test]
+    fn observe_humano_sin_origen_despues_de_plan_sigue_contando() {
+        // Guarda: un evento viejo, sin `origen`, cuenta como hoy.
+        let eventos = [
+            evento(TipoEvento::PlanAprobado, 100.0),
+            evento(TipoEvento::Humano, 101.0),
+        ];
+        assert_eq!(resumir_eventos(&eventos).intervenciones, 1);
+    }
+
+    #[test]
+    fn observe_cuenta_aparte_los_declarados_por_mcp() {
+        let eventos = [
+            evento(TipoEvento::PlanAprobado, 100.0),
+            evento_mcp(TipoEvento::Humano, 101.0),
+            evento_mcp(TipoEvento::PlanAprobado, 102.0),
+            evento(TipoEvento::Humano, 103.0),
+        ];
+        assert_eq!(contar_declarados_mcp(&eventos), 2);
+        assert_eq!(resumir_eventos(&eventos).intervenciones, 1);
     }
 
     #[test]
