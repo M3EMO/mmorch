@@ -104,6 +104,10 @@ pub struct Fila {
     /// Una fila sin el campo vale `None`. Con ítems del juez, `None` cuenta como vieja y no calibra.
     #[serde(default)]
     pub huella: Option<String>,
+    /// Hash del `tarea.toml` con que se midió la fila. Otro `tarea.toml` deja la fila sin valor.
+    /// Una fila sin el campo vale `None`, y sigue valiendo.
+    #[serde(default)]
+    pub tarea_hash: Option<String>,
     /// Ítems del juez que variaron entre los tres juicios de la base, en orden. No entran a la medición de la
     /// dimensión. Una fila sin el campo vale vacía.
     #[serde(default)]
@@ -169,8 +173,9 @@ impl Calibraciones {
     }
 
     /// Marca cada puntaje con su calibración: `calibrada` si la exactitud balanceada llega a `UMBRAL`.
-    /// Sin fila, o con muestra insuficiente, el puntaje queda sin calibrar.
-    pub fn aplicar(&self, tarea: &str, puntajes: &mut [Puntaje]) {
+    /// Sin fila, o con muestra insuficiente, el puntaje queda sin calibrar. `tarea_hash` es el hash actual
+    /// del `tarea.toml` de `tarea` (`hash_de_tarea`).
+    pub fn aplicar(&self, tarea: &str, tarea_hash: &str, puntajes: &mut [Puntaje]) {
         for puntaje in puntajes {
             // Una fila con muestra corta cuenta como si no existiera.
             let fila = self
@@ -182,6 +187,7 @@ impl Calibraciones {
             let calibrable = fila.is_some_and(|f| {
                 !f.incompleta
                     && f.limpios_sin_veredicto * 100 <= f.limpios * MAX_LIMPIOS_SIN_VEREDICTO_PCT
+                    && tarea_vigente(f, tarea_hash)
                     && huella_vigente(f, puntaje.dimension)
             });
             puntaje.calibrada =
@@ -197,15 +203,26 @@ impl Calibraciones {
             .map_or(&[], |fila| fila.inestables.as_slice())
     }
 
-    /// Motivo por el que la fila más reciente de `dimension` no calibra por su huella: es de otro juez.
-    /// `None` si no hay fila con muestra suficiente, o si su huella es la actual.
-    pub fn motivo_sin_calibrar(&self, tarea: &str, dimension: Dimension) -> Option<&'static str> {
+    /// Motivo por el que la fila más reciente de `dimension` no calibra: es de otro `tarea.toml` o de otro juez.
+    /// Con las dos causas, gana la del `tarea.toml`. Da `None` si no hay fila con muestra suficiente, o si la fila vale.
+    pub fn motivo_sin_calibrar(
+        &self,
+        tarea: &str,
+        tarea_hash: &str,
+        dimension: Dimension,
+    ) -> Option<&'static str> {
         let fila = self
             .de(tarea, dimension)
             .filter(|f| muestra_suficiente(f))?;
+        if !tarea_vigente(fila, tarea_hash) {
+            return Some(MOTIVO_OTRA_TAREA);
+        }
         (!huella_vigente(fila, dimension)).then_some(MOTIVO_OTRO_JUEZ)
     }
 }
+
+/// Motivo de un puntaje cuya fila es de otro `tarea.toml`: la calibración sale de otra versión de la tarea.
+const MOTIVO_OTRA_TAREA: &str = "calibración con otro tarea.toml";
 
 /// Motivo de un puntaje cuya fila tiene otra huella: la calibración sale de otro juez.
 const MOTIVO_OTRO_JUEZ: &str = "calibración de otro juez";
@@ -256,22 +273,63 @@ pub fn global_de(puntajes: &[Puntaje]) -> Option<f32> {
     (!valores.is_empty()).then(|| valores.iter().sum::<f32>() / valores.len() as f32)
 }
 
-/// Huella de la calibración de `dimension`. Con ítems del juez, cuenta el prompt del juez y las rúbricas.
-/// Sin ellos, cuentan solo las rúbricas. Cambiar lo que cuenta cambia la huella.
-/// Las filas con otra huella no calibran si la dimensión tiene ítems del juez.
-pub fn huella_de(dimension: Dimension) -> String {
-    huella_con_prompt(dimension, &huella_del_prompt())
+/// Calcula el hash del `tarea.toml` de `tarea`. Una fila lo guarda y solo vale para esa versión.
+pub fn hash_de_tarea(tarea: &Tarea) -> Result<String, ErrorOraculo> {
+    compartidos::hash_del_tarea_toml(&tarea.dir)
 }
 
-/// Huella de `dimension` con `huella_prompt` como huella del juez. Sin ítems del juez, ignora `huella_prompt`.
-fn huella_con_prompt(dimension: Dimension, huella_prompt: &str) -> String {
+/// Huella de la calibración de `dimension`. Con ítems del juez, cuenta el prompt del juez y las rúbricas.
+/// Sin ellos, cuentan solo las rúbricas. Cuenta también la versión de sus sondas (`version_de_sondas`).
+/// Las filas con otra huella no calibran.
+pub fn huella_de(dimension: Dimension) -> String {
+    huella_con_version(
+        dimension,
+        &huella_del_prompt(),
+        version_de_sondas(dimension),
+    )
+}
+
+/// Versión base de las sondas. Una dimensión en esta versión conserva su huella de antes de existir la versión.
+const VERSION_SONDAS_BASE: u32 = 1;
+
+/// Versión de las sondas de `dimension`. Subirla cambia la huella de la dimensión: sus filas viejas no calibran.
+fn version_de_sondas(dimension: Dimension) -> u32 {
+    match dimension {
+        // Arquitectura sube a 2 por el cambio de imports agrupados de sus sondas.
+        Dimension::Arquitectura => 2,
+        Dimension::Funciona
+        | Dimension::Seguridad
+        | Dimension::Eficiencia
+        | Dimension::Estructura
+        | Dimension::Diseno
+        | Dimension::Completitud
+        | Dimension::Entrega
+        | Dimension::Pruebas => VERSION_SONDAS_BASE,
+    }
+}
+
+/// Calcula la huella de `dimension` con `huella_prompt` y con la versión `version` de sus sondas.
+/// Sin ítems del juez, ignora `huella_prompt`. La versión base no entra al texto: su huella no cambia.
+fn huella_con_version(dimension: Dimension, huella_prompt: &str, version: u32) -> String {
     let juntas: String = rubricas_de(dimension).iter().map(Rubrica::hash).collect();
     let texto = if tiene_items_de_juez(dimension) {
         format!("{huella_prompt}\n{juntas}")
     } else {
         juntas
     };
+    let texto = if version == VERSION_SONDAS_BASE {
+        texto
+    } else {
+        format!("{texto}\nsondas v{version}")
+    };
     calcular_hash(texto.as_bytes())
+}
+
+/// La fila sirve para la tarea según su `tarea_hash`. Sin hash, la fila es vieja y sirve. Con hash, debe ser el actual.
+fn tarea_vigente(fila: &Fila, tarea_hash: &str) -> bool {
+    fila.tarea_hash
+        .as_deref()
+        .is_none_or(|hash| hash == tarea_hash)
 }
 
 /// Rúbricas embebidas de `dimension`. Su id es la clave de la dimensión.
@@ -868,6 +926,7 @@ fn calibrar_medida_con_hilos(
     hilos: usize,
     compartidos: Option<&Compartidos>,
 ) -> Result<Medida, ErrorOraculo> {
+    let tarea_hash = hash_de_tarea(tarea)?;
     let defectos = inyectar::de_dimension(dimension);
     if defectos.is_empty() {
         return Err(ErrorOraculo::Uso(format!(
@@ -937,7 +996,7 @@ fn calibrar_medida_con_hilos(
             no_aplica: None,
             inestables: inestables.iter().cloned().collect(),
             extractos_base,
-            ..fila_no_aplica(tarea, dimension, semilla, &motivo)
+            ..fila_no_aplica(tarea, &tarea_hash, dimension, semilla, &motivo)
         };
         return Ok(Medida {
             fila: Some(fila),
@@ -1090,6 +1149,7 @@ fn calibrar_medida_con_hilos(
             ruidosos: ruidosos.into_iter().collect(),
             inestables: inestables.iter().cloned().collect(),
             extractos_base,
+            tarea_hash: Some(tarea_hash.clone()),
             ..fila_de(
                 tarea,
                 dimension,
@@ -1110,6 +1170,7 @@ fn calibrar_medida_con_hilos(
 }
 
 /// La fila de los casos medidos: sensibilidad, especificidad y exactitud por dimensión y por ítem.
+/// Deja `tarea_hash` en `None`: quien la llama lo pone con el hash del `tarea.toml`.
 fn fila_de(
     tarea: &Tarea,
     dimension: Dimension,
@@ -1167,6 +1228,7 @@ fn fila_de(
         }
     }
     Fila {
+        tarea_hash: None,
         tarea: tarea.nombre.clone(),
         dimension,
         n: casos.len() as u32,
@@ -1325,10 +1387,17 @@ pub fn calibrar_tarea_con(
     let dim = Dimension::desde_clave(dimension)
         .ok_or_else(|| ErrorOraculo::Uso(format!("dimensión desconocida: {dimension}")))?;
     let tarea = super::tarea::cargar_en(home, nombre)?;
+    let tarea_hash = hash_de_tarea(&tarea)?;
     // Eficiencia sin `[eficiencia]`: la tarea no la aplica. Ni la base ni los casos corren, y la fila lleva
     // solo el motivo. Es el mismo criterio que la sonda usa para no medir.
     if dim == Dimension::Eficiencia && tarea.eficiencia.is_none() {
-        let fila = fila_no_aplica(&tarea, dim, semilla, MOTIVO_NO_APLICA_EFICIENCIA);
+        let fila = fila_no_aplica(
+            &tarea,
+            &tarea_hash,
+            dim,
+            semilla,
+            MOTIVO_NO_APLICA_EFICIENCIA,
+        );
         agregar(home, &fila)?;
         return Ok(Calibrada { fila, casos: None });
     }
@@ -1342,7 +1411,7 @@ pub fn calibrar_tarea_con(
             super::entrega::Eleccion::SinDockerfile
         )
     {
-        let fila = fila_no_aplica(&tarea, dim, semilla, MOTIVO_NO_APLICA_ENTREGA);
+        let fila = fila_no_aplica(&tarea, &tarea_hash, dim, semilla, MOTIVO_NO_APLICA_ENTREGA);
         agregar(home, &fila)?;
         return Ok(Calibrada { fila, casos: None });
     }
@@ -1452,8 +1521,15 @@ const MOTIVO_NO_APLICA_ENTREGA: &str =
     "no aplica: la tarea no define [entrega] y el repo no tiene Dockerfile";
 
 /// Fila de una dimensión que la tarea no aplica: sin casos ni métricas, con `motivo` en `no_aplica`.
-fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64, motivo: &str) -> Fila {
+fn fila_no_aplica(
+    tarea: &Tarea,
+    tarea_hash: &str,
+    dimension: Dimension,
+    semilla: u64,
+    motivo: &str,
+) -> Fila {
     Fila {
+        tarea_hash: Some(tarea_hash.into()),
         tarea: tarea.nombre.clone(),
         dimension,
         n: 0,
@@ -2165,6 +2241,7 @@ mod tests {
 
     fn fila(tarea: &str, dimension: Dimension, ts: f64, exactitud: Option<f32>) -> Fila {
         Fila {
+            tarea_hash: None,
             tarea: tarea.into(),
             dimension,
             n: 20,
@@ -4152,7 +4229,7 @@ mod tests {
                 filas: vec![fila],
             };
             let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
-            c.aplicar("memora", &mut puntajes);
+            c.aplicar("memora", "", &mut puntajes);
             assert_eq!(puntajes[0].calibrada, calibrada);
         }
     }
@@ -4309,7 +4386,7 @@ mod tests {
             puntaje(Dimension::Seguridad, 0.8),
             puntaje(Dimension::Diseno, 0.8),
         ];
-        c.aplicar("memora", &mut puntajes);
+        c.aplicar("memora", "", &mut puntajes);
         assert!(puntajes[0].calibrada);
         assert_eq!(puntajes[0].exactitud_balanceada, Some(0.9));
         assert!(!puntajes[1].calibrada);
@@ -4335,7 +4412,7 @@ mod tests {
                 ..puntaje(Dimension::Funciona, 0.0)
             },
         ];
-        c.aplicar("memora", &mut puntajes);
+        c.aplicar("memora", "", &mut puntajes);
         // Diseño no está calibrada; Funciona está calibrada pero sin veredicto.
         let global = global_de(&puntajes).expect("hay una calibrada");
         assert!((global - 0.6).abs() < 1e-6, "{global}");
@@ -4344,7 +4421,7 @@ mod tests {
     #[test]
     fn calibra_global_sin_calibradas_es_none() {
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.9)];
-        Calibraciones::default().aplicar("memora", &mut puntajes);
+        Calibraciones::default().aplicar("memora", "", &mut puntajes);
         assert_eq!(global_de(&puntajes), None);
     }
 
@@ -4360,7 +4437,7 @@ mod tests {
             filas: vec![no_aplica],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.9)];
-        c.aplicar("memora", &mut puntajes);
+        c.aplicar("memora", "", &mut puntajes);
         assert!(!puntajes[0].calibrada, "una fila no aplica no calibra");
         assert_eq!(puntajes[0].exactitud_balanceada, None);
     }
@@ -4380,7 +4457,7 @@ mod tests {
             filas: vec![fila],
         };
         let mut puntajes = vec![puntaje(dimension, 0.8)];
-        c.aplicar("memora", &mut puntajes);
+        c.aplicar("memora", "", &mut puntajes);
         puntajes[0].calibrada
     }
 
@@ -4408,6 +4485,62 @@ mod tests {
         let sin = fila("memora", Dimension::Seguridad, 1.0, Some(1.0));
         assert_eq!(sin.huella, None);
         assert!(calibra_con_una_fila(sin, Dimension::Seguridad));
+    }
+
+    /// Crea una fila de Seguridad con exactitud 1.0 y el `tarea_hash` dado. Sus conteos pasan la muestra mínima.
+    fn fila_con_tarea_hash(tarea_hash: Option<String>) -> Fila {
+        Fila {
+            tarea_hash,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        }
+    }
+
+    #[test]
+    fn fila_con_otro_tarea_toml_no_calibra_y_da_su_motivo() {
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![fila_con_tarea_hash(Some("tarea-vieja".into()))],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
+        c.aplicar("memora", "tarea-actual", &mut puntajes);
+        assert!(!puntajes[0].calibrada);
+        assert_eq!(
+            c.motivo_sin_calibrar("memora", "tarea-actual", Dimension::Seguridad),
+            Some("calibración con otro tarea.toml")
+        );
+    }
+
+    #[test]
+    fn fila_sin_tarea_hash_sigue_calibrando() {
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![fila_con_tarea_hash(None)],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
+        c.aplicar("memora", "tarea-actual", &mut puntajes);
+        assert!(puntajes[0].calibrada);
+        assert_eq!(
+            c.motivo_sin_calibrar("memora", "tarea-actual", Dimension::Seguridad),
+            None
+        );
+    }
+
+    #[test]
+    fn version_de_sondas_de_arquitectura_cambia_su_huella_y_no_la_de_seguridad() {
+        let prompt = huella_del_prompt();
+        assert_eq!(version_de_sondas(Dimension::Arquitectura), 2);
+        assert_ne!(
+            huella_con_version(Dimension::Arquitectura, &prompt, 1),
+            huella_con_version(Dimension::Arquitectura, &prompt, 2)
+        );
+        assert_eq!(
+            huella_de(Dimension::Arquitectura),
+            huella_con_version(Dimension::Arquitectura, &prompt, 2)
+        );
+        assert_eq!(
+            huella_de(Dimension::Seguridad),
+            huella_con_version(Dimension::Seguridad, &prompt, 1)
+        );
     }
 
     #[test]
@@ -4488,7 +4621,7 @@ mod tests {
             filas: vec![fila_de_diseno_con_huella(Some("vieja".into()))],
         };
         assert_eq!(
-            c.motivo_sin_calibrar("memora", Dimension::Diseno),
+            c.motivo_sin_calibrar("memora", "", Dimension::Diseno),
             Some("calibración de otro juez")
         );
         let vigente = Calibraciones {
@@ -4498,10 +4631,10 @@ mod tests {
             )))],
         };
         assert_eq!(
-            vigente.motivo_sin_calibrar("memora", Dimension::Diseno),
+            vigente.motivo_sin_calibrar("memora", "", Dimension::Diseno),
             None
         );
-        assert_eq!(c.motivo_sin_calibrar("otra", Dimension::Diseno), None);
+        assert_eq!(c.motivo_sin_calibrar("otra", "", Dimension::Diseno), None);
     }
 
     #[test]
@@ -4516,16 +4649,24 @@ mod tests {
     #[test]
     fn calibra_huella_de_seguridad_no_depende_del_prompt() {
         assert_eq!(
-            huella_con_prompt(Dimension::Seguridad, "a"),
-            huella_con_prompt(Dimension::Seguridad, "b")
+            huella_con_version(
+                Dimension::Seguridad,
+                "a",
+                version_de_sondas(Dimension::Seguridad)
+            ),
+            huella_con_version(
+                Dimension::Seguridad,
+                "b",
+                version_de_sondas(Dimension::Seguridad)
+            )
         );
     }
 
     #[test]
     fn calibra_huella_de_diseno_depende_del_prompt() {
         assert_ne!(
-            huella_con_prompt(Dimension::Diseno, "a"),
-            huella_con_prompt(Dimension::Diseno, "b")
+            huella_con_version(Dimension::Diseno, "a", version_de_sondas(Dimension::Diseno)),
+            huella_con_version(Dimension::Diseno, "b", version_de_sondas(Dimension::Diseno))
         );
     }
 
@@ -4556,6 +4697,26 @@ mod tests {
     }
 
     #[test]
+    fn calibrar_con_escribe_el_hash_del_tarea_toml() {
+        let base = veredicto_base();
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia { base.clone() } else { hundido(base) }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Seguridad,
+            20,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("calibra");
+        let esperado = calcular_hash(&fs::read(tarea.dir.join("tarea.toml")).expect("lee"));
+        assert_eq!(fila.tarea_hash, Some(esperado));
+    }
+
+    #[test]
     fn calibra_n_dos_con_un_defecto_y_un_limpio_acertados_no_califica() {
         let base = veredicto_base();
         let fila = calibrar(
@@ -4567,12 +4728,16 @@ mod tests {
         assert_eq!((fila.defectos, fila.limpios), (1, 1));
         assert_eq!(fila.exactitud_balanceada, Some(1.0));
         let tarea = fila.tarea.clone();
+        let hash = fila
+            .tarea_hash
+            .clone()
+            .expect("calibrar deja el hash del tarea.toml");
         let c = Calibraciones {
             v: VERSION,
             filas: vec![fila],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.0)];
-        c.aplicar(&tarea, &mut puntajes);
+        c.aplicar(&tarea, &hash, &mut puntajes);
         assert!(
             !puntajes[0].calibrada,
             "1 defecto y 1 limpio no son muestra"
@@ -4591,12 +4756,16 @@ mod tests {
         );
         assert_eq!((fila.defectos, fila.limpios), (5, 5));
         let tarea = fila.tarea.clone();
+        let hash = fila
+            .tarea_hash
+            .clone()
+            .expect("calibrar deja el hash del tarea.toml");
         let c = Calibraciones {
             v: VERSION,
             filas: vec![fila],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.0)];
-        c.aplicar(&tarea, &mut puntajes);
+        c.aplicar(&tarea, &hash, &mut puntajes);
         assert!(puntajes[0].calibrada);
         assert_eq!(puntajes[0].exactitud_balanceada, Some(1.0));
     }
@@ -4613,7 +4782,7 @@ mod tests {
                 filas: vec![f],
             };
             let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
-            c.aplicar("memora", &mut puntajes);
+            c.aplicar("memora", "", &mut puntajes);
             assert!(!puntajes[0].calibrada);
         }
     }
@@ -4697,7 +4866,7 @@ mod tests {
             filas: vec![incompleta],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
-        c.aplicar("memora", &mut puntajes);
+        c.aplicar("memora", "", &mut puntajes);
         assert!(!puntajes[0].calibrada);
         assert!(global_de(&puntajes).is_none());
     }

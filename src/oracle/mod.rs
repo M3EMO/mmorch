@@ -836,12 +836,14 @@ fn evaluar_con(
     let mut pendientes_del_veredicto = pendientes::desde(tarea, &colab);
     pendientes_del_veredicto.extend(medicion.pendientes);
     let mut puntajes = medicion.puntajes;
-    deps.calibracion.aplicar(&tarea.nombre, &mut puntajes);
-    // Un puntaje calibrado no lleva motivo. Uno sin calibrar lleva el de su fila, si la huella no es la actual.
+    let tarea_hash = calibra::hash_de_tarea(tarea)?;
+    deps.calibracion
+        .aplicar(&tarea.nombre, &tarea_hash, &mut puntajes);
+    // Un puntaje calibrado no lleva motivo. Uno sin calibrar lleva el motivo de su fila, si esa fila no vale.
     for puntaje in puntajes.iter_mut().filter(|p| !p.calibrada) {
         puntaje.motivo_sin_calibrar = deps
             .calibracion
-            .motivo_sin_calibrar(&tarea.nombre, puntaje.dimension)
+            .motivo_sin_calibrar(&tarea.nombre, &tarea_hash, puntaje.dimension)
             .map(str::to_string);
     }
     let sin_calibrar = sin_calibrar(&puntajes);
@@ -5501,6 +5503,7 @@ mod tests {
         Calibraciones {
             v: calibra::VERSION,
             filas: vec![calibra::Fila {
+                tarea_hash: None,
                 tarea: tarea.into(),
                 dimension,
                 n: 0,
@@ -6209,6 +6212,7 @@ mod tests {
         ]
         .into_iter()
         .map(|dimension| calibra::Fila {
+            tarea_hash: None,
             tarea: "tarea-rust".into(),
             dimension,
             n: 20,

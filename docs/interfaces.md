@@ -781,6 +781,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "tarea": {
           "type": "string"
         },
+        "tarea_hash": {
+          "description": "Hash del `tarea.toml` con que se midió la fila. Otro `tarea.toml` deja la fila sin valor.\nUna fila sin el campo vale `None`, y sigue valiendo.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "ts": {
           "description": "Epoch en segundos de la medición. Gana la fila más reciente.",
           "type": "number",

@@ -925,6 +925,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
     .expect("calibra");
     // Seguridad calibrada en la misma tarea: `global` la cuenta y Eficiencia no.
     let seguridad = Fila {
+        tarea_hash: None,
         defectos_en_piso: 0,
         omisiones: 0,
         tarea: "calibra-fixture".into(),
@@ -975,7 +976,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
             faltantes: vec![],
         },
     ];
-    cal.aplicar("calibra-fixture", &mut puntajes);
+    cal.aplicar("calibra-fixture", "", &mut puntajes);
     assert!(!puntajes[0].calibrada, "eficiencia no aplicable no calibra");
     assert!(puntajes[1].calibrada, "seguridad sí calibra");
     assert_eq!(
@@ -1076,6 +1077,7 @@ fn eficiencia_con_bloque_mantiene_la_medicion_previa() {
 #[test]
 fn fila_vieja_sin_no_aplica_se_lee() {
     let fila = Fila {
+        tarea_hash: None,
         defectos_en_piso: 0,
         omisiones: 0,
         tarea: "calibra-fixture".into(),
@@ -1112,6 +1114,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
     // Una fila `no_aplica` nueva se agrega al final: las filas anteriores quedan como estaban.
     let home = home_con_tarea("");
     let antes = Fila {
+        tarea_hash: None,
         defectos_en_piso: 0,
         omisiones: 0,
         tarea: "calibra-fixture".into(),
