@@ -1,6 +1,7 @@
 //! Corrida completa de `r00t corre` (Tarea 16, parte 2): GOAL, ruteo previo de todos los roles, armado,
 //! lanzamiento por rol, sesiones, lecturas del oráculo, evaluación y la fila de `runs.jsonl`.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -231,6 +232,8 @@ fn correr_interno(
     let mut reanudando = reanuda.is_some();
     // Desde el primer lanzamiento de esta invocación, la vigencia se espera antes de cada lanzamiento.
     let mut ya_lanzo = false;
+    // Modelo del último lanzamiento de cada rol. Lo toma la fila: el ruteo de cada vuelta puede cambiarlo.
+    let mut modelos_lanzados: BTreeMap<Rol, String> = BTreeMap::new();
     for (rol, _) in &elecciones {
         let prompt_rol = config_cargada.prompt.get(rol).cloned().unwrap_or_default();
         let mut sesion: Option<String> = None;
@@ -260,9 +263,9 @@ fn correr_interno(
             // Antes de cada lanzamiento el rol vuelve a rutear. Si ya no va por cupo, la corrida para acá.
             let modelo = match rutear_por_cupo(deps.home, *rol, tarea) {
                 Ok(modelo) => modelo,
-                Err(_) => {
+                Err(causa) => {
                     let motivo = format!(
-                        "cupo agotado antes del rol {}, vuelta {}",
+                        "cupo agotado antes del rol {}, vuelta {}: {causa}",
                         nombre_rol(*rol),
                         vuelta + 1
                     );
@@ -294,6 +297,7 @@ fn correr_interno(
                 plugin: config_cargada.claude.plugin_de(*rol).map(Path::to_path_buf),
                 plazo,
             };
+            modelos_lanzados.insert(*rol, modelo.clone());
             let inicio = Instant::now();
             let resultado = deps.ejecutor.lanzar(&lanzamiento);
             let duracion = inicio.elapsed();
@@ -427,10 +431,13 @@ fn correr_interno(
     // j) La fila. El resumen sale de los eventos de esta corrida.
     let resumen =
         observe::resumir_en(&ruta_eventos, &id).map_err(|e| de_observe("resumir la corrida", e))?;
-    let modelos = elecciones
+    // Base: el modelo del ruteo inicial. Lo pisa el último lanzamiento de cada rol. Un rol reanudado
+    // como `Terminado` no se lanza y conserva el inicial.
+    let mut modelos: BTreeMap<Rol, String> = elecciones
         .iter()
         .filter_map(|(rol, eleccion)| eleccion.modelo.clone().map(|m| (*rol, m)))
         .collect();
+    modelos.extend(modelos_lanzados);
     let fila = Fila {
         id,
         ts: observe::ahora().0,
@@ -674,13 +681,14 @@ fn sesion_de_transcript(stdout: &[u8]) -> Option<String> {
 /// Un rol va por cupo con modelo, o `r00t corre` no lo lanza. Devuelve el modelo.
 fn modelo_por_cupo(rol: Rol, eleccion: &Eleccion) -> Result<String, String> {
     let nombre = nombre_rol(rol);
+    let motivo = &eleccion.motivo;
     match (eleccion.via, &eleccion.modelo) {
         (Via::Cupo, Some(modelo)) => Ok(modelo.clone()),
         (Via::Cupo, None) => Err(format!(
-            "el rol {nombre} va por cupo sin modelo: r00t corre solo lanza claude -p por cupo"
+            "el rol {nombre} va por cupo sin modelo: r00t corre solo lanza claude -p por cupo; motivo del ruteo: {motivo}"
         )),
         (via, _) => Err(format!(
-            "el rol {nombre} va por {}: r00t corre solo lanza claude -p por cupo",
+            "el rol {nombre} va por {}: r00t corre solo lanza claude -p por cupo; motivo del ruteo: {motivo}",
             etiqueta_via(via)
         )),
     }
@@ -2677,6 +2685,38 @@ mod tests {
         observe::registrar_en(&observe::ruta_eventos_en(home), &ev).expect("llenar el cupo");
     }
 
+    /// Ejecutor que, tras cada lanzamiento, cambia el modelo de construye en `root.toml`. El ruteo del
+    /// próximo lanzamiento ya da otro modelo que el inicial.
+    struct CambiaModeloTras<'a> {
+        interno: &'a dyn EjecutorBuilder,
+        home: &'a Path,
+        modelo: &'static str,
+    }
+
+    impl EjecutorBuilder for CambiaModeloTras<'_> {
+        fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+            let resultado = self.interno.lanzar(l);
+            let toml = format!(
+                "[modelos]\nplanifica = \"opus\"\norganiza = \"sonnet\"\nconstruye = \"{}\"\n",
+                self.modelo
+            );
+            fs::write(self.home.join("root.toml"), toml).expect("root.toml");
+            resultado
+        }
+
+        fn verificar_antes(&self, plazo: Duration) -> Result<(), ErrorCorre> {
+            self.interno.verificar_antes(plazo)
+        }
+
+        fn espera_vigencia(&self) -> EsperaVigencia {
+            self.interno.espera_vigencia()
+        }
+
+        fn vida_restante(&self) -> Result<Option<Duration>, ErrorCorre> {
+            self.interno.vida_restante()
+        }
+    }
+
     /// Planifica va por cupo. Tras su lanzamiento, el cupo se llena: construye ya no va por cupo y no se lanza.
     #[test]
     fn corre_rol_que_deja_de_ir_por_cupo_no_se_lanza_y_la_corrida_para() {
@@ -2694,7 +2734,9 @@ mod tests {
         }
         assert_eq!(
             gates(&e, FASE_ROL),
-            vec!["cupo agotado antes del rol construye, vuelta 1".to_string()]
+            vec![
+                "cupo agotado antes del rol construye, vuelta 1: el rol construye va por api: r00t corre solo lanza claude -p por cupo; motivo del ruteo: cupo del bloque agotado: pasa a la API".to_string()
+            ]
         );
         let guardadas =
             track::filas_de(&e.home.join("runs.jsonl"), &Filtro::default()).expect("runs");
@@ -2720,12 +2762,60 @@ mod tests {
         );
         assert_eq!(
             gates(&e, FASE_ROL),
-            vec!["cupo agotado antes del rol construye, vuelta 2".to_string()]
+            vec![
+                "cupo agotado antes del rol construye, vuelta 2: el rol construye va por api: r00t corre solo lanza claude -p por cupo; motivo del ruteo: cupo del bloque agotado: pasa a la API".to_string()
+            ]
         );
         let guardadas =
             track::filas_de(&e.home.join("runs.jsonl"), &Filtro::default()).expect("runs");
         assert_eq!(guardadas.len(), 1, "la fila se escribe");
         assert_eq!(guardadas[0].id, fila.id);
+    }
+
+    /// El rol cambia de modelo entre su primera y su segunda vuelta. La fila guarda el último modelo lanzado.
+    #[test]
+    fn corre_fila_guarda_el_modelo_del_ultimo_lanzamiento_del_rol() {
+        let e = entorno();
+        let programado = Programado::con(vec![cortado(), Paso::Bien]);
+        let cambia = CambiaModeloTras {
+            interno: &programado,
+            home: &e.home,
+            modelo: "sonnet",
+        };
+        let fila =
+            correr_con(&e, &cambia, &[], CONFIG_CONSTRUYE).expect("la corrida llega a la fila");
+        assert_eq!(programado.lanzados.borrow().len(), 2, "dos vueltas");
+        assert_eq!(
+            fila.modelos.get(&Rol::Construye).map(String::as_str),
+            Some("sonnet"),
+            "el modelo de la segunda vuelta: {:?}",
+            fila.modelos
+        );
+    }
+
+    /// Un rol que pasa a API sin `SinPresupuesto` para el `Gate`: nombra la vía y el motivo del ruteo.
+    #[test]
+    fn gate_de_cupo_que_pasa_a_api_nombra_la_via_y_el_motivo() {
+        let e = entorno();
+        let programado = Programado::con(vec![cortado(), Paso::Bien]);
+        let agota = AgotaCupoTras {
+            interno: &programado,
+            home: &e.home,
+        };
+        correr_con(&e, &agota, &[], CONFIG_CONSTRUYE).expect("la corrida para y llega a la fila");
+        let motivos = gates(&e, FASE_ROL);
+        assert_eq!(motivos.len(), 1, "{motivos:?}");
+        let motivo = &motivos[0];
+        assert!(
+            motivo.starts_with("cupo agotado antes del rol construye, vuelta 2: "),
+            "{motivo}"
+        );
+        assert!(
+            motivo
+                .contains("el rol construye va por api: r00t corre solo lanza claude -p por cupo"),
+            "{motivo}"
+        );
+        assert!(motivo.contains("motivo del ruteo: "), "{motivo}");
     }
 
     #[test]
