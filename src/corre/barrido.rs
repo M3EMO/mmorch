@@ -27,10 +27,20 @@ const PROCESOS: &str = "/proc";
 /// Nombre del programa `r00t`. Su proceso es el único que puede dejar una corrida viva.
 const NOMBRE_R00T: &str = "r00t";
 
+/// Resultado de un barrido: ids de las corridas barridas y de las que dieron error.
+/// "Barrida" quiere decir que su copia se borró.
+#[derive(Debug, Default, PartialEq)]
+pub struct ResultadoBarrido {
+    /// Corridas cuya copia se borró.
+    pub barridas: Vec<String>,
+    /// Corridas en las que hubo algún error.
+    pub con_error: Vec<String>,
+}
+
 /// Recorre las carpetas de corridas de `raiz_corridas` y barre las copias de corridas muertas.
 /// Si la raíz no existe, no hace nada. Una corrida que no se puede borrar deja un `Gate` y no corta
-/// el barrido de las demás.
-pub fn barrer(raiz_corridas: &Path, ruta_eventos: &Path) -> Result<(), ErrorCorre> {
+/// el barrido de las demás. Devuelve las corridas barridas y las que dieron error.
+pub fn barrer(raiz_corridas: &Path, ruta_eventos: &Path) -> Result<ResultadoBarrido, ErrorCorre> {
     barrer_con_proc(raiz_corridas, ruta_eventos, Path::new(PROCESOS))
 }
 
@@ -39,10 +49,12 @@ pub fn barrer_con_proc(
     raiz_corridas: &Path,
     ruta_eventos: &Path,
     raiz_proc: &Path,
-) -> Result<(), ErrorCorre> {
+) -> Result<ResultadoBarrido, ErrorCorre> {
     let entradas = match fs::read_dir(raiz_corridas) {
         Ok(entradas) => entradas,
-        Err(fuente) if fuente.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(fuente) if fuente.kind() == io::ErrorKind::NotFound => {
+            return Ok(ResultadoBarrido::default());
+        }
         Err(fuente) => {
             return Err(ErrorCorre::Io {
                 contexto: format!("leer {}", raiz_corridas.display()),
@@ -50,13 +62,21 @@ pub fn barrer_con_proc(
             });
         }
     };
+    // Una entrada que no se puede leer no tiene id: se informa y el barrido sigue.
+    let mut carpetas = Vec::new();
     for entrada in entradas {
-        let carpeta = entrada
-            .map_err(|fuente| ErrorCorre::Io {
-                contexto: format!("leer {}", raiz_corridas.display()),
-                fuente,
-            })?
-            .path();
+        match entrada {
+            Ok(entrada) => carpetas.push(entrada.path()),
+            Err(fuente) => eprintln!(
+                "r00t corre: barrido: no se pudo leer una entrada de {}: {fuente}",
+                raiz_corridas.display()
+            ),
+        }
+    }
+    // Orden por nombre: el orden de `read_dir` no es fijo.
+    carpetas.sort();
+    let mut resultado = ResultadoBarrido::default();
+    for carpeta in carpetas {
         // Un enlace o un archivo suelto no es carpeta de corrida.
         let Ok(meta) = fs::symlink_metadata(&carpeta) else {
             continue;
@@ -79,26 +99,38 @@ pub fn barrer_con_proc(
                     "no se pudo mirar la copia de la corrida {id}: {:?}",
                     fuente.kind()
                 );
-                gate(ruta_eventos, id, motivo)?;
+                anotar(ruta_eventos, id, motivo);
+                resultado.con_error.push(id.to_string());
                 continue;
             }
         }
         let Some(por_que) = motivo_de_muerte(id, raiz_proc) else {
             continue;
         };
-        let motivo = match borrado::borrar_archivo_dentro(&carpeta, &copia) {
-            Ok(()) => format!("copia de la corrida {id} barrida: {por_que}"),
-            Err(error) => format!("no se pudo borrar la copia de la corrida {id}: {error}"),
-        };
-        gate(ruta_eventos, id, motivo)?;
+        match borrado::borrar_archivo_dentro(&carpeta, &copia) {
+            Ok(()) => {
+                let motivo = format!("copia de la corrida {id} barrida: {por_que}");
+                if !anotar(ruta_eventos, id, motivo) {
+                    resultado.con_error.push(id.to_string());
+                }
+                resultado.barridas.push(id.to_string());
+            }
+            Err(error) => {
+                let motivo = format!("no se pudo borrar la copia de la corrida {id}: {error}");
+                anotar(ruta_eventos, id, motivo);
+                resultado.con_error.push(id.to_string());
+            }
+        }
     }
-    Ok(())
+    Ok(resultado)
 }
 
 /// Ticks de reloj por segundo del `starttime` de `/proc/<pid>/stat`. Linux usa 100 (CLK_TCK).
 const TICKS_POR_SEG: u64 = 100;
-/// Margen en segundos entre el inicio del proceso y los segundos del id. Cubre el redondeo de `btime`.
-const MARGEN_S: u64 = 2;
+/// Margen en segundos entre el inicio del proceso y los segundos del id. Antes era 2 s.
+/// La laptop se suspende y NTP corrige el reloj: `btime` deriva. Una corrida viva puede verse
+/// como pid reusado y perder su copia. Por eso el margen es de 300 s.
+const MARGEN_S: u64 = 300;
 
 /// Por qué la corrida `id` está muerta. `None` si su proceso vive, es `r00t` y es la misma corrida.
 /// Un pid sin carpeta en `raiz_proc` no vive. Un cmdline que no es de `r00t` está muerto. Un
@@ -187,6 +219,17 @@ fn gate(ruta_eventos: &Path, corrida: &str, motivo: String) -> Result<(), ErrorC
         contexto: format!("registrar el barrido en {}", ruta_eventos.display()),
         fuente,
     })
+}
+
+/// Registra el `Gate` de `corrida`. Si falla, lo informa por stderr y sigue. Devuelve si quedó registrado.
+fn anotar(ruta_eventos: &Path, corrida: &str, motivo: String) -> bool {
+    match gate(ruta_eventos, corrida, motivo) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("r00t corre: barrido: no se pudo registrar la corrida {corrida}: {error}");
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -398,8 +441,9 @@ mod tests {
         let e = escenario();
         let raiz_proc = e.base.join("proc");
         let pid = 4000401;
-        // La corrida nació a los 1700000000 s. El proceso del pid nació diez segundos después.
-        proceso_con_inicio(&raiz_proc, pid, 1_700_000_000, 1000);
+        // La corrida nació a los 1700000000 s. El proceso del pid nació 400 s después: pasa el margen
+        // de 300 s. Antes de subir el margen, este caso usaba 10 s después.
+        proceso_con_inicio(&raiz_proc, pid, 1_700_000_000, 40_000);
         let id = format!("corre-memo-ecc-test-1700000000-{pid}-0");
         let copia = corrida_con_copia(&e.raiz, &id);
         barrer_con_proc(&e.raiz, &e.eventos, &raiz_proc).expect("barre");
@@ -417,6 +461,8 @@ mod tests {
         assert!(sin_token(&e.eventos));
     }
 
+    /// Margen de 300 s. Antes era de 2 s: el caso "2 s después" ahora prueba el margen nuevo, en el
+    /// borde de 300 s.
     #[test]
     fn r00t_vivo_que_empezo_antes_o_en_el_margen_no_se_barre() {
         let e = escenario();
@@ -425,9 +471,9 @@ mod tests {
         // Un proceso que nació 500 s antes: es la misma corrida.
         let antes = 4000501;
         proceso_con_inicio(&raiz_proc, antes, 1_699_999_000, 50_000);
-        // Un proceso que nació 2 s después: está en el margen, sigue siendo la misma corrida.
+        // Un proceso que nació 300 s después, justo en el borde del margen: es la misma corrida.
         let margen = 4000502;
-        proceso_con_inicio(&raiz_proc, margen, 1_699_999_000, 100_200);
+        proceso_con_inicio(&raiz_proc, margen, 1_699_999_000, 130_000);
         let copia_antes = corrida_con_copia(
             &e.raiz,
             &format!("corre-memo-ecc-test-1700000000-{antes}-0"),
@@ -443,9 +489,107 @@ mod tests {
         );
         assert!(
             copia_margen.is_file(),
-            "dentro del margen de dos segundos: la copia queda"
+            "en el borde del margen de 300 s: la copia queda"
         );
         assert!(gates_de_barrido(&e.eventos).is_empty(), "sin Gate");
+    }
+
+    #[test]
+    fn r00t_vivo_que_empezo_60_s_despues_no_se_barre() {
+        let e = escenario();
+        let raiz_proc = e.base.join("proc");
+        // Inicio = btime + 6000 ticks / 100 = 60 s después de los segundos del id.
+        let pid = 4000601;
+        proceso_con_inicio(&raiz_proc, pid, 1_700_000_000, 6000);
+        let copia = corrida_con_copia(&e.raiz, &format!("corre-memo-ecc-test-1700000000-{pid}-0"));
+        barrer_con_proc(&e.raiz, &e.eventos, &raiz_proc).expect("barre");
+        assert!(
+            copia.is_file(),
+            "60 s después está dentro del margen de 300 s: la copia queda"
+        );
+        assert!(gates_de_barrido(&e.eventos).is_empty(), "sin Gate");
+    }
+
+    #[test]
+    fn r00t_vivo_que_empezo_400_s_despues_se_barre() {
+        let e = escenario();
+        let raiz_proc = e.base.join("proc");
+        // Inicio = btime + 40000 ticks / 100 = 400 s después de los segundos del id: pasa el margen.
+        let pid = 4000701;
+        proceso_con_inicio(&raiz_proc, pid, 1_700_000_000, 40_000);
+        let copia = corrida_con_copia(&e.raiz, &format!("corre-memo-ecc-test-1700000000-{pid}-0"));
+        barrer_con_proc(&e.raiz, &e.eventos, &raiz_proc).expect("barre");
+        assert!(
+            fs::symlink_metadata(&copia).is_err(),
+            "400 s después pasa el margen de 300 s: se reusó, la copia se barre"
+        );
+        let gates = gates_de_barrido(&e.eventos);
+        assert_eq!(gates.len(), 1, "un Gate de barrido");
+        assert!(motivo(&gates[0]).contains("empezó después"));
+    }
+
+    #[test]
+    fn error_en_una_corrida_del_medio_no_corta_el_barrido() {
+        let e = escenario();
+        let primera = format!("corre-memo-ecc-test-1-{PID_MUERTO}-0");
+        let del_medio = format!("corre-memo-ecc-test-2-{}-0", PID_MUERTO - 1);
+        let tercera = format!("corre-memo-ecc-test-3-{}-0", PID_MUERTO - 2);
+        let copia_primera = corrida_con_copia(&e.raiz, &primera);
+        // La carpeta de estado del medio es un enlace a `fuera/`: su borrado falla y no toca nada.
+        let fuera = e.base.join("fuera");
+        fs::create_dir_all(&fuera).expect("fuera");
+        let ajena = fuera.join(".credentials.json");
+        fs::write(&ajena, "dato-ajeno").expect("ajena");
+        fs::create_dir_all(e.raiz.join(&del_medio)).expect("carpeta");
+        symlink(&fuera, e.raiz.join(&del_medio).join("claude-estado")).expect("enlace de estado");
+        let copia_tercera = corrida_con_copia(&e.raiz, &tercera);
+
+        let resultado = barrer(&e.raiz, &e.eventos).expect("barre sin cortar");
+
+        assert!(
+            fs::symlink_metadata(&copia_primera).is_err(),
+            "la primera se barre"
+        );
+        assert!(
+            fs::symlink_metadata(&copia_tercera).is_err(),
+            "la tercera se barre"
+        );
+        assert_eq!(fs::read_to_string(&ajena).expect("ajena"), "dato-ajeno");
+        assert_eq!(
+            resultado.barridas,
+            vec![primera.clone(), tercera.clone()],
+            "barridas en orden de nombre"
+        );
+        assert_eq!(
+            resultado.con_error,
+            vec![del_medio.clone()],
+            "la del medio da error"
+        );
+        assert_eq!(gates_de_barrido(&e.eventos).len(), 3, "un Gate por corrida");
+        assert!(sin_token(&e.eventos));
+    }
+
+    #[test]
+    fn error_al_registrar_el_gate_no_corta_el_barrido() {
+        let e = escenario();
+        let primera = format!("corre-memo-ecc-test-1-{PID_MUERTO}-0");
+        let segunda = format!("corre-memo-ecc-test-2-{}-0", PID_MUERTO - 1);
+        let copia_primera = corrida_con_copia(&e.raiz, &primera);
+        let copia_segunda = corrida_con_copia(&e.raiz, &segunda);
+        // `eventos.jsonl` es una carpeta: registrar cada Gate falla, pero la copia se borra.
+        fs::create_dir_all(&e.eventos).expect("eventos como carpeta");
+
+        let resultado = barrer(&e.raiz, &e.eventos).expect("barre sin cortar");
+
+        assert!(
+            fs::symlink_metadata(&copia_primera).is_err(),
+            "primera barrida"
+        );
+        assert!(
+            fs::symlink_metadata(&copia_segunda).is_err(),
+            "segunda barrida"
+        );
+        assert_eq!(resultado.barridas, vec![primera, segunda]);
     }
 
     #[test]
