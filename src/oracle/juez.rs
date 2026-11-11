@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::cambios;
 use super::evidencia::{Verificacion, ruta_dentro, verificar_hallazgo};
 use super::mapa::Mapa;
 use super::perfiles::crear_hallazgo;
@@ -39,6 +40,8 @@ const NIVEL_MAX: i64 = 3;
 const SEVERIDAD_MAX: i64 = 3;
 /// Cuántos archivos grandes del mapa van en los extractos.
 const ARCHIVOS_DESTACADOS: usize = 5;
+/// Líneas de contexto a cada lado de un cambio en su extracto.
+const CONTEXTO: usize = 40;
 /// Entrada máxima de un juez, en bytes UTF-8 del sistema y el usuario del prompt. Es un límite: un prompt
 /// más grande no se envía y su juicio da sin veredicto. Así la estimación de costo nunca queda corta.
 pub const MAX_ENTRADA_JUEZ_BYTES: u64 = 256 * 1024;
@@ -61,10 +64,15 @@ Respondé SOLO un objeto JSON con esta forma exacta:
 {\"items\":[{\"item\":\"<id>\",\"nivel\":0-3,\"evidencia\":[{\"archivo\":\"...\",\"linea\":N,\"cita\":\"<texto textual del archivo>\"}]},{\"item\":\"<id>\",\"nivel\":null,\"motivo\":\"sin_evidencia\",\"evidencia\":[]}],\"hallazgos\":[{\"item\":\"<id>\",\"severidad\":1-3,\"archivo\":\"...\",\"linea\":N,\"cita\":\"...\",\"detalle\":\"...\",\"impacto\":[\"R1\"]}]}
 Sin hallazgos: \"hallazgos\":[].";
 
+/// Versión de la forma de elegir los extractos. Cambiarla cambia la huella: los limpios con la lectura vieja no se reusan.
+const VERSION_LECTURA: &str = "lectura-guiada-1";
+
 /// Huella de los textos fijos del prompt del juez. Cambiar uno cambia la huella: los limpios guardados con el
 /// prompt viejo ya no se reusan.
 pub fn huella_del_prompt() -> String {
-    crate::goal::calcular_hash(format!("{PROMPT_SISTEMA}\n{MARCA_RECORTE}").as_bytes())
+    crate::goal::calcular_hash(
+        format!("{PROMPT_SISTEMA}\n{MARCA_RECORTE}\n{VERSION_LECTURA}").as_bytes(),
+    )
 }
 
 /// Un modelo que responde al prompt del juez.
@@ -136,6 +144,8 @@ pub struct EntradaJuez<'a> {
     pub hallazgos_sondas: &'a [Hallazgo],
     pub rubricas: &'a [Rubrica],
     pub repo: &'a Path,
+    /// Estado inicial del repo (`bootstrap/`). Con él, el juez lee primero lo que cambió.
+    pub inicial: Option<&'a Path>,
 }
 
 /// Límites del prompt. El `Default` es el de producción.
@@ -247,8 +257,16 @@ fn construir_prompt_con(
         usuario.push_str(texto);
     }
     usuario.push_str("\nEXTRACTOS:\n");
-    for (archivo, texto) in extractos(e, limites) {
-        usuario.push_str(&format!("--- {archivo} ---\n{texto}"));
+    let mut anterior: Option<String> = None;
+    for extracto in extractos(e, limites) {
+        // Una ventana que sigue a otra del mismo archivo va con la marca de recorte antes.
+        if anterior.as_deref() == Some(extracto.archivo.as_str()) {
+            usuario.push_str(&format!("{MARCA_RECORTE}\n"));
+        } else {
+            usuario.push_str(&format!("--- {} ---\n", extracto.archivo));
+        }
+        usuario.push_str(&extracto.texto);
+        anterior = Some(extracto.archivo);
     }
     Prompt {
         sistema: Some(PROMPT_SISTEMA.into()),
@@ -305,21 +323,53 @@ fn mide_texto(mide: Mide) -> &'static str {
     }
 }
 
-/// Extractos de los archivos grandes del mapa y de los que citan las sondas, en ese orden.
-/// Respeta `extracto_max` por archivo y `extractos_total` en conjunto.
-fn extractos(e: &EntradaJuez, limites: &LimitesPrompt) -> Vec<(String, String)> {
-    let mut archivos = e.mapa.archivos_destacados(ARCHIVOS_DESTACADOS);
+/// Por qué un extracto va en el prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Motivo {
+    /// Tiene líneas cambiadas frente a `bootstrap/`.
+    Cambio,
+    /// Archivo grande del mapa.
+    Grande,
+    /// Archivo que citan las sondas.
+    Sonda,
+}
+
+/// Una ventana de un archivo en el prompt: las líneas `desde..=hasta`, con sus números reales.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Extracto {
+    pub archivo: String,
+    pub desde: u32,
+    pub hasta: u32,
+    pub motivo: Motivo,
+    pub texto: String,
+}
+
+/// Extractos del prompt. Primero van las ventanas de lo que cambió, si hay `inicial`. Después, los archivos
+/// grandes del mapa y los citados por sondas, desde su comienzo. Respeta `extracto_max` por ventana y
+/// `extractos_total` en conjunto.
+pub(crate) fn extractos(e: &EntradaJuez, limites: &LimitesPrompt) -> Vec<Extracto> {
+    let secretos = lineas_con_secreto(e.hallazgos_sondas);
+    let mut restante = limites.extractos_total;
+    let mut salida = Vec::new();
+    let mut por_cambio = BTreeSet::new();
+    if let Some(inicial) = e.inicial {
+        let cambios = cambios::rangos_cambiados(inicial, e.repo);
+        por_cambio =
+            extractos_de_cambios(e, limites, &cambios, &secretos, &mut restante, &mut salida);
+    }
+    let destacados = e.mapa.archivos_destacados(ARCHIVOS_DESTACADOS);
+    let mut archivos = destacados.clone();
     for h in e.hallazgos_sondas {
         if !archivos.contains(&h.archivo) {
             archivos.push(h.archivo.clone());
         }
     }
-    let secretos = lineas_con_secreto(e.hallazgos_sondas);
-    let mut restante = limites.extractos_total;
-    let mut salida = Vec::new();
     for archivo in archivos {
         if restante == 0 {
             break;
+        }
+        if por_cambio.contains(&archivo) {
+            continue;
         }
         // Solo se lee lo que queda dentro del repo. Se lee la ruta canónica que devuelve `ruta_dentro`.
         let Ok(ruta) = ruta_dentro(e.repo, &archivo) else {
@@ -329,14 +379,125 @@ fn extractos(e: &EntradaJuez, limites: &LimitesPrompt) -> Vec<(String, String)> 
             continue;
         };
         let omitidas = secretos.get(archivo.as_str()).cloned().unwrap_or_default();
-        let texto = numerar(&contenido, restante.min(limites.extracto_max), &omitidas);
+        let (texto, hasta) = numerar_rango(
+            &contenido,
+            1,
+            usize::MAX,
+            restante.min(limites.extracto_max),
+            &omitidas,
+        );
         if texto.is_empty() {
             continue;
         }
         restante = restante.saturating_sub(texto.chars().count());
-        salida.push((archivo, texto));
+        let motivo = if destacados.contains(&archivo) {
+            Motivo::Grande
+        } else {
+            Motivo::Sonda
+        };
+        salida.push(Extracto {
+            archivo,
+            desde: 1,
+            hasta: hasta as u32,
+            motivo,
+            texto,
+        });
     }
     salida
+}
+
+/// Ventanas de los archivos con cambios, de más líneas cambiadas a menos (desempate por ruta). Agrega sus
+/// extractos a `salida` y gasta `restante`. Devuelve los archivos que tuvieron al menos una ventana.
+fn extractos_de_cambios(
+    e: &EntradaJuez,
+    limites: &LimitesPrompt,
+    cambios: &BTreeMap<String, Vec<(u32, u32)>>,
+    secretos: &BTreeMap<&str, BTreeSet<u32>>,
+    restante: &mut usize,
+    salida: &mut Vec<Extracto>,
+) -> BTreeSet<String> {
+    let mut orden: Vec<(&String, &Vec<(u32, u32)>)> = cambios.iter().collect();
+    orden.sort_by(|a, b| {
+        lineas_cambiadas(b.1)
+            .cmp(&lineas_cambiadas(a.1))
+            .then_with(|| a.0.cmp(b.0))
+    });
+    let mut entraron = BTreeSet::new();
+    for (archivo, rangos) in orden {
+        if *restante == 0 {
+            break;
+        }
+        let Ok(ruta) = ruta_dentro(e.repo, archivo) else {
+            continue;
+        };
+        let Ok(contenido) = fs::read_to_string(ruta) else {
+            continue;
+        };
+        let total = contenido.lines().count();
+        let omitidas = secretos.get(archivo.as_str()).cloned().unwrap_or_default();
+        let mut emitidas = 0;
+        for (desde, hasta) in ventanas(rangos, total) {
+            // Entre dos ventanas del mismo archivo va la marca de recorte, en su propia línea.
+            let separador = if emitidas > 0 { largo_separador() } else { 0 };
+            if *restante <= separador {
+                break;
+            }
+            let limite = (*restante - separador).min(limites.extracto_max);
+            let (texto, ultima) = numerar_rango(&contenido, desde, hasta, limite, &omitidas);
+            if texto.is_empty() {
+                continue;
+            }
+            *restante -= separador + texto.chars().count();
+            salida.push(Extracto {
+                archivo: archivo.clone(),
+                desde: desde as u32,
+                hasta: ultima as u32,
+                motivo: Motivo::Cambio,
+                texto,
+            });
+            emitidas += 1;
+        }
+        if emitidas > 0 {
+            entraron.insert(archivo.clone());
+        }
+    }
+    entraron
+}
+
+/// Líneas cambiadas de un archivo: la suma de sus rangos.
+fn lineas_cambiadas(rangos: &[(u32, u32)]) -> usize {
+    rangos
+        .iter()
+        .map(|&(desde, hasta)| (hasta - desde + 1) as usize)
+        .sum()
+}
+
+/// Ventanas de un archivo de `total` líneas: cada rango con `CONTEXTO` líneas a cada lado, dentro de
+/// `1..=total`. Las ventanas que se tocan o se solapan se unen.
+fn ventanas(rangos: &[(u32, u32)], total: usize) -> Vec<(usize, usize)> {
+    let mut expandidas: Vec<(usize, usize)> = rangos
+        .iter()
+        .map(|&(desde, hasta)| {
+            let desde = (desde as usize).saturating_sub(CONTEXTO).max(1);
+            let hasta = (hasta as usize).saturating_add(CONTEXTO).min(total);
+            (desde, hasta)
+        })
+        .filter(|(desde, hasta)| desde <= hasta)
+        .collect();
+    expandidas.sort();
+    let mut unidas: Vec<(usize, usize)> = Vec::new();
+    for (desde, hasta) in expandidas {
+        match unidas.last_mut() {
+            Some(ultima) if desde <= ultima.1 + 1 => ultima.1 = ultima.1.max(hasta),
+            _ => unidas.push((desde, hasta)),
+        }
+    }
+    unidas
+}
+
+/// Largo de la línea de marca entre dos ventanas: la marca y su salto de línea.
+fn largo_separador() -> usize {
+    MARCA_RECORTE.chars().count() + 1
 }
 
 /// Líneas de cada archivo que cita un hallazgo de `gitleaks`. Todas van omitidas en el extracto.
@@ -353,34 +514,42 @@ fn lineas_con_secreto(hallazgos: &[Hallazgo]) -> BTreeMap<&str, BTreeSet<u32>> {
     secretos
 }
 
-/// Líneas con su número real (`NN: `). Las de `omitidas` salen como `LINEA_OMITIDA`. El texto, con la
-/// marca de recorte, no pasa `limite` caracteres. Vacío si ni una línea cabe: así no sale un archivo con
-/// solo la marca.
-fn numerar(contenido: &str, limite: usize, omitidas: &BTreeSet<u32>) -> String {
+/// Líneas `desde..=hasta` (1-based, acotadas al archivo) con su número real (`NN: `). Las de `omitidas`
+/// salen como `LINEA_OMITIDA`. El texto, con la marca de recorte, no pasa `limite` caracteres. Vacío si ni
+/// una línea cabe: así no sale una ventana con solo la marca. Devuelve también la última línea escrita.
+fn numerar_rango(
+    contenido: &str,
+    desde: usize,
+    hasta: usize,
+    limite: usize,
+    omitidas: &BTreeSet<u32>,
+) -> (String, usize) {
+    let lineas: Vec<&str> = contenido.lines().collect();
     let marca = format!("{MARCA_RECORTE}\n");
     let tope = limite.saturating_sub(marca.chars().count());
     let mut salida = String::new();
     let mut usados = 0;
-    for (i, linea) in contenido.lines().enumerate() {
-        let numero = i + 1;
+    let mut ultima = 0;
+    for numero in desde..=hasta.min(lineas.len()) {
         let texto = if omitidas.contains(&(numero as u32)) {
             LINEA_OMITIDA
         } else {
-            linea
+            lineas[numero - 1]
         };
         let fila = format!("{numero}: {texto}\n");
         let largo = fila.chars().count();
         if usados + largo > tope {
             if salida.is_empty() {
-                return String::new();
+                return (String::new(), 0);
             }
             salida.push_str(&marca);
             break;
         }
         salida.push_str(&fila);
         usados += largo;
+        ultima = numero;
     }
-    salida
+    (salida, ultima)
 }
 
 /// Bytes UTF-8 que el modelo recibe de un prompt: el sistema y el usuario.
@@ -1151,6 +1320,7 @@ mod tests {
                 hallazgos_sondas: &self.sondas,
                 rubricas: &self.rubricas,
                 repo: self.repo.path(),
+                inicial: None,
             }
         }
     }
@@ -1998,6 +2168,263 @@ mod tests {
             .expect("hay extractos");
         assert!(extractos.contains("--- src/a.rs ---"));
         assert!(!extractos.contains("--- src/b.rs ---"), "{extractos}");
+    }
+
+    // Lectura guiada por cambios: extractos desde `bootstrap/`.
+
+    /// Texto de `n` líneas `fn fK() {}`. Las de `cambiadas` dicen `fn cambio_K() {}`.
+    fn texto_de(n: usize, cambiadas: &[usize]) -> String {
+        (1..=n)
+            .map(|k| {
+                if cambiadas.contains(&k) {
+                    format!("fn cambio_{k}() {{}}\n")
+                } else {
+                    format!("fn f{k}() {{}}\n")
+                }
+            })
+            .collect()
+    }
+
+    /// Par `(repo, inicial)`. Cada `(ruta, n, cambiadas)` escribe `n` líneas en el repo. La copia inicial
+    /// tiene las mismas líneas, sin los cambios.
+    fn par_de_carpetas(archivos: &[(&str, usize, &[usize])]) -> (TempDir, TempDir) {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let inicial = tempfile::tempdir().expect("tempdir");
+        for (ruta, n, cambiadas) in archivos {
+            for (base, texto) in [
+                (repo.path(), texto_de(*n, cambiadas)),
+                (inicial.path(), texto_de(*n, &[])),
+            ] {
+                let destino = base.join(ruta);
+                fs::create_dir_all(destino.parent().expect("tiene carpeta")).expect("crea");
+                fs::write(destino, texto).expect("escribe");
+            }
+        }
+        (repo, inicial)
+    }
+
+    /// Extractos del repo con `inicial` como copia de partida y límites de producción.
+    fn extractos_con_inicial(repo: &Path, inicial: &Path) -> Vec<Extracto> {
+        let mapa = construir_mapa(repo).expect("mapa");
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo,
+            mapa: &mapa,
+            inicial: Some(inicial),
+            ..c.entrada()
+        };
+        extractos(&entrada, &LimitesPrompt::default())
+    }
+
+    /// Sección de extractos del prompt, desde `EXTRACTOS:`.
+    fn seccion_extractos_de(usuario: &str) -> &str {
+        usuario.split("EXTRACTOS:\n").nth(1).expect("hay extractos")
+    }
+
+    /// Caracteres de la sección que cuentan para `extractos_total`: sin los encabezados `--- archivo ---`.
+    fn chars_sin_encabezados(seccion: &str) -> usize {
+        seccion
+            .lines()
+            .filter(|l| !l.starts_with("--- "))
+            .map(|l| l.chars().count() + 1)
+            .sum()
+    }
+
+    #[test]
+    fn juez_extractos_cambio_en_linea_900_da_la_ventana_860_a_940() {
+        let (repo, ini) = par_de_carpetas(&[("src/grande.rs", 2000, &[900])]);
+        let salida = extractos_con_inicial(repo.path(), ini.path());
+        let grande: Vec<&Extracto> = salida
+            .iter()
+            .filter(|e| e.archivo == "src/grande.rs")
+            .collect();
+        assert_eq!(grande.len(), 1, "{salida:?}");
+        assert_eq!((grande[0].desde, grande[0].hasta), (860, 940));
+        assert_eq!(grande[0].motivo, Motivo::Cambio);
+        let texto = &grande[0].texto;
+        assert!(texto.starts_with("860: fn f860() {}\n"), "{texto}");
+        assert!(texto.contains("900: fn cambio_900() {}\n"), "{texto}");
+        assert!(texto.ends_with("940: fn f940() {}\n"), "{texto}");
+        assert!(!texto.contains("\n859: "), "{texto}");
+        assert!(!texto.contains("\n941: "), "{texto}");
+    }
+
+    #[test]
+    fn juez_archivo_nuevo_entra_desde_su_comienzo_antes_que_los_grandes() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let ini = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(repo.path().join("src")).expect("crea src");
+        fs::write(
+            repo.path().join("src/nuevo.rs"),
+            "fn a() {}\nfn b() {}\nfn c() {}\n",
+        )
+        .expect("escribe");
+        fs::write(repo.path().join("src/grande.rs"), texto_de(300, &[])).expect("escribe");
+        fs::create_dir(ini.path().join("src")).expect("crea src");
+        fs::write(ini.path().join("src/grande.rs"), texto_de(300, &[])).expect("escribe");
+        let salida = extractos_con_inicial(repo.path(), ini.path());
+        assert_eq!(salida[0].archivo, "src/nuevo.rs", "{salida:?}");
+        assert_eq!((salida[0].desde, salida[0].hasta), (1, 3));
+        assert_eq!(salida[0].motivo, Motivo::Cambio);
+        assert!(salida[0].texto.starts_with("1: fn a() {}\n"), "{salida:?}");
+        let grande = salida
+            .iter()
+            .position(|e| e.archivo == "src/grande.rs")
+            .expect("el grande sin cambio también entra");
+        assert!(grande > 0, "{salida:?}");
+        assert_eq!(salida[grande].motivo, Motivo::Grande);
+    }
+
+    #[test]
+    fn juez_dos_cambios_a_50_lineas_dan_una_sola_ventana() {
+        let (repo, ini) = par_de_carpetas(&[("src/grande.rs", 2000, &[500, 550])]);
+        let salida = extractos_con_inicial(repo.path(), ini.path());
+        let grande: Vec<&Extracto> = salida
+            .iter()
+            .filter(|e| e.archivo == "src/grande.rs")
+            .collect();
+        assert_eq!(grande.len(), 1, "{salida:?}");
+        assert_eq!((grande[0].desde, grande[0].hasta), (460, 590));
+    }
+
+    #[test]
+    fn juez_dos_cambios_muy_separados_dan_dos_ventanas_y_un_solo_encabezado() {
+        let (repo, ini) = par_de_carpetas(&[("src/grande.rs", 2000, &[100, 1500])]);
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            inicial: Some(ini.path()),
+            ..c.entrada()
+        };
+        let p = construir_prompt(&entrada, &LimitesPrompt::default());
+        let seccion = seccion_extractos_de(&p.usuario);
+        assert_eq!(
+            seccion.matches("--- src/grande.rs ---").count(),
+            1,
+            "{seccion}"
+        );
+        assert!(
+            seccion.contains("140: fn f140() {}\n…[recortado]\n1460: "),
+            "{seccion}"
+        );
+        let salida = extractos(&entrada, &LimitesPrompt::default());
+        let ventanas: Vec<(u32, u32)> = salida
+            .iter()
+            .filter(|e| e.archivo == "src/grande.rs")
+            .map(|e| (e.desde, e.hasta))
+            .collect();
+        assert_eq!(ventanas, vec![(60, 140), (1460, 1540)]);
+    }
+
+    #[test]
+    fn juez_extractos_con_cambios_no_pasan_el_total() {
+        let archivos: Vec<(String, usize, Vec<usize>)> = (0..10)
+            .map(|i| (format!("src/f{i}.rs"), 2000, vec![100, 1000, 1900]))
+            .collect();
+        let refs: Vec<(&str, usize, &[usize])> = archivos
+            .iter()
+            .map(|(r, n, c)| (r.as_str(), *n, c.as_slice()))
+            .collect();
+        let (repo, ini) = par_de_carpetas(&refs);
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            inicial: Some(ini.path()),
+            ..c.entrada()
+        };
+        let p = construir_prompt(&entrada, &LimitesPrompt::default());
+        let usados = chars_sin_encabezados(seccion_extractos_de(&p.usuario));
+        assert!(usados <= 40_000, "{usados}");
+        assert!(usados >= 39_000, "el total se gasta casi entero: {usados}");
+    }
+
+    #[test]
+    fn juez_extractos_linea_de_secreto_dentro_de_ventana_sale_omitida() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let ini = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(repo.path().join("src")).expect("crea src");
+        fs::create_dir(ini.path().join("src")).expect("crea src");
+        fs::write(
+            repo.path().join("src/secreto.rs"),
+            "fn inicio() {}\nconst TOKEN: &str = \"sk-SECRETO-123\";\n",
+        )
+        .expect("escribe");
+        fs::write(
+            ini.path().join("src/secreto.rs"),
+            "fn inicio() {}\nconst TOKEN: &str = \"\";\n",
+        )
+        .expect("escribe");
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let sondas = vec![hallazgo_de("gitleaks", "src/secreto.rs", 2)];
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            hallazgos_sondas: &sondas,
+            inicial: Some(ini.path()),
+            ..c.entrada()
+        };
+        let p = construir_prompt(&entrada, &LimitesPrompt::default());
+        assert!(!p.usuario.contains("SECRETO-123"), "{}", p.usuario);
+        assert!(
+            p.usuario.contains(
+                "--- src/secreto.rs ---\n1: fn inicio() {}\n2: [línea con un secreto omitida]\n"
+            ),
+            "{}",
+            p.usuario
+        );
+    }
+
+    #[test]
+    fn juez_archivo_con_cambio_no_entra_otra_vez_desde_el_comienzo() {
+        let (repo, ini) = par_de_carpetas(&[("src/grande.rs", 2000, &[900])]);
+        let salida = extractos_con_inicial(repo.path(), ini.path());
+        let veces = salida
+            .iter()
+            .filter(|e| e.archivo == "src/grande.rs")
+            .count();
+        assert_eq!(veces, 1, "{salida:?}");
+        assert!(
+            salida
+                .iter()
+                .all(|e| e.archivo != "src/grande.rs" || e.motivo == Motivo::Cambio),
+            "{salida:?}"
+        );
+    }
+
+    #[test]
+    fn juez_extractos_inicial_sin_diferencias_es_identico_a_sin_inicial() {
+        let (repo, ini) = par_de_carpetas(&[("src/grande.rs", 300, &[]), ("src/corto.rs", 5, &[])]);
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let c = caso();
+        let sin = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            ..c.entrada()
+        };
+        let con = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            inicial: Some(ini.path()),
+            ..c.entrada()
+        };
+        let limites = LimitesPrompt::default();
+        assert_eq!(extractos(&sin, &limites), extractos(&con, &limites));
+        assert_eq!(
+            construir_prompt(&sin, &limites),
+            construir_prompt(&con, &limites)
+        );
+    }
+
+    #[test]
+    fn juez_huella_cambia_con_la_lectura_guiada() {
+        let vieja =
+            crate::goal::calcular_hash(format!("{PROMPT_SISTEMA}\n{MARCA_RECORTE}").as_bytes());
+        assert_ne!(huella_del_prompt(), vieja);
     }
 
     /// Texto que solo existe fuera de la raíz del repo.

@@ -158,6 +158,7 @@ fn juez_con_tope_lleno_no_envia_el_reintento() {
         hallazgos_sondas: &[],
         rubricas: &rubricas,
         repo: repo.path(),
+        inicial: None,
     };
     let limites = LimitesPrompt {
         max_tokens: MAX_TOKENS,
