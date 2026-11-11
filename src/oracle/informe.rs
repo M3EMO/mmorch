@@ -407,15 +407,15 @@ fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     salida
 }
 
-/// Reglas de no listo: un producto que no compila, un test oculto o del contrato que falla y ningún requisito
-/// prueba, la completitud con veredicto bajo su mínimo, y una dimensión calibrada bajo su mínimo de
+/// Reglas de no listo: un producto o sus tests que no compilan, un test oculto o del contrato que falla y
+/// ningún requisito prueba, la completitud con veredicto bajo su mínimo, y una dimensión calibrada bajo su mínimo de
 /// `[decision.minimo]`. Una completitud sin veredicto no dispara aquí: `sin_decision` la cubre si no hay evidencia.
 fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Disparo> {
     let mut salida = Vec::new();
     if v.no_compila {
         salida.push(Disparo {
-            regla: "el producto no compila".into(),
-            frase: "El producto no compila, así que no está listo.".into(),
+            regla: "no_compila: el producto o sus tests no compilan".into(),
+            frase: "El producto o sus tests no compilan, así que no está listo.".into(),
             hallazgo: None,
         });
     }
@@ -1961,7 +1961,12 @@ modulos = ["config"]
         )
         .expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(i.motivo.contains("el producto no compila"), "{}", i.motivo);
+        // La regla lleva su clave, como las demás de no listo.
+        assert_eq!(
+            i.motivo, "no_compila: el producto o sus tests no compilan",
+            "{}",
+            i.motivo
+        );
     }
 
     #[test]

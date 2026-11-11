@@ -392,7 +392,7 @@ enum Suite {
 }
 
 /// Aviso del producto que no compila: su contrato no corre y la oculta tampoco.
-const MOTIVO_PRODUCTO_NO_COMPILA: &str = "el producto no compila";
+const MOTIVO_PRODUCTO_NO_COMPILA: &str = "el producto o sus tests no compilan";
 
 /// Evalúa `repo` con la tarea: corre el contrato y el oculto sobre una copia del repo, y las sondas.
 pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> {
@@ -4120,6 +4120,13 @@ mod tests {
         assert_eq!(funciona.sin_veredicto, None, "{funciona:?}");
         assert_eq!(funciona.valor, 0.0);
         assert_eq!(v.ocultos_fallidos, vec!["test_b::t3", "test_b::t4"]);
+        // El motivo de los tests que no corren: el producto o sus tests no compilan.
+        assert!(
+            v.avisos
+                .contains(&"el producto o sus tests no compilan".to_string()),
+            "{:?}",
+            v.avisos
+        );
         let completitud = puntaje_de_prueba(&v, Dimension::Completitud);
         assert_eq!(completitud.sin_veredicto, None, "{completitud:?}");
         assert_eq!(completitud.valor, 0.0);
