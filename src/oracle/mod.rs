@@ -1009,7 +1009,11 @@ fn medir(
     // El orden de las sondas es el de siempre: la Entrega, la mutación, las nativas y las de herramientas.
     let mut sondas = vec![entrega.sonda.clone()];
     if partes.mutacion {
-        sondas.push(mutacion::sonda_mutacion(ej, tarea).sonda);
+        let bootstrap = tarea.dir.join("bootstrap");
+        let cambios = bootstrap
+            .is_dir()
+            .then(|| cambios::rangos_cambiados(&bootstrap, repo));
+        sondas.push(mutacion::sonda_mutacion_en(ej, tarea, cambios.as_ref()).sonda);
     }
     if partes.nativas {
         sondas.extend(perfiles::sondas_nativas(repo, tarea));

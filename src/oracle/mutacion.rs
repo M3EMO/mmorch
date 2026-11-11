@@ -593,14 +593,46 @@ fn desde_sonda(sonda: ResultadoSonda) -> ResultadoMutacion {
 
 /// Sonda de mutación. Solo Rust. Sin `cargo-mutants` en la imagen, no corre el comando largo.
 pub fn sonda_mutacion(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoMutacion {
-    let resultado = medir_mutantes(ej, tarea);
+    sonda_mutacion_en(ej, tarea, None)
+}
+
+/// Como `sonda_mutacion`, pero con `cambios` (rangos de `rangos_cambiados`), solo los mutantes que
+/// caen dentro de ellos forman la muestra. Sin `cambios`, mide el listado entero.
+pub fn sonda_mutacion_en(
+    ej: &dyn EjecutorHerramienta,
+    tarea: &Tarea,
+    cambios: Option<&BTreeMap<String, Vec<(u32, u32)>>>,
+) -> ResultadoMutacion {
+    let resultado = medir_mutantes(ej, tarea, cambios);
     ULTIMA_MUESTRA.with(|u| *u.borrow_mut() = resultado.mutantes.clone());
     ULTIMA_BASE_SEGUNDOS.with(|u| *u.borrow_mut() = resultado.base_segundos);
     resultado
 }
 
-/// Cuerpo de `sonda_mutacion`. Su resultado sale con la muestra de `mutantes`.
-fn medir_mutantes(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoMutacion {
+/// Verdadero si `nombre` (`<archivo>:<línea>:<col>: ...`) cae en un rango de `cambios`.
+/// Un nombre que no trae archivo y línea, o cuyo archivo no está en `cambios`, no cae dentro.
+fn dentro_del_cambio(nombre: &str, cambios: &BTreeMap<String, Vec<(u32, u32)>>) -> bool {
+    let mut partes = nombre.split(':');
+    let (Some(archivo), Some(linea)) = (partes.next(), partes.next()) else {
+        return false;
+    };
+    let Ok(linea) = linea.parse::<u32>() else {
+        return false;
+    };
+    cambios.get(archivo).is_some_and(|rangos| {
+        rangos
+            .iter()
+            .any(|&(desde, hasta)| desde <= linea && linea <= hasta)
+    })
+}
+
+/// Cuerpo de `sonda_mutacion_en`. Su resultado sale con la muestra de `mutantes`.
+/// Con `cambios`, la muestra y el total son los mutantes que caen dentro del cambio.
+fn medir_mutantes(
+    ej: &dyn EjecutorHerramienta,
+    tarea: &Tarea,
+    cambios: Option<&BTreeMap<String, Vec<(u32, u32)>>>,
+) -> ResultadoMutacion {
     if tarea.lenguaje != "rust" {
         return desde_sonda(sin_veredicto(
             DIMENSION,
@@ -638,6 +670,20 @@ fn medir_mutantes(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoMutac
             hallazgos: Vec::new(),
         });
     }
+    let nombres = match cambios {
+        Some(c) => {
+            let dentro: Vec<String> = nombres
+                .into_iter()
+                .filter(|n| dentro_del_cambio(n, c))
+                .collect();
+            if dentro.is_empty() {
+                let motivo = "ningún mutante cae dentro del cambio";
+                return desde_sonda(sin_veredicto(DIMENSION, motivo));
+            }
+            dentro
+        }
+        None => nombres,
+    };
     let max = mutantes_max(tarea);
     let total = nombres.len() as u32;
     let muestra = muestra_repartida(&nombres, max as usize);
@@ -1301,6 +1347,149 @@ mod tests {
             corridas(&ej).is_empty(),
             "sin mutantes del archivo no corre la muestra"
         );
+    }
+
+    /// Rangos de `cambios` con un solo archivo y un solo rango.
+    fn cambio_en(archivo: &str, desde: u32, hasta: u32) -> BTreeMap<String, Vec<(u32, u32)>> {
+        BTreeMap::from([(archivo.to_string(), vec![(desde, hasta)])])
+    }
+
+    #[test]
+    fn mutacion_con_cambios_filtra_la_corrida_a_los_mutantes_dentro() {
+        let nombres = [
+            "src/a.rs:9:5: replace x -> u8 with 0",
+            "src/a.rs:10:5: replace y -> u8 with 0",
+            "src/a.rs:20:1: replace z -> u8 with 0",
+            "src/a.rs:21:1: replace w -> u8 with 0",
+            "src/b.rs:12:1: replace v -> u8 with 0",
+            "src/a.rs:15:2: replace u -> u8 with 0",
+        ];
+        let dentro = [nombres[1], nombres[2], nombres[5]];
+        let t = tarea_pruebas(10);
+        let ej = con_listado_y_corrida(listado_json(&nombres), corrida_de(&dentro));
+        let cambios = cambio_en("src/a.rs", 10, 20);
+        let r = sonda_mutacion_en(&ej, &t, Some(&cambios));
+        assert!(r.sonda.valor.is_some(), "{:?}", r.sonda.motivo);
+        assert_eq!(r.muestra, 3);
+        let cmds = corridas(&ej);
+        assert_eq!(cmds.len(), 1, "una sola corrida: {cmds:?}");
+        let esperados: Vec<String> = dentro.iter().map(|n| n.to_string()).collect();
+        assert!(cmds[0].contains(&filtro_de(&esperados)), "{}", cmds[0]);
+        assert!(!cmds[0].contains("src/b"), "{}", cmds[0]);
+        assert!(!cmds[0].contains("a\\.rs:9:"), "{}", cmds[0]);
+        assert!(!cmds[0].contains("a\\.rs:21:"), "{}", cmds[0]);
+    }
+
+    #[test]
+    fn mutacion_con_cambios_sin_mutantes_dentro_da_sin_veredicto() {
+        let nombres = cien_mutantes();
+        let refs: Vec<&str> = nombres.iter().map(String::as_str).collect();
+        let ej = con_listado_y_corrida(listado_json(&refs), corrida_de(&refs[..1]));
+        let cambios = cambio_en("src/a.rs", 500, 600);
+        let r = sonda_mutacion_en(&ej, &tarea_pruebas(10), Some(&cambios));
+        assert_eq!(r.sonda.valor, None);
+        let motivo = r.sonda.motivo.unwrap_or_default();
+        assert!(
+            motivo.contains("ningún mutante cae dentro del cambio"),
+            "{motivo}"
+        );
+        assert!(
+            corridas(&ej).is_empty(),
+            "sin mutantes dentro no corre la muestra"
+        );
+    }
+
+    #[test]
+    fn mutacion_sin_cambios_es_igual_a_sonda_mutacion() {
+        let nombres = cien_mutantes();
+        let refs: Vec<&str> = nombres.iter().map(String::as_str).collect();
+        let base: Vec<&str> = (0..10).map(|i| refs[i * 10]).collect();
+        let t = tarea_pruebas(10);
+        let ej_a = con_listado_y_corrida(listado_json(&refs), corrida_de(&base));
+        let a = sonda_mutacion(&ej_a, &t);
+        let ej_b = con_listado_y_corrida(listado_json(&refs), corrida_de(&base));
+        let b = sonda_mutacion_en(&ej_b, &t, None);
+        assert_eq!(a.sonda.valor, b.sonda.valor);
+        assert_eq!(a.muestra, b.muestra);
+        assert_eq!(a.total_conocido, b.total_conocido);
+        assert_eq!(a.truncado, b.truncado);
+        assert_eq!(*ej_a.cmds.borrow(), *ej_b.cmds.borrow());
+    }
+
+    #[test]
+    fn dentro_del_cambio_incluye_los_bordes_y_descarta_lo_de_afuera() {
+        let cambios = BTreeMap::from([
+            ("src/a.rs".to_string(), vec![(10, 20), (30, 30)]),
+            ("src/b.rs".to_string(), vec![(5, 5)]),
+        ]);
+        assert!(
+            dentro_del_cambio("src/a.rs:10:1: x", &cambios),
+            "borde inferior"
+        );
+        assert!(
+            dentro_del_cambio("src/a.rs:20:9: x", &cambios),
+            "borde superior"
+        );
+        assert!(dentro_del_cambio("src/a.rs:15:1: x", &cambios), "interior");
+        assert!(
+            dentro_del_cambio("src/a.rs:30:1: x", &cambios),
+            "rango de una línea"
+        );
+        assert!(
+            dentro_del_cambio("src/b.rs:5:1: x", &cambios),
+            "b.rs de una línea"
+        );
+        assert!(
+            !dentro_del_cambio("src/a.rs:9:1: x", &cambios),
+            "antes del rango"
+        );
+        assert!(
+            !dentro_del_cambio("src/a.rs:21:1: x", &cambios),
+            "entre rangos"
+        );
+        assert!(
+            !dentro_del_cambio("src/a.rs:31:1: x", &cambios),
+            "después del último"
+        );
+        assert!(
+            !dentro_del_cambio("src/c.rs:12:1: x", &cambios),
+            "archivo fuera del mapa"
+        );
+        assert!(
+            !dentro_del_cambio("src/a.rs: sin línea", &cambios),
+            "sin línea"
+        );
+        assert!(!dentro_del_cambio("src/a.rs", &cambios), "solo archivo");
+        assert!(
+            !dentro_del_cambio("src/a.rs:abc:1: x", &cambios),
+            "línea no numérica"
+        );
+        assert!(!dentro_del_cambio("sin prefijo", &cambios), "sin archivo");
+    }
+
+    #[test]
+    fn mutacion_con_cambios_mas_mutantes_que_el_tope_reparte_la_muestra_dentro() {
+        // Listado: un mutante de b.rs, diez de a.rs (líneas 1..=10) y otro de b.rs.
+        // Dentro del cambio son diez: con tope 3, índices 0, 3 y 6 de esos diez.
+        let mut nombres: Vec<String> = vec!["src/b.rs:1:1: replace p -> u8 with 0".into()];
+        nombres.extend((1..=10).map(|i| format!("src/a.rs:{i}:1: replace f{i} -> u8 with 0")));
+        nombres.push("src/b.rs:2:1: replace q -> u8 with 0".into());
+        let refs: Vec<&str> = nombres.iter().map(String::as_str).collect();
+        let esperados: Vec<String> = [1, 4, 7]
+            .iter()
+            .map(|i| format!("src/a.rs:{i}:1: replace f{i} -> u8 with 0"))
+            .collect();
+        let refs_pedidos: Vec<&str> = esperados.iter().map(String::as_str).collect();
+        let ej = con_listado_y_corrida(listado_json(&refs), corrida_de(&refs_pedidos));
+        let cambios = cambio_en("src/a.rs", 1, 10);
+        let r = sonda_mutacion_en(&ej, &tarea_pruebas(3), Some(&cambios));
+        assert!(r.sonda.valor.is_some(), "{:?}", r.sonda.motivo);
+        assert_eq!(r.muestra, 3);
+        assert!(r.truncado, "10 dentro del cambio y tope 3");
+        assert_eq!(r.total_conocido, Some(10));
+        let cmds = corridas(&ej);
+        assert_eq!(cmds.len(), 1, "una sola corrida: {cmds:?}");
+        assert!(cmds[0].contains(&filtro_de(&esperados)), "{}", cmds[0]);
     }
 
     #[test]
