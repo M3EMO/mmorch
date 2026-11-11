@@ -609,9 +609,14 @@ fn usos_de_crate_en(lineas: &[Linea]) -> Vec<UsoDeCrate> {
                 .unwrap_or(lineas.len() - 1);
             let mut texto = String::new();
             let mut inicios = Vec::new();
-            for l in &lineas[i..=fin] {
+            for (k, l) in lineas[i..=fin].iter().enumerate() {
                 inicios.push(texto.len());
-                texto.push_str(&l.limpia);
+                // Solo la primera línea puede llevar `pub(in ...)`. Su camino no es destino.
+                if k == 0 {
+                    texto.push_str(&sin_visibilidad(&l.limpia));
+                } else {
+                    texto.push_str(&l.limpia);
+                }
                 texto.push('\n');
             }
             for (nombre, byte) in nombres_en(&texto) {
@@ -655,6 +660,26 @@ fn es_inicio_de_use(limpia: &str) -> bool {
     resto
         .strip_prefix("use")
         .is_some_and(|r| r.is_empty() || r.starts_with(|c: char| c.is_whitespace() || c == '{'))
+}
+
+/// Cambia el `pub(...)` del inicio de la línea por espacios, del mismo largo. Así no queda ningún `crate::`
+/// de la visibilidad, y los bytes de las demás partes no se mueven.
+fn sin_visibilidad(limpia: &str) -> String {
+    let sangria = limpia.len() - limpia.trim_start().len();
+    let Some(tras_pub) = limpia[sangria..].strip_prefix("pub") else {
+        return limpia.to_string();
+    };
+    let espacios = tras_pub.len() - tras_pub.trim_start().len();
+    let Some(dentro) = tras_pub[espacios..].strip_prefix('(') else {
+        return limpia.to_string();
+    };
+    let Some(fin) = dentro.find(')') else {
+        return limpia.to_string();
+    };
+    let largo = "pub".len() + espacios + 1 + fin + 1;
+    let mut salida = limpia.to_string();
+    salida.replace_range(sangria..sangria + largo, &" ".repeat(largo));
+    salida
 }
 
 /// Nombres X de cada `crate::X` del texto, con el byte donde empieza X. Con `crate::{...}` da el primer
@@ -1554,6 +1579,71 @@ mod tests {
             .map(|(o, d)| format!("{o}->{d}"))
             .collect();
         assert_eq!(claves, ["x->app"]);
+    }
+
+    #[test]
+    fn aristas_pub_in_no_cuenta_el_camino_de_visibilidad() {
+        // El `crate::a` de `pub(in ...)` no es destino: solo cuenta `b`.
+        let archivos = [archivo_de(
+            "src/x.rs",
+            "pub(in crate::a) use crate::b::X;\n",
+        )];
+        let mods = modulos_de(&["x", "a", "b"]);
+        let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+            .keys()
+            .map(|(o, d)| format!("{o}->{d}"))
+            .collect();
+        assert_eq!(claves, ["x->b"]);
+    }
+
+    #[test]
+    fn aristas_pub_in_agrupado_no_cuenta_la_visibilidad() {
+        let texto = "pub(in crate::a) use crate::{\n    b::X,\n};\n";
+        let archivos = [archivo_de("src/x.rs", texto)];
+        let mods = modulos_de(&["x", "a", "b"]);
+        let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+            .keys()
+            .map(|(o, d)| format!("{o}->{d}"))
+            .collect();
+        assert_eq!(claves, ["x->b"]);
+    }
+
+    #[test]
+    fn aristas_otras_visibilidades_y_use_simple_siguen_igual() {
+        // Guarda: sin `in crate::`, la visibilidad no tiene `crate::` y el destino sigue igual.
+        let mods = modulos_de(&["x", "b"]);
+        for texto in [
+            "pub(crate) use crate::b::X;\n",
+            "pub(super) use crate::b::X;\n",
+            "use crate::b::X;\n",
+        ] {
+            let archivos = [archivo_de("src/x.rs", texto)];
+            let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+                .keys()
+                .map(|(o, d)| format!("{o}->{d}"))
+                .collect();
+            assert_eq!(claves, ["x->b"], "texto: {texto}");
+        }
+    }
+
+    #[test]
+    fn sonda_arquitectura_pub_in_no_inventa_ciclo() {
+        // `b` usa `pub(in crate::a)`: ese `a` no es una arista b -> a. Sin la arista falsa no hay ciclo.
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "src/a.rs",
+            "use crate::b::algo;\npub fn f() {}\n",
+        );
+        escribir(
+            dir.path(),
+            "src/b.rs",
+            "pub(in crate::a) use crate::c::K;\npub fn algo() {}\n",
+        );
+        escribir(dir.path(), "src/c.rs", "pub struct K;\n");
+        let r = arquitectura_nativa(dir.path(), &[], &[]);
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.valor, Some(1.0));
     }
 
     #[test]
