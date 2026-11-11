@@ -5352,6 +5352,7 @@ mod tests {
             hallazgos: Vec::new(),
             descartes: Vec::new(),
             hallazgos_descartados: Vec::new(),
+            extractos: Vec::new(),
             faltantes: vec![TOPE_ID.to_string()],
         };
         let rubricas = [rubrica_diseno()];
@@ -5888,6 +5889,7 @@ mod tests {
             hallazgos: Vec::new(),
             descartes: Vec::new(),
             hallazgos_descartados: Vec::new(),
+            extractos: Vec::new(),
             faltantes: Vec::new(),
         }
     }

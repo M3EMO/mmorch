@@ -197,19 +197,33 @@ pub struct ResultadoJuez {
     /// Hallazgos rechazados por no tener requisito afectado o por el gate de citas. Un resultado viejo lee vacío.
     #[serde(default)]
     pub hallazgos_descartados: Vec<HallazgoDescartado>,
+    /// Ventanas que vieron en el prompt, sin su texto. Un resultado viejo lee vacío.
+    #[serde(default)]
+    pub extractos: Vec<ExtractoGuardado>,
+}
+
+/// Una ventana del prompt del juez, sin su texto. `motivo` es `cambio`, `grande` o `sonda`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtractoGuardado {
+    pub archivo: String,
+    pub desde: u32,
+    pub hasta: u32,
+    pub motivo: String,
 }
 
 /// Arma el prompt del juez. Es determinista: la misma entrada da el mismo prompt.
 pub fn construir_prompt(e: &EntradaJuez, limites: &LimitesPrompt) -> Prompt {
-    construir_prompt_con(e, limites, None, None)
+    construir_prompt_con(e, limites, None, None, &extractos(e, limites))
 }
 
 /// Como `construir_prompt`. Con `ids`, solo pide esos ítems. Con `reintento`, agrega su sección `REINTENTO:`.
+/// `leidos` son los extractos de `e`: el llamador los lee una vez y los pasa.
 fn construir_prompt_con(
     e: &EntradaJuez,
     limites: &LimitesPrompt,
     ids: Option<&BTreeSet<String>>,
     reintento: Option<&str>,
+    leidos: &[Extracto],
 ) -> Prompt {
     let pedidos: Vec<&ItemRubrica> = pedidos_de(e.rubricas)
         .into_iter()
@@ -258,7 +272,7 @@ fn construir_prompt_con(
     }
     usuario.push_str("\nEXTRACTOS:\n");
     let mut anterior: Option<String> = None;
-    for extracto in extractos(e, limites) {
+    for extracto in leidos {
         // Una ventana que sigue a otra del mismo archivo va con la marca de recorte antes.
         if anterior.as_deref() == Some(extracto.archivo.as_str()) {
             usuario.push_str(&format!("{MARCA_RECORTE}\n"));
@@ -266,7 +280,7 @@ fn construir_prompt_con(
             usuario.push_str(&format!("--- {} ---\n", extracto.archivo));
         }
         usuario.push_str(&extracto.texto);
-        anterior = Some(extracto.archivo);
+        anterior = Some(extracto.archivo.clone());
     }
     Prompt {
         sistema: Some(PROMPT_SISTEMA.into()),
@@ -332,6 +346,17 @@ pub(crate) enum Motivo {
     Grande,
     /// Archivo que citan las sondas.
     Sonda,
+}
+
+impl Motivo {
+    /// Nombre que se guarda en el resultado: `cambio`, `grande` o `sonda`.
+    fn nombre(self) -> &'static str {
+        match self {
+            Motivo::Cambio => "cambio",
+            Motivo::Grande => "grande",
+            Motivo::Sonda => "sonda",
+        }
+    }
 }
 
 /// Una ventana de un archivo en el prompt: las líneas `desde..=hasta`, con sus números reales.
@@ -586,13 +611,16 @@ pub fn juzgar(
     limites: &LimitesPrompt,
 ) -> ResultadoJuez {
     let (pedidos, catalogo) = mapas_de(e.rubricas);
-    let prompt = construir_prompt(e, limites);
+    // Se leen una vez. El prompt y el reintento usan las mismas ventanas.
+    let leidos = extractos(e, limites);
+    let guardados = guardar_extractos(&leidos);
+    let prompt = construir_prompt_con(e, limites, None, None, &leidos);
     if let Some(motivo) = exceso_de_entrada(&prompt) {
-        return sin_veredicto(motivo, &pedidos);
+        return sin_veredicto(motivo, &pedidos, guardados);
     }
     let respuesta = match pedir(modelo, &prompt) {
         Ok(respuesta) => respuesta,
-        Err(causa) => return sin_veredicto(causa, &pedidos),
+        Err(causa) => return sin_veredicto(causa, &pedidos, guardados),
     };
     let cx = Contexto {
         repo: e.repo,
@@ -618,7 +646,7 @@ pub fn juzgar(
         .cloned()
         .collect();
     if !reintento.is_empty() {
-        let otra = reintentar(e, modelo, limites, &cx, &reintento, &lectura);
+        let otra = reintentar(e, modelo, limites, &cx, &reintento, &lectura, &leidos);
         for nivel in otra.items {
             lectura.niveles.insert(nivel.item.clone(), nivel.nivel);
             lectura.items.push(nivel);
@@ -659,6 +687,7 @@ pub fn juzgar(
         descartes: lectura.descartes,
         faltantes,
         hallazgos_descartados,
+        extractos: guardados,
     }
 }
 
@@ -671,9 +700,10 @@ fn reintentar(
     cx: &Contexto,
     ids: &BTreeSet<String>,
     lectura: &Lectura,
+    leidos: &[Extracto],
 ) -> Lectura {
     let texto = texto_reintento(&lectura.gate, &lectura.rotos, &lectura.invalidos);
-    let prompt = construir_prompt_con(e, limites, Some(ids), Some(&texto));
+    let prompt = construir_prompt_con(e, limites, Some(ids), Some(&texto), leidos);
     if exceso_de_entrada(&prompt).is_some() {
         return Lectura::default();
     }
@@ -737,7 +767,12 @@ fn texto_reintento(
 }
 
 /// Resultado sin veredicto: sin niveles ni hallazgos, y todo lo pedido queda como faltante.
-fn sin_veredicto(causa: String, pedidos: &BTreeMap<String, Dimension>) -> ResultadoJuez {
+/// Los extractos guardados sí van: el prompt ya se armó cuando el juez falla.
+fn sin_veredicto(
+    causa: String,
+    pedidos: &BTreeMap<String, Dimension>,
+    extractos: Vec<ExtractoGuardado>,
+) -> ResultadoJuez {
     ResultadoJuez {
         estado: EstadoJuez::SinVeredicto(causa),
         niveles: BTreeMap::new(),
@@ -746,7 +781,21 @@ fn sin_veredicto(causa: String, pedidos: &BTreeMap<String, Dimension>) -> Result
         descartes: Vec::new(),
         faltantes: pedidos.keys().cloned().collect(),
         hallazgos_descartados: Vec::new(),
+        extractos,
     }
+}
+
+/// Copia las ventanas sin su texto, para guardarlas en el resultado.
+fn guardar_extractos(leidos: &[Extracto]) -> Vec<ExtractoGuardado> {
+    leidos
+        .iter()
+        .map(|e| ExtractoGuardado {
+            archivo: e.archivo.clone(),
+            desde: e.desde,
+            hasta: e.hasta,
+            motivo: e.motivo.nombre().into(),
+        })
+        .collect()
 }
 
 /// Lo que los procesadores de cada elemento necesitan para validarlo.
@@ -2231,6 +2280,59 @@ mod tests {
     }
 
     #[test]
+    fn juez_resultado_guarda_los_extractos_del_prompt_sin_texto() {
+        let (repo, ini) =
+            par_de_carpetas(&[("src/cambia.rs", 2000, &[900]), ("src/grande.rs", 300, &[])]);
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            inicial: Some(ini.path()),
+            ..c.entrada()
+        };
+        let modelo = Falso::con(respuesta(json!([]), json!([])));
+        let r = juzgar(&entrada, &modelo, MODELO, &LimitesPrompt::default());
+        assert_eq!(r.estado, EstadoJuez::Ok, "{r:?}");
+        let guardados: Vec<(&str, u32, u32, &str)> = r
+            .extractos
+            .iter()
+            .map(|e| (e.archivo.as_str(), e.desde, e.hasta, e.motivo.as_str()))
+            .collect();
+        assert_eq!(
+            guardados,
+            vec![
+                ("src/cambia.rs", 860, 940, "cambio"),
+                ("src/grande.rs", 1, 300, "grande"),
+            ],
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn juez_resultado_viejo_sin_extractos_lee_lista_vacia() {
+        let r = ResultadoJuez {
+            estado: EstadoJuez::Ok,
+            niveles: BTreeMap::new(),
+            items: vec![],
+            hallazgos: vec![],
+            descartes: vec![],
+            hallazgos_descartados: vec![],
+            faltantes: vec![],
+            extractos: vec![ExtractoGuardado {
+                archivo: "src/x.rs".into(),
+                desde: 1,
+                hasta: 2,
+                motivo: "sonda".into(),
+            }],
+        };
+        let mut valor = serde_json::to_value(&r).expect("serializa");
+        valor.as_object_mut().expect("objeto").remove("extractos");
+        let viejo: ResultadoJuez = serde_json::from_value(valor).expect("lee el resultado viejo");
+        assert!(viejo.extractos.is_empty(), "{viejo:?}");
+    }
+
+    #[test]
     fn juez_extractos_cambio_en_linea_900_da_la_ventana_860_a_940() {
         let (repo, ini) = par_de_carpetas(&[("src/grande.rs", 2000, &[900])]);
         let salida = extractos_con_inicial(repo.path(), ini.path());
@@ -3092,6 +3194,7 @@ mod tests {
             descartes: vec![],
             hallazgos_descartados: vec![],
             faltantes: vec![],
+            extractos: vec![],
         };
         let p = puntuar_con_juez(&rubrica_mixta(), &r, &topes, MODELO).expect("puntúa");
         let nivel = p
@@ -3178,6 +3281,7 @@ mod tests {
             descartes: vec![],
             hallazgos_descartados: vec![],
             faltantes: vec![],
+            extractos: vec![],
         };
         let p = puntuar_con_juez(&rubricas[0], &r, &topes, MODELO).expect("puntúa");
         let nivel = p
