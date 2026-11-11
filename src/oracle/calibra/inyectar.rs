@@ -95,6 +95,8 @@ pub struct Inyeccion {
     pub mutante: Option<String>,
     /// Nombres completos de los tests que `AssertBorrado` apagó con `#[ignore]`. Vacía en los demás defectos.
     pub tests_apagados: Vec<String>,
+    /// `true` si el defecto (`ComportamientoRoto` o `ModuloBorrado`) cayó dentro del cambio de `bootstrap/`.
+    pub en_cambio: bool,
 }
 
 /// Lo que `inyectar_con` necesita además de la copia y la semilla.
@@ -107,6 +109,8 @@ pub struct Contexto<'a> {
     pub limites: &'a LimitesEstructura,
     /// Mutantes muertos de la base: `AssertBorrado` elige uno y apaga con `#[ignore]` sus tests. Vacía: no aplica.
     pub muertos: &'a [MutanteMuerto],
+    /// Rangos de líneas del cambio (1-based, inclusivos) por ruta relativa. `None`: la tarea no trae `bootstrap/`.
+    pub cambios: Option<&'a Rangos>,
 }
 
 /// Aplica `defecto` a la copia de repo Rust en `dir`. `capas` son las de `[arquitectura]` de la tarea.
@@ -124,6 +128,7 @@ pub fn inyectar(
         camino_caliente: &[],
         limites: &limites,
         muertos: &[],
+        cambios: None,
     };
     inyectar_con(defecto, dir, &contexto, semilla)
 }
@@ -145,15 +150,22 @@ pub fn inyectar_con(
         Defecto::BucleCuadratico => bucle(dir, contexto.camino_caliente, &mut rng)?,
         Defecto::CicloEntreCapas => ciclo(dir, contexto.capas, &mut rng)?,
         Defecto::ArchivoDios => dios(dir, contexto.limites, &mut rng)?,
-        Defecto::ModuloBorrado => modulo_borrado(dir, &mut rng)?,
+        Defecto::ModuloBorrado => modulo_borrado(dir, &mut rng, contexto.cambios)?,
         Defecto::ErrorTragado => error_tragado(dir, &mut rng)?,
         Defecto::AssertBorrado => {
             apagado = assert_borrado(dir, contexto.muertos, &mut rng)?;
             apagado.as_ref().map(|a| (a.archivo.clone(), a.linea))
         }
         Defecto::DockerfileRoot => dockerfile(dir)?,
-        Defecto::ComportamientoRoto => comportamiento(dir, &mut rng)?,
+        Defecto::ComportamientoRoto => comportamiento(dir, &mut rng, contexto.cambios)?,
     };
+    // Con `cambios`, un defecto de línea o de módulo solo cae dentro del cambio: toda elección lo está.
+    let en_cambio = contexto.cambios.is_some()
+        && matches!(
+            defecto,
+            Defecto::ComportamientoRoto | Defecto::ModuloBorrado
+        )
+        && lugar.is_some();
     Ok(lugar.map(|(archivo, linea)| match apagado {
         Some(a) => Inyeccion {
             defecto,
@@ -162,6 +174,7 @@ pub fn inyectar_con(
             mutante_archivo: Some(a.mutante_archivo),
             mutante: Some(a.mutante),
             tests_apagados: a.tests,
+            en_cambio,
         },
         None => Inyeccion {
             defecto,
@@ -170,12 +183,31 @@ pub fn inyectar_con(
             mutante_archivo: None,
             mutante: None,
             tests_apagados: Vec::new(),
+            en_cambio,
         },
     }))
 }
 
 /// Archivo y línea (1-based) donde quedó el defecto, o `None` si no se pudo aplicar.
 type Lugar = Option<(String, u32)>;
+
+/// Rangos de líneas del cambio (1-based, inclusivos) por ruta relativa con `/`. Ver `Contexto.cambios`.
+type Rangos = BTreeMap<String, Vec<(u32, u32)>>;
+
+/// `true` si la línea `linea` (1-based) de `archivo` cae en un rango del cambio. Sin cambio (`None`), siempre.
+fn en_el_cambio(cambios: Option<&Rangos>, archivo: &str, linea: u32) -> bool {
+    cambios.is_none_or(|rangos| {
+        rangos.get(archivo).is_some_and(|rs| {
+            rs.iter()
+                .any(|&(desde, hasta)| (desde..=hasta).contains(&linea))
+        })
+    })
+}
+
+/// `true` si `archivo` tiene al menos un rango del cambio. Sin cambio (`None`), siempre.
+fn archivo_tocado(cambios: Option<&Rangos>, archivo: &str) -> bool {
+    cambios.is_none_or(|rangos| rangos.get(archivo).is_some_and(|rs| !rs.is_empty()))
+}
 
 /// PRNG determinista (splitmix64). Sin crates: la misma semilla da la misma secuencia.
 struct Prng(u64);
@@ -529,7 +561,8 @@ fn nombre_de_declaracion(linea: &str) -> Option<String> {
 }
 
 /// Borra un módulo declarado en `lib.rs` o `main.rs`, con su archivo y su declaración.
-fn modulo_borrado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+/// Con `cambios`, solo los módulos cuyo archivo tiene un rango del cambio.
+fn modulo_borrado(dir: &Path, rng: &mut Prng, cambios: Option<&Rangos>) -> io::Result<Lugar> {
     let raices = ["src/lib.rs", "src/main.rs"];
     let mut declarados: BTreeSet<String> = BTreeSet::new();
     for raiz in raices {
@@ -541,7 +574,10 @@ fn modulo_borrado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
     }
     let candidatos: Vec<String> = declarados
         .into_iter()
-        .filter(|m| dir.join(format!("src/{m}.rs")).is_file())
+        .filter(|m| {
+            let archivo = format!("src/{m}.rs");
+            dir.join(&archivo).is_file() && archivo_tocado(cambios, &archivo)
+        })
         .collect();
     let Some(modulo) = rng.elegir(&candidatos).cloned() else {
         return Ok(None);
@@ -845,13 +881,16 @@ fn posicion_de_igualdad(linea: &str) -> Option<usize> {
 
 /// Cambia el primer ` == ` de una línea de producción de `src/` por ` != `: la comparación sale invertida.
 /// Usa solo las líneas de antes de `#[cfg(test)]`. `Ok(None)` si no hay ninguna comparación de ese tipo.
-fn comportamiento(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+/// Con `cambios`, solo las líneas que caen dentro de un rango del cambio.
+fn comportamiento(dir: &Path, rng: &mut Prng, cambios: Option<&Rangos>) -> io::Result<Lugar> {
     let mut candidatos: Vec<(String, usize)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
         let limite = limite_de_produccion(&lineas);
         for (i, linea) in lineas[..limite].iter().enumerate() {
-            if posicion_de_igualdad(linea).is_some() {
+            if posicion_de_igualdad(linea).is_some()
+                && en_el_cambio(cambios, &archivo, i as u32 + 1)
+            {
                 candidatos.push((archivo.clone(), i));
             }
         }
@@ -1299,6 +1338,7 @@ mod tests {
                 camino_caliente: &[],
                 limites: &limites,
                 muertos: &[],
+                cambios: None,
             };
             let inyeccion = inyectar_con(Defecto::ArchivoDios, dir.path(), &contexto, 42)
                 .expect("E/S")
@@ -1458,6 +1498,7 @@ mod tests {
             camino_caliente: &[],
             limites: &limites,
             muertos,
+            cambios: None,
         };
         inyectar_con(Defecto::AssertBorrado, dir, &contexto, semilla)
     }
@@ -1520,6 +1561,7 @@ mod tests {
             camino_caliente: &[],
             limites: &limites,
             muertos: &[muerto_de_leer_numero()],
+            cambios: None,
         };
         let inyeccion = inyectar_con(Defecto::SecretoEnCodigo, dir.path(), &contexto, 42)
             .expect("E/S")
@@ -1846,6 +1888,7 @@ mod tests {
             camino_caliente: camino,
             limites: &limites,
             muertos: &[],
+            cambios: None,
         };
         inyectar_con(defecto, dir, &contexto, semilla)
     }
@@ -2162,5 +2205,163 @@ pub fn dos(x: u32) -> bool {
         if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
             panic!("la copia con el defecto no compila:\n{stderr}");
         }
+    }
+
+    /// Fuente de 30 líneas en `src/lib.rs`: las líneas 3, 12, 15 y 25 tienen ` == `, las demás no.
+    fn fuente_con_igualdades() -> String {
+        (1..=30)
+            .map(|n| {
+                if [3, 12, 15, 25].contains(&n) {
+                    format!("    let c{n} = x == {n};")
+                } else {
+                    format!("    let c{n} = x;")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    /// Rangos con un solo archivo, para `Contexto.cambios`.
+    fn rangos_de(archivo: &str, rangos: &[(u32, u32)]) -> BTreeMap<String, Vec<(u32, u32)>> {
+        BTreeMap::from([(archivo.to_string(), rangos.to_vec())])
+    }
+
+    /// `inyectar_con` de `defecto` en `dir`, con `cambios` y las capas del fixture.
+    fn con_cambios(
+        defecto: Defecto,
+        dir: &Path,
+        cambios: Option<&BTreeMap<String, Vec<(u32, u32)>>>,
+        semilla: u64,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos: &[],
+            cambios,
+        };
+        inyectar_con(defecto, dir, &contexto, semilla)
+    }
+
+    #[test]
+    fn comportamiento_con_cambio_elige_solo_igualdades_dentro_del_rango() {
+        let fuente = fuente_con_igualdades();
+        let cambios = rangos_de("src/lib.rs", &[(10, 20)]);
+        let mut lineas = BTreeSet::new();
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/lib.rs", fuente.as_str())]);
+            let inyeccion = con_cambios(
+                Defecto::ComportamientoRoto,
+                dir.path(),
+                Some(&cambios),
+                semilla,
+            )
+            .expect("no falla la E/S")
+            .expect("hay igualdades dentro del cambio");
+            assert!(
+                (10..=20).contains(&inyeccion.linea),
+                "semilla {semilla}: la línea {} cae fuera del cambio",
+                inyeccion.linea
+            );
+            lineas.insert(inyeccion.linea);
+        }
+        assert_eq!(
+            lineas,
+            BTreeSet::from([12, 15]),
+            "la semilla elige entre las dos igualdades del rango"
+        );
+    }
+
+    #[test]
+    fn comportamiento_con_cambio_sin_igualdades_no_es_aplicable() {
+        let fuente = fuente_con_igualdades();
+        let cambios = rangos_de("src/lib.rs", &[(1, 2)]);
+        for semilla in 1..=5u64 {
+            let dir = repo_de(&[("src/lib.rs", fuente.as_str())]);
+            let antes = arbol(dir.path());
+            let inyeccion = con_cambios(
+                Defecto::ComportamientoRoto,
+                dir.path(),
+                Some(&cambios),
+                semilla,
+            )
+            .expect("no falla la E/S");
+            assert_eq!(
+                inyeccion, None,
+                "semilla {semilla}: las líneas 1 y 2 no tienen =="
+            );
+            assert_eq!(
+                arbol(dir.path()),
+                antes,
+                "semilla {semilla}: no toca el repo"
+            );
+        }
+    }
+
+    #[test]
+    fn modulo_borrado_con_cambio_elige_un_modulo_tocado() {
+        let cambios = rangos_de("src/a.rs", &[(1, 1)]);
+        for semilla in 1..=10u64 {
+            let dir = repo_de(&[
+                ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+                ("src/a.rs", "pub fn a() -> u32 {\n    1\n}\n"),
+                ("src/b.rs", "pub fn b() -> u32 {\n    2\n}\n"),
+            ]);
+            let inyeccion =
+                con_cambios(Defecto::ModuloBorrado, dir.path(), Some(&cambios), semilla)
+                    .expect("no falla la E/S")
+                    .expect("el módulo a está en el cambio");
+            assert_eq!(inyeccion.archivo, "src/a.rs", "semilla {semilla}");
+        }
+    }
+
+    #[test]
+    fn sin_cambio_los_dos_defectos_de_linea_eligen_como_la_api_sin_contexto() {
+        let fuente = fuente_con_igualdades();
+        for defecto in [Defecto::ComportamientoRoto, Defecto::ModuloBorrado] {
+            for semilla in 1..=10u64 {
+                let repo = repo_de(&[
+                    ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+                    ("src/a.rs", fuente.as_str()),
+                    ("src/b.rs", "pub fn b(x: u32) -> bool {\n    x == 2\n}\n"),
+                ]);
+                let a = tempfile::tempdir().expect("temporal");
+                let b = tempfile::tempdir().expect("temporal");
+                copiar(repo.path(), a.path());
+                copiar(repo.path(), b.path());
+                let ia = inyectar(defecto, a.path(), &capas_fixture(), semilla).expect("E/S");
+                let ib = con_cambios(defecto, b.path(), None, semilla).expect("E/S");
+                assert_eq!(ia, ib, "{defecto:?} semilla {semilla}");
+                assert_eq!(
+                    arbol(a.path()),
+                    arbol(b.path()),
+                    "{defecto:?} semilla {semilla}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inyeccion_marca_en_cambio_solo_con_rangos_y_defecto_de_linea() {
+        let fuente = fuente_con_igualdades();
+        let cambios = rangos_de("src/lib.rs", &[(10, 20)]);
+        let dir = repo_de(&[("src/lib.rs", fuente.as_str())]);
+        let dentro = con_cambios(Defecto::ComportamientoRoto, dir.path(), Some(&cambios), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert!(dentro.en_cambio, "{dentro:?}");
+        let sin_rangos = repo_de(&[("src/lib.rs", fuente.as_str())]);
+        let fuera = con_cambios(Defecto::ComportamientoRoto, sin_rangos.path(), None, 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert!(!fuera.en_cambio, "sin rangos no hay cambio: {fuera:?}");
+        let otro = repo_de(&[("src/lib.rs", fuente.as_str())]);
+        let secreto = con_cambios(Defecto::SecretoEnCodigo, otro.path(), Some(&cambios), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert!(!secreto.en_cambio, "el secreto no es de línea: {secreto:?}");
     }
 }

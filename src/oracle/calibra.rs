@@ -503,6 +503,9 @@ pub struct CasoGuardado {
     /// Nombres completos de los tests que `AssertBorrado` apagó. Vacío en los demás defectos.
     #[serde(default)]
     pub tests_apagados: Vec<String>,
+    /// `true` si el defecto cayó dentro del cambio de `bootstrap/`. `false` en los casos limpios y sin cambio.
+    #[serde(default)]
+    pub en_cambio: bool,
 }
 
 /// Resultado de `calibrar_tarea_con`: la fila y la ruta de los casos guardados, si hubo casos medidos.
@@ -677,6 +680,8 @@ struct Ronda<'a> {
     capas: &'a [Vec<String>],
     camino: &'a [String],
     muertos: &'a [MutanteMuerto],
+    /// Rangos del cambio de `bootstrap/`. `None`: la tarea no trae `bootstrap/`.
+    cambios: Option<&'a BTreeMap<String, Vec<(u32, u32)>>>,
     base: &'a Veredicto,
     evaluador: &'a (dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
     /// Tope de la medición. Cada reemplazo lo revisa antes de correr.
@@ -805,6 +810,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         camino_caliente: r.camino,
         limites: &limites,
         muertos: r.muertos,
+        cambios: r.cambios,
     };
     // Un defecto que rompe la construcción, o que la suite no ejecuta, se reemplaza por el siguiente
     // candidato, hasta `MAX_REEMPLAZOS` veces. Cada intento inválido suma a `invalidos`, también el del caso agotado.
@@ -832,7 +838,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             motivo_sin_caso = if ultimo_descarte_sonda {
                 MOTIVO_SIN_EJECUTAR
             } else {
-                motivo_sin_inyeccion(defecto, r.muertos.is_empty())
+                motivo_sin_inyeccion(defecto, r.muertos.is_empty(), r.cambios.is_some())
             };
             break;
         };
@@ -1049,6 +1055,11 @@ fn calibrar_medida_con_hilos(
         .calibracion
         .as_ref()
         .map_or(&[], |c| c.camino_caliente.as_slice());
+    // Con `bootstrap/`, los defectos de línea y de módulo solo caen en lo que cambió el repo. Se calcula una vez.
+    let bootstrap = tarea.dir.join("bootstrap");
+    let cambios = bootstrap
+        .is_dir()
+        .then(|| crate::oracle::cambios::rangos_cambiados(&bootstrap, repo_bueno));
     let ronda = Ronda {
         semilla,
         dimension,
@@ -1058,6 +1069,7 @@ fn calibrar_medida_con_hilos(
         capas,
         camino,
         muertos: &muertos,
+        cambios: cambios.as_ref(),
         base: &base,
         evaluador,
         tope,
@@ -1763,6 +1775,7 @@ impl CasoGuardado {
                 .as_ref()
                 .map(|i| i.tests_apagados.clone())
                 .unwrap_or_default(),
+            en_cambio: caso.inyeccion.as_ref().is_some_and(|i| i.en_cambio),
         }
     }
 
@@ -1792,6 +1805,7 @@ impl CasoGuardado {
             omitidos: Vec::new(),
             mutante: None,
             tests_apagados: Vec::new(),
+            en_cambio: false,
         }
     }
 }
@@ -1827,6 +1841,9 @@ pub const MAX_REEMPLAZOS: u32 = 5;
 /// Motivo de un caso no aplicable: la inyección no dio ningún candidato.
 const MOTIVO_SIN_CANDIDATO: &str = "sin candidato para inyectar";
 
+/// Motivo de un defecto de línea o de módulo sin lugar dentro del cambio de `bootstrap/`.
+const MOTIVO_FUERA_DEL_CAMBIO: &str = "ninguna línea del cambio admite este defecto";
+
 /// Motivo de un `AssertBorrado` no aplicable: la base no dejó mutantes muertos.
 const MOTIVO_SIN_MUERTOS: &str = "la base no dio mutantes muertos";
 
@@ -1834,11 +1851,15 @@ const MOTIVO_SIN_MUERTOS: &str = "la base no dio mutantes muertos";
 const MOTIVO_SIN_TEST_DE_MUERTO: &str = "ningún mutante muerto tiene tests fallidos ubicables";
 
 /// Motivo de un caso sin inyección. `AssertBorrado` separa si la base no dio muertos de si ninguno tiene test.
+/// Con `con_rangos`, un defecto de línea o de módulo dice que ninguna línea del cambio lo admite.
 /// Los demás defectos usan el motivo común.
-fn motivo_sin_inyeccion(defecto: Defecto, sin_muertos: bool) -> &'static str {
+fn motivo_sin_inyeccion(defecto: Defecto, sin_muertos: bool, con_rangos: bool) -> &'static str {
     match (defecto, sin_muertos) {
         (Defecto::AssertBorrado, true) => MOTIVO_SIN_MUERTOS,
         (Defecto::AssertBorrado, false) => MOTIVO_SIN_TEST_DE_MUERTO,
+        (Defecto::ComportamientoRoto | Defecto::ModuloBorrado, _) if con_rangos => {
+            MOTIVO_FUERA_DEL_CAMBIO
+        }
         _ => MOTIVO_SIN_CANDIDATO,
     }
 }
@@ -5307,6 +5328,134 @@ mod tests {
             .expect("un caso con defecto")
     }
 
+    /// Carpeta de una tarea con `bootstrap/` y `repo-bueno` (copias del fixture). Las dos tienen una igualdad vieja
+    /// en `comandos.rs`. `repo-bueno` tiene una igualdad nueva en `almacen.rs` solo si `con_cambio`.
+    fn tarea_con_bootstrap(con_cambio: bool) -> (TempDir, Tarea) {
+        const VIEJA: &str = "\npub fn vieja(x: u32) -> bool {\n    x == 9\n}\n";
+        const NUEVA: &str = "\npub fn nueva(x: u32) -> bool {\n    x == 8\n}\n";
+        fn anexar(ruta: &Path, extra: &str) {
+            let mut texto = fs::read_to_string(ruta).expect("lee");
+            texto.push_str(extra);
+            fs::write(ruta, texto).expect("escribe");
+        }
+        let dir = tempfile::tempdir().expect("temporal");
+        let boot = dir.path().join("bootstrap");
+        let repo = dir.path().join("repo-bueno");
+        for carpeta in [&boot, &repo] {
+            fs::create_dir_all(carpeta).expect("carpeta");
+            super::inyectar::pruebas::copiar(Path::new(FIXTURE), carpeta);
+            anexar(&carpeta.join("src/comandos.rs"), VIEJA);
+        }
+        if con_cambio {
+            anexar(&repo.join("src/almacen.rs"), NUEVA);
+        }
+        let tarea = tarea_en(dir.path(), "");
+        (dir, tarea)
+    }
+
+    /// Mide `n` casos de Funciona de `repo` con `tarea`, con el evaluador `ev`. Hilos en 1, como `medir_con_sondas`.
+    fn medir_funciona(
+        tarea: &Tarea,
+        repo: &Path,
+        n: usize,
+        semilla: u64,
+        ev: &(dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
+    ) -> Medida {
+        calibrar_medida_con_hilos(
+            tarea,
+            Dimension::Funciona,
+            n,
+            semilla,
+            repo,
+            ev,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide")
+    }
+
+    #[test]
+    fn calibra_con_bootstrap_los_defectos_de_linea_caen_en_el_cambio() {
+        let (dir, tarea) = tarea_con_bootstrap(true);
+        let repo = dir.path().join("repo-bueno");
+        let base = veredicto_de(Dimension::Funciona, 1.0, None);
+        let sondas = AtomicUsize::new(0);
+        let ev = evaluador_de_sondas(&repo, &base, "", true, &sondas);
+        let medida = medir_funciona(&tarea, &repo, 12, 42, &ev);
+        let con_defecto: Vec<&Caso> = medida
+            .casos
+            .iter()
+            .filter(|c| c.inyeccion.is_some())
+            .collect();
+        assert!(
+            con_defecto.len() >= 4,
+            "casos con defecto: {}",
+            con_defecto.len()
+        );
+        for caso in &con_defecto {
+            let inyeccion = caso.inyeccion.as_ref().expect("con defecto");
+            assert_eq!(inyeccion.archivo, "src/almacen.rs", "{inyeccion:?}");
+            assert!(inyeccion.en_cambio, "{inyeccion:?}");
+            assert!(CasoGuardado::de(caso).en_cambio);
+        }
+        assert!(
+            medida
+                .casos
+                .iter()
+                .filter(|c| c.inyeccion.is_none())
+                .all(|c| !CasoGuardado::de(c).en_cambio),
+            "los limpios no marcan en_cambio"
+        );
+    }
+
+    #[test]
+    fn calibra_con_bootstrap_sin_igualdad_en_el_cambio_dice_que_ninguna_linea_admite_el_defecto() {
+        let (dir, tarea) = tarea_con_bootstrap(false);
+        let repo = dir.path().join("repo-bueno");
+        let base = veredicto_de(Dimension::Funciona, 1.0, None);
+        let sondas = AtomicUsize::new(0);
+        let ev = evaluador_de_sondas(&repo, &base, "", true, &sondas);
+        let medida = medir_funciona(&tarea, &repo, 4, 42, &ev);
+        assert!(
+            medida.casos.iter().all(|c| c.inyeccion.is_none()),
+            "sin cambio con igualdad no hay caso con defecto"
+        );
+        assert!(!medida.no_aplicables.is_empty(), "hay casos no aplicables");
+        for no in &medida.no_aplicables {
+            assert_eq!(
+                no.motivo, "ninguna línea del cambio admite este defecto",
+                "{no:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn motivo_de_defecto_de_linea_sin_candidato_dentro_del_cambio_lo_dice() {
+        assert_eq!(
+            motivo_sin_inyeccion(Defecto::ComportamientoRoto, false, true),
+            "ninguna línea del cambio admite este defecto"
+        );
+        assert_eq!(
+            motivo_sin_inyeccion(Defecto::ModuloBorrado, false, true),
+            "ninguna línea del cambio admite este defecto"
+        );
+        assert_eq!(
+            motivo_sin_inyeccion(Defecto::ComportamientoRoto, false, false),
+            MOTIVO_SIN_CANDIDATO
+        );
+    }
+
+    #[test]
+    fn caso_guardado_de_antes_de_en_cambio_se_lee_con_false() {
+        let viejo = r#"{"caso":0,"es_defecto":true,"detectado":false,"defecto":"comportamiento_roto","linea":5}"#;
+        let caso: CasoGuardado = serde_json::from_str(viejo).expect("renglón sin en_cambio");
+        assert!(!caso.en_cambio);
+    }
+
     #[test]
     fn sonda_linea_no_ejecutada_se_reemplaza_y_mide_la_siguiente() {
         let dir = copia_con_sondas(&[("src/muerta.rs", MUERTA), ("src/viva.rs", VIVA)]);
@@ -6062,6 +6211,7 @@ mod tests {
             mutante_archivo: None,
             mutante: None,
             tests_apagados: vec![],
+            en_cambio: false,
         };
         let mut casos = vec![
             Caso::nuevo(0, Some(inyeccion), base.clone()),
@@ -6095,6 +6245,7 @@ mod tests {
             mutante_archivo: None,
             mutante: None,
             tests_apagados: vec![],
+            en_cambio: false,
         }
     }
 
@@ -6205,6 +6356,7 @@ mod tests {
             mutante_archivo: None,
             mutante: None,
             tests_apagados: vec![],
+            en_cambio: false,
         };
         let mut casos = vec![
             Caso::nuevo(0, Some(inyeccion), defecto),
@@ -6260,6 +6412,7 @@ mod tests {
             mutante_archivo: Some("src/lib.rs".into()),
             mutante: None,
             tests_apagados: vec![],
+            en_cambio: false,
         };
         Caso::nuevo(indice, Some(inyeccion), veredicto)
     }

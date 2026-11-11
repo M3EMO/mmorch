@@ -194,6 +194,7 @@ fn ensayar_con_home(
         camino_caliente: camino,
         limites: &limites,
         muertos: &muertos,
+        cambios: None,
     };
     let inyeccion = inyectar_con(defecto, copia.path(), &contexto, SEMILLA)
         .expect("inyecta el defecto")

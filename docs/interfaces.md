@@ -844,6 +844,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "Si la dimensión calibrada bajó frente a la base en este caso.",
       "type": "boolean"
     },
+    "en_cambio": {
+      "description": "`true` si el defecto cayó dentro del cambio de `bootstrap/`. `false` en los casos limpios y sin cambio.",
+      "type": "boolean",
+      "default": false
+    },
     "es_defecto": {
       "type": "boolean"
     },
