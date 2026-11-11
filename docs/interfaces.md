@@ -630,6 +630,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 0,
           "minimum": 0
         },
+        "defectos_en_piso": {
+          "description": "Defectos cuyo ítem ya estaba en piso en la base. Una fila sin el campo vale 0.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "dimension": {
           "$ref": "#/$defs/Dimension"
         },
@@ -728,6 +735,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "no_aplicable": {
           "description": "Casos que no se pudieron aplicar al repo, por ejemplo sin Dockerfile. No entran a las métricas.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "omisiones": {
+          "description": "Omisiones de todos los casos: ítems estables de la base que el juez no puntuó. Sin el campo vale 0.",
           "type": "integer",
           "format": "uint32",
           "default": 0,
@@ -897,6 +911,19 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "null"
       ],
       "default": null
+    },
+    "omitidos": {
+      "description": "Ítems estables de la base que el juez no puntuó en este caso. Vacío sin veredicto de la dimensión.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "piso": {
+      "description": "`true`: el ítem del defecto ya estaba en piso en la base. Un caso limpio o sin nivel base vale `false`.",
+      "type": "boolean",
+      "default": false
     },
     "reemplazos": {
       "description": "Inyecciones inválidas reemplazadas antes de este caso. `0` si no hubo ninguna.",

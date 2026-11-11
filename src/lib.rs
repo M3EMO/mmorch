@@ -195,11 +195,12 @@ fn oraculo_calibrar(
         println!("{}/{}: {motivo}", fila.tarea, fila.dimension.clave());
     } else {
         println!(
-            "{}/{}: sensibilidad {}, {}, exactitud {}, casos {} (defectos {}, limpios {}, no aplicables {}, reemplazos {})",
+            "{}/{}: sensibilidad {}, {}, {}, exactitud {}, casos {} (defectos {}, limpios {}, no aplicables {}, reemplazos {})",
             fila.tarea,
             fila.dimension.clave(),
             medida(fila.sensibilidad),
             oracle::calibra::texto_especificidad(&fila),
+            oracle::calibra::texto_piso(&fila),
             medida(fila.exactitud_balanceada),
             fila.n,
             fila.defectos,

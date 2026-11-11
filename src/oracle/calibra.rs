@@ -62,6 +62,12 @@ pub struct Fila {
     /// Casos que no se pudieron aplicar al repo, por ejemplo sin Dockerfile. No entran a las métricas.
     #[serde(default)]
     pub no_aplicable: u32,
+    /// Defectos cuyo ítem ya estaba en piso en la base. Una fila sin el campo vale 0.
+    #[serde(default)]
+    pub defectos_en_piso: u32,
+    /// Omisiones de todos los casos: ítems estables de la base que el juez no puntuó. Sin el campo vale 0.
+    #[serde(default)]
+    pub omisiones: u32,
     /// Semilla de la muestra: con la misma semilla, la medición se repite igual.
     pub semilla: u64,
     /// Epoch en segundos de la medición. Gana la fila más reciente.
@@ -406,6 +412,12 @@ pub struct CasoGuardado {
     /// Nivel de cada ítem de la dimensión calibrada en este caso. Vacío si no hay puntaje.
     #[serde(default)]
     pub niveles: BTreeMap<String, u8>,
+    /// `true`: el ítem del defecto ya estaba en piso en la base. Un caso limpio o sin nivel base vale `false`.
+    #[serde(default)]
+    pub piso: bool,
+    /// Ítems estables de la base que el juez no puntuó en este caso. Vacío sin veredicto de la dimensión.
+    #[serde(default)]
+    pub omitidos: Vec<String>,
     /// Valor de la dimensión calibrada en la base. `None` si la base no tiene puntaje de la dimensión.
     #[serde(default)]
     pub valor_base: Option<f32>,
@@ -1117,6 +1129,8 @@ fn fila_de(
     let limpios_con_veredicto = casos
         .iter()
         .filter(|c| !c.es_defecto && c.sin_veredicto.is_none());
+    let defectos_en_piso = casos.iter().filter(|c| c.es_defecto && c.piso).count() as u32;
+    let omisiones: u32 = casos.iter().map(|c| c.omitidos.len() as u32).sum();
     let sensibilidad = proporcion(
         casos.iter().filter(|c| c.es_defecto && c.detectado).count() as u32,
         defectos_medidos,
@@ -1160,6 +1174,8 @@ fn fila_de(
         limpios,
         limpios_sin_veredicto,
         no_aplicable: no_aplicables,
+        defectos_en_piso,
+        omisiones,
         semilla,
         ts: ahora(),
         sensibilidad,
@@ -1445,6 +1461,8 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64, motivo: &st
         limpios: 0,
         limpios_sin_veredicto: 0,
         no_aplicable: 0,
+        defectos_en_piso: 0,
+        omisiones: 0,
         semilla,
         ts: ahora(),
         sensibilidad: None,
@@ -1571,6 +1589,10 @@ struct Caso {
     niveles_base: BTreeMap<String, u8>,
     /// Nivel de cada ítem de la dimensión calibrada en este caso.
     niveles: BTreeMap<String, u8>,
+    /// El ítem del defecto ya estaba en piso en la base. Ver `en_piso`.
+    piso: bool,
+    /// Ítems estables de la base que el juez dejó sin nivel en este caso. Ver `omitidos_de`.
+    omitidos: Vec<String>,
     /// Valor de la dimensión calibrada en la base. `None` si la base no tiene puntaje de la dimensión.
     valor_base: Option<f32>,
     /// Valor de la dimensión calibrada en este caso. `None` si el caso no tiene puntaje de la dimensión.
@@ -1602,6 +1624,8 @@ impl Caso {
             reemplazos: 0,
             target_reusado: false,
             limpio_reusado: false,
+            piso: false,
+            omitidos: Vec::new(),
         }
     }
 
@@ -1633,6 +1657,8 @@ impl CasoGuardado {
             valor: caso.valor,
             extractos: caso.extractos.clone(),
             no_aplicable: None,
+            piso: caso.piso,
+            omitidos: caso.omitidos.clone(),
             mutante: caso.inyeccion.as_ref().and_then(|i| i.mutante.clone()),
             tests_apagados: caso
                 .inyeccion
@@ -1664,6 +1690,8 @@ impl CasoGuardado {
             valor: None,
             extractos: Vec::new(),
             no_aplicable: Some(no.motivo.clone()),
+            piso: false,
+            omitidos: Vec::new(),
             mutante: None,
             tests_apagados: Vec::new(),
         }
@@ -1880,6 +1908,8 @@ fn finalizar_casos(
         caso.niveles = niveles_de(puntaje_de(&caso.veredicto, dimension));
         caso.valor_base = puntaje_de(base, dimension).map(|p| p.valor);
         caso.valor = puntaje_de(&caso.veredicto, dimension).map(|p| p.valor);
+        caso.piso = en_piso(&caso.niveles_base, caso.item_defecto, dimension);
+        caso.omitidos = omitidos_de(caso);
         caso.items = items
             .iter()
             .map(|item| {
@@ -2031,6 +2061,30 @@ fn detecta_item(
     })
 }
 
+/// Si el nivel base del ítem es menor que la baja que pide la dimensión.
+/// Con juez la baja es `BAJA_ITEM_CON_JUEZ`; sin juez, 1. Sin nivel base del ítem, no está en piso.
+fn en_piso(niveles_base: &BTreeMap<String, u8>, item: Option<&str>, dimension: Dimension) -> bool {
+    let baja = if regla::es_con_juez(dimension) {
+        BAJA_ITEM_CON_JUEZ
+    } else {
+        1
+    };
+    item.and_then(|i| niveles_base.get(i))
+        .is_some_and(|nivel| *nivel < baja)
+}
+
+/// Ítems estables de la base que el caso no puntuó. Vacío si el caso no tiene veredicto de la dimensión.
+fn omitidos_de(caso: &Caso) -> Vec<String> {
+    if caso.sin_veredicto.is_some() {
+        return Vec::new();
+    }
+    caso.niveles_base
+        .keys()
+        .filter(|item| !caso.niveles.contains_key(*item))
+        .cloned()
+        .collect()
+}
+
 fn puntaje_de(veredicto: &Veredicto, dimension: Dimension) -> Option<&Puntaje> {
     veredicto.puntajes.iter().find(|p| p.dimension == dimension)
 }
@@ -2052,6 +2106,15 @@ pub fn texto_especificidad(fila: &Fila) -> String {
     format!(
         "especificidad {medida} (limpios con veredicto {con_veredicto} de {})",
         fila.limpios
+    )
+}
+
+/// Texto de los defectos en piso y de las omisiones de la fila.
+/// Un defecto en piso no puede bajar su ítem, así que no mide la dimensión.
+pub fn texto_piso(fila: &Fila) -> String {
+    format!(
+        "defectos en piso {}, omisiones {}",
+        fila.defectos_en_piso, fila.omisiones
     )
 }
 
@@ -2109,6 +2172,8 @@ mod tests {
             limpios: 10,
             limpios_sin_veredicto: 0,
             no_aplicable: 0,
+            defectos_en_piso: 0,
+            omisiones: 0,
             semilla: 42,
             ts,
             sensibilidad: Some(1.0),
@@ -5433,6 +5498,189 @@ mod tests {
             &mut casos,
         );
         assert_eq!(casos[0].detecta_en("seguridad.secretos"), Some(true));
+    }
+
+    /// Caso con defecto en `item`. Sin inyección: solo sirve a `finalizar_casos` y a `fila_de`.
+    fn caso_defecto_en(item: &'static str, veredicto: Veredicto) -> Caso {
+        Caso {
+            es_defecto: true,
+            item_defecto: Some(item),
+            ..Caso::nuevo(1, None, veredicto)
+        }
+    }
+
+    #[test]
+    fn piso_defecto_en_diseno_con_nivel_base_0_guarda_true() {
+        // Diseño usa juez: el ítem en 0 no puede bajar 2 niveles. Está en piso.
+        let base = diseno_con(&[(ITEM_MODULARIDAD, 0), (ITEM_ROBUSTEZ, 3)]);
+        let mut casos = vec![caso_defecto_en(ITEM_MODULARIDAD, base.clone())];
+        finalizar_casos(
+            &base,
+            Dimension::Diseno,
+            &[ITEM_MODULARIDAD, ITEM_ROBUSTEZ],
+            &[],
+            &mut casos,
+        );
+        assert!(CasoGuardado::de(&casos[0]).piso);
+    }
+
+    #[test]
+    fn piso_defecto_en_diseno_con_nivel_base_3_guarda_false() {
+        // Con nivel 3, un defecto puede bajarlo 2 niveles. No está en piso.
+        let base = diseno_con(&[(ITEM_MODULARIDAD, 3), (ITEM_ROBUSTEZ, 3)]);
+        let mut casos = vec![caso_defecto_en(ITEM_MODULARIDAD, base.clone())];
+        finalizar_casos(
+            &base,
+            Dimension::Diseno,
+            &[ITEM_MODULARIDAD, ITEM_ROBUSTEZ],
+            &[],
+            &mut casos,
+        );
+        assert!(!CasoGuardado::de(&casos[0]).piso);
+    }
+
+    #[test]
+    fn piso_sin_juez_usa_la_baja_de_un_nivel() {
+        // Seguridad no usa juez: la baja es de 1 nivel. Con nivel base 0 está en piso; con nivel base 1, no.
+        let piso_de_base = |nivel: u8| -> bool {
+            let mut base = veredicto_base();
+            base.puntajes[0].items[0].nivel = nivel;
+            let mut casos = vec![caso_defecto_en("seguridad.secretos", base.clone())];
+            finalizar_casos(
+                &base,
+                Dimension::Seguridad,
+                &["seguridad.secretos"],
+                &[],
+                &mut casos,
+            );
+            CasoGuardado::de(&casos[0]).piso
+        };
+        assert!(piso_de_base(0), "nivel base 0");
+        assert!(!piso_de_base(1), "nivel base 1");
+    }
+
+    #[test]
+    fn piso_sin_nivel_base_del_item_guarda_false() {
+        // El ítem del defecto no está en la base: su nivel base no se conoce.
+        let base = veredicto_base();
+        let mut casos = vec![caso_defecto_en("seguridad.inexistente", base.clone())];
+        finalizar_casos(
+            &base,
+            Dimension::Seguridad,
+            &["seguridad.inexistente"],
+            &[],
+            &mut casos,
+        );
+        assert!(!CasoGuardado::de(&casos[0]).piso);
+    }
+
+    #[test]
+    fn omitidos_lista_el_item_estable_que_el_juez_dejo_sin_nivel() {
+        // El juez no dio nivel a `secretos` en el caso 1. En el caso 2 sí lo dio: no hay omisión.
+        let base = veredicto_base();
+        let mut sin_secretos = base.clone();
+        sin_secretos.puntajes[0]
+            .items
+            .retain(|i| i.item != "seguridad.secretos");
+        let mut casos = vec![
+            Caso::nuevo(1, None, sin_secretos),
+            Caso::nuevo(2, None, base.clone()),
+        ];
+        finalizar_casos(
+            &base,
+            Dimension::Seguridad,
+            &["seguridad.secretos", "seguridad.panico_en_entrada"],
+            &[],
+            &mut casos,
+        );
+        assert_eq!(
+            CasoGuardado::de(&casos[0]).omitidos,
+            vec!["seguridad.secretos".to_string()]
+        );
+        assert!(CasoGuardado::de(&casos[1]).omitidos.is_empty());
+    }
+
+    #[test]
+    fn fila_cuenta_defectos_en_piso_y_omisiones_y_el_texto_los_muestra() {
+        let (_t, tarea) = tarea_prueba();
+        let mut en_piso = Caso::nuevo(1, None, Veredicto::default());
+        en_piso.es_defecto = true;
+        en_piso.piso = true;
+        en_piso.omitidos = vec!["a".into(), "b".into()];
+        let mut fuera_de_piso = Caso::nuevo(2, None, Veredicto::default());
+        fuera_de_piso.es_defecto = true;
+        let mut limpio = Caso::nuevo(3, None, Veredicto::default());
+        limpio.omitidos = vec!["a".into()];
+        let fila = fila_de(
+            &tarea,
+            Dimension::Seguridad,
+            1,
+            &[en_piso, fuera_de_piso, limpio],
+            &[],
+            0,
+            false,
+        );
+        assert_eq!((fila.defectos_en_piso, fila.omisiones), (1, 3));
+        let texto = texto_piso(&fila);
+        assert!(texto.contains("defectos en piso 1"), "texto: {texto}");
+        assert!(texto.contains("omisiones 3"), "texto: {texto}");
+    }
+
+    #[test]
+    fn piso_no_cambia_la_sensibilidad_de_un_defecto_detectado_por_cita() {
+        // Guarda: un defecto en piso que el juez cita cuenta como detectado. La sensibilidad no cambia.
+        let (_t, tarea) = tarea_prueba();
+        let mut defecto = Caso::nuevo(1, None, Veredicto::default());
+        defecto.es_defecto = true;
+        defecto.piso = true;
+        defecto.detectado = true;
+        defecto.motivo = Some("cita_juez".into());
+        let limpio = Caso::nuevo(2, None, Veredicto::default());
+        let fila = fila_de(
+            &tarea,
+            Dimension::Seguridad,
+            1,
+            &[defecto, limpio],
+            &[],
+            0,
+            false,
+        );
+        assert_eq!(fila.sensibilidad, Some(1.0));
+        assert_eq!(fila.especificidad, Some(1.0));
+    }
+
+    #[test]
+    fn caso_viejo_sin_piso_ni_omitidos_se_lee_con_cero() {
+        // Guarda: un renglón sin los campos nuevos se lee con piso false y omitidos vacío.
+        let base = diseno_con(&[(ITEM_MODULARIDAD, 0), (ITEM_ROBUSTEZ, 3)]);
+        let mut casos = vec![caso_defecto_en(ITEM_MODULARIDAD, base.clone())];
+        finalizar_casos(
+            &base,
+            Dimension::Diseno,
+            &[ITEM_MODULARIDAD, ITEM_ROBUSTEZ],
+            &[],
+            &mut casos,
+        );
+        let guardado = CasoGuardado::de(&casos[0]);
+        assert!(guardado.piso, "antes de quitar el campo, piso es true");
+        let mut vieja = serde_json::to_value(&guardado).expect("serializa");
+        let objeto = vieja.as_object_mut().expect("objeto");
+        objeto.remove("piso");
+        objeto.remove("omitidos");
+        let leido: CasoGuardado = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert!(!leido.piso);
+        assert!(leido.omitidos.is_empty());
+    }
+
+    #[test]
+    fn fila_vieja_sin_conteos_de_piso_se_lee_con_cero() {
+        let fila = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        let objeto = vieja.as_object_mut().expect("objeto");
+        objeto.remove("defectos_en_piso");
+        objeto.remove("omisiones");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!((leida.defectos_en_piso, leida.omisiones), (0, 0));
     }
 
     #[test]
