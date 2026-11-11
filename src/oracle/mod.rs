@@ -1040,12 +1040,16 @@ fn medir(
     );
     // El orden de las sondas es el de siempre: la Entrega, la mutación, las nativas y las de herramientas.
     let mut sondas = vec![entrega.sonda.clone()];
+    let mut avisos_de_mutacion = Vec::new();
     if partes.mutacion {
         let bootstrap = tarea.dir.join("bootstrap");
         let cambios = bootstrap
             .is_dir()
             .then(|| cambios::rangos_cambiados(&bootstrap, repo));
-        sondas.push(mutacion::sonda_mutacion_en(ej, tarea, cambios.as_ref()).sonda);
+        let mutacion = mutacion::sonda_mutacion_en(ej, tarea, cambios.as_ref());
+        // Los mutantes de más no cuentan en el puntaje. El veredicto avisa cuántos corrieron.
+        avisos_de_mutacion.extend(mutacion::aviso_de_mas(&mutacion.fuera_de_la_muestra));
+        sondas.push(mutacion.sonda);
     }
     if partes.nativas {
         sondas.extend(perfiles::sondas_nativas(repo, tarea));
@@ -1212,6 +1216,7 @@ fn medir(
         .collect();
     let mut avisos = avisos;
     avisos.extend(entrega.avisos);
+    avisos.extend(avisos_de_mutacion);
     Ok(Medicion {
         puntajes,
         hallazgos,
@@ -5170,6 +5175,57 @@ mod tests {
                 fuga: true,
             })
         }
+    }
+
+    /// Reporte de `cargo mutants` con `m` (en la muestra) y dos mutantes de más, `x1` y `x2`.
+    const OUTCOMES_CON_DE_MAS: &str = r#"{"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"m","file":"src/lib.rs","span":{"start":{"line":1}}}},"summary":"CaughtMutant"},{"scenario":{"Mutant":{"name":"x1","file":"src/lib.rs","span":{"start":{"line":2}}}},"summary":"CaughtMutant"},{"scenario":{"Mutant":{"name":"x2","file":"src/lib.rs","span":{"start":{"line":3}}}},"summary":"CaughtMutant"}],"total_mutants":3}"#;
+
+    /// Herramientas sanas, salvo que el reporte de `cargo mutants` trae `OUTCOMES_CON_DE_MAS`.
+    struct HerramientasConMutantesDeMas(HerramientasSanas);
+
+    impl EjecutorHerramienta for HerramientasConMutantesDeMas {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            let mut salida = self.0.ejecutar(cmd)?;
+            if cmd.contains("cargo mutants") && !cmd.contains("--list") {
+                salida
+                    .archivos
+                    .insert("outcomes.json".into(), OUTCOMES_CON_DE_MAS.into());
+            }
+            Ok(salida)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            self.0.tiene_rustsec()
+        }
+    }
+
+    /// Fábrica de herramientas con mutantes de más en el reporte de mutación.
+    fn herramientas_con_mutantes_de_mas() -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
+        |_: &Preparada| {
+            Box::new(HerramientasConMutantesDeMas(HerramientasSanas {
+                faltan: Vec::new(),
+                fuga: false,
+            }))
+        }
+    }
+
+    #[test]
+    fn oraculo_mutantes_de_mas_dan_el_aviso_en_el_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr,
+            &herramientas_con_mutantes_de_mas(),
+        )
+        .expect("evalúa");
+        let aviso = "cargo-mutants corrió 2 mutantes que no estaban en la muestra";
+        assert!(v.avisos.iter().any(|a| a == aviso), "{:?}", v.avisos);
     }
 
     fn opciones(home: &Path) -> OpcionesOraculo {

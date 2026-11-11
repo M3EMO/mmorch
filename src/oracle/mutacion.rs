@@ -486,6 +486,16 @@ fn fuera_de(del_reporte: &[String], pedidos: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Aviso del veredicto por los mutantes que cargo-mutants corrió fuera de la muestra. `None` si no hubo ninguno.
+pub(crate) fn aviso_de_mas(fuera: &[String]) -> Option<String> {
+    (!fuera.is_empty()).then(|| {
+        format!(
+            "cargo-mutants corrió {} mutantes que no estaban en la muestra",
+            fuera.len()
+        )
+    })
+}
+
 /// Primer nombre de `pedidos`, en su orden, que el reporte no trae. Un `Unviable` sí cuenta como traído.
 fn primer_faltante<'a>(pedidos: &'a [String], del_reporte: &[String]) -> Option<&'a String> {
     pedidos.iter().find(|p| !del_reporte.contains(p))
@@ -2069,6 +2079,15 @@ mod tests {
     /// Pasa nombres literales a `String`, como los pide `parsear_outcomes`.
     fn strs(nombres: &[&str]) -> Vec<String> {
         nombres.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn mutacion_aviso_de_mas_cuenta_los_fuera_de_la_muestra() {
+        assert_eq!(
+            aviso_de_mas(&strs(&["x1", "x2"])).as_deref(),
+            Some("cargo-mutants corrió 2 mutantes que no estaban en la muestra")
+        );
+        assert_eq!(aviso_de_mas(&[]), None);
     }
 
     #[test]
