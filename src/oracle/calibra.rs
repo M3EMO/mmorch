@@ -126,6 +126,10 @@ pub struct Fila {
     /// `None` si la base no trajo duración. Una fila sin el campo vale `None`.
     #[serde(default)]
     pub plazo_mutantes: Option<u64>,
+    /// Carpeta de la que salió el repo bueno de Pruebas: `con_tests` si usó `<tarea>/con_tests/`. `None` si
+    /// salió de `--repo` o de `[calibracion] repo`, y en las dimensiones que no son Pruebas.
+    #[serde(default)]
+    pub repo_origen: Option<String>,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -1432,6 +1436,7 @@ fn fila_de(
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
         plazo_mutantes: None,
+        repo_origen: None,
     }
 }
 
@@ -1581,7 +1586,11 @@ pub fn calibrar_tarea_con(
         agregar(home, &fila)?;
         return Ok(Calibrada { fila, casos: None });
     }
-    let repo = repo_de(&tarea, repo_cli)?;
+    // Pruebas con `con_tests/` en la tarea usa esa carpeta, aunque venga `--repo`. La fila guarda el origen.
+    let (repo, repo_origen) = match carpeta_con_tests(&tarea, dim) {
+        Some(carpeta) => (carpeta, Some(CON_TESTS.to_string())),
+        None => (repo_de(&tarea, repo_cli)?, None),
+    };
     // Entrega sin `[entrega]` y sin Dockerfile que elegir: no hay nada que instalar ni levantar. Mismo
     // `containerfile` que usa la evaluación real.
     let sin_entrega = dim == Dimension::Entrega && tarea.entrega.is_none();
@@ -1642,7 +1651,7 @@ pub fn calibrar_tarea_con(
             Compartidos::nuevo(home, &tarea, &repo, &modelo, semilla)
         })
         .transpose()?;
-    let medida = calibrar_medida(
+    let mut medida = calibrar_medida(
         &tarea,
         dim,
         n as usize,
@@ -1655,6 +1664,9 @@ pub fn calibrar_tarea_con(
         compartidos.as_ref(),
         Some(home),
     )?;
+    if let Some(fila) = medida.fila.as_mut() {
+        fila.repo_origen = repo_origen;
+    }
     // Los casos se escriben antes de `agregar`, también si el tope detuvo la calibración.
     let casos = match &medida.fila {
         Some(fila) => escribir_casos(
@@ -1736,6 +1748,7 @@ fn fila_no_aplica(
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
         plazo_mutantes: None,
+        repo_origen: None,
     }
 }
 
@@ -1751,6 +1764,19 @@ fn gate_de_tope(tarea: &str, dimension: Dimension, detencion: &Detencion) -> Eve
     ]);
     observe::evento_gate(CORRIDA_CALIBRACION, FASE_TOPE_CALIBRACION, extra)
 }
+
+/// Carpeta del repo bueno de Pruebas: `con_tests/` dentro de la carpeta de la tarea. Solo si existe.
+/// Gana a `--repo` y a `[calibracion] repo`. Las demás dimensiones no la miran.
+fn carpeta_con_tests(tarea: &Tarea, dimension: Dimension) -> Option<PathBuf> {
+    if dimension != Dimension::Pruebas {
+        return None;
+    }
+    let carpeta = tarea.dir.join(CON_TESTS);
+    carpeta.is_dir().then_some(carpeta)
+}
+
+/// Nombre de la carpeta con tests de Pruebas. Es también el origen que guarda la fila.
+const CON_TESTS: &str = "con_tests";
 
 /// El repo bueno: `--repo`, o `[calibracion] repo` de la tarea (relativo a su carpeta). Debe existir.
 fn repo_de(tarea: &Tarea, repo_cli: Option<&Path>) -> Result<PathBuf, ErrorOraculo> {
@@ -2466,6 +2492,7 @@ mod tests {
         Fila {
             tarea_hash: None,
             plazo_mutantes: None,
+            repo_origen: None,
             tarea: tarea.into(),
             dimension,
             n: 20,
@@ -3087,6 +3114,63 @@ mod tests {
         )
         .expect("calibra con el repo de la tarea");
         assert_eq!(vistos.lock().expect("lock")[0], repo);
+    }
+
+    /// Pruebas con `con_tests/` en la tarea: usa esa carpeta aunque venga `--repo`, y la fila lo dice.
+    #[test]
+    fn calibra_pruebas_usa_con_tests_de_la_tarea_y_la_fila_lo_dice() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        let con_tests = carpeta.join("con_tests");
+        std::fs::create_dir_all(&con_tests).expect("con_tests");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &con_tests);
+        let repo_cli = home.path().join("repo-cli");
+        std::fs::create_dir_all(&repo_cli).expect("repo cli");
+        let _ = tarea_en(&carpeta, "");
+        let vistos = Mutex::new(Vec::<PathBuf>::new());
+        let evaluador = |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| {
+            vistos.lock().expect("lock").push(ruta.to_path_buf());
+            Ok(veredicto_de_pruebas())
+        };
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            Some(repo_cli.as_path()),
+            None,
+            &evaluador,
+        )
+        .expect("calibra Pruebas con con_tests");
+        assert_eq!(vistos.lock().expect("lock")[0], con_tests);
+        assert_eq!(calibrada.fila.repo_origen.as_deref(), Some("con_tests"));
+    }
+
+    /// Pruebas sin `con_tests/`: usa el repo de `[calibracion]` y la fila no dice de dónde salió.
+    #[test]
+    fn calibra_pruebas_sin_con_tests_la_fila_no_lo_dice() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        let repo = carpeta.join("repo-bueno");
+        let vistos = Mutex::new(Vec::<PathBuf>::new());
+        let evaluador = |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| {
+            vistos.lock().expect("lock").push(ruta.to_path_buf());
+            Ok(veredicto_de_pruebas())
+        };
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra Pruebas sin con_tests");
+        assert_eq!(vistos.lock().expect("lock")[0], repo);
+        assert_eq!(calibrada.fila.repo_origen, None);
     }
 
     /// La carpeta temporal de la base vive dentro de `home/tmp`, no en el `/tmp` del sistema.

@@ -6465,6 +6465,7 @@ mod tests {
             filas: vec![calibra::Fila {
                 tarea_hash: None,
                 plazo_mutantes: None,
+                repo_origen: None,
                 tarea: tarea.into(),
                 dimension,
                 n: 0,
@@ -7176,6 +7177,7 @@ mod tests {
         .map(|dimension| calibra::Fila {
             tarea_hash: None,
             plazo_mutantes: None,
+            repo_origen: None,
             tarea: "tarea-rust".into(),
             dimension,
             n: 20,

@@ -775,6 +775,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 0,
           "minimum": 0
         },
+        "repo_origen": {
+          "description": "Carpeta de la que salió el repo bueno de Pruebas: `con_tests` si usó `<tarea>/con_tests/`. `None` si\nsalió de `--repo` o de `[calibracion] repo`, y en las dimensiones que no son Pruebas.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "ruidosos": {
           "description": "Tests ruidosos de la calibración, en orden: los que cambiaron de estado entre la base y los limpios. Sus\nhallazgos no detectan (Tarea 63). Una fila sin el campo vale vacía.",
           "type": "array",
