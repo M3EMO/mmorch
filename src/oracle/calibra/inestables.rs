@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::PREFIJO_INESTABLE;
 use crate::oracle::rubrica::{Mide, Rubrica};
 use crate::tipos::{Dimension, NivelItem, Veredicto};
 
@@ -168,7 +169,7 @@ pub(super) fn dimension_inestable(pesos: &Pesos, inestables: &BTreeSet<String>) 
 /// Motivo de la fila de una dimensión inestable. Nombra sus ítems.
 pub(super) fn motivo(inestables: &BTreeSet<String>) -> String {
     let ids: Vec<&str> = inestables.iter().map(String::as_str).collect();
-    format!("inestable en esta tarea: {}", ids.join(", "))
+    format!("{PREFIJO_INESTABLE}: {}", ids.join(", "))
 }
 
 #[cfg(test)]
@@ -264,7 +265,7 @@ mod tests {
     #[test]
     fn motivo_de_dimension_inestable_nombra_sus_items() {
         let motivo = motivo(&conjunto(&[ERRORES, MODULARIDAD]));
-        assert!(motivo.starts_with("inestable en esta tarea"), "{motivo}");
+        assert!(motivo.starts_with(PREFIJO_INESTABLE), "{motivo}");
         assert!(motivo.contains(MODULARIDAD), "{motivo}");
         assert!(motivo.contains(ERRORES), "{motivo}");
     }

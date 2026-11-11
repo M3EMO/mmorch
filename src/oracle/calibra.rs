@@ -4387,13 +4387,6 @@ mod tests {
     }
 
     #[test]
-    fn motivo_inestable_empieza_con_el_prefijo_que_lee_las_filas_viejas() {
-        // Guarda: el motivo nuevo y el prefijo de `normalizar_inestable` deben decir lo mismo.
-        let motivo = motivo_inestable(&["diseno.modularidad".to_string()]);
-        assert!(motivo.starts_with(PREFIJO_INESTABLE), "{motivo}");
-    }
-
-    #[test]
     fn calibra_fila_vieja_con_motivo_inestable_en_no_aplica_se_lee_como_inestable() {
         let texto = r#"{"v":1,"filas":[
             {"tarea":"memora","dimension":"diseno","n":0,"semilla":42,"ts":1.0,

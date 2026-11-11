@@ -42,8 +42,8 @@ const SEVERIDAD_MAX: i64 = 3;
 const ARCHIVOS_DESTACADOS: usize = 5;
 /// Líneas de contexto a cada lado de un cambio en su extracto.
 const CONTEXTO: usize = 40;
-/// Entrada máxima de un juez, en bytes UTF-8 del sistema y el usuario del prompt. Es un límite: un prompt
-/// más grande no se envía y su juicio da sin veredicto. Así la estimación de costo nunca queda corta.
+/// Límite del prompt que se envía al juez, en bytes UTF-8 del sistema y el usuario. Un prompt más grande no se envía
+/// y su juicio da sin veredicto. Ninguna cota de calibración usa este valor.
 pub const MAX_ENTRADA_JUEZ_BYTES: u64 = 256 * 1024;
 /// Prompt fijo del juez. Refuta por default y pide solo un objeto JSON.
 const PROMPT_SISTEMA: &str = "Sos un PM técnico que revisa el diseño y la arquitectura de un repo contra su spec.
