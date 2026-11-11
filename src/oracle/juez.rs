@@ -45,17 +45,6 @@ const CONTEXTO: usize = 40;
 /// Entrada máxima de un juez, en bytes UTF-8 del sistema y el usuario del prompt. Es un límite: un prompt
 /// más grande no se envía y su juicio da sin veredicto. Así la estimación de costo nunca queda corta.
 pub const MAX_ENTRADA_JUEZ_BYTES: u64 = 256 * 1024;
-/// Bytes de un carácter UTF-8 en el peor caso. Los topes de `LimitesPrompt` se miden en caracteres.
-const BYTES_POR_CARACTER: u64 = 4;
-/// Caracteres de una línea de hallazgo del prompt. Supuesto: el detalle de una sonda cabe en una línea.
-const HALLAZGO_CHARS_MAX: u64 = 200;
-/// Reserva de bytes para encabezados de archivo, marcas de recorte y textos fijos del prompt. Supuesto: suman
-/// menos de 4 KiB con los archivos que caben en `extractos_total`.
-const RESERVA_ENCABEZADOS_BYTES: u64 = 4 * 1024;
-/// Reserva de bytes para la sección `REINTENTO:`. `texto_reintento` escribe una línea por id roto y por cita
-/// que falla el gate. Supuesto: las citas son líneas cortas de código, así que 8 KiB cubren los ids pedidos.
-const RESERVA_REINTENTO_BYTES: u64 = 8 * 1024;
-
 /// Prompt fijo del juez. Refuta por default y pide solo un objeto JSON.
 const PROMPT_SISTEMA: &str = "Sos un PM técnico que revisa el diseño y la arquitectura de un repo contra su spec.
 REFUTA POR DEFAULT: el nivel de cada ítem parte en 0 y solo sube con evidencia citada textual.
@@ -703,44 +692,6 @@ fn numerar_rango(
 pub fn bytes_de_prompt(prompt: &Prompt) -> u64 {
     let sistema = prompt.sistema.as_deref().map_or(0, str::len);
     (sistema + prompt.usuario.len()) as u64
-}
-
-/// Cota superior de los bytes UTF-8 del prompt (sistema y usuario) del peor pedido, que es el reintento.
-/// Suma los textos fijos, la spec, los requisitos y los ítems pedidos con su largo exacto. Los topes de
-/// `limites` van en caracteres: cada uno cuenta `BYTES_POR_CARACTER`. Nunca pasa `MAX_ENTRADA_JUEZ_BYTES`.
-pub fn cota_bytes_de_prompt(
-    spec: &str,
-    requisitos: &[Requisito],
-    rubricas: &[Rubrica],
-    limites: &LimitesPrompt,
-) -> u64 {
-    let mut total = (PROMPT_SISTEMA.len() as u64).saturating_add(spec.len() as u64);
-    for r in requisitos {
-        let linea = format!("- {} (peso {}): {}\n", r.id, r.peso, r.titulo);
-        total = total.saturating_add(linea.len() as u64);
-    }
-    // Lo mismo que escribe `construir_prompt_con` para cada ítem pedido: su id, su fuente, su modo y sus anclas.
-    for (item, _) in pedidos_de(rubricas) {
-        let mut bloque = format!(
-            "- {}\n- {} | fuente: {} | mide: {}\n",
-            item.id,
-            item.id,
-            item.fuente,
-            mide_texto(item.mide)
-        );
-        for ancla in &item.anclas {
-            bloque.push_str(&format!("  {ancla}\n"));
-        }
-        total = total.saturating_add(bloque.len() as u64);
-    }
-    let caracteres = (limites.mapa_chars as u64)
-        .saturating_add(limites.extractos_total as u64)
-        .saturating_add((limites.hallazgos_max as u64).saturating_mul(HALLAZGO_CHARS_MAX));
-    total = total
-        .saturating_add(caracteres.saturating_mul(BYTES_POR_CARACTER))
-        .saturating_add(RESERVA_ENCABEZADOS_BYTES)
-        .saturating_add(RESERVA_REINTENTO_BYTES);
-    total.min(MAX_ENTRADA_JUEZ_BYTES)
 }
 
 /// Motivo del juicio que no envía un prompt de más de `MAX_ENTRADA_JUEZ_BYTES`. `None` si cabe.
@@ -2393,68 +2344,6 @@ mod tests {
             !modelo.visto.borrow().is_empty(),
             "un prompt chico sí se envía"
         );
-    }
-
-    // Cota del prompt del reintento.
-
-    /// Límites chicos: con ellos la cota queda bajo el máximo. Con los de producción, la cota es el máximo.
-    fn limites_chicos() -> LimitesPrompt {
-        LimitesPrompt {
-            mapa_chars: 1000,
-            extractos_total: 2000,
-            extracto_max: 2000,
-            hallazgos_max: 2,
-            max_tokens: 1000,
-        }
-    }
-
-    #[test]
-    fn cota_de_spec_enorme_es_el_maximo() {
-        let c = caso();
-        let spec = "x".repeat(1024 * 1024);
-        let cota =
-            cota_bytes_de_prompt(&spec, &c.requisitos, &c.rubricas, &LimitesPrompt::default());
-        assert_eq!(cota, MAX_ENTRADA_JUEZ_BYTES);
-    }
-
-    #[test]
-    fn cota_de_spec_chica_con_limites_chicos_baja_del_maximo() {
-        let c = caso();
-        let cota = cota_bytes_de_prompt(SPEC, &c.requisitos, &c.rubricas, &limites_chicos());
-        assert!(cota < MAX_ENTRADA_JUEZ_BYTES, "{cota}");
-    }
-
-    #[test]
-    fn cota_crece_con_la_spec() {
-        let c = caso();
-        let limites = limites_chicos();
-        let chica = cota_bytes_de_prompt(SPEC, &c.requisitos, &c.rubricas, &limites);
-        let grande = format!("{SPEC}\n{}", "y".repeat(100_000));
-        let mayor = cota_bytes_de_prompt(&grande, &c.requisitos, &c.rubricas, &limites);
-        assert!(mayor > chica, "{mayor} <= {chica}");
-    }
-
-    #[test]
-    fn cota_cubre_el_prompt_real_del_reintento() {
-        let texto = texto_reintento(
-            &BTreeMap::new(),
-            &BTreeSet::from(["diseno.modularidad".to_string()]),
-            &BTreeSet::new(),
-        );
-        let ids = BTreeSet::from(["diseno.modularidad".to_string()]);
-        for c in [caso(), caso_de_150_lineas()] {
-            for limites in [LimitesPrompt::default(), limites_chicos()] {
-                let e = c.entrada();
-                let leidos = extractos(&e, &limites);
-                let real = construir_prompt_con(&e, &limites, Some(&ids), Some(&texto), &leidos);
-                let cota = cota_bytes_de_prompt(e.spec, e.requisitos, e.rubricas, &limites);
-                assert!(
-                    bytes_de_prompt(&real) <= cota,
-                    "el prompt real pesa {} y la cota es {cota}",
-                    bytes_de_prompt(&real)
-                );
-            }
-        }
     }
 
     #[test]
