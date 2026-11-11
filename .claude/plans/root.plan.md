@@ -8185,3 +8185,86 @@ Brief: `docs/builds/brief-local-101.md`, con base 4a6ef27 y rama `laptop/tarea-1
 - `docs/interfaces.md` se regenera una sola vez, al final.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P102 siguen abiertas.
+
+## Vuelta del 2026-11-11 (24): los tres escapes, la Tarea 101, y lo que queda
+
+**Estado.** La Tarea 101 está en `laptop/tarea-101` (cabb373). Sin podman dio 3188, 0 y 4. Con podman dio 3187, 1 y 4: la falla es de red y se repite sola. Quedaron sin hacer C3 y el resto de `modulo_borrado`. Las mezclas de la 84 a la 101 y P95 a P102 esperan al usuario.
+
+**Lo medido con la 101.** Pruebas dio 3 de 3, Completitud 2 de 3, Funciona 1 de 3, y los limpios 9 de 9, sin ruidosos. Ninguna detección fue segura por construcción. Es la primera calibración de S2 que mide algo en las cuatro dimensiones de oráculo.
+
+## 1. Los tres escapes
+
+Leí el código en `rep/tN-ref` y los tests ocultos en `oraculos/s2-tN/oculto/`.
+
+**t1, Funciona: es un mutante equivalente, un defecto de la medición.**
+- La mutación cambia `(And, None) => true` por `false` en `composite_pattern.rs:113`.
+- Ese brazo está en la función de atajo de `eval`. Decide si se corta la evaluación, no el resultado.
+- Sin el atajo, el operador evalúa el lado derecho y cae en `(And, None, _) => None`. El resultado es el mismo. El comentario del código lo dice: "normally not called due to short-circuit".
+- Ningún test puede matar ese mutante. No es un escape del test.
+- **Se acepta como límite.** Saber si un mutante es equivalente no se puede decidir en general. Con P102 a, Funciona es una dimensión de oráculo, y un escape así no cambia lo que se prueba.
+
+**t1, Completitud: es un escape real de los tests de la tarea.**
+- `cuerpo_vaciado` vació `search_content` (`composite_pattern.rs:125`). El commit cambió esa función y también `search_string`.
+- Los tests ocultos de t1 (`search_strings.rs`) solo llaman a `search_string`. Nadie llama a `search_content`.
+- Es un hueco del commit: probó una de las dos funciones que cambió.
+
+**t3, Funciona: es un escape real, causado por la regla de partición del dataset.**
+- La mutación cambia `== 32` por `!= 32` en el `while` de `content_match.rs:38`.
+- El anexo de t3 trae 3 tests. `left_trimming_still_drops_leading_spaces` mataría ese mutante: con `!=`, el recorte deja los espacios.
+- Pero `oculto.cmd` corre un solo test, con `-E`: `empty_match_at_end_of_line_doesnt_panic`. Es el único que pasa de rojo a verde. Los otros dos ya pasaban en el padre, y quedaron fuera.
+- **La causa es mi regla de la vuelta (3) para S2:** "Poné todos los rojo a verde en `pruebas`". Esa regla dejó afuera los tests nuevos que ya pasaban.
+
+**Regla nueva de D3: la partición oculta lleva todos los tests que agrega el commit.**
+1. Los ids ocultos son los tests nuevos del commit, pasen o no en el padre.
+2. El criterio 1 sigue igual: al menos uno pasa de rojo a verde.
+3. Los tests nuevos que ya pasaban en el padre también son parte de la especificación. Protegen el comportamiento que el cambio no debe romper.
+4. **Para S2:** el orquestador amplía el `-E` de `oculto.cmd` y los `pruebas` de t1 a t3, con los ids nuevos que salen de un junit real. Lo hace después de la mezcla, junto con las capas y el comando nuevo de nextest. El cambio de `tarea_hash` invalida las filas de oráculo, que se recalibran sin API.
+
+## 2. Las 11 preguntas de la Tarea 101
+
+1. **C3, tocar `perfiles/rust.rs`: sí, en la 102.** `analizar` es el lector de todas las sondas. Si no ve un comentario de bloque, las sondas tampoco: un `unsafe` dentro de `/* */` cuenta hoy como código. Arreglarlo en un solo lugar sirve a las sondas y al inyector.
+2. **La variante `Defecto::ModuloBorrado`: se queda.** Los casos guardados nombran el defecto. Si la variante desaparece, un caso viejo no se lee. Ya no la elige ninguna dimensión, y eso alcanza.
+3. **Un build roto solo por la suite oculta no marca `no_compila` (`mod.rs:761`): cambia en la 102.** Con nextest, un 101 de la suite oculta también marca `no_compila`. La regla de decisión ya dice "el producto o sus tests no compilan". Así A1 lo ve en la calibración, y una mutación que rompe solo los tests ocultos va a reemplazo. En una tarea de función nueva, un nombre de interfaz distinto da 101, y "no listo" es lo correcto.
+4. **`Vencido` cuenta como ruido:** acepto. Un cambio de plazo es ruido de la herramienta.
+5. **Sin asesinos conocidos, el cambio es ruido:** acepto. El error queda del lado de avisar.
+6. **`--repo` y `con_tests/` juntos: cambia.** La fila ya guarda `repo_origen`. Además, el comando avisa "se usó con_tests/ en vez de --repo". Va a la 102.
+7. **`repo_origen`:** acepto el nombre.
+8. **"corrió 1 mutantes": cambia.** El aviso usa singular con N igual a 1. Va a la 102.
+9. **Unificar el aviso "sin juez":** se acepta para después. No cambia ninguna medición.
+10. **`bucle` excluye `const fn`, `async fn` y `unsafe fn`: cambia.** Usa los mismos calificadores que `nombre_de_funcion`. Va a la 102.
+11. **`if` sin `{` en la línea no ofrece candidato:** acepto. Una condición de varias líneas es rara en los cambios chicos.
+
+## 3. Tarea 102
+
+Brief: `docs/builds/brief-local-102.md`, con base cabb373 y rama `laptop/tarea-102`.
+
+| Grupo | Qué | Archivos |
+|---|---|---|
+| A | `analizar` ve comentarios de bloque y cadenas crudas, y conserva posiciones; `inyectar.rs` lo usa; `bucle` con calificadores | `src/oracle/perfiles/rust.rs`, `src/oracle/calibra/inyectar.rs` |
+| B | `no_compila` también con el 101 de la suite oculta; singular del aviso | `src/oracle/mod.rs` |
+| C | Aviso de `con_tests/` contra `--repo` | `src/oracle/calibra.rs` |
+
+Los tres grupos no comparten archivos, y corren en paralelo. Dentro del grupo A, primero `analizar` y después `inyectar.rs`.
+
+## 4. Qué falta para terminar el trabajo que no depende del usuario
+
+**Con la 102, termina.** Después de ella solo queda trabajo que alguna respuesta destraba. Lo que el orquestador puede hacer solo, sin código, después de la mezcla:
+- aplicar en `ROOT_HOME` las capas, el comando nuevo de nextest, `con_tests/` y los ids ocultos ampliados de t1 a t3;
+- actualizar `armar_s2.py` con esas cuatro reglas;
+- recalibrar sin API las dimensiones de oráculo.
+
+**Lo que queda bloqueado, y por qué:**
+
+| Espera | Qué destraba |
+|---|---|
+| Las mezclas de la 84 a la 102 | Que el `ROOT_HOME` real use todo lo construido. Sin ellas, nada de lo anterior se aplica |
+| P96, avisos previos | Hoy toda tarea de broot da "bloqueado" por los 7 RUSTSEC de su `Cargo.lock`. Ninguna evaluación real de S2 puede dar otra decisión. Es la pregunta que más frena hoy |
+| P95, "listo" con un test oculto fallando | Qué promete "listo" |
+| P97, de dónde salen más tareas | El dataset de D3. Sin él no hay casos para ninguna cota |
+| P99, la interfaz en las fichas | Las 6 tareas de función nueva |
+| P102, qué significa "calibrada" | Cuántos casos hay que juntar en D4 |
+| P101, medir Diseño en t1 | Si D4 vale su costo en las dimensiones de juez |
+| P98, el final sellado de V3 | El recall de 0,8 en sembrados |
+| P100, los worktrees auxiliares | Limpieza |
+
+**Preguntas al usuario:** ninguna nueva. P95 a P102 siguen abiertas. **P96 es la que más frena hoy.**
