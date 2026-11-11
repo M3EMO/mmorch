@@ -100,6 +100,8 @@ pub struct Inyeccion {
     /// En `ModuloBorrado`, el módulo borrado es un archivo tocado.
     /// Un archivo tocado tiene al menos una línea del cambio.
     pub en_cambio: bool,
+    /// Operador que `ComportamientoRoto` cambió, con modo de estado inicial (p. ej. `"> -> >="`). `None` en los demás.
+    pub operador: Option<String>,
 }
 
 /// Lo que `inyectar_con` necesita además de la copia y la semilla.
@@ -114,6 +116,8 @@ pub struct Contexto<'a> {
     pub muertos: &'a [MutanteMuerto],
     /// Rangos de líneas del cambio (1-based, inclusivos) por ruta relativa. `None`: la tarea no trae `bootstrap/`.
     pub cambios: Option<&'a Rangos>,
+    /// Carpeta del estado inicial (`bootstrap/`). `Some`: `ComportamientoRoto` cambia también operadores y condiciones.
+    pub inicial: Option<&'a Path>,
 }
 
 /// Aplica `defecto` a la copia de repo Rust en `dir`. `capas` son las de `[arquitectura]` de la tarea.
@@ -132,6 +136,7 @@ pub fn inyectar(
         limites: &limites,
         muertos: &[],
         cambios: None,
+        inicial: None,
     };
     inyectar_con(defecto, dir, &contexto, semilla)
 }
@@ -147,6 +152,7 @@ pub fn inyectar_con(
 ) -> io::Result<Option<Inyeccion>> {
     let mut rng = Prng::nuevo(semilla);
     let mut apagado = None;
+    let mut operador: Option<String> = None;
     let lugar = match defecto {
         Defecto::SecretoEnCodigo => secreto(dir, &mut rng)?,
         Defecto::PanicoEnEntrada => panico(dir, &mut rng)?,
@@ -160,7 +166,14 @@ pub fn inyectar_con(
             apagado.as_ref().map(|a| (a.archivo.clone(), a.linea))
         }
         Defecto::DockerfileRoot => dockerfile(dir)?,
-        Defecto::ComportamientoRoto => comportamiento(dir, &mut rng, contexto.cambios)?,
+        Defecto::ComportamientoRoto => {
+            comportamiento(dir, &mut rng, contexto.cambios, contexto.inicial)?.map(
+                |(archivo, linea, op)| {
+                    operador = op;
+                    (archivo, linea)
+                },
+            )
+        }
     };
     // Con `cambios`, un defecto de línea o de módulo solo cae dentro del cambio: toda elección lo está.
     let en_cambio = contexto.cambios.is_some()
@@ -178,6 +191,7 @@ pub fn inyectar_con(
             mutante: Some(a.mutante),
             tests_apagados: a.tests,
             en_cambio,
+            operador,
         },
         None => Inyeccion {
             defecto,
@@ -187,6 +201,7 @@ pub fn inyectar_con(
             mutante: None,
             tests_apagados: Vec::new(),
             en_cambio,
+            operador,
         },
     }))
 }
@@ -885,7 +900,7 @@ fn posicion_de_igualdad(linea: &str) -> Option<usize> {
 /// Cambia el primer ` == ` de una línea de producción de `src/` por ` != `: la comparación sale invertida.
 /// Usa solo las líneas de antes de `#[cfg(test)]`. `Ok(None)` si no hay ninguna comparación de ese tipo.
 /// Con `cambios`, solo las líneas que caen dentro de un rango del cambio.
-fn comportamiento(dir: &Path, rng: &mut Prng, cambios: Option<&Rangos>) -> io::Result<Lugar> {
+fn igualdad_invertida(dir: &Path, rng: &mut Prng, cambios: Option<&Rangos>) -> io::Result<Lugar> {
     let mut candidatos: Vec<(String, usize)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
@@ -908,6 +923,260 @@ fn comportamiento(dir: &Path, rng: &mut Prng, cambios: Option<&Rangos>) -> io::R
     lineas[i].replace_range(p..p + 4, " != ");
     escribir(dir, &archivo, &unir(&lineas))?;
     Ok(Some((archivo, i as u32 + 1)))
+}
+
+/// Pares de operadores que `ComportamientoRoto` cambia con estado inicial. Con espacios a ambos lados: no toca
+/// genéricos (`<T>`), flechas (`->`, `=>`) ni desplazamientos (`<<`, `>>`).
+const PARES_DE_OPERADOR: [(&str, &str); 8] = [
+    (" < ", " <= "),
+    (" <= ", " < "),
+    (" > ", " >= "),
+    (" >= ", " > "),
+    (" == ", " != "),
+    (" != ", " == "),
+    (" && ", " || "),
+    (" || ", " && "),
+];
+
+/// Constantes booleanas. Son palabras enteras: no van pegadas a letras, dígitos ni `_`.
+const PARES_DE_PALABRA: [(&str, &str); 2] = [("true", "false"), ("false", "true")];
+
+/// Sumas de uno. El `1` no sigue de dígito, letra, `_` ni `.`.
+const PARES_DE_SUMA: [(&str, &str); 2] = [(" + 1", " - 1"), (" - 1", " + 1")];
+
+/// Prefijos de línea que tienen una condición. `else if` y `} else if` van aparte: el prefijo es el texto exacto.
+const PREFIJOS_DE_CONDICION: [&str; 4] = ["} else if ", "else if ", "if ", "while "];
+
+/// Un cambio posible en una línea: reemplaza `inicio..fin` de la línea original por `nuevo`. `operador` lo nombra.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Edicion {
+    inicio: usize,
+    fin: usize,
+    nuevo: String,
+    operador: String,
+}
+
+impl Edicion {
+    fn aplicar(&self, linea: &str) -> String {
+        let mut nueva = linea.to_string();
+        nueva.replace_range(self.inicio..self.fin, &self.nuevo);
+        nueva
+    }
+}
+
+fn cambio(inicio: usize, fin: usize, nuevo: &str, operador: String) -> Edicion {
+    Edicion {
+        inicio,
+        fin,
+        nuevo: nuevo.to_string(),
+        operador,
+    }
+}
+
+/// Nombre legible de un par: `> -> >=`.
+fn nombre_de_par(de: &str, a: &str) -> String {
+    format!("{} -> {}", de.trim(), a.trim())
+}
+
+/// `true` si `c` puede seguir o empezar un identificador: letra, dígito o `_`.
+fn es_parte_de_palabra(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// La línea con el contenido de cadenas, de caracteres y de comentarios `//` en espacios. Mismo largo en bytes y
+/// mismas posiciones: un operador que aparece aquí está en esa posición del código real.
+fn linea_limpia(linea: &str) -> String {
+    let cars: Vec<char> = linea.chars().collect();
+    let mut oculto = vec![false; cars.len()];
+    let mut en_cadena = false;
+    let mut i = 0;
+    while i < cars.len() {
+        if en_cadena {
+            oculto[i] = true;
+            match cars[i] {
+                '\\' => {
+                    if let Some(o) = oculto.get_mut(i + 1) {
+                        *o = true;
+                    }
+                    i += 2;
+                    continue;
+                }
+                '"' => en_cadena = false,
+                _ => {}
+            }
+        } else if cars[i] == '/' && cars.get(i + 1) == Some(&'/') {
+            oculto[i..].fill(true);
+            break;
+        } else if cars[i] == '"' {
+            en_cadena = true;
+            oculto[i] = true;
+        } else if cars[i] == '\''
+            && let Some(fin) = fin_de_caracter(&cars, i)
+        {
+            oculto[i..=fin].fill(true);
+            i = fin;
+        }
+        i += 1;
+    }
+    cars.iter()
+        .zip(&oculto)
+        .map(|(&c, &o)| {
+            if o {
+                " ".repeat(c.len_utf8())
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Índice del `'` que cierra el literal de carácter que abre en `i` (`'a'`, `'\n'`, `'\''`). `None` si es un lifetime.
+fn fin_de_caracter(cars: &[char], i: usize) -> Option<usize> {
+    match cars.get(i + 1)? {
+        '\\' => (i + 3..cars.len()).find(|&j| cars[j] == '\''),
+        _ => (cars.get(i + 2) == Some(&'\'')).then_some(i + 2),
+    }
+}
+
+/// `true` si la línea empieza con `//`, `/*` o `* `: no tiene código que mutar.
+fn es_comentario(linea: &str) -> bool {
+    let t = linea.trim_start();
+    t.starts_with("//") || t.starts_with("/*") || t.starts_with("* ")
+}
+
+/// Cambios de operador de comparación o lógico en la línea limpia.
+fn ediciones_de_operador(limpia: &str) -> Vec<Edicion> {
+    let mut salida = Vec::new();
+    for &(de, a) in &PARES_DE_OPERADOR {
+        for (p, _) in limpia.match_indices(de) {
+            salida.push(cambio(p, p + de.len(), a, nombre_de_par(de, a)));
+        }
+    }
+    salida
+}
+
+/// Cambios de `true`/`false` como palabra entera, y de `+ 1`/`- 1` donde el `1` no sigue de dígito, letra, `_` ni `.`.
+fn ediciones_de_valor(limpia: &str) -> Vec<Edicion> {
+    let mut salida = Vec::new();
+    for &(de, a) in &PARES_DE_PALABRA {
+        for (p, _) in limpia.match_indices(de) {
+            let fin = p + de.len();
+            let antes = limpia[..p].chars().next_back();
+            let despues = limpia[fin..].chars().next();
+            if !antes.is_some_and(es_parte_de_palabra) && !despues.is_some_and(es_parte_de_palabra)
+            {
+                salida.push(cambio(p, fin, a, nombre_de_par(de, a)));
+            }
+        }
+    }
+    for &(de, a) in &PARES_DE_SUMA {
+        for (p, _) in limpia.match_indices(de) {
+            let fin = p + de.len();
+            let despues = limpia[fin..].chars().next();
+            if !despues.is_some_and(|c| es_parte_de_palabra(c) || c == '.') {
+                salida.push(cambio(p, fin, a, nombre_de_par(de, a)));
+            }
+        }
+    }
+    salida
+}
+
+/// Cambios de la condición de un `if`, `while` o `else if` de la línea limpia: quita el `!` que tiene o agrega uno.
+/// `if let` queda fuera.
+fn ediciones_de_condicion(limpia: &str) -> Vec<Edicion> {
+    let inicio_codigo = limpia.len() - limpia.trim_start().len();
+    let resto = &limpia[inicio_codigo..];
+    let Some(prefijo) = PREFIJOS_DE_CONDICION
+        .into_iter()
+        .find(|p| resto.starts_with(*p))
+    else {
+        return Vec::new();
+    };
+    let c = inicio_codigo + prefijo.len();
+    let condicion = &limpia[c..];
+    if condicion.starts_with("let ") {
+        return Vec::new();
+    }
+    if condicion.starts_with('!') && !condicion.starts_with("!=") {
+        vec![cambio(c, c + 1, "", "if: quitar !".to_string())]
+    } else {
+        vec![cambio(c, c, "!", "if: agregar !".to_string())]
+    }
+}
+
+/// Todos los cambios posibles de `ComportamientoRoto` en una línea de producción. Vacío en comentarios.
+fn candidatos_de_linea(linea: &str) -> Vec<Edicion> {
+    if es_comentario(linea) {
+        return Vec::new();
+    }
+    let limpia = linea_limpia(linea);
+    let mut salida = ediciones_de_operador(&limpia);
+    salida.extend(ediciones_de_valor(&limpia));
+    salida.extend(ediciones_de_condicion(&limpia));
+    salida
+}
+
+/// Líneas del archivo en el estado inicial, sin espacios a los lados. Vacío si el archivo no existe allí.
+fn lineas_del_inicial(inicial: &Path, archivo: &str) -> io::Result<BTreeSet<String>> {
+    let ruta = inicial.join(archivo);
+    if !ruta.is_file() {
+        return Ok(BTreeSet::new());
+    }
+    Ok(partir(&fs::read_to_string(ruta)?)
+        .iter()
+        .map(|l| l.trim().to_string())
+        .collect())
+}
+
+/// Modo operadores (`inicial` dado): cambia un operador, un valor o una condición dentro del cambio de `bootstrap/`.
+/// Descarta lo que el estado inicial ya tenía, para no revertir el cambio. `Ok(None)` si no queda ningún candidato.
+fn comportamiento_con_inicial(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    inicial: &Path,
+) -> io::Result<Option<(String, u32, Option<String>)>> {
+    let mut candidatos: Vec<(String, usize, Edicion)> = Vec::new();
+    for archivo in rust_en(dir, "src")? {
+        let lineas = partir(&leer(dir, &archivo)?);
+        let previas = lineas_del_inicial(inicial, &archivo)?;
+        let limite = limite_de_produccion(&lineas);
+        for (i, linea) in lineas[..limite].iter().enumerate() {
+            if !en_el_cambio(cambios, &archivo, i as u32 + 1) {
+                continue;
+            }
+            for edicion in candidatos_de_linea(linea) {
+                if !previas.contains(edicion.aplicar(linea).trim()) {
+                    candidatos.push((archivo.clone(), i, edicion));
+                }
+            }
+        }
+    }
+    let Some((archivo, i, edicion)) = rng.elegir(&candidatos).cloned() else {
+        return Ok(None);
+    };
+    let mut lineas = partir(&leer(dir, &archivo)?);
+    lineas[i] = edicion.aplicar(&lineas[i]);
+    escribir(dir, &archivo, &unir(&lineas))?;
+    Ok(Some((archivo, i as u32 + 1, Some(edicion.operador))))
+}
+
+/// Cambia un defecto de comportamiento en `dir`. Sin `inicial`, cambia el primer ` == ` por ` != ` (la regla de
+/// siempre). Con `inicial`, cambia un operador, un valor o una condición (ver `comportamiento_con_inicial`).
+/// Devuelve archivo, línea (1-based) y el operador cambiado, que solo existe con `inicial`.
+fn comportamiento(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    inicial: Option<&Path>,
+) -> io::Result<Option<(String, u32, Option<String>)>> {
+    match inicial {
+        Some(inicial) => comportamiento_con_inicial(dir, rng, cambios, inicial),
+        None => {
+            Ok(igualdad_invertida(dir, rng, cambios)?
+                .map(|(archivo, linea)| (archivo, linea, None)))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1341,6 +1610,7 @@ mod tests {
                 camino_caliente: &[],
                 limites: &limites,
                 muertos: &[],
+                inicial: None,
                 cambios: None,
             };
             let inyeccion = inyectar_con(Defecto::ArchivoDios, dir.path(), &contexto, 42)
@@ -1500,6 +1770,7 @@ mod tests {
             capas: &capas,
             camino_caliente: &[],
             limites: &limites,
+            inicial: None,
             muertos,
             cambios: None,
         };
@@ -1562,6 +1833,7 @@ mod tests {
         let contexto = Contexto {
             capas: &capas,
             camino_caliente: &[],
+            inicial: None,
             limites: &limites,
             muertos: &[muerto_de_leer_numero()],
             cambios: None,
@@ -1888,6 +2160,7 @@ mod tests {
         let limites = LimitesEstructura::default();
         let contexto = Contexto {
             capas: &capas,
+            inicial: None,
             camino_caliente: camino,
             limites: &limites,
             muertos: &[],
@@ -2240,6 +2513,7 @@ pub fn dos(x: u32) -> bool {
         let capas = capas_fixture();
         let limites = LimitesEstructura::default();
         let contexto = Contexto {
+            inicial: None,
             capas: &capas,
             camino_caliente: &[],
             limites: &limites,
@@ -2366,5 +2640,184 @@ pub fn dos(x: u32) -> bool {
             .expect("E/S")
             .expect("aplica");
         assert!(!secreto.en_cambio, "el secreto no es de línea: {secreto:?}");
+    }
+
+    /// `inyectar_con` de `ComportamientoRoto` en `dir`, con `cambios` y el estado inicial `inicial`.
+    fn con_inicial(
+        dir: &Path,
+        cambios: &BTreeMap<String, Vec<(u32, u32)>>,
+        inicial: &Path,
+        semilla: u64,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos: &[],
+            cambios: Some(cambios),
+            inicial: Some(inicial),
+        };
+        inyectar_con(Defecto::ComportamientoRoto, dir, &contexto, semilla)
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_cambia_mayor_por_mayor_o_igual_dentro_del_cambio() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let dir = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n\npub fn dos(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+        )]);
+        let inicial = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+        )]);
+        let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.archivo, "src/lib.rs");
+        assert_eq!(inyeccion.linea, 2);
+        assert_eq!(inyeccion.operador.as_deref(), Some("> -> >="));
+        let nuevo = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+        assert_eq!(nuevo.lines().nth(1), Some("    a >= b"));
+        assert_eq!(nuevo.lines().nth(5), Some("    a > b"), "fuera del cambio");
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_descarta_el_cambio_que_el_inicial_ya_tenia() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let vacio = repo_de(&[]);
+        let dir = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+        )]);
+        let sin_revertir = con_inicial(dir.path(), &cambios, vacio.path(), 42)
+            .expect("E/S")
+            .expect("sin estado inicial que lo contenga, aplica `a >= b`");
+        assert_eq!(sin_revertir.linea, 2);
+        let dir = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+        )]);
+        let inicial = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a >= b\n}\n",
+        )]);
+        let antes = arbol(dir.path());
+        for semilla in 1..=5u64 {
+            let inyeccion =
+                con_inicial(dir.path(), &cambios, inicial.path(), semilla).expect("E/S");
+            assert_eq!(
+                inyeccion, None,
+                "semilla {semilla}: `a >= b` ya estaba en el inicial"
+            );
+        }
+        assert_eq!(arbol(dir.path()), antes, "no toca la copia");
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_sin_el_archivo_no_descarta_nada() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let inicial = repo_de(&[("src/otra.rs", "    a >= b\n")]);
+        let dir = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+        )]);
+        let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.linea, 2);
+        let nuevo = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+        assert_eq!(nuevo.lines().nth(1), Some("    a >= b"));
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_if_ofrece_or_y_negacion_de_la_condicion() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let inicial = repo_de(&[]);
+        let mut vistas = BTreeSet::new();
+        for semilla in 1..=40u64 {
+            let dir = repo_de(&[(
+                "src/lib.rs",
+                "pub fn uno(x: bool, y: bool) -> u32 {\n    if x && y { 1 } else { 0 }\n}\n",
+            )]);
+            let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), semilla)
+                .expect("E/S")
+                .expect("aplica");
+            assert_eq!(inyeccion.linea, 2, "semilla {semilla}");
+            assert!(inyeccion.operador.is_some(), "semilla {semilla}");
+            let nuevo = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+            vistas.insert(nuevo.lines().nth(1).expect("línea 2").to_string());
+        }
+        assert_eq!(
+            vistas,
+            BTreeSet::from([
+                "    if x || y { 1 } else { 0 }".to_string(),
+                "    if !x && y { 1 } else { 0 }".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_cambia_true_y_mas_uno_por_su_par() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 5)]);
+        let inicial = repo_de(&[]);
+        let mut vistas = BTreeSet::new();
+        for semilla in 1..=40u64 {
+            let dir = repo_de(&[(
+                "src/lib.rs",
+                "pub fn uno(x: u32) -> u32 {\n    let n = x + 1;\n    let ok = true;\n    n\n}\n",
+            )]);
+            let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), semilla)
+                .expect("E/S")
+                .expect("aplica");
+            let nuevo = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+            vistas.insert(
+                nuevo
+                    .lines()
+                    .nth(inyeccion.linea as usize - 1)
+                    .expect("línea")
+                    .to_string(),
+            );
+        }
+        assert_eq!(
+            vistas,
+            BTreeSet::from([
+                "    let n = x - 1;".to_string(),
+                "    let ok = false;".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_ignora_operadores_en_textos_y_comentarios() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 5)]);
+        let inicial = repo_de(&[]);
+        let dir = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(x: u32) -> u32 {\n    // x > 1\n    let t = \"a > b && if x\"; // x == y || z\n    x\n}\n",
+        )]);
+        let antes = arbol(dir.path());
+        for semilla in 1..=5u64 {
+            let inyeccion =
+                con_inicial(dir.path(), &cambios, inicial.path(), semilla).expect("E/S");
+            assert_eq!(inyeccion, None, "semilla {semilla}");
+        }
+        assert_eq!(arbol(dir.path()), antes);
+    }
+
+    /// Guarda: sin `inicial` la elección sigue siendo la de siempre. Mismo PRNG sobre las líneas de igualdad, en orden.
+    #[test]
+    fn comportamiento_sin_inicial_elige_con_la_semilla_como_antes() {
+        let fuente = fuente_con_igualdades();
+        for semilla in 1..=20u64 {
+            let esperada = Prng::nuevo(semilla).elegir(&[3u32, 12, 15, 25]).copied();
+            let dir = repo_de(&[("src/lib.rs", fuente.as_str())]);
+            let linea = con_cambios(Defecto::ComportamientoRoto, dir.path(), None, semilla)
+                .expect("E/S")
+                .map(|i| i.linea);
+            assert_eq!(linea, esperada, "semilla {semilla}");
+        }
     }
 }

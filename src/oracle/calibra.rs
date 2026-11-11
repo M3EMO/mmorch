@@ -525,6 +525,9 @@ pub struct CasoGuardado {
     /// Un archivo tocado tiene al menos una línea del cambio. Los casos limpios y sin cambio valen `false`.
     #[serde(default)]
     pub en_cambio: bool,
+    /// Operador que cambió `ComportamientoRoto` con estado inicial (p. ej. `"> -> >="`). `None` en los demás casos.
+    #[serde(default)]
+    pub operador: Option<String>,
 }
 
 /// Resultado de `calibrar_tarea_con`: la fila y la ruta de los casos guardados, si hubo casos medidos.
@@ -701,6 +704,8 @@ struct Ronda<'a> {
     muertos: &'a [MutanteMuerto],
     /// Rangos del cambio de `bootstrap/`. `None`: la tarea no trae `bootstrap/`.
     cambios: Option<&'a BTreeMap<String, Vec<(u32, u32)>>>,
+    /// Carpeta de `bootstrap/` (estado inicial). `None`: la tarea no trae `bootstrap/`.
+    inicial: Option<&'a Path>,
     base: &'a Veredicto,
     evaluador: &'a (dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
     /// Tope de la medición. Cada reemplazo lo revisa antes de correr.
@@ -860,6 +865,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         limites: &limites,
         muertos: r.muertos,
         cambios: r.cambios,
+        inicial: r.inicial,
     };
     // Un defecto que rompe la construcción, o que la suite no ejecuta, se reemplaza por el siguiente
     // candidato, hasta `MAX_REEMPLAZOS` veces. Cada intento inválido suma a `invalidos`, también el del caso agotado.
@@ -1138,6 +1144,7 @@ fn calibrar_medida_con_hilos(
         camino,
         muertos: &muertos,
         cambios: cambios.as_ref(),
+        inicial: cambios.as_ref().map(|_| bootstrap.as_path()),
         base: &base,
         evaluador,
         tope,
@@ -1860,6 +1867,7 @@ impl CasoGuardado {
                 .map(|i| i.tests_apagados.clone())
                 .unwrap_or_default(),
             en_cambio: caso.inyeccion.as_ref().is_some_and(|i| i.en_cambio),
+            operador: caso.inyeccion.as_ref().and_then(|i| i.operador.clone()),
             mutantes: caso.mutantes.clone(),
             mutantes_cambiados: caso.mutantes_cambiados.clone(),
             ruidoso: !caso.mutantes_cambiados.is_empty(),
@@ -1893,6 +1901,7 @@ impl CasoGuardado {
             mutante: None,
             tests_apagados: Vec::new(),
             en_cambio: false,
+            operador: None,
             mutantes: Vec::new(),
             mutantes_cambiados: Vec::new(),
             ruidoso: false,
@@ -5548,6 +5557,26 @@ mod tests {
         assert!(!caso.en_cambio);
     }
 
+    /// El operador cambiado llega al renglón guardado y hace ida y vuelta. Un renglón viejo lo lee como `None`.
+    #[test]
+    fn caso_guardado_lleva_el_operador_y_los_viejos_quedan_en_none() {
+        let mut inyeccion = inyeccion_modulo();
+        inyeccion.operador = Some("> -> >=".to_string());
+        let caso = Caso::nuevo(
+            0,
+            Some(inyeccion),
+            veredicto_de(Dimension::Seguridad, 0.9, None),
+        );
+        let guardado = CasoGuardado::de(&caso);
+        assert_eq!(guardado.operador.as_deref(), Some("> -> >="));
+        let texto = serde_json::to_string(&guardado).expect("serializa");
+        let ida: CasoGuardado = serde_json::from_str(&texto).expect("lee");
+        assert_eq!(ida.operador.as_deref(), Some("> -> >="));
+        let viejo: CasoGuardado =
+            serde_json::from_str(r#"{"caso":0,"es_defecto":true,"detectado":false}"#).expect("lee");
+        assert_eq!(viejo.operador, None);
+    }
+
     #[test]
     fn sonda_linea_no_ejecutada_se_reemplaza_y_mide_la_siguiente() {
         let dir = copia_con_sondas(&[("src/muerta.rs", MUERTA), ("src/viva.rs", VIVA)]);
@@ -6304,6 +6333,7 @@ mod tests {
             mutante: None,
             tests_apagados: vec![],
             en_cambio: false,
+            operador: None,
         };
         let mut casos = vec![
             Caso::nuevo(0, Some(inyeccion), base.clone()),
@@ -6338,6 +6368,7 @@ mod tests {
             mutante: None,
             tests_apagados: vec![],
             en_cambio: false,
+            operador: None,
         }
     }
 
@@ -6449,6 +6480,7 @@ mod tests {
             mutante: None,
             tests_apagados: vec![],
             en_cambio: false,
+            operador: None,
         };
         let mut casos = vec![
             Caso::nuevo(0, Some(inyeccion), defecto),
@@ -6505,6 +6537,7 @@ mod tests {
             mutante: None,
             tests_apagados: vec![],
             en_cambio: false,
+            operador: None,
         };
         Caso::nuevo(indice, Some(inyeccion), veredicto)
     }

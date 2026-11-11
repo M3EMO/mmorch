@@ -970,6 +970,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "type": "string"
       }
     },
+    "operador": {
+      "description": "Operador que cambió `ComportamientoRoto` con estado inicial (p. ej. `\"> -> >=\"`). `None` en los demás casos.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
     "piso": {
       "description": "`true`: el ítem del defecto ya estaba en piso en la base. Un caso limpio o sin nivel base vale `false`.",
       "type": "boolean",
