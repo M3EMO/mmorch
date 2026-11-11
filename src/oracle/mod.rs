@@ -2804,7 +2804,9 @@ pub fn codigo_de_estado(estado: Estado) -> u8 {
 mod tests {
     use super::*;
     use crate::oracle::contenedor::SalidaPodman;
-    use crate::oracle::entrega::tests::{PodmanFalso, responde_build, salida_ok, salida_sin_red};
+    use crate::oracle::entrega::tests::{
+        PodmanFalso, responde_build, salida_ok, salida_red_no_configurada, salida_sin_red,
+    };
     use crate::oracle::entrega::{CorredorDeEscenario, FabricaEscenarios, Podman};
 
     #[test]
@@ -7014,7 +7016,10 @@ mod tests {
         .expect("Dockerfile");
         let correr = correr_suites(JUNIT_CONTRATO);
         let fabrica = herramientas(&[]);
-        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let podman = PodmanFalso::nuevo(responde_build(
+            salida_sin_red(),
+            salida_red_no_configurada(),
+        ));
         let deps = deps_con_podman(&correr, &fabrica, &podman);
         let v = evaluar_con_deps(base.path(), &repo, deps);
         let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
@@ -7038,8 +7043,11 @@ mod tests {
         .expect("Dockerfile");
         let correr = correr_suites(JUNIT_CONTRATO);
         let fabrica = herramientas(&[]);
-        // Sin red, el `RUN` falla por la resolución de nombres, y con red también: queda pendiente.
-        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        // Sin red el `RUN` falla por nombres. Con red, podman no arma la red: queda pendiente con aviso.
+        let podman = PodmanFalso::nuevo(responde_build(
+            salida_sin_red(),
+            salida_red_no_configurada(),
+        ));
         let deps = deps_con_podman(&correr, &fabrica, &podman);
         let v = evaluar_con_deps(base.path(), &repo, deps);
         assert!(
@@ -7052,7 +7060,7 @@ mod tests {
         assert!(
             v.avisos
                 .iter()
-                .any(|a| a.contains("la construcción con red tampoco tuvo red")),
+                .any(|a| a.contains("la construcción con red no arrancó")),
             "{:?}",
             v.avisos
         );

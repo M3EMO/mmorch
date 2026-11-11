@@ -329,8 +329,6 @@ fn motivos_sin_veredicto(
     Ok(motivos)
 }
 
-/// Aviso de la repetición con red (Tarea 9d3) cuando el host tampoco tiene red.
-const AVISO_RED_TAMPOCO: &str = "la construcción con red tampoco tuvo red";
 /// Aviso cuando el build con red no llega a construir por un error de podman: queda el Pendiente.
 const AVISO_RED_NO_ARRANCO: &str = "la construcción con red no arrancó";
 /// Marcadores (en minúsculas) de un build con red donde podman no armó la red del `RUN`.
@@ -448,7 +446,7 @@ fn construir_con<'a>(
                 linea,
                 cita,
             },
-            _ => clasificar_fallo(&build, &ruta, &texto, reqs)?,
+            _ => clasificar_fallo(&build, &ruta, &texto, reqs, false)?,
         };
         match desenlace {
             Desenlace::PendienteRed {
@@ -469,7 +467,8 @@ fn construir_con<'a>(
                         if let Some(linea) = red_no_configurada(&salida) {
                             return Err(ErrorOraculo::Infra(linea));
                         }
-                        clasificar_fallo(&salida, &ruta, &texto, reqs).map(|d| (salida, Some(d)))
+                        clasificar_fallo(&salida, &ruta, &texto, reqs, true)
+                            .map(|d| (salida, Some(d)))
                     });
                 let desenlace_red = match con_red_salida {
                     Ok((salida, desenlace)) => {
@@ -498,15 +497,8 @@ fn construir_con<'a>(
                         SONDA,
                         reqs,
                     ));
-                } else {
-                    match desenlace_red {
-                        Some(Desenlace::PendienteRed { motivo, .. }) => {
-                            avisos.push(AVISO_RED_TAMPOCO.into());
-                            resultado.pendientes.push(pendiente_de_build(motivo));
-                        }
-                        Some(otro) => anotar_desenlace(&mut resultado, otro),
-                        None => {}
-                    }
+                } else if let Some(otro) = desenlace_red {
+                    anotar_desenlace(&mut resultado, otro);
                 }
             }
             otro => anotar_desenlace(&mut resultado, otro),
@@ -659,28 +651,35 @@ enum Desenlace {
 }
 
 /// Separa un fallo de build en falta de red, imagen base ausente, o producto que no construye.
-/// Sin ningún `STEP` en la salida, podman no empezó: es infraestructura. Si el texto del paso que
-/// falló no está en una sola instrucción del Dockerfile, la construcción queda sin veredicto.
-/// Si la cola perdió el `STEP`, sirve el que guardó el lector en `paso`.
+/// Solo cuenta la última línea no vacía del stderr: la escribe podman después de que terminó el
+/// proceso del repo. Lo que imprime un `RUN` (stdout, o un `STEP` falso) no decide el paso.
+/// Sin esa línea de paso, ver `sin_paso_en_la_linea_final`. Con `con_red`, un fallo de paso es
+/// hallazgo: la repetición con red no da `PendienteRed`.
 fn clasificar_fallo(
     build: &SalidaPodman,
     archivo: &str,
     texto: &str,
     reqs: &[Requisito],
+    con_red: bool,
 ) -> Result<Desenlace, ErrorOraculo> {
     let salida = format!("{}\n{}", build.stdout, build.stderr);
-    let ultimo_paso =
-        texto_paso_fallido(&salida).or_else(|| build.paso.as_deref().and_then(texto_de_linea_step));
-    let Some(paso) = ultimo_paso else {
-        let ultima = build.stderr.lines().rev().find(|l| !l.trim().is_empty());
-        let detalle = ultima.unwrap_or("sin salida de error").trim().to_string();
-        return Err(ErrorOraculo::Infra(format!(
-            "podman no empezó la construcción: {}",
-            recortar_cola(detalle)
-        )));
+    let ultima = ultima_linea_de(&build.stderr);
+    let Some(linea_paso) = ultima
+        .as_deref()
+        .filter(|l| l.starts_with(PREFIJO_PASO_FALLIDO))
+    else {
+        return sin_paso_en_la_linea_final(build, ultima.as_deref(), texto);
     };
     let instrucciones_df = instrucciones(texto);
-    let Some(indice) = indice_del_paso(&instrucciones_df, &paso) else {
+    let cortes = particiones_del_paso(linea_paso);
+    let ubicado = cortes
+        .iter()
+        .find(|(paso, _)| indice_del_paso(&instrucciones_df, paso).is_some())
+        .or(cortes.first());
+    let Some((paso, causa)) = ubicado else {
+        return sin_paso_en_la_linea_final(build, ultima.as_deref(), texto);
+    };
+    let Some(indice) = indice_del_paso(&instrucciones_df, paso) else {
         return Ok(Desenlace::Pendiente(format!(
             "sin veredicto: no se ubica en el Dockerfile el paso que falló: {paso}"
         )));
@@ -692,8 +691,9 @@ fn clasificar_fallo(
         palabra_clave(&i.logico).0,
         paso_que_necesita_red(&i.logico),
     );
-    let minuscula = salida.to_lowercase();
     if kw == "FROM" {
+        // Solo la causa de esta línea: el texto del repo no cuenta como imagen ausente.
+        let minuscula = causa.to_lowercase();
         if PATRONES_AUSENTE.iter().any(|p| minuscula.contains(p)) {
             return Ok(Desenlace::Pendiente(format!(
                 "imagen base no descargada (fase de descarga no corrió): línea {linea}, {cita}"
@@ -703,7 +703,7 @@ fn clasificar_fallo(
             "podman no pudo arrancar el FROM de la línea {linea}"
         )));
     }
-    if red_paso && pide_red(&salida) {
+    if !con_red && red_paso && pide_red(&salida) {
         let motivo = format!("no se pudo construir sin red: línea {linea}, {cita}");
         return Ok(Desenlace::PendienteRed {
             motivo,
@@ -723,10 +723,69 @@ fn clasificar_fallo(
     )))
 }
 
-/// Texto del paso que falló: el de la última línea `STEP k/n: <texto>` de la salida de `podman build`,
-/// con los espacios normalizados. Con varias etapas, buildah antepone `[k/m] `.
-fn texto_paso_fallido(salida: &str) -> Option<String> {
-    salida.lines().rev().find_map(texto_de_linea_step)
+/// Prefijo de la línea final de podman cuando un paso del Dockerfile falla.
+const PREFIJO_PASO_FALLIDO: &str = "Error: building at STEP \"";
+
+/// Pares (instrucción, causa) que puede traer `Error: building at STEP "<instrucción>": <causa>`.
+/// La instrucción puede tener `": ` dentro, así que da cada corte posible, del primero al último.
+/// La instrucción sale normalizada. Si la línea no tiene la forma, no da ninguno.
+fn particiones_del_paso(linea: &str) -> Vec<(String, String)> {
+    let Some(resto) = linea.strip_prefix(PREFIJO_PASO_FALLIDO) else {
+        return Vec::new();
+    };
+    resto
+        .match_indices("\": ")
+        .map(|(p, _)| (normalizar_texto(&resto[..p]), resto[p + 3..].to_string()))
+        .collect()
+}
+
+/// Un fallo cuya última línea de podman no trae el paso. Con la imagen base ausente en esa línea,
+/// da pendiente. Con algún `STEP` visible, no hay veredicto. Sin ningún `STEP`, podman no empezó.
+fn sin_paso_en_la_linea_final(
+    build: &SalidaPodman,
+    ultima: Option<&str>,
+    texto: &str,
+) -> Result<Desenlace, ErrorOraculo> {
+    if let Some(linea) = ultima {
+        let minuscula = linea.to_lowercase();
+        if PATRONES_AUSENTE.iter().any(|p| minuscula.contains(p)) {
+            let donde = from_de_la_linea(texto, linea)
+                .map(|(n, cita)| format!(": línea {n}, {cita}"))
+                .unwrap_or_default();
+            return Ok(Desenlace::Pendiente(format!(
+                "imagen base no descargada (fase de descarga no corrió){donde}"
+            )));
+        }
+    }
+    let salida = format!("{}\n{}", build.stdout, build.stderr);
+    let hubo_paso =
+        build.paso.is_some() || salida.lines().any(|l| texto_de_linea_step(l).is_some());
+    if hubo_paso {
+        return Ok(Desenlace::Pendiente(
+            "sin veredicto: podman no informó el paso que falló".into(),
+        ));
+    }
+    let detalle = ultima.unwrap_or("sin salida de error").to_string();
+    Err(ErrorOraculo::Infra(format!(
+        "podman no empezó la construcción: {}",
+        recortar_cola(detalle)
+    )))
+}
+
+/// Línea y cita del único `FROM` cuya imagen escrita aparece en `linea`. Si hay varios, o ninguno, da `None`.
+fn from_de_la_linea(texto: &str, linea: &str) -> Option<(u32, String)> {
+    let mut hallados = descarga::resolver_froms(texto)
+        .into_iter()
+        .filter(|f| !f.escrito.is_empty() && linea.contains(f.escrito.as_str()))
+        .map(|f| f.linea);
+    let primero = hallados.next()?;
+    if hallados.next().is_some() {
+        return None;
+    }
+    instrucciones(texto)
+        .into_iter()
+        .find(|i| i.linea == primero)
+        .map(|i| (primero, i.cita))
 }
 
 /// Texto con los espacios en blanco colapsados a uno. Así se compara lo que imprime buildah con el Dockerfile.
@@ -745,13 +804,12 @@ fn indice_del_paso(instrucciones_df: &[Instruccion], paso: &str) -> Option<usize
     hallados.next().is_none().then_some(primero)
 }
 
-/// Primera línea de la salida que dice que podman no pudo armar la red del build (`slirp4netns`, `pasta`
-/// o `netavark`). Un `RUN` del Dockerfile no produce estas líneas: son de podman.
+/// La última línea del stderr, si dice que podman no pudo armar la red del build (`slirp4netns`, `pasta`
+/// o `netavark`). Solo esa línea cuenta: el stdout y el resto del stderr los imprime el `RUN` del repo.
 fn red_no_configurada(build: &SalidaPodman) -> Option<String> {
-    format!("{}\n{}", build.stdout, build.stderr)
-        .lines()
-        .find(|linea| es_linea_red_no_configurada(linea))
-        .map(|linea| recortar_cola(linea.trim().to_string()))
+    ultima_linea_de(&build.stderr)
+        .filter(|linea| es_linea_red_no_configurada(linea))
+        .map(recortar_cola)
 }
 
 fn es_linea_red_no_configurada(linea: &str) -> bool {
@@ -1089,7 +1147,7 @@ fn correr_podman(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOr
 }
 
 /// Corre `podman` para un build y deja la cola de 1 MiB de cada flujo, sin recortar a `COLA`.
-/// `clasificar_fallo` necesita el `STEP` aunque el error de después sea largo. Lo que se muestra se recorta
+/// `clasificar_fallo` necesita la línea final de podman aunque el error de antes sea largo. Lo que se muestra se recorta
 /// en su punto de salida. `programa` es `podman` en producción; los tests pasan `sh`.
 fn correr_podman_build(
     programa: &str,
@@ -2067,21 +2125,31 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn entrega_ultimo_paso_sale_del_ultimo_step_de_la_salida() {
-        let salida = "STEP 1/3: FROM x\nSTEP 2/3: RUN a\nSTEP 3/3: RUN  b\n\
-            Error: building at STEP \"RUN b\": while running runtime: exit status 1";
-        assert_eq!(texto_paso_fallido(salida).as_deref(), Some("RUN b"));
-        assert_eq!(
-            texto_paso_fallido("Error: creating build container: x: image not known"),
-            None
+    fn entrega_paso_de_la_linea_final_sale_de_error_building() {
+        // Reemplaza al test del último `STEP`: ahora solo cuenta `Error: building at STEP` de la línea final.
+        let cortes = particiones_del_paso(
+            "Error: building at STEP \"RUN  b\": while running runtime: exit status 1",
         );
+        assert_eq!(
+            cortes.first(),
+            Some(&(
+                "RUN b".to_string(),
+                "while running runtime: exit status 1".to_string()
+            ))
+        );
+        assert!(particiones_del_paso("STEP 3/3: RUN b").is_empty());
+        assert!(particiones_del_paso("Error: creating build container: x").is_empty());
     }
 
     #[test]
-    fn entrega_ultimo_paso_quita_el_prefijo_de_etapa() {
-        let salida =
-            "[1/2] STEP 1/2: FROM x\n[2/2] STEP 2/3: WORKDIR /srv\n[2/2] STEP 3/3: RUN wget y";
-        assert_eq!(texto_paso_fallido(salida).as_deref(), Some("RUN wget y"));
+    fn entrega_paso_con_comillas_y_separador_da_todos_los_cortes() {
+        // La instrucción tiene `": ` dentro. Cada corte posible sale, del primero al último.
+        let cortes = particiones_del_paso(
+            "Error: building at STEP \"RUN echo \"x\": y\": while running runtime: exit status 1",
+        );
+        assert_eq!(cortes.len(), 2, "{cortes:?}");
+        assert_eq!(cortes[1].0, "RUN echo \"x\": y");
+        assert_eq!(cortes[1].1, "while running runtime: exit status 1");
     }
 
     /// Salida sintética de `podman build` (formato real de buildah): un `STEP k/n: <texto>` por paso,
@@ -2105,7 +2173,7 @@ pub(crate) mod tests {
     }
 
     fn clasifica(salida: &SalidaPodman, texto: &str) -> Desenlace {
-        clasificar_fallo(salida, "Dockerfile", texto, &[]).expect("clasifica el fallo")
+        clasificar_fallo(salida, "Dockerfile", texto, &[], false).expect("clasifica el fallo")
     }
 
     #[test]
@@ -2213,22 +2281,27 @@ pub(crate) mod tests {
 
     #[test]
     fn entrega_sin_step_en_la_salida_es_infraestructura() {
+        // Sin ningún STEP y sin imagen ausente en la línea final, podman no empezó: es infraestructura.
+        // La imagen ausente tiene su propio caso (pendiente), en `entrega_imagen_base_ausente_*`.
         let salida = SalidaPodman {
             paso: None,
             codigo: 125,
             stdout: String::new(),
-            stderr: "Error: creating build container: x: image not known\n".into(),
+            stderr: "Error: no se pudo iniciar el motor\n".into(),
         };
-        assert!(clasificar_fallo(&salida, "Dockerfile", "FROM x\n", &[]).is_err());
+        assert!(clasificar_fallo(&salida, "Dockerfile", "FROM x\n", &[], false).is_err());
     }
 
     #[test]
     fn entrega_paso_guardado_clasifica_si_la_cola_perdio_el_step() {
-        // La cola de 1 MiB no trae ningún STEP: el último paso llega por `paso`.
+        // La cola de 1 MiB no trae ningún STEP. La línea final de podman sigue ahí y da el paso.
+        // `paso` ya no decide: el texto de la línea final manda.
         let salida = SalidaPodman {
             codigo: 1,
             stdout: "yyy\n".into(),
-            stderr: "causa\n".into(),
+            stderr:
+                "causa\nError: building at STEP \"RUN a\": while running runtime: exit status 1\n"
+                    .into(),
             paso: Some("STEP 2/2: RUN a".into()),
         };
         match clasifica(&salida, "FROM x\nRUN a\n") {
@@ -2243,10 +2316,13 @@ pub(crate) mod tests {
 
     #[test]
     fn entrega_si_la_cola_trae_un_step_manda_la_cola_y_no_paso() {
+        // El `paso` guardado apunta a `RUN a`, pero la línea final de podman nombra `RUN b`: manda la final.
         let salida = SalidaPodman {
             codigo: 1,
             stdout: "STEP 3/3: RUN b\n".into(),
-            stderr: "causa\n".into(),
+            stderr:
+                "causa\nError: building at STEP \"RUN b\": while running runtime: exit status 1\n"
+                    .into(),
             paso: Some("STEP 2/3: RUN a".into()),
         };
         match clasifica(&salida, "FROM x\nRUN a\nRUN b\n") {
@@ -2257,6 +2333,225 @@ pub(crate) mod tests {
             ),
             otro => panic!("debía dar hallazgo, no {}", nombre(&otro)),
         }
+    }
+
+    #[test]
+    fn entrega_step_impreso_por_el_repo_no_decide_el_paso() {
+        // El `RUN` imprime `STEP 9/9: FROM falsa` en stdout. Solo cuenta la línea final de podman.
+        let salida = SalidaPodman {
+            paso: None,
+            codigo: 1,
+            stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN ./falla\nSTEP 9/9: FROM falsa\n"
+                .into(),
+            stderr:
+                "Error: building at STEP \"RUN ./falla\": while running runtime: exit status 1\n"
+                    .into(),
+        };
+        match clasifica(&salida, "FROM debian:12\nRUN ./falla\n") {
+            Desenlace::Hallazgo(h) => {
+                assert_eq!((h.severidad, h.linea), (3, 2), "{h:?}");
+                assert_eq!(h.cita, "RUN ./falla");
+            }
+            otro => panic!("debía ser hallazgo de la línea 2, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_red_con_red_que_falla_igual_en_el_mismo_paso_es_hallazgo_sin_aviso() {
+        // Sin red, el `RUN` imprime "could not resolve host": PendienteRed, se repite. Con red falla igual.
+        let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
+        let home = tempfile::tempdir().expect("home");
+        let falla = SalidaPodman {
+            paso: None,
+            codigo: 1,
+            stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
+            stderr: "E: could not resolve host deb.debian.org\n\
+                Error: building at STEP \"RUN apt-get install -y curl\": while running runtime: exit status 1\n"
+                .into(),
+        };
+        let podman = PodmanFalso::nuevo(responde_build(falla.clone(), falla));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(!r.construida, "{r:?}");
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert!(
+            r.hallazgos[0]
+                .detalle
+                .contains("la imagen no construye: línea 2"),
+            "{:?}",
+            r.hallazgos
+        );
+        assert!(c.avisos.is_empty(), "{:?}", c.avisos);
+        assert_eq!(podman.builds().len(), 2, "{:?}", podman.builds());
+        assert_eq!(gates_de_repeticion(home.path()).len(), 1);
+    }
+
+    #[test]
+    fn entrega_sin_linea_final_de_podman_da_sin_veredicto_con_pasos_visibles() {
+        let salida = SalidaPodman {
+            paso: None,
+            codigo: 1,
+            stdout: "STEP 1/2: FROM x\nSTEP 2/2: RUN a\n".into(),
+            stderr: "causa\n".into(),
+        };
+        match clasifica(&salida, "FROM x\nRUN a\n") {
+            Desenlace::Pendiente(motivo) => {
+                assert!(motivo.starts_with("sin veredicto"), "{motivo}");
+                assert!(
+                    motivo.contains("podman no informó el paso que falló"),
+                    "{motivo}"
+                );
+            }
+            otro => panic!("debía quedar sin veredicto, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_imagen_base_ausente_en_la_linea_final_da_pendiente_con_su_from() {
+        let salida = SalidaPodman {
+            paso: None,
+            codigo: 125,
+            stdout: "STEP 1/2: FROM localhost/no-existe:9\n".into(),
+            stderr: "Error: creating build container: localhost/no-existe:9: image not known\n"
+                .into(),
+        };
+        match clasifica(&salida, "FROM localhost/no-existe:9\nRUN x\n") {
+            Desenlace::Pendiente(motivo) => {
+                assert!(motivo.contains("imagen base no descargada"), "{motivo}");
+                assert!(motivo.contains("línea 1"), "{motivo}");
+            }
+            otro => panic!("debía ser pendiente de imagen base, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_from_que_falla_con_imagen_ausente_en_su_paso_da_pendiente() {
+        let salida = SalidaPodman {
+            paso: None,
+            codigo: 125,
+            stdout: "STEP 1/2: FROM localhost/no-existe:9\n".into(),
+            stderr: "Error: building at STEP \"FROM localhost/no-existe:9\": image not known\n"
+                .into(),
+        };
+        match clasifica(&salida, "FROM localhost/no-existe:9\nRUN x\n") {
+            Desenlace::Pendiente(motivo) => {
+                assert!(motivo.contains("imagen base no descargada"), "{motivo}")
+            }
+            otro => panic!("debía ser pendiente de imagen base, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_image_not_known_solo_en_stdout_no_da_imagen_base_ausente() {
+        // El repo imprime "image not known" en stdout. La línea final es un fallo normal de `RUN`.
+        let salida = SalidaPodman {
+            paso: None,
+            codigo: 1,
+            stdout: "STEP 1/3: FROM debian:12\nSTEP 2/3: RUN echo hola\nSTEP 3/3: RUN ./falla\n\
+                image not known\n"
+                .into(),
+            stderr:
+                "Error: building at STEP \"RUN ./falla\": while running runtime: exit status 1\n"
+                    .into(),
+        };
+        match clasifica(&salida, "FROM debian:12\nRUN echo hola\nRUN ./falla\n") {
+            Desenlace::Hallazgo(h) => assert_eq!(h.linea, 3, "{h:?}"),
+            otro => panic!("debía ser hallazgo de la línea 3, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_red_no_configurada_solo_mira_la_linea_final_del_stderr() {
+        // El repo imprime el texto de podman en stdout. La línea final es un fallo normal: no cuenta.
+        let salida = SalidaPodman {
+            paso: None,
+            codigo: 1,
+            stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN ./falla\ncould not find slirp4netns\n"
+                .into(),
+            stderr:
+                "Error: building at STEP \"RUN ./falla\": while running runtime: exit status 1\n"
+                    .into(),
+        };
+        assert_eq!(red_no_configurada(&salida), None);
+    }
+
+    #[test]
+    fn entrega_con_red_slirp_impreso_por_el_repo_no_es_error_de_podman() {
+        let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
+        let home = tempfile::tempdir().expect("home");
+        let sin_red = SalidaPodman {
+            paso: None,
+            codigo: 1,
+            stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
+            stderr: "Temporary failure in name resolution\n\
+                Error: building at STEP \"RUN apt-get install -y curl\": while running runtime: exit status 1\n"
+                .into(),
+        };
+        let con_red = SalidaPodman {
+            paso: None,
+            codigo: 1,
+            stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n\
+                could not find slirp4netns\n"
+                .into(),
+            stderr: "Error: building at STEP \"RUN apt-get install -y curl\": while running runtime: exit status 1\n"
+                .into(),
+        };
+        let podman = PodmanFalso::nuevo(responde_build(sin_red, con_red));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert!(
+            r.hallazgos[0].detalle.contains("la imagen no construye"),
+            "{:?}",
+            r.hallazgos
+        );
+        assert!(
+            !c.avisos.iter().any(|a| a.starts_with(AVISO_RED_NO_ARRANCO)),
+            "{:?}",
+            c.avisos
+        );
+    }
+
+    #[test]
+    fn entrega_run_con_podman_real_que_imprime_step_falso_da_la_linea_del_run() {
+        crate::saltar_sin_podman!();
+        // GUARDA con podman real: el `RUN` imprime un STEP falso y sale con 1. Cuenta la línea 2.
+        let texto =
+            "FROM docker.io/library/alpine:3.20\nRUN echo \"STEP 9/9: FROM falsa\"; exit 1\n";
+        let repo = repo_con_archivos(&[("Dockerfile", texto)]);
+        let home = tempfile::tempdir().expect("home");
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &PodmanReal,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(!r.construida, "{r:?}");
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].linea, 2, "{:?}", r.hallazgos);
     }
 
     fn nombre(d: &Desenlace) -> &'static str {
@@ -2438,13 +2733,16 @@ pub(crate) mod tests {
     /// Dockerfile de la 9d3: la línea 2 es un `RUN` que pide red.
     pub(crate) const DF_RED: &str = "FROM debian:12\nRUN apt-get install -y curl\nUSER app\n";
 
-    /// Salida de `podman build` sin red: el `RUN` de la línea 2 falla por el DNS.
+    /// Salida de `podman build` sin red: el `RUN` de la línea 2 falla por el DNS. La última línea de
+    /// error es la de podman, con el paso que falló.
     pub(crate) fn salida_sin_red() -> SalidaPodman {
         SalidaPodman {
             paso: None,
             codigo: 1,
             stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
-            stderr: "Temporary failure in name resolution\n".into(),
+            stderr: "Temporary failure in name resolution\n\
+                Error: building at STEP \"RUN apt-get install -y curl\": while running runtime: exit status 1\n"
+                .into(),
         }
     }
 
@@ -3052,7 +3350,9 @@ pub(crate) mod tests {
             codigo: 1,
             stdout: "STEP 1/3: FROM debian:12\nSTEP 2/3: RUN echo listo\nSTEP 3/3: RUN apt-get install -y curl\n"
                 .into(),
-            stderr: "Temporary failure in name resolution\n".into(),
+            stderr: "Temporary failure in name resolution\n\
+                Error: building at STEP \"RUN apt-get install -y curl\": exit status 1\n"
+                .into(),
         };
         let podman = PodmanFalso::nuevo(responde_build(sin_red, salida_ok()));
         let c = construir_con(
@@ -3088,7 +3388,9 @@ pub(crate) mod tests {
             paso: None,
             codigo: 1,
             stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
-            stderr: "E: Unable to locate package curl\n".into(),
+            stderr: "E: Unable to locate package curl\n\
+                Error: building at STEP \"RUN apt-get install -y curl\": exit status 100\n"
+                .into(),
         };
         let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), con_red_falla));
         let c = construir_con(
@@ -3148,40 +3450,8 @@ pub(crate) mod tests {
         assert!(gates_de_repeticion(home.path()).is_empty());
     }
 
-    #[test]
-    fn entrega_red_sin_red_en_el_host_queda_pendiente_con_aviso() {
-        let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
-        let home = tempfile::tempdir().expect("home");
-        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
-        let c = construir_con(
-            repo.path(),
-            home.path(),
-            &tarea_de("shell", ""),
-            &[],
-            PLAZO_BUILD,
-            &podman,
-        )
-        .expect("construye");
-        let r = &c.resultado;
-        assert!(!r.construida, "{r:?}");
-        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
-        assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-        assert!(
-            r.pendientes[0].motivo.contains("línea 2"),
-            "{:?}",
-            r.pendientes
-        );
-        assert!(
-            c.avisos.iter().any(|a| a == AVISO_RED_TAMPOCO),
-            "{:?}",
-            c.avisos
-        );
-        assert_eq!(podman.builds().len(), 2, "{:?}", podman.builds());
-        assert_eq!(gates_de_repeticion(home.path()).len(), 1);
-    }
-
     /// Salida de `podman build` con red cuando podman no puede armar la red del `RUN` (sin `slirp4netns`).
-    fn salida_red_no_configurada() -> SalidaPodman {
+    pub(crate) fn salida_red_no_configurada() -> SalidaPodman {
         SalidaPodman {
             paso: None,
             codigo: 1,
@@ -3274,7 +3544,9 @@ pub(crate) mod tests {
             paso: None,
             codigo: 1,
             stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
-            stderr: "ERROR: unable to select packages:\n  curl (no such package)\n".into(),
+            stderr: "ERROR: unable to select packages:\n  curl (no such package)\n\
+                Error: building at STEP \"RUN apt-get install -y curl\": exit status 1\n"
+                .into(),
         };
         let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), error_paquetes));
         let c = construir_con(
@@ -3403,7 +3675,9 @@ pub(crate) mod tests {
             paso: None,
             codigo: 1,
             stdout: SALIDA_ADD.into(),
-            stderr: "dial tcp: lookup ejemplo.com: Temporary failure in name resolution\n".into(),
+            stderr: "dial tcp: lookup ejemplo.com: Temporary failure in name resolution\n\
+                Error: building at STEP \"ADD https://ejemplo.com/x.tar.gz /x\": exit status 1\n"
+                .into(),
         };
         let repo = repo_con_archivos(&[("Dockerfile", DF_ADD_URL)]);
         let home = tempfile::tempdir().expect("home");
@@ -3517,7 +3791,10 @@ pub(crate) mod tests {
     fn entrega_dockerfile_con_paso_fallido_por_red_sin_otros_hallazgos_no_da_valor() {
         let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
         let home = tempfile::tempdir().expect("home");
-        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let podman = PodmanFalso::nuevo(responde_build(
+            salida_sin_red(),
+            salida_red_no_configurada(),
+        ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
             &Falso::sano(),
@@ -3634,7 +3911,10 @@ pub(crate) mod tests {
         let repo =
             repo_con_archivos(&[("Dockerfile", "FROM scratch\nRUN apt-get install -y curl\n")]);
         let home = tempfile::tempdir().expect("home");
-        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let podman = PodmanFalso::nuevo(responde_build(
+            salida_sin_red(),
+            salida_red_no_configurada(),
+        ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
             &Falso::sano(),
@@ -3662,7 +3942,10 @@ pub(crate) mod tests {
             "FROM scratch\nUSER app\nRUN apt-get install -y curl\n",
         )]);
         let home = tempfile::tempdir().expect("home");
-        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let podman = PodmanFalso::nuevo(responde_build(
+            salida_sin_red(),
+            salida_red_no_configurada(),
+        ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
             &Falso::sano(),
@@ -3688,7 +3971,10 @@ pub(crate) mod tests {
             "FROM debian:12\nRUN apt-get install -y curl\n",
         )]);
         let home = tempfile::tempdir().expect("home");
-        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let podman = PodmanFalso::nuevo(responde_build(
+            salida_sin_red(),
+            salida_red_no_configurada(),
+        ));
         let fabrica = fabrica_vacia();
         let r = entregar_con(
             &Falso::sano(),
@@ -3756,8 +4042,11 @@ pub(crate) mod tests {
     #[test]
     fn entrega_build_con_step_seguido_de_mas_de_1_mib_da_la_imagen_no_construye() {
         // Los STEP van por stdout y luego siguen más de 2 MiB de salida. La cola de 1 MiB pierde el STEP.
+        // Al final, la línea de error de podman en stderr: es la que cuenta.
         let script = "printf 'STEP 1/3: FROM x\\nSTEP 2/3: RUN a\\nSTEP 3/5: RUN x\\n'; \
-                      head -c 2500000 /dev/zero | tr '\\0' y; echo; exit 1";
+                      head -c 2500000 /dev/zero | tr '\\0' y; echo; \
+                      echo 'Error: building at STEP \"RUN x\": while running runtime: exit status 1' >&2; \
+                      exit 1";
         let salida = correr_podman_build("sh", &["-c", script], PLAZO_BUILD).expect("corre");
         let texto = "FROM x\nRUN a\nRUN x\n";
         match clasifica(&salida, texto) {
@@ -3772,9 +4061,11 @@ pub(crate) mod tests {
 
     #[test]
     fn entrega_build_con_step_y_8_kb_de_error_da_la_imagen_no_construye() {
-        // El STEP va al principio del stderr y luego siguen 8 KB de error sin saltos de línea.
+        // El STEP va al principio del stderr, luego siguen 8 KB de error sin saltos de línea,
+        // y al final la línea de error de podman.
         let script = "printf 'STEP 1/2: FROM debian:12\\nSTEP 2/2: RUN false\\n' >&2; \
-                      head -c 8192 /dev/zero | tr '\\0' e >&2; exit 1";
+                      head -c 8192 /dev/zero | tr '\\0' e >&2; echo >&2; \
+                      echo 'Error: building at STEP \"RUN false\": exit status 1' >&2; exit 1";
         let salida = correr_podman_build("sh", &["-c", script], PLAZO_BUILD).expect("corre");
         let texto = "FROM debian:12\nRUN false\n";
         match clasifica(&salida, texto) {
