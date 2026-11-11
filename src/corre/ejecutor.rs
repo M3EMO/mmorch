@@ -13,7 +13,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::contenedor::{args_podman_builder, estado_de, fisica, validar_montajes};
 use super::{ErrorCorre, copiar_sin_mcp, verificar_vigencia, vida_restante};
 use crate::oracle::ErrorOraculo;
-use crate::oracle::contenedor::{esperar, leer_en_hilo};
+use crate::oracle::contenedor::{
+    Lectura, TOPE_SALIDA_BUILDER, esperar, leer_en_hilo_con, tamano_legible,
+};
 use crate::tipos::Rol;
 
 /// Nombre de la copia de la credencial dentro del estado de `claude`. Es el que ve el builder.
@@ -320,9 +322,21 @@ enum Fin {
 /// Cuánto espera la lectura de una pipe después de matar el proceso. Pasado ese plazo, se deja de leer.
 const GRACIA_LECTURA: Duration = Duration::from_secs(2);
 
+/// Corre `programa` con `args` y espera hasta `plazo`, con el tope del builder. Ver `correr_proceso_con_tope`.
+fn correr_proceso(programa: &str, args: &[String], plazo: Duration) -> Result<Fin, ErrorCorre> {
+    correr_proceso_con_tope(programa, args, plazo, TOPE_SALIDA_BUILDER)
+}
+
 /// Corre `programa` con `args` y espera hasta `plazo`. Si vence, mata el proceso y recoge lo leído hasta
 /// ahí. Un fallo al lanzar o al esperar es `Ejecutor`. El código de salida lo decide el llamador.
-fn correr_proceso(programa: &str, args: &[String], plazo: Duration) -> Result<Fin, ErrorCorre> {
+/// Si el proceso termina y su stdout pasa `tope`, falla: el builder necesita la salida entera.
+/// Un stderr recortado no falla. Solo se trunca.
+fn correr_proceso_con_tope(
+    programa: &str,
+    args: &[String],
+    plazo: Duration,
+    tope: usize,
+) -> Result<Fin, ErrorCorre> {
     let mut hijo = Command::new(programa)
         .args(args)
         .stdin(Stdio::null())
@@ -334,8 +348,8 @@ fn correr_proceso(programa: &str, args: &[String], plazo: Duration) -> Result<Fi
                 "no se pudo lanzar {programa} (¿está instalado y en PATH?): {e}"
             ))
         })?;
-    let salida = hijo.stdout.take().map(leer_en_hilo);
-    let error = hijo.stderr.take().map(leer_en_hilo);
+    let salida = hijo.stdout.take().map(|f| leer_en_hilo_con(f, tope));
+    let error = hijo.stderr.take().map(|f| leer_en_hilo_con(f, tope));
     let estado = esperar(&mut hijo, plazo).map_err(|e| {
         ErrorCorre::Ejecutor(match e {
             ErrorOraculo::Infra(m) => m,
@@ -346,8 +360,8 @@ fn correr_proceso(programa: &str, args: &[String], plazo: Duration) -> Result<Fi
         let _ = hijo.kill();
         let _ = hijo.wait();
         return Ok(Fin::Vencio {
-            stdout: bytes_tras_corte(salida),
-            stderr: bytes_tras_corte(error),
+            stdout: lectura_tras_corte(salida).bytes,
+            stderr: lectura_tras_corte(error).bytes,
         });
     };
     let Some(codigo) = estado.code() else {
@@ -355,28 +369,35 @@ fn correr_proceso(programa: &str, args: &[String], plazo: Duration) -> Result<Fi
             "{programa} terminó por una señal"
         )));
     };
+    let stdout = lectura_de(salida);
+    if stdout.recortada {
+        return Err(ErrorCorre::Ejecutor(format!(
+            "salida del builder mayor que {}",
+            tamano_legible(tope)
+        )));
+    }
     Ok(Fin::Termino(SalidaClaude {
         codigo,
-        stdout: bytes_de(salida),
-        stderr: bytes_de(error),
+        stdout: stdout.bytes,
+        stderr: lectura_de(error).bytes,
     }))
 }
 
-/// Bytes de un flujo leído en otro hilo. Sin flujo o con un hilo caído, vacío.
-fn bytes_de(hilo: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
+/// Lectura de un flujo leído en otro hilo. Sin flujo o con un hilo caído, vacía.
+fn lectura_de(hilo: Option<JoinHandle<Lectura>>) -> Lectura {
     hilo.and_then(|h| h.join().ok()).unwrap_or_default()
 }
 
-/// Bytes de un flujo después de matar el proceso. Espera la lectura hasta `GRACIA_LECTURA` y no más: un
-/// nieto que retiene la pipe no debe colgar la corrida. Si vence la espera, el hilo se suelta y da vacío.
-fn bytes_tras_corte(hilo: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
+/// Lectura de un flujo después de matar el proceso. Espera la lectura hasta `GRACIA_LECTURA` y no más: un
+/// nieto que retiene la pipe no debe colgar la corrida. Si vence la espera, el hilo se suelta y da vacía.
+fn lectura_tras_corte(hilo: Option<JoinHandle<Lectura>>) -> Lectura {
     let Some(hilo) = hilo else {
-        return Vec::new();
+        return Lectura::default();
     };
     let limite = std::time::Instant::now() + GRACIA_LECTURA;
     while !hilo.is_finished() {
         if std::time::Instant::now() >= limite {
-            return Vec::new();
+            return Lectura::default();
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -757,6 +778,47 @@ mod tests {
             matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains("no se pudo lanzar")),
             "{error}"
         );
+    }
+
+    #[test]
+    fn corre_proceso_con_tope_falla_si_stdout_pasa_el_tope() {
+        let args = vec![
+            "-c".to_string(),
+            "head -c 5000 /dev/zero | tr '\\0' x".to_string(),
+        ];
+        let error = correr_proceso_con_tope("sh", &args, Duration::from_secs(20), 1000)
+            .expect_err("stdout pasa el tope");
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains("salida del builder mayor que")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn corre_proceso_con_tope_stderr_recortado_no_falla() {
+        let args = vec![
+            "-c".to_string(),
+            "head -c 5000 /dev/zero | tr '\\0' x >&2; echo ok".to_string(),
+        ];
+        let Fin::Termino(salida) =
+            correr_proceso_con_tope("sh", &args, Duration::from_secs(20), 1000).expect("corre")
+        else {
+            panic!("no debe vencer");
+        };
+        assert_eq!(salida.stdout, b"ok\n".to_vec());
+        assert_eq!(salida.stderr.len(), 1000);
+    }
+
+    #[test]
+    fn corre_proceso_con_tope_amplio_y_salida_chica_igual_que_hoy() {
+        let args = vec!["-c".to_string(), "echo hola".to_string()];
+        let Fin::Termino(salida) =
+            correr_proceso_con_tope("sh", &args, Duration::from_secs(20), 1000).expect("corre")
+        else {
+            panic!("no debe vencer");
+        };
+        assert_eq!(salida.codigo, 0);
+        assert_eq!(salida.stdout, b"hola\n".to_vec());
     }
 
     /// Credencial de prueba con `claudeAiOauth` y `mcpOAuth`. Ningún token es real.

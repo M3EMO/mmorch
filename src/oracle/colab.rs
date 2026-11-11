@@ -30,6 +30,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use signal_hook::consts::{SIGINT, SIGTERM};
 
+use super::contenedor::{Modo, TOPE_SALIDA_COLAB, leer_con_tope, tamano_legible};
 use super::junit;
 use super::pendientes::{entorno_de_colab, id_de_junit, nombre_junit};
 use super::tarea::Tarea;
@@ -1875,12 +1876,25 @@ fn escribir(tmp: &Path, nombre: &str, texto: &str) -> Result<PathBuf, ErrorOracu
     Ok(ruta)
 }
 
+/// Lee la salida de `claude` con el tope de colab. Si pasa el tope, guarda la cola y avisa al inicio.
 fn leer_todo<R: Read>(lector: Option<R>) -> String {
-    let mut bytes = Vec::new();
-    if let Some(mut lector) = lector {
-        let _ = lector.read_to_end(&mut bytes);
+    leer_todo_con(lector, TOPE_SALIDA_COLAB)
+}
+
+fn leer_todo_con<R: Read>(lector: Option<R>, tope: usize) -> String {
+    let Some(lector) = lector else {
+        return String::new();
+    };
+    let lectura = leer_con_tope(lector, tope, Modo::Cola);
+    let texto = String::from_utf8_lossy(&lectura.bytes).into_owned();
+    if lectura.recortada {
+        format!(
+            "[aviso: salida recortada a los últimos {}]\n{texto}",
+            tamano_legible(tope)
+        )
+    } else {
+        texto
     }
-    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn args(valores: &[&str]) -> Vec<String> {
@@ -3604,5 +3618,25 @@ mod tests {
         let r = vigilar(&falso, home.path(), Duration::from_secs(7200));
         assert!(matches!(r, Ok(Vigilancia::SinRuntime)), "{r:?}");
         assert!(falso.lineas().is_empty());
+    }
+
+    #[test]
+    fn leer_todo_con_tope_chico_guarda_la_cola_y_avisa() {
+        let texto = leer_todo_con(Some(&b"abcdefghij"[..]), 4);
+        assert_eq!(
+            texto,
+            "[aviso: salida recortada a los últimos 4 bytes]\nghij"
+        );
+    }
+
+    #[test]
+    fn leer_todo_con_salida_chica_sale_igual_y_sin_aviso() {
+        let texto = leer_todo_con(Some(&b"hola\n"[..]), 100);
+        assert_eq!(texto, "hola\n");
+    }
+
+    #[test]
+    fn leer_todo_sin_lector_da_vacio() {
+        assert_eq!(leer_todo::<&[u8]>(None), "");
     }
 }

@@ -20,6 +20,12 @@ const COLA_BYTES: usize = COLA * 4 + 4;
 /// Bytes de la cola de stdout y stderr de `podman` que se conservan (build, inspect, rm). Es 1 MiB.
 /// El build necesita la salida entera para clasificar el fallo. El recorte a `COLA` va después.
 const TOPE_SALIDA_PODMAN: usize = 1024 * 1024;
+/// Bytes de stdout del builder que se guardan completos. El builder necesita su salida entera para
+/// leer costos y sesión. Pasado el tope, el proceso corre igual, pero la corrida falla.
+pub(crate) const TOPE_SALIDA_BUILDER: usize = 64 * 1024 * 1024;
+/// Bytes de la cola de la salida de `claude` que se guardan en el oráculo colab. Es 16 MiB.
+/// La cola basta para el diagnóstico. Lo que pasa del tope se descarta.
+pub(crate) const TOPE_SALIDA_COLAB: usize = 16 * 1024 * 1024;
 /// Tope de procesos e hilos del contenedor. Acota una fork bomb dentro de la imagen.
 const PIDS_LIMITE: u32 = 512;
 /// Memoria máxima del contenedor. Sube si una suite legítima llega al tope (ver el informe de medición).
@@ -325,13 +331,83 @@ fn lanzar(e: &Ejecucion, nombre: &str) -> Result<Child, ErrorOraculo> {
         .map_err(|err| ErrorOraculo::Infra(format!("no se pudo lanzar podman: {err}")))
 }
 
-/// Lee un flujo completo en otro hilo para que el proceso no se bloquee al llenar el pipe.
-pub(crate) fn leer_en_hilo<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = flujo.read_to_end(&mut bytes);
-        bytes
-    })
+/// Resultado de leer un flujo: los bytes guardados y si la salida pasó el tope.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Lectura {
+    pub bytes: Vec<u8>,
+    pub recortada: bool,
+}
+
+/// Qué parte de la salida se guarda cuando pasa el tope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Modo {
+    /// Guarda el inicio. Lo que pasa del tope se lee y se descarta.
+    Inicio,
+    /// Guarda la cola. Sirve para el diagnóstico de lo último que se imprimió.
+    Cola,
+}
+
+/// Lee un flujo hasta EOF con un tope. Reintenta si la lectura se interrumpe. Otro error corta la lectura.
+pub(crate) fn leer_con_tope<R: Read>(mut flujo: R, tope: usize, modo: Modo) -> Lectura {
+    let mut bytes = Vec::new();
+    let mut total: usize = 0;
+    let mut trozo = [0u8; 8192];
+    loop {
+        match flujo.read(&mut trozo) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                match modo {
+                    Modo::Inicio => {
+                        // Sigue leyendo al pasar el tope. Así el proceso no se bloquea al escribir.
+                        let libre = tope - bytes.len();
+                        bytes.extend_from_slice(&trozo[..n.min(libre)]);
+                    }
+                    Modo::Cola => {
+                        bytes.extend_from_slice(&trozo[..n]);
+                        // Se recorta al pasar el doble: el recorte cuesta lo mismo que la entrada leída.
+                        if bytes.len() > 2 * tope {
+                            bytes.drain(..bytes.len() - tope);
+                        }
+                    }
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    if modo == Modo::Cola && bytes.len() > tope {
+        bytes.drain(..bytes.len() - tope);
+    }
+    Lectura {
+        bytes,
+        recortada: total > tope,
+    }
+}
+
+/// Lee un flujo completo en otro hilo, con el tope del builder. Así el proceso no se bloquea al llenar el pipe.
+/// Solo lo usan los tests. `correr_proceso` pasa su tope con `leer_en_hilo_con`.
+#[cfg(test)]
+pub(crate) fn leer_en_hilo<R: Read + Send + 'static>(flujo: R) -> JoinHandle<Lectura> {
+    leer_en_hilo_con(flujo, TOPE_SALIDA_BUILDER)
+}
+
+/// Lee un flujo en otro hilo y guarda el inicio hasta `tope` bytes.
+pub(crate) fn leer_en_hilo_con<R: Read + Send + 'static>(
+    flujo: R,
+    tope: usize,
+) -> JoinHandle<Lectura> {
+    thread::spawn(move || leer_con_tope(flujo, tope, Modo::Inicio))
+}
+
+/// Texto de un tamaño en bytes. Da `N MiB` si es múltiplo exacto de MiB. Si no, da `N bytes`.
+pub(crate) fn tamano_legible(bytes: usize) -> String {
+    const MIB: usize = 1024 * 1024;
+    if bytes >= MIB && bytes.is_multiple_of(MIB) {
+        format!("{} MiB", bytes / MIB)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 /// Lee un flujo en otro hilo y conserva solo los últimos `COLA_BYTES` bytes. La memoria no crece con la salida.
@@ -429,6 +505,7 @@ mod tests {
     use std::io;
 
     use super::*;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
 
@@ -779,5 +856,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Flujo de `restante` bytes que no aloca el total. Cuenta cuántos bytes entregó.
+    struct Contado {
+        restante: usize,
+        entregado: Arc<AtomicUsize>,
+    }
+
+    impl io::Read for Contado {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = buf.len().min(self.restante);
+            buf[..n].fill(b'a');
+            self.restante -= n;
+            self.entregado.fetch_add(n, Ordering::SeqCst);
+            Ok(n)
+        }
+    }
+
+    /// Lector que pide reintentar una vez y después da sus datos.
+    struct Interrumpido {
+        interrumpio: bool,
+        datos: &'static [u8],
+    }
+
+    impl io::Read for Interrumpido {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.interrumpio {
+                self.interrumpio = true;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            let n = buf.len().min(self.datos.len());
+            buf[..n].copy_from_slice(&self.datos[..n]);
+            self.datos = &self.datos[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn leer_en_hilo_guarda_64_mib_y_drena_los_70_mib() {
+        let total = 70 * 1024 * 1024;
+        let entregado = Arc::new(AtomicUsize::new(0));
+        let flujo = Contado {
+            restante: total,
+            entregado: Arc::clone(&entregado),
+        };
+        let lectura = leer_en_hilo(flujo).join().expect("hilo");
+        assert_eq!(lectura.bytes.len(), 64 * 1024 * 1024);
+        assert!(lectura.recortada);
+        assert_eq!(entregado.load(Ordering::SeqCst), total);
+    }
+
+    #[test]
+    fn leer_en_hilo_salida_chica_se_lee_completa() {
+        let lectura = leer_en_hilo(&b"hola\n"[..]).join().expect("hilo");
+        assert_eq!(
+            lectura,
+            Lectura {
+                bytes: b"hola\n".to_vec(),
+                recortada: false
+            }
+        );
+    }
+
+    #[test]
+    fn leer_en_hilo_con_tope_chico_guarda_el_inicio_y_marca_recorte() {
+        let lectura = leer_en_hilo_con(&b"abcdefghij"[..], 4)
+            .join()
+            .expect("hilo");
+        assert_eq!(
+            lectura,
+            Lectura {
+                bytes: b"abcd".to_vec(),
+                recortada: true
+            }
+        );
+    }
+
+    #[test]
+    fn modo_cola_conserva_los_ultimos_bytes_y_marca_recorte() {
+        let lectura = leer_con_tope(&b"abcdefghij"[..], 4, Modo::Cola);
+        assert_eq!(
+            lectura,
+            Lectura {
+                bytes: b"ghij".to_vec(),
+                recortada: true
+            }
+        );
+    }
+
+    #[test]
+    fn modo_cola_con_salida_del_tope_exacto_no_marca_recorte() {
+        let lectura = leer_con_tope(&b"abcd"[..], 4, Modo::Cola);
+        assert_eq!(
+            lectura,
+            Lectura {
+                bytes: b"abcd".to_vec(),
+                recortada: false
+            }
+        );
+    }
+
+    #[test]
+    fn leer_con_tope_reintenta_si_la_lectura_se_interrumpe() {
+        let flujo = Interrumpido {
+            interrumpio: false,
+            datos: b"ok",
+        };
+        let lectura = leer_con_tope(flujo, 10, Modo::Inicio);
+        assert_eq!(lectura.bytes, b"ok".to_vec());
+        assert!(!lectura.recortada);
+    }
+
+    #[test]
+    fn topes_de_salida_valen_64_y_16_mib() {
+        assert_eq!(TOPE_SALIDA_BUILDER, 64 * 1024 * 1024);
+        assert_eq!(TOPE_SALIDA_COLAB, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn tamano_legible_usa_mib_solo_si_es_exacto() {
+        assert_eq!(tamano_legible(TOPE_SALIDA_BUILDER), "64 MiB");
+        assert_eq!(tamano_legible(1000), "1000 bytes");
     }
 }
