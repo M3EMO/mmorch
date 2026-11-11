@@ -6505,3 +6505,21 @@ P95, P96 y P97 siguen abiertas, tal como están en la vuelta del 2026-11-09 (4).
 - **c)** Esperar. No abrir nada hasta tener 15 reales.
 
 **Si elegís a en P98,** la minería de P97 también debe dar 4 reales o más de repos nuevos para el final. Esos repos no pueden ser broot ni los 4 del final.
+
+## Vuelta del 2026-11-10 (2): brief de la Tarea 80
+
+**Estado.** La punta local es 8bd12bb, sin push. P95, P96, P97 y P98 siguen sin respuesta.
+
+**Causa de (f) confirmada offline.** `HuellasOraculo::armar` compara las líneas ocultas solo con `contrato/`. En S2 esa carpeta está vacía. Con `bootstrap/` sumado, t1 queda con 5 huellas y 0 disparos. t2 y t3 no cambian.
+
+**Lo que cambió:**
+- **Brief escrito:** `docs/builds/brief-local-80.md`. Lleva (f) y (g). (a) no entra, porque P95 no tiene respuesta.
+- **(f) también filtra nombres de test.** Un nombre oculto que aparece en `bootstrap/` deja de ser huella. El orquestador no lo había revisado, y la regla es la misma que para las líneas.
+- **El estado visible es `oraculos/<tarea>/bootstrap`.** El repo de trabajo de la minería trae los tests ocultos y no sirve.
+- **(g) cambia el cálculo, no solo el texto.** La especificidad se calcula solo sobre limpios con veredicto. Sin ninguno, queda "sin medir". Las filas guardadas no se recalculan.
+- **Paralelo.** (f) toca `src/observe/transcript.rs`, `src/corre/corrida.rs` y `tests/transcript.rs`. (g) toca `src/oracle/calibra.rs`, `src/lib.rs` y `docs/interfaces.md`. No se pisan.
+- **Informe:** `docs/builds/informe-local-80.md`.
+
+**Después de mezclar:** el orquestador corre la suite con podman, y la detección offline de (f) sobre el transcript de t1 con el binario nuevo.
+
+**Preguntas al usuario:** ninguna nueva.
