@@ -18,7 +18,7 @@ use crate::config::ReglasDecision;
 use crate::proveedores::{self, Prompt, causa_tope_alcanzado};
 use crate::tipos::{
     Accion, Confianza, Cumplimiento, Decision, Dimension, Eleccion, Estado, EstadoRequisito,
-    Informe, ParteSinVeredicto, Veredicto,
+    Fuente, Hallazgo, Informe, ParteSinVeredicto, Veredicto,
 };
 
 /// Máximo de riesgos y de próximos pasos.
@@ -345,8 +345,16 @@ fn bloquea_la_dimension(dimension: Dimension, rubricas: &[Rubrica]) -> bool {
         .any(|i| i.bloquea)
 }
 
-/// Reglas que bloquean: un requisito de peso 3 en nivel 0, un hallazgo de seguridad de severidad 3, y un
-/// ítem de rúbrica con `bloquea = true` en nivel 0.
+/// Sonda que encuentra secretos. Sus hallazgos son secretos.
+const SONDA_SECRETOS: &str = "gitleaks";
+
+/// Verdadero si el hallazgo es un secreto: lo encontró gitleaks.
+fn es_secreto(h: &Hallazgo) -> bool {
+    matches!(&h.fuente, Fuente::Sonda(sonda) if sonda == SONDA_SECRETOS)
+}
+
+/// Reglas que bloquean: un requisito de peso 3 en nivel 0, un hallazgo de seguridad de severidad 3 que el
+/// cambio introduce (un secreto bloquea aunque sea previo), y un ítem de rúbrica con `bloquea = true` en nivel 0.
 fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     let mut salida = Vec::new();
     for e in v
@@ -366,20 +374,29 @@ fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
             hallazgo: None,
         });
     }
-    for h in v
-        .hallazgos
-        .iter()
-        .filter(|h| h.dimension == Dimension::Seguridad && h.severidad == SEVERIDAD_BLOQUEANTE)
-    {
+    // Un aviso previo no bloquea. Un secreto bloquea siempre, sea previo o no.
+    for h in v.hallazgos.iter().filter(|h| {
+        h.dimension == Dimension::Seguridad
+            && h.severidad == SEVERIDAD_BLOQUEANTE
+            && (!h.previo || es_secreto(h))
+    }) {
+        let frase = if h.previo {
+            format!(
+                "{} es un hallazgo de seguridad con severidad {SEVERIDAD_BLOQUEANTE}; estaba en el estado inicial; los secretos bloquean siempre.",
+                h.id
+            )
+        } else {
+            format!(
+                "{} es un hallazgo de seguridad con severidad {SEVERIDAD_BLOQUEANTE}.",
+                h.id
+            )
+        };
         salida.push(Disparo {
             regla: format!(
                 "bloqueo_seguridad: hallazgo {} de seguridad con severidad {SEVERIDAD_BLOQUEANTE}",
                 h.id
             ),
-            frase: format!(
-                "{} es un hallazgo de seguridad con severidad {SEVERIDAD_BLOQUEANTE}.",
-                h.id
-            ),
+            frase,
             hallazgo: Some(h.id.clone()),
         });
     }
@@ -1653,6 +1670,75 @@ modulos = ["config"]
         assert_eq!(i.bloqueantes, vec!["h-seguridad-3".to_string()]);
         assert!(i.motivo.contains("bloqueo_seguridad"), "{}", i.motivo);
         assert_eq!(i.proximos_pasos[0].refs, vec!["h-seguridad-3".to_string()]);
+    }
+
+    /// Hallazgo de Seguridad de severidad 3 de la sonda `sonda`, previo o no.
+    fn seguridad_de(id: &str, sonda: &str, previo: bool) -> Hallazgo {
+        Hallazgo {
+            fuente: Fuente::Sonda(sonda.into()),
+            previo,
+            ..hallazgo(id, Dimension::Seguridad, 3, &[])
+        }
+    }
+
+    #[test]
+    fn informe_siete_avisos_previos_de_cargo_audit_no_bloquean() {
+        let mut v = ecc();
+        v.hallazgos
+            .extend((1..=7).map(|n| seguridad_de(&format!("h-audit-{n}"), "cargo-audit", true)));
+        let i = informe_de(&v);
+        assert_ne!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert!(i.bloqueantes.is_empty(), "{:?}", i.bloqueantes);
+    }
+
+    #[test]
+    fn informe_aviso_previo_mas_uno_nuevo_bloquea_y_cita_el_nuevo() {
+        let mut v = ecc();
+        v.hallazgos
+            .extend((1..=7).map(|n| seguridad_de(&format!("h-audit-{n}"), "cargo-audit", true)));
+        v.hallazgos
+            .push(seguridad_de("h-audit-nuevo", "cargo-audit", false));
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert_eq!(i.bloqueantes, vec!["h-audit-nuevo".to_string()]);
+        assert!(i.motivo.contains("h-audit-nuevo"), "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_secreto_previo_bloquea_y_la_frase_lo_dice() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto", "gitleaks", true));
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert_eq!(i.bloqueantes, vec!["h-secreto".to_string()]);
+        assert!(
+            i.resumen
+                .contains("estaba en el estado inicial; los secretos bloquean siempre"),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_veredicto_viejo_sin_previo_lee_false_y_sigue_bloqueado() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-audit-viejo", "cargo-audit", false));
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        for h in json["hallazgos"]
+            .as_array_mut()
+            .expect("lista de hallazgos")
+        {
+            h.as_object_mut()
+                .expect("objeto")
+                .remove("previo")
+                .expect("el campo existe al serializar");
+        }
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee un veredicto viejo");
+        assert!(viejo.hallazgos.iter().all(|h| !h.previo));
+        let i = informe_de(&viejo);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
     }
 
     #[test]
