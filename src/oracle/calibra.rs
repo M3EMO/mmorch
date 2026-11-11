@@ -195,11 +195,15 @@ impl Calibraciones {
         }
     }
 
-    /// Ítems inestables de la fila más reciente de `dimension`. Vacía si la tarea no tiene fila, o si la fila
-    /// tiene otra huella: sus ítems salen de otro juez (Tarea 83, punto 2).
-    pub fn inestables_de(&self, tarea: &str, dimension: Dimension) -> &[String] {
-        self.de(tarea, dimension)
-            .filter(|fila| huella_vigente(fila, dimension))
+    /// Ítems inestables de la fila más reciente de `dimension` que sirve para la tarea. Sirve una fila con
+    /// huella actual y con el `tarea_hash` actual, o sin `tarea_hash`. Las demás filas no cuentan. Vacía si
+    /// ninguna sirve: sus ítems salen de otro juez o de otro `tarea.toml` (Tarea 83, punto 2).
+    pub fn inestables_de(&self, tarea: &str, tarea_hash: &str, dimension: Dimension) -> &[String] {
+        self.filas
+            .iter()
+            .filter(|f| f.tarea == tarea && f.dimension == dimension)
+            .filter(|f| huella_vigente(f, dimension) && tarea_vigente(f, tarea_hash))
+            .max_by(|a, b| a.ts.total_cmp(&b.ts))
             .map_or(&[], |fila| fila.inestables.as_slice())
     }
 
@@ -4560,10 +4564,13 @@ mod tests {
             filas: vec![nueva, vieja],
         };
         assert_eq!(
-            c.inestables_de("memora", Dimension::Diseno),
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno),
             ["diseno.ciclos".to_string()]
         );
-        assert!(c.inestables_de("otra", Dimension::Diseno).is_empty());
+        assert!(
+            c.inestables_de("otra", "tarea-actual", Dimension::Diseno)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4577,7 +4584,70 @@ mod tests {
             v: VERSION,
             filas: vec![vieja],
         };
-        assert!(c.inestables_de("memora", Dimension::Diseno).is_empty());
+        assert!(
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn inestables_de_con_otro_tarea_toml_no_los_da() {
+        let otra = Fila {
+            inestables: vec!["diseno.ciclos".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
+            tarea_hash: Some("tarea-vieja".into()),
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![otra],
+        };
+        assert!(
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn inestables_de_con_mismo_tarea_toml_los_da() {
+        let misma = Fila {
+            inestables: vec!["diseno.ciclos".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
+            tarea_hash: Some("tarea-actual".into()),
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![misma],
+        };
+        assert_eq!(
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno),
+            ["diseno.ciclos".to_string()]
+        );
+    }
+
+    #[test]
+    fn inestables_de_sirve_la_fila_vigente_aunque_una_nueva_sea_de_otro_tarea_toml() {
+        let vigente = Fila {
+            inestables: vec!["diseno.ciclos".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
+            tarea_hash: Some("tarea-actual".into()),
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let otra = Fila {
+            inestables: vec!["diseno.errores".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
+            tarea_hash: Some("tarea-vieja".into()),
+            ..fila("memora", Dimension::Diseno, 2.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![otra, vigente],
+        };
+        assert_eq!(
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno),
+            ["diseno.ciclos".to_string()]
+        );
     }
 
     #[test]

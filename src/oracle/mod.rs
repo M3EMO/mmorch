@@ -1062,6 +1062,8 @@ fn medir(
         .as_ref()
         .map(|r| r.extractos.clone())
         .unwrap_or_default();
+    // El hash del `tarea.toml` actual: una fila de otra versión de la tarea no excluye sus ítems.
+    let tarea_hash = calibra::hash_de_tarea(tarea)?;
     let puntajes = DIMENSIONES
         .iter()
         .map(|&dimension| match dimension {
@@ -1069,7 +1071,14 @@ fn medir(
             _ if !partes.mide(dimension) => sin_veredicto_puntaje(dimension, NO_MEDIDA.into()),
             Dimension::Funciona => funciona(tarea, contrato, oculto, &entrega.escenarios),
             Dimension::Diseno => {
-                let excluidos = excluidos_de(calibracion, tarea, partes, juez.rubricas, dimension);
+                let excluidos = excluidos_de(
+                    calibracion,
+                    tarea,
+                    &tarea_hash,
+                    partes,
+                    juez.rubricas,
+                    dimension,
+                );
                 puntaje_diseno(juez, resultado.as_ref(), &topes, &excluidos)
             }
             Dimension::Completitud => {
@@ -1078,7 +1087,14 @@ fn medir(
                 })
             }
             _ => {
-                let excluidos = excluidos_de(calibracion, tarea, partes, juez.rubricas, dimension);
+                let excluidos = excluidos_de(
+                    calibracion,
+                    tarea,
+                    &tarea_hash,
+                    partes,
+                    juez.rubricas,
+                    dimension,
+                );
                 let de_la_dimension = sondas
                     .iter()
                     .filter(|s| s.dimension == dimension)
@@ -1555,6 +1571,7 @@ fn aplicar_cobertura(
 fn excluidos_de(
     calibracion: &Calibraciones,
     tarea: &Tarea,
+    tarea_hash: &str,
     partes: &Partes,
     rubricas: &[Rubrica],
     dimension: Dimension,
@@ -1566,7 +1583,7 @@ fn excluidos_de(
         return Vec::new();
     };
     calibracion
-        .inestables_de(&tarea.nombre, dimension)
+        .inestables_de(&tarea.nombre, tarea_hash, dimension)
         .iter()
         .filter(|id| del_juez.item.iter().any(|i| i.id == **id))
         .cloned()
