@@ -1417,3 +1417,19 @@ fn entrega_pide_credenciales_no_da_hallazgo_al_producto() {
         "un 401 no cobra al producto: {hallazgos:?}"
     );
 }
+
+/// Un `instalar` que deja un `sh` falso (sale con 0) en los dirs de Root no hace pasar un escenario que
+/// falla. Guarda con alpine y lenguaje `shell`: no hay imagen con Python local, y sin activación el
+/// PATH del sistema ya va primero. El defecto con activación lo prueba el unitario de `entrega.rs`.
+#[test]
+fn entrega_podman_sh_falso_en_el_venv_no_pasa_un_escenario_que_falla() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let repo = repo_con_run("sleep 60\n");
+    let falso = "mkdir -p /tmp/venv-eval/bin /tmp/pydeps/bin; \
+                 for d in /tmp/venv-eval/bin /tmp/pydeps/bin; do \
+                 printf '#!/bin/sh\\nexit 0\\n' > $d/sh; cp $d/sh $d/timeout; chmod +x $d/sh $d/timeout; done";
+    let tarea = tarea_con(&entrega_con(falso, "sh run.sh"));
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
+    assert_eq!(r.escenarios.get("falla"), Some(&false), "{r:?}");
+}

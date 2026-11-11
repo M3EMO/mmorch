@@ -1279,23 +1279,65 @@ const PATH_DEL_SISTEMA: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 
 /// Línea de `sh` que envuelve cada paso: el PATH del sistema, la activación (si hay), el `cmd` como `$1`
 /// y el código de salida. No usa `exec`: el `sh` de afuera vive para leer `$?`.
-/// Con `con_timeout`, el `timeout 120` va DENTRO, antes del `sh` del `cmd`. Así el `sh` de afuera no
-/// se muere con el plazo y siempre llega a leer `$?`.
+/// `ruta_sh` y `ruta_timeout` son rutas absolutas dentro de la imagen. Así la activación de Root no
+/// tapa el `sh` ni el `timeout`. Con `ruta_timeout`, el `timeout 120` va DENTRO, antes del `sh` del `cmd`.
+/// Así el `sh` de afuera no se muere con el plazo y siempre llega a leer `$?`.
 /// El 125 del producto pasa a 1. Así un 125 que sale de `podman exec` siempre es de podman.
-fn envoltorio_de(activar: &str, con_timeout: bool) -> String {
+fn envoltorio_de(activar: &str, ruta_sh: &str, ruta_timeout: Option<&str>) -> String {
     let previa = if activar.is_empty() {
         String::new()
     } else {
         format!("{activar} ")
     };
-    let plazo = if con_timeout {
-        format!("timeout {TIMEOUT_ESCENARIO} ")
-    } else {
-        String::new()
-    };
+    let plazo = ruta_timeout
+        .map(|ruta| format!("{ruta} {TIMEOUT_ESCENARIO} "))
+        .unwrap_or_default();
     format!(
-        "export PATH={PATH_DEL_SISTEMA}:$PATH; {previa}{plazo}sh -c \"$1\"; s=$?; [ \"$s\" -eq {CODIGO_PODMAN} ] && s=1; exit \"$s\""
+        "export PATH={PATH_DEL_SISTEMA}:$PATH; {previa}{plazo}{ruta_sh} -c \"$1\"; s=$?; [ \"$s\" -eq {CODIGO_PODMAN} ] && s=1; exit \"$s\""
     )
+}
+
+/// Verdadero si `ruta` es absoluta y no vive bajo `/tmp`, `/salida` ni `/repo`. Compara por componente:
+/// `/tmpx` no está bajo `/tmp`. Un `..` en la ruta la vuelve inválida.
+fn ruta_de_sistema_valida(ruta: &str) -> bool {
+    let ruta = Path::new(ruta);
+    let absoluta = ruta.is_absolute();
+    let sin_saltos = !ruta
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    let propias = [Path::new("/tmp"), Path::new(SALIDA), Path::new("/repo")];
+    absoluta && sin_saltos && !propias.iter().any(|raiz| ruta.starts_with(raiz))
+}
+
+/// Rutas de `sh` y `timeout` dentro del contenedor, con una sola llamada. Sin `sh` válido da error.
+/// Un `timeout` vacío o inválido da `None`: el plazo lo pone Root desde afuera.
+fn rutas_de_la_imagen(exec: &dyn Exec, nombre: &str) -> Result<(String, Option<String>), String> {
+    // Con el PATH del sistema y nada activado: el `PATH` de la imagen no decide qué `sh` se guarda.
+    let sonda = format!(
+        r#"PATH={PATH_DEL_SISTEMA}; printf "sh=%s\ntimeout=%s\n" "$(command -v sh)" "$(command -v timeout)""#
+    );
+    let texto = match exec.exec(&["exec", nombre, "/bin/sh", "-c", &sonda], PLAZO_CORTO) {
+        Ok(s) if s.codigo == 0 => s.stdout,
+        _ => return Err("la imagen no trae sh".into()),
+    };
+    let campo = |clave: &str| {
+        texto
+            .lines()
+            .find_map(|l| l.strip_prefix(clave))
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let sh = campo("sh=");
+    if sh.is_empty() {
+        return Err("la imagen no trae sh".into());
+    }
+    if !ruta_de_sistema_valida(&sh) {
+        return Err(format!("la ruta de sh no es válida: {sh}"));
+    }
+    let timeout = campo("timeout=");
+    let ruta_timeout = (!timeout.is_empty() && ruta_de_sistema_valida(&timeout)).then_some(timeout);
+    Ok((sh, ruta_timeout))
 }
 
 /// Contenedor vivo, donde los pasos corren con `podman exec`. Cada paso lleva su `Entorno`.
@@ -1303,8 +1345,11 @@ fn envoltorio_de(activar: &str, con_timeout: bool) -> String {
 pub(crate) struct Sesion<'a> {
     nombre: String,
     exec: &'a dyn Exec,
-    /// Verdadero si la imagen trae `timeout`. Si no, el plazo lo pone Root desde afuera.
-    tiene_timeout: bool,
+    /// Ruta absoluta de `sh` en la imagen, de `command -v sh` dentro del contenedor.
+    ruta_sh: String,
+    /// Ruta absoluta de `timeout`, o `None` si la imagen no lo trae o su ruta no es válida.
+    /// Si es `None`, el plazo lo pone Root desde afuera.
+    ruta_timeout: Option<String>,
 }
 
 /// Contador de los contenedores de escenario de este proceso.
@@ -1340,22 +1385,18 @@ impl<'a> Sesion<'a> {
             let salida = exec.exec(&refs, PLAZO_CORTO);
             let arranco = salida.as_ref().is_ok_and(|s| s.codigo == 0);
             if arranco && corriendo(exec, nombre) {
-                let sh = exec.exec(&["exec", nombre, "sh", "-c", "true"], PLAZO_CORTO);
-                if sh.is_ok_and(|s| s.codigo == 0) {
-                    let tiene_timeout = exec
-                        .exec(
-                            &["exec", nombre, "sh", "-c", "command -v timeout"],
-                            PLAZO_CORTO,
-                        )
-                        .is_ok_and(|s| s.codigo == 0);
-                    return Ok(Sesion {
+                return match rutas_de_la_imagen(exec, nombre) {
+                    Ok((ruta_sh, ruta_timeout)) => Ok(Sesion {
                         nombre: nombre.to_string(),
                         exec,
-                        tiene_timeout,
-                    });
-                }
-                quitar(exec, nombre);
-                return Err("la imagen no trae sh".into());
+                        ruta_sh,
+                        ruta_timeout,
+                    }),
+                    Err(motivo) => {
+                        quitar(exec, nombre);
+                        Err(motivo)
+                    }
+                };
             }
             motivos.push(format!("{}: {}", comando.join(" "), motivo_de_run(&salida)));
             quitar(exec, nombre);
@@ -1366,21 +1407,25 @@ impl<'a> Sesion<'a> {
         ))
     }
 
-    /// Argumentos de `podman exec` para `cmd`. Con `con_timeout` y si la imagen trae `timeout`, lo pone antes.
-    /// Todo paso corre dentro de un `sh` envoltorio: primero el PATH del sistema, después la activación
-    /// (si hay) y el `cmd` como `$1`. Con `con_timeout` y si la imagen trae `timeout`, el `timeout` va dentro
-    /// del envoltorio. El envoltorio convierte el 125 del producto en 1 (ver `CODIGO_PODMAN`).
+    /// Argumentos de `podman exec` para `cmd`. Todo paso corre dentro de un `sh` envoltorio: primero el
+    /// PATH del sistema, después la activación (si hay) y el `cmd` como `$1`. El `sh` y el `timeout` del
+    /// envoltorio van por ruta absoluta. Con `con_timeout` y si la imagen trae `timeout`, el `timeout` va
+    /// dentro del envoltorio. El envoltorio convierte el 125 del producto en 1 (ver `CODIGO_PODMAN`).
     pub(crate) fn paso_args(&self, entorno: &Entorno, cmd: &str, con_timeout: bool) -> Vec<String> {
         let mut args: Vec<String> = vec!["exec".into()];
         if let Some(dir) = &entorno.dir {
             args.extend(["-w".to_string(), dir.clone()]);
         }
         args.push(self.nombre.clone());
-        let con_plazo = con_timeout && self.tiene_timeout;
+        let ruta_timeout = if con_timeout {
+            self.ruta_timeout.as_deref()
+        } else {
+            None
+        };
         args.extend([
             "sh".to_string(),
             "-c".to_string(),
-            envoltorio_de(&entorno.activar, con_plazo),
+            envoltorio_de(&entorno.activar, &self.ruta_sh, ruta_timeout),
             "_".to_string(),
             cmd.to_string(),
         ]);
@@ -2008,6 +2053,8 @@ pub(crate) mod tests {
             }
             let stdout = if args.first() == Some(&"container") {
                 "true\n"
+            } else if ultimo.contains("command -v sh") {
+                "sh=/usr/bin/sh\ntimeout=/usr/bin/timeout\n"
             } else {
                 ""
             };
@@ -4553,26 +4600,32 @@ pub(crate) mod tests {
         }
     }
 
-    /// Sesión de prueba con nombre `n` sobre `exec`.
+    /// Sesión de prueba con nombre `n` sobre `exec`. `sh` es `/usr/bin/sh`; `timeout` es `/usr/bin/timeout` si `tiene_timeout`.
     fn sesion_de_prueba(exec: &dyn Exec, tiene_timeout: bool) -> Sesion<'_> {
         Sesion {
             nombre: "n".into(),
             exec,
-            tiene_timeout,
+            ruta_sh: "/usr/bin/sh".into(),
+            ruta_timeout: tiene_timeout.then(|| "/usr/bin/timeout".into()),
         }
     }
 
-    /// Envoltorio de cada paso sin activación: PATH del sistema primero, `125` pasa a `1`.
-    const ENVOLTORIO_SIN_ACTIVAR: &str = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"";
+    /// Envoltorio de cada paso sin activación: PATH del sistema primero, `sh` por ruta, `125` pasa a `1`.
+    const ENVOLTORIO_SIN_ACTIVAR: &str = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; /usr/bin/sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"";
 
-    /// Envoltorio con plazo: el `timeout 120` va dentro, antes del `sh` que corre el `cmd`.
-    const ENVOLTORIO_CON_TIMEOUT: &str = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; timeout 120 sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"";
+    /// Envoltorio con plazo: el `timeout 120` va dentro, antes del `sh` que corre el `cmd`. Ambos por ruta.
+    const ENVOLTORIO_CON_TIMEOUT: &str = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; /usr/bin/timeout 120 /usr/bin/sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"";
 
     /// Corre el envoltorio de `paso_args` de verdad, en el `sh` local, y da su código de salida.
     /// Sirve para probar el 125 del producto sin `podman`: el `sh` local recibe los mismos argumentos.
     fn codigo_del_envoltorio(cmd: &str) -> i32 {
         let exec = ExecFalso::con_codigos(&[]);
-        let s = sesion_de_prueba(&exec, false);
+        let s = Sesion {
+            nombre: "n".into(),
+            exec: &exec,
+            ruta_sh: "/bin/sh".into(),
+            ruta_timeout: None,
+        };
         let args = s.paso_args(&Entorno::default(), cmd, false);
         // Quita `exec` y el nombre del contenedor: queda `sh -c <envoltorio> _ <cmd>`.
         let (programa, resto) = args[2..].split_first().expect("hay argumentos");
@@ -4614,7 +4667,10 @@ pub(crate) mod tests {
         let args = s.paso_args(&Entorno::default(), "exit 0", true);
         assert_eq!(args[2], "sh", "{args:?}");
         assert!(!args.iter().any(|a| a == "timeout"), "{args:?}");
-        assert!(args[4].contains("timeout 120 sh -c \"$1\""), "{args:?}");
+        assert!(
+            args[4].contains("/usr/bin/timeout 120 /usr/bin/sh -c \"$1\""),
+            "{args:?}"
+        );
     }
 
     #[test]
@@ -4666,7 +4722,7 @@ pub(crate) mod tests {
                 "n",
                 "sh",
                 "-c",
-                "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export A=1; timeout 120 sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"",
+                "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export A=1; /usr/bin/timeout 120 /usr/bin/sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"",
                 "_",
                 "pytest -q",
             ]
@@ -4831,13 +4887,90 @@ pub(crate) mod tests {
         let exec = ExecFalso::con(vec![
             Ok(salida(0, "")),
             Ok(salida(0, "true\n")),
-            Ok(salida(0, "")),
-            Ok(salida(0, "")),
+            Ok(salida(0, "sh=/usr/bin/sh\ntimeout=/usr/bin/timeout\n")),
         ]);
         let arranque = |c: &[&str]| vec!["run".to_string(), c[0].to_string()];
         let s = Sesion::iniciar(&exec, "n", &arranque).expect("arranca");
-        assert!(s.tiene_timeout);
+        assert_eq!(s.ruta_sh, "/usr/bin/sh");
+        assert_eq!(s.ruta_timeout.as_deref(), Some("/usr/bin/timeout"));
         assert_eq!(exec.llamadas()[0], ["run", "sleep"]);
+    }
+
+    #[test]
+    fn sesion_iniciar_rechaza_sh_bajo_tmp() {
+        let exec = ExecFalso::con(vec![
+            Ok(salida(0, "")),
+            Ok(salida(0, "true\n")),
+            Ok(salida(
+                0,
+                "sh=/tmp/venv-eval/bin/sh\ntimeout=/usr/bin/timeout\n",
+            )),
+            Ok(salida(0, "")),
+        ]);
+        let arranque = |c: &[&str]| vec!["run".to_string(), c[0].to_string()];
+        match Sesion::iniciar(&exec, "n", &arranque) {
+            Err(motivo) => assert!(motivo.contains("la ruta de sh no es válida"), "{motivo}"),
+            Ok(_) => panic!("un sh bajo /tmp no debe arrancar"),
+        }
+        let ultima = exec.llamadas().pop().expect("hay llamadas");
+        assert_eq!(ultima, ["rm", "-f", "-t", "0", "n"]);
+    }
+
+    #[test]
+    fn sesion_iniciar_timeout_bajo_tmp_se_ignora() {
+        let exec = ExecFalso::con(vec![
+            Ok(salida(0, "")),
+            Ok(salida(0, "true\n")),
+            Ok(salida(
+                0,
+                "sh=/usr/bin/sh\ntimeout=/tmp/pydeps/bin/timeout\n",
+            )),
+        ]);
+        let arranque = |c: &[&str]| vec!["run".to_string(), c[0].to_string()];
+        let s = Sesion::iniciar(&exec, "n", &arranque).expect("arranca");
+        assert_eq!(s.ruta_sh, "/usr/bin/sh");
+        assert_eq!(s.ruta_timeout, None);
+    }
+
+    #[test]
+    fn envoltorio_con_activacion_usa_rutas_absolutas_de_sh_y_timeout() {
+        let exec = ExecFalso::con_codigos(&[]);
+        let s = Sesion {
+            nombre: "n".into(),
+            exec: &exec,
+            ruta_sh: "/usr/bin/sh".into(),
+            ruta_timeout: Some("/usr/bin/timeout".into()),
+        };
+        let entorno = Entorno {
+            dir: None,
+            activar: "export VIRTUAL_ENV=/tmp/venv-eval;".into(),
+        };
+        let args = s.paso_args(&entorno, "exit 0", true);
+        let envoltorio = &args[4];
+        assert!(
+            envoltorio.contains("/usr/bin/timeout 120 /usr/bin/sh -c \"$1\""),
+            "{envoltorio}"
+        );
+        assert!(!envoltorio.contains(" sh -c"), "{envoltorio}");
+        assert!(!envoltorio.contains(" timeout 120 sh"), "{envoltorio}");
+    }
+
+    #[test]
+    fn ruta_de_sistema_valida_tabla() {
+        let casos = [
+            ("/usr/bin/sh", true),
+            ("sh", false),
+            ("", false),
+            ("/tmp/x/sh", false),
+            ("/tmp", false),
+            ("/salida/work/bin/sh", false),
+            ("/repo/sh", false),
+            ("/tmpx/sh", true),
+            ("/usr/bin/../tmp/sh", false),
+        ];
+        for (ruta, esperado) in casos {
+            assert_eq!(ruta_de_sistema_valida(ruta), esperado, "{ruta:?}");
+        }
     }
 
     #[test]
