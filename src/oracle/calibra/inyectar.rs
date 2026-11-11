@@ -79,10 +79,11 @@ impl Defecto {
 }
 
 /// Defectos que sirven para una dimensión, en el orden en que `calibrar` los rota. Vacío si no hay ninguno.
+/// `ModuloBorrado` queda fuera: borrar un módulo que se usa siempre rompe el build. Es una detección segura.
 pub fn de_dimension(dimension: Dimension) -> Vec<Defecto> {
     TODOS
         .into_iter()
-        .filter(|d| d.dimension() == dimension)
+        .filter(|d| d.dimension() == dimension && *d != Defecto::ModuloBorrado)
         .collect()
 }
 
@@ -1496,11 +1497,19 @@ mod tests {
         );
         assert_eq!(
             de_dimension(Dimension::Completitud),
-            vec![Defecto::ModuloBorrado, Defecto::CuerpoVaciado]
+            vec![Defecto::CuerpoVaciado]
         );
         assert_eq!(
             de_dimension(Dimension::Funciona),
             vec![Defecto::ComportamientoRoto]
+        );
+    }
+
+    #[test]
+    fn de_dimension_completitud_no_trae_modulo_borrado() {
+        assert_eq!(
+            de_dimension(Dimension::Completitud),
+            vec![Defecto::CuerpoVaciado]
         );
     }
 
