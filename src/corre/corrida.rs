@@ -92,6 +92,14 @@ struct Lanzado {
     linea: String,
 }
 
+/// Cómo termina un rol: con su código de salida, con sus vueltas cortadas agotadas, o porque el cupo
+/// ya no alcanza antes de una vuelta.
+enum Fin {
+    Codigo(i32),
+    VueltasAgotadas,
+    SinCupo,
+}
+
 /// Corre la tarea con la configuración y devuelve la fila que se agregó a `runs.jsonl`.
 ///
 /// Cada rol registra su sesión al terminar, antes de lanzar el siguiente.
@@ -105,6 +113,8 @@ struct Lanzado {
 /// Si la última vuelta también se corta, el rol se agota y no corren más roles.
 /// La corrida igual llega a las lecturas del oráculo, a la evaluación y a la fila.
 ///
+/// Antes de cada lanzamiento, rol y vuelta, el rol vuelve a rutear. Si ya no va por cupo, no se lanza:
+/// la corrida para ahí con un `Gate` de "cupo agotado antes del rol X, vuelta N", y sigue como un corte.
 /// Un código distinto de 0 de un rol corta la corrida: los roles siguientes no corren,
 /// pero la evaluación sí, y el informe dice lo que falta.
 /// Un fallo al lanzar que no es un corte aborta sin evaluar: sin builder no hay nada que evaluar,
@@ -221,9 +231,8 @@ fn correr_interno(
     let mut reanudando = reanuda.is_some();
     // Desde el primer lanzamiento de esta invocación, la vigencia se espera antes de cada lanzamiento.
     let mut ya_lanzo = false;
-    for (rol, eleccion) in &elecciones {
+    for (rol, _) in &elecciones {
         let prompt_rol = config_cargada.prompt.get(rol).cloned().unwrap_or_default();
-        let modelo = eleccion.modelo.clone().unwrap_or_default();
         let mut sesion: Option<String> = None;
         // Hay transcripts parciales de este rol: la primera vuelta sigue con la instrucción de continuar.
         let mut retoma = false;
@@ -243,12 +252,24 @@ fn correr_interno(
             reanudando = false;
         }
         let mut vuelta: u32 = 0;
-        // `Some(código)` si el rol terminó. `None` si agotó sus vueltas cortadas.
-        let codigo = loop {
+        let fin = loop {
             // Desde el primer lanzamiento de esta invocación, cada uno vuelve a leer la credencial: se revisa su vigencia antes.
             if ya_lanzo {
                 esperar_vigencia_del_rol(deps.ejecutor, &ruta_eventos, &id, *rol)?;
             }
+            // Antes de cada lanzamiento el rol vuelve a rutear. Si ya no va por cupo, la corrida para acá.
+            let modelo = match rutear_por_cupo(deps.home, *rol, tarea) {
+                Ok(modelo) => modelo,
+                Err(_) => {
+                    let motivo = format!(
+                        "cupo agotado antes del rol {}, vuelta {}",
+                        nombre_rol(*rol),
+                        vuelta + 1
+                    );
+                    gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
+                    break Fin::SinCupo;
+                }
+            };
             vuelta += 1;
             lanzamientos += 1;
             ya_lanzo = true;
@@ -302,7 +323,7 @@ fn correr_interno(
                     // La sesión se registra al terminar el rol: si un rol siguiente aborta, su costo ya queda.
                     registrar_sesion(deps.home, &id, &lanzado, &lanzado.linea, &ruta_eventos)?;
                     lanzados.push(lanzado);
-                    break Some(codigo);
+                    break Fin::Codigo(codigo);
                 }
                 Err(ErrorCorre::Cortado { mensaje, stdout }) => {
                     // Un corte no aborta: deja su transcript parcial, su costo y la sesión para la siguiente vuelta.
@@ -323,7 +344,7 @@ fn correr_interno(
                         sesion = Some(id_sesion);
                     }
                     if vuelta == MAX_VUELTAS {
-                        break None;
+                        break Fin::VueltasAgotadas;
                     }
                 }
                 Err(error) => {
@@ -333,8 +354,8 @@ fn correr_interno(
                 }
             }
         };
-        match codigo {
-            None => {
+        match fin {
+            Fin::VueltasAgotadas => {
                 let motivo = format!(
                     "rol {} agotó {MAX_VUELTAS} vueltas cortadas por plazo",
                     nombre_rol(*rol)
@@ -342,12 +363,14 @@ fn correr_interno(
                 gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
                 break;
             }
-            Some(codigo) if codigo != 0 => {
+            // El `Gate` de cupo ya quedó dentro del bucle. La corrida sigue como en un corte.
+            Fin::SinCupo => break,
+            Fin::Codigo(codigo) if codigo != 0 => {
                 let motivo = format!("rol {} salió con {codigo}", nombre_rol(*rol));
                 gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
                 break;
             }
-            Some(_) => {}
+            Fin::Codigo(_) => {}
         }
     }
 
@@ -648,19 +671,33 @@ fn sesion_de_transcript(stdout: &[u8]) -> Option<String> {
     })
 }
 
-/// Un rol va por cupo con modelo, o `r00t corre` no lo lanza.
-fn exigir_cupo(rol: Rol, eleccion: &Eleccion) -> Result<(), ErrorCorre> {
+/// Un rol va por cupo con modelo, o `r00t corre` no lo lanza. Devuelve el modelo.
+fn modelo_por_cupo(rol: Rol, eleccion: &Eleccion) -> Result<String, String> {
     let nombre = nombre_rol(rol);
     match (eleccion.via, &eleccion.modelo) {
-        (Via::Cupo, Some(_)) => Ok(()),
-        (Via::Cupo, None) => Err(ErrorCorre::Uso(format!(
+        (Via::Cupo, Some(modelo)) => Ok(modelo.clone()),
+        (Via::Cupo, None) => Err(format!(
             "el rol {nombre} va por cupo sin modelo: r00t corre solo lanza claude -p por cupo"
-        ))),
-        (via, _) => Err(ErrorCorre::Uso(format!(
+        )),
+        (via, _) => Err(format!(
             "el rol {nombre} va por {}: r00t corre solo lanza claude -p por cupo",
             etiqueta_via(via)
-        ))),
+        )),
     }
+}
+
+/// Un rol va por cupo con modelo, o `r00t corre` no lo lanza.
+fn exigir_cupo(rol: Rol, eleccion: &Eleccion) -> Result<(), ErrorCorre> {
+    modelo_por_cupo(rol, eleccion)
+        .map(|_| ())
+        .map_err(ErrorCorre::Uso)
+}
+
+/// Rutea el rol otra vez y devuelve su modelo si sigue yendo por cupo. Si no, o si el ruteo falla, da el
+/// motivo para no lanzar. No registra nada: el `Gate` lo pone quien llama.
+fn rutear_por_cupo(home: &Path, rol: Rol, tarea: &str) -> Result<String, String> {
+    let eleccion = rutear_en(home, rol, tarea, false, TOKENS_RUTEO).map_err(|e| e.to_string())?;
+    modelo_por_cupo(rol, &eleccion)
 }
 
 /// Textos de `result` que dicen que el login venció o no es válido. Se comparan en minúsculas.
@@ -2602,6 +2639,93 @@ mod tests {
             fila.resumen
         );
         assert_eq!(costos_estimados(&e, &fila.id), 2, "dos Llamadas de corte");
+    }
+
+    /// Ejecutor que, después de cada lanzamiento, llena el cupo del bloque de `home`. Así el ruteo del
+    /// próximo lanzamiento de un rol que va por cupo ya no lo deja pasar.
+    struct AgotaCupoTras<'a> {
+        interno: &'a dyn EjecutorBuilder,
+        home: &'a Path,
+    }
+
+    impl EjecutorBuilder for AgotaCupoTras<'_> {
+        fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+            let resultado = self.interno.lanzar(l);
+            llenar_cupo(self.home);
+            resultado
+        }
+
+        fn verificar_antes(&self, plazo: Duration) -> Result<(), ErrorCorre> {
+            self.interno.verificar_antes(plazo)
+        }
+
+        fn espera_vigencia(&self) -> EsperaVigencia {
+            self.interno.espera_vigencia()
+        }
+
+        fn vida_restante(&self) -> Result<Option<Duration>, ErrorCorre> {
+            self.interno.vida_restante()
+        }
+    }
+
+    /// Un evento de cupo de otra corrida, con un costo por encima de cualquier tope del bloque.
+    fn llenar_cupo(home: &Path) {
+        let mut ev = observe::evento_manual("otra-corrida", TipoEvento::Llamada, None);
+        ev.via = Some(Via::Cupo);
+        ev.modelo = Some("opus".into());
+        ev.cost_usd = 1000.0;
+        observe::registrar_en(&observe::ruta_eventos_en(home), &ev).expect("llenar el cupo");
+    }
+
+    /// Planifica va por cupo. Tras su lanzamiento, el cupo se llena: construye ya no va por cupo y no se lanza.
+    #[test]
+    fn corre_rol_que_deja_de_ir_por_cupo_no_se_lanza_y_la_corrida_para() {
+        let e = entorno();
+        let builder = Builder::default();
+        let agota = AgotaCupoTras {
+            interno: &builder,
+            home: &e.home,
+        };
+        let fila = correr_con(&e, &agota, &[], CONFIG).expect("la corrida para y llega a la fila");
+        {
+            let lanzados = builder.lanzados.borrow();
+            assert_eq!(lanzados.len(), 1, "solo planifica se lanza");
+            assert_eq!(lanzados[0].rol, Rol::Planifica);
+        }
+        assert_eq!(
+            gates(&e, FASE_ROL),
+            vec!["cupo agotado antes del rol construye, vuelta 1".to_string()]
+        );
+        let guardadas =
+            track::filas_de(&e.home.join("runs.jsonl"), &Filtro::default()).expect("runs");
+        assert_eq!(guardadas.len(), 1, "la fila se escribe");
+        assert_eq!(guardadas[0].id, fila.id);
+    }
+
+    /// La primera vuelta de construye se corta. Tras ella el cupo se llena: la segunda vuelta no se lanza.
+    #[test]
+    fn corre_vuelta_que_deja_de_ir_por_cupo_no_se_lanza_y_la_corrida_para() {
+        let e = entorno();
+        let programado = Programado::con(vec![cortado(), Paso::Bien]);
+        let agota = AgotaCupoTras {
+            interno: &programado,
+            home: &e.home,
+        };
+        let fila = correr_con(&e, &agota, &[], CONFIG_CONSTRUYE)
+            .expect("la corrida para y llega a la fila");
+        assert_eq!(
+            programado.lanzados.borrow().len(),
+            1,
+            "solo la primera vuelta se lanza"
+        );
+        assert_eq!(
+            gates(&e, FASE_ROL),
+            vec!["cupo agotado antes del rol construye, vuelta 2".to_string()]
+        );
+        let guardadas =
+            track::filas_de(&e.home.join("runs.jsonl"), &Filtro::default()).expect("runs");
+        assert_eq!(guardadas.len(), 1, "la fila se escribe");
+        assert_eq!(guardadas[0].id, fila.id);
     }
 
     #[test]
