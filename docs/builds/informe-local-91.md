@@ -80,3 +80,89 @@ No cambió ningún esquema serde. `docs/interfaces.md` no necesita regeneración
 7. `red_no_configurada` ahora mira solo la última línea del stderr. El diseño no lo pedía de forma explícita. Lo hice por la regla 3.
 8. Imagen base ausente sin línea `building at STEP` (error `creating build container`). Decisión: da pendiente con la ubicación del `FROM` si es única. El brief no fijaba esa forma.
 9. El riesgo aceptado de D2 sigue abierto: un proceso puede alternar rojo y verde entre tests.
+
+# Tarea 91b: corrección de la Tarea 91
+
+Rama `laptop/tarea-91`, base ea76273. Haiku construyó cada parte. El organizador revisó cada diff antes de su commit.
+El brief pedía `informe-local-91b.md`. La orden del usuario pidió agregar esta sección a este archivo.
+
+## 1. Resultado de la suite (91b)
+
+| Momento | Verdes | Fallas | Ignorados |
+|---|---|---|---|
+| Base sin podman (ea76273) | 3047 | 0 | 4 |
+| Final sin podman (3e393e0) | 3061 | 0 | 4 |
+| `tests/entrega.rs` con podman, antes (ea76273) | 34 | 14 | 0 |
+| `tests/entrega.rs` con podman, final | 48 | 0 | 0 |
+| `--lib entrega` con podman, final | 151 | 0 | 0 |
+
+- La base con podman viene del informe del orquestador: 14 fallas de 48 tests de `tests/entrega.rs`.
+- La suite completa con podman la corre el orquestador.
+- No corrí la validez, `corre`, `calibrar` ni la pasada reales.
+
+## 2. Causa de la clase A
+
+- El texto real de podman: `Error: i: image not known`. El contenedor de evaluación no arrancaba ni con `sleep` ni con `tail`.
+- La causa no era un montaje. Era la imagen. `tests/entrega.rs` escribía `imagen = "i"` en el `tarea.toml`.
+- Antes del punto 2 de la Tarea 91, los tests pasaban `ALPINE` a un ejecutor. Desde entonces, el contenedor usa `tarea.imagen`.
+- El arreglo: los tres `tarea.toml` de prueba usan `docker.io/library/alpine:3.20`.
+- Además, `Sesion::iniciar` ahora conserva el stderr de cada `run` fallido, y `iniciar_evaluacion` llama a `validar_rutas` antes del `run`.
+- Con eso, los 11 tests de la clase A quedaron verdes.
+
+## 3. Commits
+
+| Punto | Defecto | Tests vistos en rojo | Commit |
+|---|---|---|---|
+| 1 | El error de `run` se perdía, y no se validaban las rutas | `sesion_iniciar_incluye_el_stderr_de_cada_run_fallido`, `iniciar_evaluacion_valida_rutas_antes_de_podman`, y con podman los 11 de la clase A | a19338d |
+| 2 | HIGH-2 (125 del producto) y MEDIUM-1 (`PATH`) | `sesion_paso_args_pone_el_path_del_sistema_despues_de_la_activacion`, `sesion_correr_escenario_con_125_del_producto_es_fallo`, `eval_instalar_con_125_del_producto_no_instala`, `sesion_paso_args_con_timeout_lo_pone_dentro_del_envoltorio` | 1d85458 |
+| 3 | Clase B y HIGH-3 (la red por texto) | repetición sin mirar el texto, sonda en rojo con su motivo, `RUN echo "setup network"; false` con sonda verde, 7 de ubicación del paso | b3c358b |
+| 4 | HIGH-1 (`pide_red` en escenarios) | `sesion_correr_escenario_con_texto_de_red_y_sin_red_es_fallo`, `sesion_correr_escenario_con_red_queda_pendiente_sin_correrlo`, `eval_escenario_con_red_queda_pendiente_sin_correrlo` | 3e393e0 |
+
+Guardas sin rojo previo:
+- Punto 2: `envoltorio_deja_pasar_126_y_127_como_codigos_del_producto`, `eval_preludio_de_rust_con_codigo_125_es_infraestructura`.
+- Punto 2, con podman: `guarda_podman_envoltorio_el_wget_del_sistema_gana_al_wget_falso_del_producto`.
+- Punto 3: con la sonda verde el build con red que falla da rojo, y un `COPY` local da rojo sin repetir.
+- Punto 4: `escenario_red_por_defecto_es_falso_y_con_red_true_es_verdadero`.
+
+## 4. Qué falló o quedó incompleto
+
+- El test con podman del `PATH` usa `wget`, no `curl`. Alpine no trae `curl`, y un `curl` falso no tapa nada. El motivo es el mismo.
+- Un `PATH` con el sistema primero protege solo las herramientas que el sistema tiene. Una herramienta que solo aporta el producto, como `pytest` del venv, sigue saliendo del producto.
+- La sonda corre en `tarea.imagen` con `--pull=never`. Con una imagen ausente o sin `sh`, da "sin red" y deja pendiente.
+- La sonda se guarda una vez por proceso para todas las imágenes.
+- El pendiente "la red no se pudo configurar en este host" ya no lleva la línea del `RUN`. El aviso lleva la última línea del stderr.
+- `timeout` ahora corre dentro del envoltorio. La cita de un escenario que supera el plazo cambió. El código sigue siendo 124.
+- No corrí la suite completa con podman, ni la validez, `corre`, `calibrar` ni la pasada.
+
+## 5. Tests que cambiaron de valor
+
+- Cuatro de `paso_args`: la forma de los argumentos ahora incluye el envoltorio, con el `timeout` adentro.
+- `entrega_red_setup_network_con_red_queda_pendiente_con_aviso`, `entrega_red_pasta_fallida_con_red_queda_pendiente_con_aviso` y siete más de red en `entrega.rs` y `mod.rs`: la red mal configurada ahora la dice la sonda en rojo, no un texto.
+- `oraculo_hallazgo_de_la_construccion_llega_al_veredicto_en_entrega`: ahora un `RUN false` también se repite con red, y falla con red.
+- Siete de ubicación del paso (`clasifica_con_red`): miden el paso, no la regla de red.
+- `tests/entrega.rs`, clase B: aceptan tres desenlaces. Con red pasa (severidad 1), rojo en la línea N, o pendiente con el motivo de la sonda.
+- `sesion_correr_escenario_sin_red_queda_pendiente` pasó a `..._con_texto_de_red_y_sin_red_es_fallo`: un texto de red ya no decide.
+- `eval_escenario_con_red_queda_pendiente_fuera_del_mapa` pasó a `..._sin_correrlo`: ahora usa `red = true`.
+- `entrega_escenario_con_red_queda_pendiente_y_no_false` pasó a `entrega_escenario_que_declara_red_queda_pendiente_y_no_false`: el escenario declara `red = true`.
+- Borrados porque solo probaban `pide_red`: `entrega_pide_red_no_confunde_un_servicio_caido_con_falta_de_red`, `entrega_pide_red_reconoce_los_errores_de_apk_y_wget`.
+- `entrega_run_con_podman_real_que_imprime_step_falso_da_la_linea_del_run`: usa Alpine como imagen de la tarea, porque la sonda corre en ella.
+
+## 6. Llamadores revisados (91b)
+
+Codegraph y `grep -w` coinciden en todos.
+- `Podman::red_disponible` (nuevo): solo `construir_con`. `PodmanReal` lo sobreescribe.
+- `pide_red`, `PATRONES_RED`: borrados. Cero usos en `src/` y `tests/`.
+- `validar_rutas`: ahora `pub(crate)`. Llamadores: `ejecutar` e `iniciar_evaluacion`.
+- `paso_args`: llamadores `paso`, `lanzar` y sus tests. El nuevo `envoltorio_de` solo lo llama `paso_args`.
+- `clasificar_fallo`: sin cambio de firma. Llamadores: `construir_con` y los tests.
+- `Escenario` (campo `red`): literales de `entrega.rs`, `mod.rs` y `tarea.rs`. Las otras estructuras `Escenario` (`barrido.rs`, `mutacion.rs`, `tests/colab.rs`, `tests/corre.rs`) son distintas y no cambian.
+- `docs/interfaces.md`: solo cambia la fila `[[escenario]]`. `Escenario` no figura en los esquemas, así que no hubo regeneración. `tests/interfaces.rs` pasa.
+
+## 7. Preguntas para el planner
+
+1. **`PATH` del sistema primero.** El brief lo pide. Un `python` o `pytest` del venv puede quedar tapado por el del sistema. Decisión: lo hice como pedía. Confirmar con un repo de Python real.
+2. **La sonda usa `tarea.imagen`.** Decisión: sí, con `--pull=never` y `--http-proxy=false`. Una imagen ausente da "sin red".
+3. **Cualquier `RUN` que falla se repite con red.** Incluso un `RUN false`. Decisión: sí, como pide el diseño. Cada repetición registra su Gate.
+4. **`tarea.toml` existentes con escenarios que necesitan red.** Hoy dan fallo, no pendiente. Decisión: no los cambié. Hay que agregar `red = true` en cada tarea que los use.
+5. **Se perdió la regla "connection refused no es red".** Ya no existe ningún patrón de red. Decisión: es el diseño.
+6. **Cita del plazo.** Un escenario que supera 120 s ahora da código 124 y la cita es la última línea de su salida. Decisión: lo dejé así.
