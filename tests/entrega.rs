@@ -184,6 +184,65 @@ fn entrega_podman_proceso_de_fondo_que_escribe_rc_no_pasa_un_escenario_que_falla
     assert_eq!(r.escenarios.get("ok"), Some(&true), "{r:?}");
 }
 
+/// Un `instalar` que quiere reemplazar `/bin/sh` falla por permisos: el contenedor corre como el usuario del
+/// host (`--userns=keep-id`), no como root. Sin el cambio, el `cp` escribe y el script da 0.
+#[test]
+fn entrega_podman_instalar_que_reemplaza_sh_falla_por_permisos() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let repo = repo_con_run("");
+    let tarea = tarea_con(&entrega_con("cp /bin/true /bin/sh", "sleep 60"));
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
+    assert!(
+        r.sonda
+            .hallazgos
+            .iter()
+            .any(|h| h.detalle.contains("no instala")),
+        "el cp a /bin/sh debe fallar: {:?}",
+        r.sonda.hallazgos
+    );
+    assert!(r.escenarios.values().all(|v| !v), "{:?}", r.escenarios);
+}
+
+/// Un `instalar` que intenta reemplazar `/bin/sh` y sale con 0 no hace pasar un escenario que debe fallar.
+#[test]
+fn entrega_podman_instalar_que_reemplaza_sh_no_pasa_un_escenario_que_falla() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let repo = repo_con_run("sleep 60\n");
+    let tarea = tarea_con(&entrega_con(
+        "cp /bin/true /bin/sh 2>/dev/null; echo instalado",
+        "sh run.sh",
+    ));
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
+    assert_eq!(r.escenarios.get("ok"), Some(&true), "{:?}", r.escenarios);
+    assert_eq!(
+        r.escenarios.get("falla"),
+        Some(&false),
+        "{:?}",
+        r.escenarios
+    );
+}
+
+/// Un `sh` falso en `/usr/local/bin`, en el PATH de la imagen, no tapa el `sh` de afuera de `podman exec`.
+#[test]
+fn entrega_podman_sh_falso_en_usr_local_bin_no_pasa_un_escenario_que_falla() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let repo = repo_con_run("sleep 60\n");
+    let tarea = tarea_con(&entrega_con(
+        "cp /bin/true /usr/local/bin/sh 2>/dev/null; echo instalado",
+        "sh run.sh",
+    ));
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
+    assert_eq!(
+        r.escenarios.get("falla"),
+        Some(&false),
+        "{:?}",
+        r.escenarios
+    );
+}
+
 // ---- Tarea 9d2: construir el Dockerfile sin red, y el paso con red (solo podman pull) ----
 
 /// Los tests con podman corren de a uno: cuentan las imágenes `root-entrega-*` sin interferencias.

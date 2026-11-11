@@ -1491,9 +1491,10 @@ impl<'a> Sesion<'a> {
     }
 
     /// Argumentos de `podman exec` para `cmd`. Todo paso corre dentro de un `sh` envoltorio: primero el
-    /// PATH del sistema, después la activación (si hay) y el `cmd` como `$1`. El `sh` y el `timeout` del
-    /// envoltorio van por ruta absoluta. Con `con_timeout` y si la imagen trae `timeout`, el `timeout` va
-    /// dentro del envoltorio. El envoltorio convierte el 125 del producto en 1 (ver `CODIGO_PODMAN`).
+    /// PATH del sistema, después la activación (si hay) y el `cmd` como `$1`. El `sh` de afuera (el programa
+    /// de `podman exec`) y el del envoltorio van por ruta absoluta. El `timeout` del envoltorio también.
+    /// Con `con_timeout` y si la imagen trae `timeout`, el `timeout` va dentro del envoltorio. El envoltorio
+    /// convierte el 125 del producto en 1 (ver `CODIGO_PODMAN`).
     pub(crate) fn paso_args(&self, entorno: &Entorno, cmd: &str, con_timeout: bool) -> Vec<String> {
         let mut args: Vec<String> = vec!["exec".into()];
         if let Some(dir) = &entorno.dir {
@@ -1506,7 +1507,7 @@ impl<'a> Sesion<'a> {
             None
         };
         args.extend([
-            "sh".to_string(),
+            self.ruta_sh.clone(),
             "-c".to_string(),
             envoltorio_de(&entorno.activar, &self.ruta_sh, ruta_timeout),
             "_".to_string(),
@@ -4939,7 +4940,7 @@ pub(crate) mod tests {
             [
                 "exec",
                 "n",
-                "sh",
+                "/usr/bin/sh",
                 "-c",
                 ENVOLTORIO_CON_TIMEOUT,
                 "_",
@@ -4954,7 +4955,7 @@ pub(crate) mod tests {
         let exec = ExecFalso::con_codigos(&[]);
         let s = sesion_de_prueba(&exec, true);
         let args = s.paso_args(&Entorno::default(), "exit 0", true);
-        assert_eq!(args[2], "sh", "{args:?}");
+        assert_eq!(args[2], "/usr/bin/sh", "{args:?}");
         assert!(!args.iter().any(|a| a == "timeout"), "{args:?}");
         assert!(
             args[4].contains("/usr/bin/timeout 120 /usr/bin/sh -c \"$1\""),
@@ -4971,7 +4972,7 @@ pub(crate) mod tests {
             [
                 "exec",
                 "n",
-                "sh",
+                "/usr/bin/sh",
                 "-c",
                 ENVOLTORIO_SIN_ACTIVAR,
                 "_",
@@ -4985,7 +4986,7 @@ pub(crate) mod tests {
             [
                 "exec",
                 "n",
-                "sh",
+                "/usr/bin/sh",
                 "-c",
                 ENVOLTORIO_SIN_ACTIVAR,
                 "_",
@@ -5009,7 +5010,7 @@ pub(crate) mod tests {
                 "-w",
                 "/salida/work",
                 "n",
-                "sh",
+                "/usr/bin/sh",
                 "-c",
                 "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export A=1; /usr/bin/timeout 120 /usr/bin/sh -c \"$1\"; s=$?; [ \"$s\" -eq 125 ] && s=1; exit \"$s\"",
                 "_",
@@ -5036,6 +5037,44 @@ pub(crate) mod tests {
             .find("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH")
             .expect("el PATH del sistema va en el envoltorio");
         assert!(sistema < activacion, "{envoltorio}");
+    }
+
+    #[test]
+    fn sesion_paso_args_usa_la_ruta_absoluta_de_sh_como_programa_del_exec() {
+        // El `sh` de afuera (el programa de `podman exec`) sale de la ruta detectada, no de la búsqueda
+        // en el PATH de la imagen. Un `sh` que el producto deje en un dir del PATH no lo tapa.
+        let exec = ExecFalso::con_codigos(&[]);
+        let s = sesion_de_prueba(&exec, false);
+        let args = s.paso_args(&Entorno::default(), "exit 0", false);
+        assert_eq!(args[2], "/usr/bin/sh", "{args:?}");
+        assert_ne!(args[2], "sh", "{args:?}");
+    }
+
+    #[test]
+    fn eval_arranque_trae_userns_keep_id_y_paso_usa_sh_absoluto() {
+        // Arranque y pasos de la evaluación con el ejecutor de mentira: ambos salen de `FabricaEvalFalsa`.
+        let fabrica = sana();
+        let repo = repo_completo();
+        sonda_con(&fabrica, repo.path(), &tarea_de("shell", ENTREGA));
+        let llamadas = fabrica.exec.llamadas();
+        let arranque = llamadas
+            .iter()
+            .find(|l| l.first().map(String::as_str) == Some("run"))
+            .expect("hay un run de arranque");
+        assert!(
+            arranque.contains(&"--userns=keep-id".to_string()),
+            "{arranque:?}"
+        );
+        // El paso es el `exec` con envoltorio. La sonda de `sh` usa `/bin/sh` y no lleva envoltorio.
+        let paso = llamadas
+            .iter()
+            .find(|l| l.iter().any(|a| a.starts_with("export PATH=")))
+            .expect("hay un exec de paso");
+        let envoltorio = paso
+            .iter()
+            .position(|a| a.starts_with("export PATH="))
+            .expect("el envoltorio");
+        assert_eq!(paso[envoltorio - 2], "/usr/bin/sh", "{paso:?}");
     }
 
     #[test]
@@ -5162,7 +5201,7 @@ pub(crate) mod tests {
             [
                 "exec",
                 "n",
-                "sh",
+                "/usr/bin/sh",
                 "-c",
                 ENVOLTORIO_CON_TIMEOUT,
                 "_",
@@ -5571,6 +5610,142 @@ pub(crate) mod tests {
     const ALPINE: &str = "docker.io/library/alpine:3.20";
     /// Imagen con `python` en `/usr/local/bin`. Debe estar descargada localmente (`--pull=never`).
     const PYTHON_SLIM: &str = "docker.io/library/python:3.12-slim";
+
+    /// Fábrica real para los tests de podman de esta sección. Estática: la sesión que da vive en `'static`.
+    static FABRICA_REAL: FabricaReal = FabricaReal;
+
+    /// Sesión de evaluación real para `tarea`, con `cache` (o sin caché). `salida` y `cache` las conserva el llamador.
+    fn evaluacion_real(
+        repo: &Path,
+        home: &Path,
+        tarea: &Tarea,
+        salida: &Path,
+        cache: Option<&Path>,
+    ) -> Sesion<'static> {
+        let mut ejecucion = ejecucion_de_evaluacion(repo, home, tarea, salida);
+        ejecucion.cache = cache.map(Path::to_path_buf);
+        FABRICA_REAL
+            .iniciar_evaluacion(&ejecucion)
+            .expect("arranca la evaluación")
+    }
+
+    #[test]
+    fn entrega_podman_python_sh_falso_en_venv_no_pasa_escenario_que_falla() {
+        crate::saltar_sin_podman!();
+        // GUARDA con podman real: `instalar` deja un `sh` falso (exit 0) en el venv del preludio. Los pasos
+        // van con `sh` absoluto, y `python` sale del venv. El escenario que debe fallar sigue fallando.
+        let repo = repo_completo();
+        let home = tempfile::tempdir().expect("home");
+        let extra = "[entrega]\ninstalar = \"cp /bin/true /tmp/venv-eval/bin/sh\"\n\
+                     correr = \"sleep 60\"\nespera_segundos = 0\n\
+                     archivos = [\"README.md\", \"Dockerfile\"]\n\n\
+                     [[escenario]]\nid = \"falla\"\ncmd = \"exit 1\"\n\n\
+                     [[escenario]]\nid = \"venv\"\ncmd = \"test $(command -v python) = /tmp/venv-eval/bin/python\"\n";
+        let mut tarea = tarea_de("python", extra);
+        tarea.imagen = PYTHON_SLIM.into();
+        // Caché vacía con el `requirements-offline.txt` que pide el preludio. No hay dependencias que bajar.
+        let cache = tempfile::tempdir().expect("cache");
+        fs::write(cache.path().join("requirements-offline.txt"), "").expect("escribe");
+        let salida = tempfile::tempdir().expect("salida");
+        let sesion = evaluacion_real(
+            repo.path(),
+            home.path(),
+            &tarea,
+            salida.path(),
+            Some(cache.path()),
+        );
+        let r = correr_en_evaluacion(&sesion, &tarea, &tarea.escenario).expect("evalúa");
+        assert_eq!(
+            r.escenarios.get("falla"),
+            Some(&false),
+            "{:?}",
+            r.escenarios
+        );
+        assert_eq!(r.escenarios.get("venv"), Some(&true), "{:?}", r.escenarios);
+    }
+
+    #[test]
+    fn entrega_podman_preludio_rust_sin_root_copia_el_config() {
+        crate::saltar_sin_podman!();
+        // GUARDA con podman real: el preludio de Rust corre sin root y copia el `config.toml` de la caché a /tmp.
+        let repo = repo_completo();
+        let home = tempfile::tempdir().expect("home");
+        let mut tarea = tarea_de(
+            "rust",
+            "[[escenario]]\nid = \"config\"\ncmd = \"test -f /tmp/cargo-home/config.toml\"\n",
+        );
+        tarea.imagen = "docker.io/library/alpine:3.20".into();
+        let cache = tempfile::tempdir().expect("cache");
+        fs::write(cache.path().join("config.toml"), "[net]\n").expect("escribe");
+        let salida = tempfile::tempdir().expect("salida");
+        let sesion = evaluacion_real(
+            repo.path(),
+            home.path(),
+            &tarea,
+            salida.path(),
+            Some(cache.path()),
+        );
+        let preludio = preludio_de("rust").expect("Rust tiene preludio");
+        let p = sesion
+            .paso(&Entorno::default(), &preludio, PLAZO_CORTO, false)
+            .expect("corre el preludio");
+        assert_eq!(p.codigo, 0, "{p:?}");
+        let r = correr_en_evaluacion(&sesion, &tarea, &tarea.escenario).expect("evalúa");
+        assert_eq!(
+            r.escenarios.get("config"),
+            Some(&true),
+            "{:?}",
+            r.escenarios
+        );
+    }
+
+    #[test]
+    fn entrega_podman_keep_id_escribe_en_salida_trabajo_tmp_y_cache() {
+        crate::saltar_sin_podman!();
+        // GUARDA con podman real: con `--userns=keep-id` el usuario del host escribe en `/salida`, su
+        // carpeta de trabajo, `/tmp` (tmpfs) y la caché montada con escritura.
+        let salida = tempfile::tempdir().expect("salida");
+        let cache = tempfile::tempdir().expect("cache");
+        let ejecucion = Ejecucion {
+            imagen: "docker.io/library/alpine:3.20".into(),
+            repo: None,
+            oraculo: None,
+            oraculo_destino: None,
+            salida: salida.path().to_path_buf(),
+            cmd: String::new(),
+            env: Vec::new(),
+            timeout: PLAZO_CORTO,
+            red: false,
+            cache: Some(cache.path().to_path_buf()),
+            cache_rw: true,
+            rustsec: None,
+            trabajo: None,
+            secretos: Vec::new(),
+        };
+        let sesion = FABRICA_REAL
+            .iniciar_evaluacion(&ejecucion)
+            .expect("arranca la evaluación");
+        let sin = Entorno::default();
+        let p = sesion
+            .paso(&sin, "mkdir -p /salida/work", PLAZO_CORTO, false)
+            .expect("corre");
+        assert_eq!(p.codigo, 0, "{p:?}");
+        let en_trabajo = Entorno {
+            dir: Some("/salida/work".into()),
+            activar: String::new(),
+        };
+        for cmd in [
+            "touch a",
+            "touch /salida/b",
+            "touch /tmp/c",
+            "touch /cache/d",
+        ] {
+            let p = sesion
+                .paso(&en_trabajo, cmd, PLAZO_CORTO, false)
+                .expect("corre");
+            assert_eq!(p.codigo, 0, "{cmd}: {p:?}");
+        }
+    }
 
     #[test]
     fn guarda_podman_envoltorio_el_wget_del_sistema_gana_al_wget_falso_del_producto() {

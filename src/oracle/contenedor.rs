@@ -121,11 +121,14 @@ pub fn argumentos(e: &Ejecucion, nombre: &str) -> Vec<String> {
 
 /// Argumentos de `podman run -d` para un contenedor que Root mantiene vivo. Corre `comando` como
 /// entrypoint. No lleva `--rm`: Root quita el contenedor con `podman rm -f`.
+/// Lleva `--userns=keep-id`: el proceso corre como el usuario del host, sin privilegios dentro. Así el
+/// producto no reemplaza `/bin/sh` ni `/usr/bin/timeout` de la imagen. `argumentos` (run --rm) no lo lleva.
 pub(crate) fn argumentos_separado(e: &Ejecucion, nombre: &str, comando: &[&str]) -> Vec<String> {
     let Some((entrada, resto)) = comando.split_first() else {
         return Vec::new();
     };
     let mut args: Vec<String> = ["run", "-d", "--name", nombre].map(String::from).into();
+    args.push("--userns=keep-id".into());
     args.extend(opciones(e));
     args.extend(["--entrypoint", entrada].map(String::from));
     args.push(e.imagen.clone());
@@ -1310,7 +1313,35 @@ mod tests {
         let inicio: Vec<&str> = args[..4].iter().map(String::as_str).collect();
         assert_eq!(inicio, ["run", "-d", "--name", "root-oraculo-1-1"]);
         assert!(!args.iter().any(|a| a == "--rm"), "{args:?}");
+        assert!(args.contains(&"--userns=keep-id".to_string()), "{args:?}");
         assert!(!args.iter().any(|a| a == "--user"), "{args:?}");
+    }
+
+    #[test]
+    fn argumentos_separado_no_corre_como_root_del_contenedor() {
+        // Con `--userns=keep-id` el proceso es el usuario del host, sin privilegios dentro. Así el producto
+        // no puede reemplazar `/bin/sh` ni `/usr/bin/timeout` de la imagen.
+        let args = argumentos_separado(&ejecucion(), "n", &["sleep", "600"]);
+        let userns = args.iter().position(|a| a == "--userns=keep-id");
+        let imagen = args
+            .iter()
+            .position(|a| a == "docker.io/library/alpine:3.20");
+        assert!(userns.is_some() && userns < imagen, "{args:?}");
+    }
+
+    #[test]
+    fn argumentos_con_rm_no_llevan_userns_keep_id() {
+        // GUARDA: el camino de `suites`/`ejecutar` (`podman run --rm`) no cambia.
+        let args = argumentos(&ejecucion(), "n");
+        assert!(!args.iter().any(|a| a.contains("keep-id")), "{args:?}");
+        assert!(!args.iter().any(|a| a.starts_with("--userns")), "{args:?}");
+    }
+
+    #[test]
+    fn argumentos_separado_mantiene_tmp_escribible_como_tmpfs() {
+        // GUARDA: `/tmp` sigue siendo tmpfs con escritura. Con keep-id el usuario de host lo escribe (1777 por defecto).
+        let args = argumentos_separado(&ejecucion(), "n", &["sleep", "600"]);
+        assert!(contiene_par(&args, "--tmpfs", "/tmp:rw"), "{args:?}");
     }
 
     #[test]
