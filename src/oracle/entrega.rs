@@ -18,8 +18,8 @@ use crate::observe;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::configs::{self, Instruccion, instrucciones, palabra_clave};
 use crate::oracle::contenedor::{
-    PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman, correr_podman as correr_podman_crudo,
-    correr_programa, texto_de_linea_step,
+    MEMORIA, PIDS_LIMITE, PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman,
+    correr_podman as correr_podman_crudo, correr_programa, texto_de_linea_step,
 };
 use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
 use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
@@ -80,6 +80,8 @@ const PATRONES_AUSENTE: [&str; 3] = ["image not known", "no such image", "unable
 static CONTADOR_BUILD: AtomicU64 = AtomicU64::new(0);
 /// Detalle del hallazgo de entrega cuando la imagen solo se construye con red (Tarea 9d3).
 const DETALLE_NECESITA_RED: &str = "la imagen necesita red para construirse";
+/// Motivo del hallazgo rojo cuando un `RUN` trae `--network` (Tarea 9d4). Sale antes del build.
+const DETALLE_RED_EN_RUN: &str = "el Dockerfile pide red en RUN";
 /// Fase del `Gate` que registra la repetición del build con red (Tarea 9d3).
 const FASE_CONSTRUCCION_RED: &str = "construccion-red";
 /// Archivo de eventos de `ROOT_HOME`, el mismo que usan los demás módulos.
@@ -179,6 +181,11 @@ fn args_build(red: bool, etiqueta: &str, dockerfile: &str, contexto: &str) -> Ve
     vec![
         "build".into(),
         PROXY_FUERA.into(),
+        // Sin capacidades, sin ganancia de privilegios y con tope de memoria (Tarea 9d4).
+        // `podman build` no acepta `--pids-limit`: el tope de procesos no va aquí.
+        "--cap-drop=all".into(),
+        "--security-opt=no-new-privileges".into(),
+        format!("--memory={MEMORIA}"),
         "--network".into(),
         red.into(),
         "--pull=never".into(),
@@ -394,6 +401,27 @@ fn construir_con<'a>(
     let estatica = configs::dockerfile_corre_como_root(repo, reqs).map_err(ErrorOraculo::Infra)?;
     let texto = fs::read_to_string(contexto.join(&ruta))
         .map_err(|e| infra("leer el Dockerfile para construir", e))?;
+    // Un RUN con `--network` frena antes de podman (Tarea 9d4): hallazgo rojo, sin build.
+    if let Some(i) = instrucciones(&texto)
+        .into_iter()
+        .find(|i| run_pide_network(&i.logico))
+    {
+        resultado.hallazgos.push(crear_hallazgo(
+            DIMENSION,
+            3,
+            &ruta,
+            i.linea,
+            &i.cita,
+            DETALLE_RED_EN_RUN,
+            SONDA,
+            reqs,
+        ));
+        return Ok(Construccion {
+            resultado,
+            imagen: None,
+            avisos,
+        });
+    }
     // La imagen temporal se borra al salir de la función, pase lo que pase.
     let imagen = ImagenTemporal {
         etiqueta: etiqueta_unica(),
@@ -745,6 +773,26 @@ fn paso_con_url(logico: &str) -> bool {
 /// Verdadero si el paso necesita red al construirse: un `RUN`, o un `ADD`/`COPY` con una URL (A11).
 fn paso_que_necesita_red(logico: &str) -> bool {
     palabra_clave(logico).0 == "RUN" || paso_con_url(logico)
+}
+
+/// Verdadero si el `RUN` trae `--network` entre sus flags (Tarea 9d4). Acepta `--network=x` y
+/// `--network x`, con la palabra clave en cualquier caja. Solo mira las flags de antes del comando.
+fn run_pide_network(logico: &str) -> bool {
+    let (kw, resto) = palabra_clave(logico);
+    if kw != "RUN" {
+        return false;
+    }
+    for token in resto.split_whitespace() {
+        let minuscula = token.to_lowercase();
+        if minuscula == "--network" || minuscula.starts_with("--network=") {
+            return true;
+        }
+        // Del primer token que no es flag en adelante, son el comando: no cuentan.
+        if !token.starts_with("--") {
+            break;
+        }
+    }
+    false
 }
 
 /// Verdadero si la salida de un build trae evidencia de falta de red.
@@ -1206,6 +1254,10 @@ fn args_arranque(
         "--name".into(),
         nombre.into(),
     ];
+    // Sin capacidades, sin ganancia de privilegios y con topes de procesos y memoria (Tarea 9d4).
+    args.extend(["--cap-drop=all", "--security-opt=no-new-privileges"].map(String::from));
+    args.push(format!("--pids-limit={PIDS_LIMITE}"));
+    args.push(format!("--memory={MEMORIA}"));
     // Solo `escenarios/` entra al contenedor: `oculto/` y `tarea.toml` quedan afuera (M15).
     if let Some(dir) = escenarios {
         args.push("-v".into());
@@ -2529,6 +2581,165 @@ pub(crate) mod tests {
         }
     }
 
+    // ---- Tarea 9d4: capacidades, pids y memoria; RUN con --network frena el build ----
+
+    /// Dockerfile sin `--network` en ningún `RUN`: construye como hoy.
+    const DF_SIN_NETWORK: &str = "FROM debian:12\nRUN apt-get install -y curl\nUSER app\n";
+
+    #[test]
+    fn entrega_args_build_llevan_capacidades_y_memoria_sin_pids_limit() {
+        use crate::oracle::contenedor::{MEMORIA, PIDS_LIMITE};
+        // `podman build` no acepta `--pids-limit`: solo `--memory` de los límites.
+        for red in [false, true] {
+            let args = args_build(red, "etiqueta", "Dockerfile", ".");
+            for esperado in [
+                "--cap-drop=all".to_string(),
+                "--security-opt=no-new-privileges".to_string(),
+                format!("--memory={MEMORIA}"),
+            ] {
+                assert!(
+                    args.contains(&esperado),
+                    "red={red}: falta {esperado} en {args:?}"
+                );
+            }
+            assert!(
+                !args.iter().any(|a| a.starts_with("--pids-limit")),
+                "red={red}: sobra --pids-limit={PIDS_LIMITE} en {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn entrega_arranque_de_escenario_lleva_capacidades_pids_y_memoria() {
+        use crate::oracle::contenedor::{MEMORIA, PIDS_LIMITE};
+        let args = args_arranque("img:1", None, "nombre", &["sleep", "600"]);
+        for esperado in [
+            "--cap-drop=all".to_string(),
+            "--security-opt=no-new-privileges".to_string(),
+            format!("--pids-limit={PIDS_LIMITE}"),
+            format!("--memory={MEMORIA}"),
+        ] {
+            assert!(args.contains(&esperado), "falta {esperado} en {args:?}");
+        }
+        // Las opciones van antes de la imagen: si no, podman las toma como argumentos del comando.
+        let imagen = args.iter().position(|a| a == "img:1");
+        let memoria = args.iter().position(|a| a.starts_with("--memory="));
+        assert!(memoria < imagen, "{args:?}");
+    }
+
+    #[test]
+    fn entrega_dockerfile_con_run_network_frena_antes_del_build() {
+        // RUN con `--network=host`: el build no corre. Sale rojo y no llama a podman.
+        let repo = repo_con_archivos(&[(
+            "Dockerfile",
+            "FROM debian:12\nRUN --network=host apt-get update\nUSER app\n",
+        )]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(|_| salida_ok());
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert_eq!(
+            podman.total(),
+            0,
+            "llamó a podman: {:?}",
+            podman.llamadas.borrow()
+        );
+        assert!(!r.construida, "{r:?}");
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].detalle, "el Dockerfile pide red en RUN");
+        assert_eq!(r.hallazgos[0].linea, 2, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].severidad, 3, "{:?}", r.hallazgos);
+    }
+
+    #[test]
+    fn entrega_run_network_en_minusculas_y_con_espacio_frena() {
+        // Palabra clave en minúsculas, la forma `--network host` con espacio, y un `--mount` antes.
+        for texto in [
+            "FROM debian:12\nrun --network host apt-get update\n",
+            "FROM debian:12\nRUN --mount=type=cache,target=/c --network=host apt-get update\n",
+        ] {
+            let repo = repo_con_archivos(&[("Dockerfile", texto)]);
+            let home = tempfile::tempdir().expect("home");
+            let podman = PodmanFalso::nuevo(|_| salida_ok());
+            let c = construir_con(
+                repo.path(),
+                home.path(),
+                &tarea_de("shell", ""),
+                &[],
+                PLAZO_BUILD,
+                &podman,
+            )
+            .expect("construye");
+            let r = &c.resultado;
+            assert_eq!(podman.total(), 0, "{texto:?} llamó a podman");
+            assert!(!r.construida, "{texto:?}: {r:?}");
+            assert_eq!(r.hallazgos.len(), 1, "{texto:?}: {:?}", r.hallazgos);
+            assert_eq!(
+                r.hallazgos[0].detalle, "el Dockerfile pide red en RUN",
+                "{texto:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn entrega_dockerfile_sin_network_construye_como_hoy() {
+        // GUARDA: sin `--network` en ningún RUN, el build sigue sin red y construye.
+        let repo = repo_con_archivos(&[("Dockerfile", DF_SIN_NETWORK)]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        assert!(c.resultado.construida, "{:?}", c.resultado);
+        let builds = podman.builds();
+        assert_eq!(builds.len(), 1, "{builds:?}");
+        assert!(
+            builds[0]
+                .windows(2)
+                .any(|p| p[0] == "--network" && p[1] == "none"),
+            "{builds:?}"
+        );
+    }
+
+    #[test]
+    fn guarda_escenario_sin_ping_ni_procesos_de_mas() {
+        crate::saltar_sin_podman!();
+        // GUARDA: sin capacidades, `ping` falla. Con el tope de procesos, un bucle que crea
+        // más procesos que el límite falla también. Ninguno de los dos sale 0.
+        let corredor = FabricaReal
+            .iniciar("docker.io/library/alpine:3.20", None)
+            .expect("arranca el contenedor de escenario");
+        let ping = Escenario {
+            id: "ping".into(),
+            cmd: "ping -c 1 -W 1 127.0.0.1".into(),
+        };
+        let r = corredor.correr(&ping).expect("corre el escenario");
+        assert!(
+            !matches!(r, Prueba::Paso),
+            "ping salió 0 dentro del contenedor"
+        );
+        let bomba = Escenario {
+            id: "procesos".into(),
+            cmd: "i=0; while [ $i -lt 700 ]; do sleep 5 & i=$((i+1)); done; wait".into(),
+        };
+        let r = corredor.correr(&bomba).expect("corre el escenario");
+        assert!(!matches!(r, Prueba::Paso), "700 procesos salieron bien");
+    }
+
     #[test]
     fn escenario_usa_oraculo_detecta_la_ruta_de_la_tarea() {
         assert!(escenario_usa_oraculo("/oraculo/escenarios/set_get.sh"));
@@ -2728,6 +2939,9 @@ pub(crate) mod tests {
             [
                 "build",
                 "--http-proxy=false",
+                "--cap-drop=all",
+                "--security-opt=no-new-privileges",
+                "--memory=2g",
                 "--network",
                 "pasta:--no-map-gw",
                 "--pull=never",
@@ -2745,6 +2959,9 @@ pub(crate) mod tests {
             [
                 "build",
                 "--http-proxy=false",
+                "--cap-drop=all",
+                "--security-opt=no-new-privileges",
+                "--memory=2g",
                 "--network",
                 "none",
                 "--pull=never",

@@ -29,9 +29,9 @@ pub(crate) const TOPE_SALIDA_BUILDER: usize = 64 * 1024 * 1024;
 /// La cola basta para el diagnóstico. Lo que pasa del tope se descarta.
 pub(crate) const TOPE_SALIDA_COLAB: usize = 16 * 1024 * 1024;
 /// Tope de procesos e hilos del contenedor. Acota una fork bomb dentro de la imagen.
-const PIDS_LIMITE: u32 = 512;
+pub(crate) const PIDS_LIMITE: u32 = 512;
 /// Memoria máxima del contenedor. Sube si una suite legítima llega al tope (ver el informe de medición).
-const MEMORIA: &str = "2g";
+pub(crate) const MEMORIA: &str = "2g";
 /// Plazo de `podman rm -f` al limpiar un contenedor. Si podman no responde, la limpieza no bloquea a Root.
 const PLAZO_LIMPIEZA: Duration = Duration::from_secs(30);
 /// Códigos de salida que indican fallo del entorno, no del comando evaluado. 125: error propio de podman
