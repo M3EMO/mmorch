@@ -6737,3 +6737,107 @@ P95, P96, P97, P98 y P99 siguen abiertas, como están en las vueltas anteriores.
 ## Vuelta del 2026-11-11 (2): brief de la Tarea 82
 
 Escribí `docs/builds/brief-local-82.md`, con base 99c0f01 y rama `laptop/tarea-82`. Trae los 4 puntos de la vuelta anterior: huella solo de sondas, ventana de cambio, motivo visible y cota del peor caso. La cota cuenta 2 pedidos y 4 bytes por carácter, con 256 KiB como máximo. El informe trae la cota vieja y la nueva para t1, sin API. La medición de estabilidad sigue en paralelo.
+
+## Vuelta del 2026-11-11 (3): estabilidad del juez, cota por llamada y Tarea 83
+
+**Estado.** La punta local es f0aacbc, sin push. La Tarea 82 está en `laptop/tarea-82` (5aa2dc6), con 2859 verdes sin podman. La suite con podman corre ahora. S2 va en 2,4382 de 5 USD. P95 a P100 siguen sin respuesta.
+
+## 1. Corrección: la aceptación de la vuelta 71 no pasa en Diseño
+
+Dije que Arquitectura y Diseño de t1 daban veredicto en todos sus casos. En Diseño es falso. El caso con defecto quedó sin veredicto: "cobertura 8 de 13 de peso, menor que dos tercios".
+
+**Lo que pasa y lo que no:**
+- **Arquitectura:** el limpio da veredicto. El defecto no aplica, por `capas` (defecto d). Pasa solo a medias.
+- **Diseño:** el limpio da veredicto, y el defecto no. No pasa.
+
+**La causa no es la lectura.** El defecto es `error_tragado` en `src/shell_install/powershell.rs:86`. Esa línea difiere del estado inicial, así que la lectura guiada la pone primero. La causa es la inestabilidad de la sección 3: los ítems aparecen y desaparecen entre corridas, y la cobertura cruza los dos tercios al azar.
+
+**Hueco que encontré.** Los casos de calibración no guardan extractos (`*.casos.jsonl`). Solo los guarda el veredicto. Va a la Tarea 83.
+
+## 2. Las 8 preguntas de la Tarea 82
+
+1. **Conectar `peor_caso_de_home_con_tarea` en el CLI: no.** La sección 4 reemplaza la cota por caso. La Tarea 83 borra las funciones que queden sin uso.
+2. **Supuestos de bytes para hallazgos y reintento: acepto por ahora.** Una cota con supuestos no es una cota. Es otra razón para la sección 4.
+3. **No bajar los topes de `LimitesPrompt`:** correcto. Cambiaría el prompt y la huella.
+4. **`Confianza.motivos_sin_calibrar` y `Ord` en `Dimension`:** confirmo. `markdown()` solo recibe el `Informe`.
+5. **Una línea en literales de `Puntaje` fuera de la lista:** acepto. Es mecánico.
+6. **Motivo con puntaje sin veredicto: no se muestra.** Sin veredicto, la dimensión ya no calibra. El motivo de huella no agrega nada.
+7. **Ventanas.**
+   - Una línea sola más larga que `extracto_max` no se omite en silencio. Va una marca "línea N omitida por largo". Va a la Tarea 83.
+   - El corte de la última ventana al agotar el total: acepto.
+   - Las particiones contiguas con su marca: acepto.
+8. **Seguridad: se recalibra cuando haga falta.** Es solo de sondas, así que no gasta API. Las filas de memora y brasa no tienen huella, y siguen valiendo. Solo una fila de Seguridad escrita entre la mezcla de la 81 y la de la 82 queda cortada. Si existe, se recalibra.
+
+## 3. Qué dice la estabilidad medida
+
+**Cuatro juicios sobre el mismo código:**
+- `diseno.errores` da 3, 0, 0 y 0. `diseno.modularidad` da 0, 2, 0 y 2. Saltan 2 niveles sin cambio de código.
+- `diseno.operabilidad` y `diseno.robustez` se mueven 1 nivel como máximo.
+- `diseno.estado`, `diseno.documentacion` y los 3 ítems de Arquitectura aparecen y desaparecen.
+
+**Consecuencias:**
+- Detectar exige bajar 2 niveles frente a un solo juicio de la base. Con este ruido, un limpio da falsa alarma por azar. Eso explica el 0,0 de Diseño en t1.
+- El defecto sembrado toca `diseno.errores`. Ese ítem dio 0 en 3 de 4 juicios. Desde 0 no se puede bajar. En t1, `error_tragado` no se puede medir.
+- La cobertura cambia entre corridas, porque los ítems sin dato varían. Por eso un caso queda sin veredicto al azar.
+
+**Decisión: una regla de estabilidad por tarea, como `repeticiones = 3` en los tests.**
+1. `calibrar` juzga la base 3 veces.
+2. Un ítem es inestable en esa tarea si sus 3 niveles difieren en 2 o más, o si falta en alguno.
+3. Un ítem inestable no entra a la detección, al puntaje ni a la cobertura. Se informa como "inestable".
+4. La cobertura se mide sobre el peso de los ítems estables.
+5. Si los ítems estables pesan menos de la mitad de la dimensión, la dimensión queda "inestable en esta tarea". No calibra, y no da puntaje.
+6. `evaluar` usa la lista de ítems inestables de la última calibración de la tarea. Sin calibración, nada cambia.
+
+**Por qué no las otras dos salidas:**
+- **Más juicios por caso,** con la mediana de 3: triplica el costo de cada caso. La regla solo agrega 2 juicios por tarea, cerca de 0,13 USD.
+- **Sacar ítems de la rúbrica:** el ruido depende de la tarea. Un ítem inestable en t1 puede ser estable en otra. Además, tocar `rubricas/` cambia el contrato de las rúbricas.
+
+**Aplicada a la tabla de t1**, sin recalcular nada: en Diseño quedarían estables `operabilidad` y `robustez`. `documentacion` falta en un juicio. Es probable que Diseño quede "inestable en t1". Ese resultado es honesto: hoy Root no mide Diseño en t1.
+
+**No pido decisión al usuario.** Es una regla de medición, igual que descartar tests inestables. No cambia qué promete Root: un puntaje que hoy sale de ruido pasa a decir "inestable".
+
+## 4. La cota: se cambia por un control por llamada
+
+**Pasado a USD con `root.toml`** (deepseek-v4-pro, 1,74 por millón de entrada y 3,48 por millón de salida):
+- Cota vieja: 3 intentos por 0,567 USD, o sea 1,70 USD por caso.
+- Cota nueva: 6 intentos por 0,541 USD, o sea 3,25 USD por caso.
+- Con 2,56 USD en P80, Diseño ya no calibra ni un caso.
+
+**El problema de fondo.** La cota por caso se calcula antes de saber el prompt. Por eso usa el máximo, con supuestos. Lo medido es cerca de 0,07 USD por juicio.
+
+**Decisión: control antes de cada llamada, con el prompt real.**
+1. Antes de cada intento, Root ya tiene el prompt armado. Conoce sus bytes exactos.
+2. La cota del intento es: bytes del prompt al precio de entrada, más todo `max_tokens` al precio de salida.
+3. Un byte es una cota de un token, así que sigue siendo una cota estricta.
+4. Si lo gastado más la cota del intento pasa el tope, el intento no sale. El caso queda incompleto, como hoy.
+5. Esto cuenta el reintento y cada intento sin supuestos.
+6. Con un prompt de 100 KB, la cota de un intento es cerca de 0,29 USD. Entra en lo que queda de P80.
+
+**La regla de dinero no cambia:** el gasto nunca pasa el tope.
+
+**¿Se mezcla la Tarea 82 así? Sí, cuando el usuario lo ordene.** Los puntos 1 a 3 están bien. El punto 4 suma funciones que no se usan, así que el CLI sigue con la cota vieja. La cota vieja no cuenta el segundo pedido. Eso ya pasaba antes de la 82. El freno de 4,0 y 4,5 USD de la vuelta 69 cubre esa diferencia hasta la Tarea 83.
+
+## 5. Tarea 83
+
+| Punto | Qué | Archivos probables |
+|---|---|---|
+| 1 | Control de gasto por llamada, con el prompt real. Se borran las funciones de cota sin uso | `src/oracle/juez.rs`, `src/oracle/calibra.rs`, `src/lib.rs` |
+| 2 | Regla de estabilidad de ítems: 3 juicios de la base, ítems inestables fuera, dimensión "inestable en esta tarea" | `src/oracle/calibra.rs`, `src/oracle/regla.rs`, `src/tipos.rs`, `src/oracle/mod.rs` |
+| 3 | Los casos de calibración guardan los extractos leídos | `src/oracle/calibra.rs` |
+| 4 | Marca "línea N omitida por largo" | `src/oracle/juez.rs` |
+
+- Los puntos 1, 2 y 3 comparten `calibra.rs`. Van en serie.
+- El punto 4 toca `juez.rs` igual que el 1. Va después del 1.
+- **Test de aceptación del punto 2:** con un juez falso que alterna 0 y 2 en un ítem, ese ítem queda inestable y fuera de la cobertura.
+- **Test de aceptación del punto 1:** un tope de 0,30 USD deja salir un intento con un prompt de 100 KB, y frena el segundo.
+- **Medición después de mezclar:** `calibrar` de Diseño y Arquitectura en t1, con P80. Cuesta cerca de 0,45 USD. Quedan 2,56.
+
+**Los HIGH de la revisión de cierre pasan a la Tarea 84.** Esta va antes porque sin ella no se calibra ninguna dimensión de juez.
+
+## 6. Lo que corre en paralelo
+
+- La suite con podman de la Tarea 82, que ya corre.
+- El brief de la Tarea 83, cuando lo pidas. Arranca sobre la punta de `laptop/tarea-82`, porque comparte `calibra.rs` y `juez.rs`.
+- Nada más gasta P80 hasta la Tarea 83.
+
+**Preguntas al usuario:** ninguna nueva. El tope de P80 alcanza con el control por llamada. P95 a P100 siguen abiertas.
