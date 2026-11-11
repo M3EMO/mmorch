@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use root::observe;
 use root::observe::transcript::{self, HuellasOraculo};
 use root::tipos::{Evento, TipoEvento};
+use serde_json::json;
 use tempfile::TempDir;
 
 const TAREA: &str = "x";
@@ -312,4 +313,58 @@ fn transcript_archivo_inexistente_es_error() {
 fn transcript_oculto_inexistente_falla_cerrado() {
     let e = preparar();
     assert!(HuellasOraculo::armar(&e.root, Some(&e.home), "no-existe").is_err());
+}
+
+/// Línea del oráculo oculto que el builder también ve en `bootstrap/benches/composite.rs`.
+const LINEA_VISIBLE: &str = "let search_modes = SearchModeMap::default();";
+
+/// Como `preparar`, pero el oculto tiene `LINEA_VISIBLE` y `HUELLA`, `contrato/` queda vacía y
+/// `bootstrap/benches/composite.rs` trae `LINEA_VISIBLE`.
+fn preparar_con_bootstrap() -> Entorno {
+    let e = preparar();
+    fs::write(
+        e.root.join("oraculos/x/oculto/t.py"),
+        format!("{LINEA_VISIBLE}\n{HUELLA}\n"),
+    )
+    .expect("oculto");
+    fs::remove_file(e.root.join("oraculos/x/contrato/test_contrato.py")).expect("contrato vacía");
+    let composite = e.root.join("oraculos/x/bootstrap/benches/composite.rs");
+    fs::create_dir_all(composite.parent().expect("padre")).expect("bootstrap");
+    fs::write(
+        &composite,
+        format!("fn main() {{\n    {LINEA_VISIBLE}\n}}\n"),
+    )
+    .expect("composite");
+    e
+}
+
+#[test]
+fn transcript_linea_que_el_builder_ve_en_bootstrap_no_emite() {
+    let e = preparar_con_bootstrap();
+    let ruta = escrito(
+        &e,
+        &[
+            init(&e),
+            llamada_bash("b1", "cat benches/composite.rs"),
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "content": format!("fn main() {{\n    {LINEA_VISIBLE}\n}}")}]}}).to_string(),
+        ],
+    );
+    let eventos = revisar(&e, &ruta);
+    assert!(eventos.is_empty(), "{eventos:?}");
+}
+
+#[test]
+fn transcript_linea_unica_del_oculto_en_la_salida_emite_huella() {
+    let e = preparar_con_bootstrap();
+    let ruta = escrito(
+        &e,
+        &[
+            init(&e),
+            llamada_bash("b1", "pytest -q"),
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "content": HUELLA}]}}).to_string(),
+        ],
+    );
+    let eventos = revisar(&e, &ruta);
+    assert_eq!(motivos(&eventos), vec!["huella".to_string()], "{eventos:?}");
+    assert_eq!(eventos[0].extra["cita"], HUELLA);
 }

@@ -52,8 +52,8 @@ pub struct Fila {
     /// Copias sin alterar medidas. La especificidad sale de ellas.
     #[serde(default)]
     pub limpios: u32,
-    /// Casos limpios medidos con `sin_veredicto`: la dimensión no emitió veredicto en la copia. No detectan, así
-    /// que entran a `especificidad` como no detectados. No son falsas alarmas. Una fila sin el campo vale 0.
+    /// Copias limpias sin veredicto de la dimensión. No entran a `especificidad`: no hay veredicto que medir.
+    /// No son falsas alarmas. Una fila sin el campo vale 0.
     #[serde(default)]
     pub limpios_sin_veredicto: u32,
     /// Casos que no se pudieron aplicar al repo, por ejemplo sin Dockerfile. No entran a las métricas.
@@ -909,16 +909,20 @@ fn fila_de(
         .iter()
         .filter(|c| !c.es_defecto && c.sin_veredicto.is_some())
         .count() as u32;
+    // La especificidad solo mira los limpios con veredicto. Un limpio sin veredicto no es un no detectado.
+    let limpios_con_veredicto = casos
+        .iter()
+        .filter(|c| !c.es_defecto && c.sin_veredicto.is_none());
     let sensibilidad = proporcion(
         casos.iter().filter(|c| c.es_defecto && c.detectado).count() as u32,
         defectos_medidos,
     );
     let especificidad = proporcion(
-        casos
-            .iter()
-            .filter(|c| !c.es_defecto && !c.detectado)
+        limpios_con_veredicto
+            .clone()
+            .filter(|c| !c.detectado)
             .count() as u32,
-        limpios,
+        limpios_con_veredicto.count() as u32,
     );
     let mut items_medidos = BTreeMap::new();
     for item in items {
@@ -929,7 +933,7 @@ fn fila_de(
             .collect();
         let negativos: Vec<bool> = casos
             .iter()
-            .filter(|c| !c.es_defecto)
+            .filter(|c| !c.es_defecto && c.sin_veredicto.is_none())
             .filter_map(|c| c.detecta_en(item))
             .collect();
         let sens_item = proporcion(
@@ -1862,14 +1866,28 @@ fn nivel_de(puntaje: &Puntaje, item: &str) -> Option<u8> {
         .map(|i| i.nivel)
 }
 
+/// La especificidad de la fila y cuántos limpios tienen veredicto. Sin limpios con veredicto dice "sin medir".
+pub fn texto_especificidad(fila: &Fila) -> String {
+    let con_veredicto = fila.limpios.saturating_sub(fila.limpios_sin_veredicto);
+    let medida = fila
+        .especificidad
+        .map_or_else(|| "sin medir".to_string(), |v| format!("{v:.2}"));
+    format!(
+        "especificidad {medida} (limpios con veredicto {con_veredicto} de {})",
+        fila.limpios
+    )
+}
+
 /// `aciertos / total`. `None` sin casos: una métrica sin clase no es 0 ni 1.
 fn proporcion(aciertos: u32, total: u32) -> Option<f32> {
     (total > 0).then(|| aciertos as f32 / total as f32)
 }
 
-/// Una fila calibra solo con muestra mínima: defectos y limpios por encima de sus mínimos.
+/// Una fila calibra solo con muestra mínima de defectos y de limpios CON veredicto.
+/// Los limpios sin veredicto no cuentan para el mínimo de limpios.
 fn muestra_suficiente(fila: &Fila) -> bool {
-    fila.defectos >= MIN_DEFECTOS_APLICABLES && fila.limpios >= MIN_LIMPIOS
+    fila.defectos >= MIN_DEFECTOS_APLICABLES
+        && fila.limpios.saturating_sub(fila.limpios_sin_veredicto) >= MIN_LIMPIOS
 }
 
 /// Media de sensibilidad y especificidad. `None` si cualquiera de las dos no tiene casos.
@@ -2062,12 +2080,11 @@ mod tests {
         );
         assert_eq!(fila.sensibilidad, Some(1.0));
         assert_eq!(
-            fila.especificidad,
-            Some(1.0),
-            "todo limpio sin veredicto no detecta: no es FP"
+            fila.especificidad, None,
+            "sin limpio con veredicto no hay especificidad"
         );
         assert_eq!(fila.limpios_sin_veredicto, fila.limpios);
-        assert_eq!(fila.exactitud_balanceada, Some(1.0));
+        assert_eq!(fila.exactitud_balanceada, None);
     }
 
     #[test]
@@ -2122,7 +2139,7 @@ mod tests {
         }
         let fila = medida.fila.expect("fila");
         assert_eq!(fila.limpios_sin_veredicto, fila.limpios);
-        assert_eq!(fila.especificidad, Some(1.0));
+        assert_eq!(fila.especificidad, None);
     }
 
     #[test]
@@ -2222,6 +2239,97 @@ mod tests {
         assert_eq!(fila.especificidad, None, "sin limpios no hay especificidad");
         assert_eq!(fila.exactitud_balanceada, None);
         assert!(fila.items.is_empty(), "un ítem sin su clase no se mide");
+    }
+
+    #[test]
+    fn calibra_un_limpio_sin_veredicto_deja_especificidad_none() {
+        // Sin limpio con veredicto no hay especificidad. El texto lo dice como "sin medir".
+        let base = veredicto_base();
+        let fila = calibrar(
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| if limpia { sin(base) } else { hundido(base) },
+            2,
+        );
+        assert_eq!(
+            (fila.defectos, fila.limpios, fila.limpios_sin_veredicto),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            fila.especificidad, None,
+            "un limpio sin veredicto no mide especificidad"
+        );
+        assert_eq!(fila.exactitud_balanceada, None);
+        let texto = texto_especificidad(&fila);
+        assert!(texto.contains("sin medir"), "texto: {texto}");
+        assert!(texto.contains("0 de 1"), "texto: {texto}");
+    }
+
+    #[test]
+    fn calibra_limpio_sin_veredicto_mas_limpio_que_no_detecta_da_especificidad_1() {
+        // Dos limpios: uno sin veredicto y otro con veredicto que no detecta. Solo el segundo cuenta.
+        let (_t, tarea) = tarea_prueba();
+        let base = veredicto_base();
+        let llamadas = std::sync::atomic::AtomicUsize::new(0);
+        let medida = medir(
+            &tarea,
+            Dimension::Seguridad,
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| {
+                if !limpia {
+                    return hundido(base);
+                }
+                // Con un hilo, la primera copia limpia es la de índice menor.
+                if llamadas.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    sin(base)
+                } else {
+                    base.clone()
+                }
+            },
+            4,
+        );
+        let fila = medida.fila.expect("fila");
+        assert_eq!(
+            (fila.defectos, fila.limpios, fila.limpios_sin_veredicto),
+            (2, 2, 1)
+        );
+        assert_eq!(fila.especificidad, Some(1.0), "1 de 1 con veredicto");
+        assert_eq!(fila.exactitud_balanceada, Some(1.0));
+        let texto = texto_especificidad(&fila);
+        assert!(texto.contains("1 de 2"), "texto: {texto}");
+    }
+
+    #[test]
+    fn calibra_limpio_sin_veredicto_mas_limpio_que_detecta_da_especificidad_0() {
+        // Dos limpios: uno sin veredicto y otro con veredicto que detecta. El detectado es el único con veredicto.
+        let (_t, tarea) = tarea_prueba();
+        let base = veredicto_base();
+        let llamadas = std::sync::atomic::AtomicUsize::new(0);
+        let medida = medir(
+            &tarea,
+            Dimension::Seguridad,
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| {
+                if !limpia {
+                    return hundido(base);
+                }
+                if llamadas.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    sin(base)
+                } else {
+                    hundido(base)
+                }
+            },
+            4,
+        );
+        let fila = medida.fila.expect("fila");
+        assert_eq!(
+            (fila.defectos, fila.limpios, fila.limpios_sin_veredicto),
+            (2, 2, 1)
+        );
+        assert_eq!(fila.especificidad, Some(0.0), "0 de 1 con veredicto");
+        assert_eq!(fila.exactitud_balanceada, Some(0.5));
     }
 
     #[test]
@@ -3744,6 +3852,28 @@ mod tests {
 
     fn fila_de_prueba(tarea: &str, ts: f64) -> Fila {
         fila(tarea, Dimension::Seguridad, ts, Some(0.95))
+    }
+
+    #[test]
+    fn muestra_suficiente_no_cuenta_limpios_sin_veredicto() {
+        let f = Fila {
+            defectos: MIN_DEFECTOS_APLICABLES,
+            limpios: 5,
+            limpios_sin_veredicto: 1,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        };
+        assert!(!muestra_suficiente(&f));
+    }
+
+    #[test]
+    fn muestra_suficiente_con_limpios_con_veredicto_suficientes() {
+        let f = Fila {
+            defectos: MIN_DEFECTOS_APLICABLES,
+            limpios: 6,
+            limpios_sin_veredicto: 1,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        };
+        assert!(muestra_suficiente(&f));
     }
 
     #[test]
@@ -5500,9 +5630,8 @@ mod tests {
         .expect("calibra");
         assert_eq!((fila.defectos, fila.limpios, fila.reemplazos), (1, 1, 0));
         assert_eq!(
-            fila.especificidad,
-            Some(1.0),
-            "un limpio sin veredicto no es falso positivo"
+            fila.especificidad, None,
+            "un limpio sin veredicto no mide especificidad"
         );
         assert_eq!(fila.limpios_sin_veredicto, 1);
     }
