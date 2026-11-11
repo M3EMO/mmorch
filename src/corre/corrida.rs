@@ -796,26 +796,67 @@ impl Drop for VigilaSenales {
 /// Si la copia ya no existe, no es error: la carrera con `GuardiaCredencial::cerrar` es normal.
 fn al_recibir_senal(corrida: &Corrida, senal: i32, programa: &str, salir: impl Fn(i32)) {
     // Todo va bajo el cerrojo del ejecutor: ningún lanzamiento nuevo entra mientras se limpia.
-    // El contenedor primero: la copia va montada en el builder vivo, y borrarla no la quita de ahí.
     ejecutor::terminar_por_senal(|resultado_de_matar| {
-        if let Err(error) = resultado_de_matar {
+        // Un pánico en la limpieza no debe matar este hilo sin salir. Se atrapa aquí.
+        let limpieza = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            limpiar_por_senal(corrida, resultado_de_matar, programa);
+        }));
+        if let Err(payload) = limpieza {
             eprintln!(
-                "r00t corre: al recibir una señal no se pudo terminar el builder en curso: {error}"
+                "r00t corre: pánico al limpiar tras la señal {senal}: {}",
+                texto_del_panico(payload.as_ref())
             );
-        }
-        if let Err(error) = ejecutor::quitar_builders_de_este_proceso(programa, PLAZO_AL_SENAL) {
-            eprintln!(
-                "r00t corre: al recibir una señal no se pudieron quitar los contenedores del builder: {error}"
-            );
-        }
-        if let Err(error) = quitar_credencial(corrida) {
-            eprintln!(
-                "r00t corre: al recibir una señal no se pudo borrar la copia de la credencial: {error}"
-            );
+            // Último intento de borrar la copia. Si también falla, sale igual con el código de la señal.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                quitar_credencial(corrida)
+            }));
         }
         salir(codigo_de_senal(senal));
     });
 }
+
+/// Limpieza de `al_recibir_senal`, con el cerrojo del ejecutor tomado. Primero el contenedor: la copia
+/// va montada en el builder vivo, y borrarla no la quita de ahí. Después borra la copia de la credencial.
+fn limpiar_por_senal(
+    corrida: &Corrida,
+    resultado_de_matar: Result<(), ErrorCorre>,
+    programa: &str,
+) {
+    if let Err(error) = resultado_de_matar {
+        eprintln!(
+            "r00t corre: al recibir una señal no se pudo terminar el builder en curso: {error}"
+        );
+    }
+    if let Err(error) = ejecutor::quitar_builders_de_este_proceso(programa, PLAZO_AL_SENAL) {
+        eprintln!(
+            "r00t corre: al recibir una señal no se pudieron quitar los contenedores del builder: {error}"
+        );
+    }
+    #[cfg(test)]
+    if PANICO_DE_PRUEBA.load(std::sync::atomic::Ordering::Relaxed) {
+        panic!("pánico de prueba en la limpieza");
+    }
+    if let Err(error) = quitar_credencial(corrida) {
+        eprintln!(
+            "r00t corre: al recibir una señal no se pudo borrar la copia de la credencial: {error}"
+        );
+    }
+}
+
+/// Texto de un pánico, para el mensaje. Sin texto si el payload no es `&str` ni `String`.
+fn texto_del_panico(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(texto) = payload.downcast_ref::<&str>() {
+        texto
+    } else if let Some(texto) = payload.downcast_ref::<String>() {
+        texto.as_str()
+    } else {
+        "sin texto"
+    }
+}
+
+/// Si vale `true`, la limpieza de `al_recibir_senal` entra en pánico. Solo en tests.
+#[cfg(test)]
+static PANICO_DE_PRUEBA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Código de salida de una señal que mata el proceso: 128 más su número. SIGINT da 130 y SIGTERM, 143.
 fn codigo_de_senal(senal: i32) -> i32 {
@@ -3383,6 +3424,44 @@ mod tests {
             "la copia se borra aunque no haya podman"
         );
         assert_eq!(codigo.get(), Some(130));
+    }
+
+    #[test]
+    fn panico_en_la_limpieza_igual_sale_una_vez_con_130() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        let salidas = RefCell::new(Vec::new());
+        PANICO_DE_PRUEBA.store(true, std::sync::atomic::Ordering::Relaxed);
+        let resultado = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            al_recibir_senal(&corrida, SIGINT, podman.to_str().expect("ruta"), |c| {
+                salidas.borrow_mut().push(c);
+            });
+        }));
+        PANICO_DE_PRUEBA.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            resultado.is_ok(),
+            "el pánico de la limpieza no debe salir de al_recibir_senal"
+        );
+        assert_eq!(*salidas.borrow(), vec![130], "sale una vez, con 130");
+    }
+
+    #[test]
+    fn panico_en_la_limpieza_quita_la_copia_de_la_credencial() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        PANICO_DE_PRUEBA.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            al_recibir_senal(&corrida, SIGTERM, podman.to_str().expect("ruta"), |_| {});
+        }));
+        PANICO_DE_PRUEBA.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "tras el pánico la copia de la credencial se borra igual"
+        );
     }
 
     #[test]
