@@ -755,20 +755,45 @@ fn aplicar_redaccion(
     if let Some(texto) = conservadas(&redaccion.resumen, ids) {
         informe.resumen = texto;
     }
-    for (&pos, texto) in visibles.riesgos.iter().zip(&redaccion.riesgos) {
-        if let Some(nuevo) = conservadas(texto, ids) {
-            informe.riesgos[pos].texto = nuevo;
+    if let Some(textos) = alineados(
+        &redaccion.riesgos,
+        visibles.riesgos.len(),
+        &mut informe.confianza.avisos,
+    ) {
+        for (&pos, texto) in visibles.riesgos.iter().zip(textos) {
+            if let Some(nuevo) = conservadas(texto, ids) {
+                informe.riesgos[pos].texto = nuevo;
+            }
         }
     }
-    for (&pos, texto) in visibles
-        .proximos_pasos
-        .iter()
-        .zip(&redaccion.proximos_pasos)
-    {
-        if let Some(nuevo) = conservadas(texto, ids) {
-            informe.proximos_pasos[pos].texto = nuevo;
+    if let Some(textos) = alineados(
+        &redaccion.proximos_pasos,
+        visibles.proximos_pasos.len(),
+        &mut informe.confianza.avisos,
+    ) {
+        for (&pos, texto) in visibles.proximos_pasos.iter().zip(textos) {
+            if let Some(nuevo) = conservadas(texto, ids) {
+                informe.proximos_pasos[pos].texto = nuevo;
+            }
         }
     }
+}
+
+/// La lista del redactor, si tiene una entrada por cada acción visible. Si no, `None` y un aviso: el
+/// texto `k` no sabe a qué acción va, así que no se aplica ninguno.
+fn alineados<'a>(
+    textos: &'a [String],
+    visibles: usize,
+    avisos: &mut Vec<String>,
+) -> Option<&'a [String]> {
+    if textos.len() == visibles {
+        return Some(textos);
+    }
+    avisos.push(format!(
+        "el redactor devolvió {} textos para {visibles} acciones; se conservan los originales",
+        textos.len()
+    ));
+    None
 }
 
 /// Las oraciones de `texto` que citan un id de `ids`, unidas. `None` si no queda ninguna.
@@ -2243,9 +2268,14 @@ modulos = ["config"]
     #[test]
     fn informe_redaccion_con_ids_reemplaza_el_texto_de_la_accion() {
         let v = sdlc();
+        // Una entrada por acción visible (R3, R2 y R4), en el mismo orden.
         let redactor = RedactorFalso {
             redaccion: Redaccion {
-                proximos_pasos: vec!["Persistencia (R3) falta: armar el almacén.".into()],
+                proximos_pasos: vec![
+                    "Persistencia (R3) falta: armar el almacén.".into(),
+                    "Comandos (R2) queda parcial: completar el módulo.".into(),
+                    "Replicación (R4) falta: armar la réplica.".into(),
+                ],
                 ..Redaccion::default()
             },
         };
@@ -2262,6 +2292,125 @@ modulos = ["config"]
             "Persistencia (R3) falta: armar el almacén."
         );
         assert_eq!(con.proximos_pasos[0].refs, vec!["R3".to_string()]);
+    }
+
+    /// Tres hallazgos de severidad 2: tres riesgos visibles. Cada id sale en el texto del redactor.
+    fn tres_riesgos() -> Veredicto {
+        veredicto(
+            Vec::new(),
+            Some(1.0),
+            vec![
+                hallazgo("h-1", Dimension::Estructura, 2, &[]),
+                hallazgo("h-2", Dimension::Estructura, 2, &[]),
+                hallazgo("h-3", Dimension::Estructura, 2, &[]),
+            ],
+        )
+    }
+
+    #[test]
+    fn informe_redactor_con_menos_textos_que_visibles_conserva_los_originales_y_avisa() {
+        let v = tres_riesgos();
+        let sin = informe_de(&v);
+        assert_eq!(sin.riesgos.len(), 3, "{:?}", sin.riesgos);
+        // Dos textos para tres acciones: ninguno se aplica, ni siquiera el primero.
+        let redactor = RedactorFalso {
+            redaccion: Redaccion {
+                riesgos: vec![
+                    "El riesgo h-1 pide revisar el comando.".into(),
+                    "El riesgo h-2 pide revisar el comando.".into(),
+                ],
+                ..Redaccion::default()
+            },
+        };
+        let con = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            Some(&redactor),
+        )
+        .expect("informa");
+        assert_eq!(con.riesgos, sin.riesgos);
+        let aviso = "el redactor devolvió 2 textos para 3 acciones; se conservan los originales";
+        assert!(
+            con.confianza.avisos.iter().any(|a| a == aviso),
+            "{:?}",
+            con.confianza.avisos
+        );
+    }
+
+    #[test]
+    fn informe_redactor_con_menos_proximos_pasos_que_visibles_conserva_los_originales_y_avisa() {
+        let v = sdlc();
+        let sin = informe_de(&v);
+        let visibles = sin.proximos_pasos.len();
+        assert!(visibles > 1, "{:?}", sin.proximos_pasos);
+        let redactor = RedactorFalso {
+            redaccion: Redaccion {
+                proximos_pasos: vec!["Persistencia (R3) falta: armar el almacén.".into()],
+                ..Redaccion::default()
+            },
+        };
+        let con = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            Some(&redactor),
+        )
+        .expect("informa");
+        assert_eq!(con.proximos_pasos, sin.proximos_pasos);
+        let aviso = format!(
+            "el redactor devolvió 1 textos para {visibles} acciones; se conservan los originales"
+        );
+        assert!(
+            con.confianza.avisos.iter().any(|a| a == &aviso),
+            "{:?}",
+            con.confianza.avisos
+        );
+    }
+
+    #[test]
+    fn informe_redactor_con_la_misma_cantidad_aplica_sus_textos_y_no_avisa() {
+        let v = tres_riesgos();
+        let sin = informe_de(&v);
+        let textos = vec![
+            "El riesgo h-1 pide revisar el comando.".to_string(),
+            "El riesgo h-2 pide revisar el comando.".to_string(),
+            "El riesgo h-3 pide revisar el comando.".to_string(),
+        ];
+        let redactor = RedactorFalso {
+            redaccion: Redaccion {
+                riesgos: textos.clone(),
+                ..Redaccion::default()
+            },
+        };
+        let con = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            Some(&redactor),
+        )
+        .expect("informa");
+        // Mismo orden que el informe sin redactor: cada texto cae en su acción.
+        assert_eq!(con.riesgos.len(), sin.riesgos.len());
+        for (accion, original) in con.riesgos.iter().zip(&sin.riesgos) {
+            let id = original.refs[0].as_str();
+            let esperado = textos
+                .iter()
+                .find(|t| t.contains(id))
+                .expect("texto del id");
+            assert_eq!(&accion.texto, esperado);
+        }
+        assert!(
+            !con.confianza
+                .avisos
+                .iter()
+                .any(|a| a.contains("el redactor devolvió")),
+            "{:?}",
+            con.confianza.avisos
+        );
     }
 
     #[test]
