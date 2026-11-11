@@ -8268,3 +8268,67 @@ Los tres grupos no comparten archivos, y corren en paralelo. Dentro del grupo A,
 | P100, los worktrees auxiliares | Limpieza |
 
 **Preguntas al usuario:** ninguna nueva. P95 a P102 siguen abiertas. **P96 es la que más frena hoy.**
+
+## Vuelta del 2026-11-11 (25): el diseño de P96 a
+
+**Respuesta del usuario a P96, literal:** "a". Es la opción "Bloquea solo lo que el cambio introduce. Lo previo se informa, y no bloquea. Un secreto bloquea siempre."
+
+**Estado.** La Tarea 102 se construye desde cabb373. Las mezclas de la 84 a la 102 y P95, P97 a P102 esperan al usuario.
+
+## 1. Cómo se identifica hoy un hallazgo
+
+- Cada hallazgo trae un `id`, armado por `crear_hallazgo` (`src/oracle/perfiles/mod.rs:64`) con la dimensión, el archivo, la cita y el detalle. La línea no entra al id. Lo dijo la revisión de cierre, y sirve acá: un hallazgo que solo cambió de línea conserva su id.
+- **cargo audit** (`src/oracle/perfiles/herramientas.rs`, cerca de la línea 248): el archivo es `Cargo.lock`, la cita es `<crate> <versión>`, y el detalle empieza con el id del aviso, por ejemplo `RUSTSEC-2025-0024`. Una vulnerabilidad da severidad 3, y un aviso sin vulnerabilidad da severidad 1.
+- **Bloqueo hoy** (`bloqueos`, `src/oracle/informe.rs:369`): todo hallazgo de Seguridad con severidad 3 bloquea, venga de donde venga.
+
+## 2. Qué es "lo que el cambio introduce"
+
+**La línea base de Seguridad.** Root corre las sondas de Seguridad sobre `oraculos/<tarea>/bootstrap/`, el estado inicial. Ese estado vive en el oráculo, no en el repo evaluado. El producto no lo puede tocar. Los ids que salen de ahí son la línea base.
+
+**Un hallazgo es previo si su id está en la línea base, y además cumple la regla de su fuente:**
+
+| Fuente | Previo si | Nuevo si |
+|---|---|---|
+| cargo audit | El mismo aviso, el mismo crate y la misma versión están en la línea base. El id ya junta los tres | Cambia cualquiera de los tres. Un crate nuevo, una versión distinta del mismo crate, o un aviso nuevo |
+| Sondas nativas | El id está en la línea base, y su línea queda fuera de los rangos que cambió el commit (`cambios::rangos_cambiados`) | El id no está en la línea base, o su línea cae dentro del cambio |
+| gitleaks | Se marca previo si el id está en la línea base, solo para informarlo | **Siempre bloquea**, sea previo o nuevo |
+
+**Ids repetidos.** Si el repo trae el mismo id más veces que la línea base, las veces de más son nuevas. Primero cuentan como nuevas las que caen dentro del cambio.
+
+**Sin `bootstrap/`:** no hay línea base. Todo hallazgo cuenta como nuevo, como hoy. El informe lo dice: "sin estado inicial: todo hallazgo de Seguridad cuenta como nuevo". Falla cerrado.
+
+## 3. Por qué un rojo no se vuelve verde
+
+- **La línea base sale del oráculo.** El producto no puede agregar un id a la línea base, porque nunca escribe en `oraculos/`.
+- **Un aviso nuevo no puede pasar por previo.** Para ser previo, el aviso, el crate y la versión tienen que estar en el `Cargo.lock` del estado inicial. Si el producto agrega una dependencia vulnerable, su id es nuevo. Si cambia una versión vulnerable por otra también vulnerable, el id cambia, y también es nuevo.
+- **Un hallazgo nativo dentro del cambio es nuevo siempre,** aunque su texto coincida con uno del estado inicial. Así el producto no puede copiar una línea mala que ya existía en otro lugar y hacerla pasar por previa.
+- **Los secretos bloquean siempre.** Es parte literal de la respuesta del usuario.
+- **El riesgo que queda es del lado estricto.** Un archivo movido sin cambios hace que sus hallazgos nativos aparezcan como nuevos. Eso puede bloquear de más, nunca de menos.
+
+## 4. Qué cambia en la decisión y en el puntaje
+
+1. **Bloqueo.** `bloqueos` solo mira los hallazgos de Seguridad nuevos con severidad 3, y todo secreto.
+2. **Puntaje de Seguridad.** Cuenta solo los hallazgos nuevos. El usuario eligió que "bloqueado" hable del cambio, y el puntaje debe hablar de lo mismo. La excepción son los secretos previos, que cuentan.
+3. **Las otras dimensiones no cambian en esta tarea.** Arquitectura, por ejemplo, ve el ciclo de 27 módulos de broot en el estado inicial. Esa dimensión no bloquea, y la calibración ya compara contra la base. Aplicarles la misma regla es una idea para después, y no la decidió el usuario.
+
+## 5. Cómo aparece lo previo en el informe del PM
+
+1. **Una sección propia, "Avisos previos".** Lista cada hallazgo previo: fuente, aviso o regla, crate y versión o archivo, y severidad. Termina con: "estaban en el estado inicial; no bloquean".
+2. **El resumen** suma una línea: "N avisos previos de Seguridad, no bloquean".
+3. **Un secreto previo** no va en esa sección. Va con los bloqueos, con la nota "estaba en el estado inicial; los secretos bloquean siempre".
+4. **Sin `bootstrap/`,** la sección no aparece, y el resumen dice que todo cuenta como nuevo.
+
+## 6. Tarea 103
+
+Brief: `docs/builds/brief-local-103.md`. Base: punta de `laptop/tarea-102`, que completa el orquestador. Rama `laptop/tarea-103`.
+
+**Por qué no en paralelo con la 102.** La 103 necesita tocar `src/oracle/mod.rs`, donde corre la evaluación, y la 102 también lo toca. Son dos cambios chicos en el mismo archivo. Ir en serie es más barato que rebasar.
+
+| Grupo | Qué | Archivos |
+|---|---|---|
+| A | Línea base de Seguridad desde `bootstrap/`, con memoria, y la marca de previo | `src/oracle/previos.rs` (nuevo), `src/oracle/mod.rs`, `src/tipos.rs` |
+| B | Bloqueo, puntaje e informe con lo previo | `src/oracle/informe.rs` |
+
+El grupo B usa el campo que agrega el A, así que va después.
+
+**Preguntas al usuario:** ninguna nueva. P95 y P97 a P102 siguen abiertas.
