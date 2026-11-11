@@ -21,7 +21,10 @@ use super::memo::{Alcance, MemoSondas, ReusoSondas};
 use super::mutacion::MutanteMuerto;
 use super::rubrica::{Mide, Rubrica, cargar_embebidas};
 use super::tarea::Tarea;
-use super::{AVISO_TARGET_FRIO, ErrorOraculo, OpcionesOraculo, Partes, Target, partes_de};
+use super::{
+    AVISO_TARGET_FRIO, CARPETA_TEMPORALES, ErrorOraculo, OpcionesOraculo, Partes, Target,
+    partes_de, temporal,
+};
 use crate::borrado;
 use crate::config::Config;
 use crate::goal::calcular_hash;
@@ -409,6 +412,7 @@ pub fn calibrar_con(
     // Sin home no hay corrida de mutación grabada: no hay muertos que dirigir `AssertBorrado`.
     // Sin memo ni reuso, el tipo de caso no cambia nada: el evaluador de la API de tests lo ignora.
     let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| evaluador(ruta);
+    // Sin `home` la carpeta temporal va al directorio temporal del sistema (`tempfile::tempdir()`).
     calibrar_medida(
         tarea,
         dimension,
@@ -419,6 +423,7 @@ pub fn calibrar_con(
         None,
         &Vec::new,
         &|| None,
+        None,
         None,
     )?
     .fila
@@ -643,6 +648,7 @@ fn calibrar_medida(
     muertos_de_la_base: &dyn Fn() -> Vec<MutanteMuerto>,
     leer_digest: &(dyn Fn() -> Option<String> + Sync),
     compartidos: Option<&Compartidos>,
+    home: Option<&Path>,
 ) -> Result<Medida, ErrorOraculo> {
     calibrar_medida_con_hilos(
         tarea,
@@ -656,6 +662,7 @@ fn calibrar_medida(
         leer_digest,
         CASOS_EN_PARALELO,
         compartidos,
+        home,
     )
 }
 
@@ -929,6 +936,7 @@ fn calibrar_medida_con_hilos(
     leer_digest: &(dyn Fn() -> Option<String> + Sync),
     hilos: usize,
     compartidos: Option<&Compartidos>,
+    home: Option<&Path>,
 ) -> Result<Medida, ErrorOraculo> {
     let tarea_hash = hash_de_tarea(tarea)?;
     let defectos = inyectar::de_dimension(dimension);
@@ -943,8 +951,17 @@ fn calibrar_medida_con_hilos(
             "oraculo calibrar necesita n de 1 o más".into(),
         ));
     }
-    // La carpeta temporal va antes de la base: la base deja ahí su `target` (Tarea 59).
-    let tmp = tempfile::tempdir().map_err(|e| super::infra("carpeta temporal", e))?;
+    // La carpeta temporal va antes de la base: la base deja ahí su `target` (Tarea 59). Con `home` cae en
+    // `home/tmp`, no en el `/tmp` del sistema (RAM en Fedora). Se borra al salir, también con error.
+    let tmp = match home {
+        Some(home) => {
+            let raiz = home.join(CARPETA_TEMPORALES);
+            fs::create_dir_all(&raiz)
+                .map_err(|e| super::infra("directorio temporal de ROOT_HOME", e))?;
+            temporal(&raiz).map_err(|e| super::infra("carpeta temporal", e))?
+        }
+        None => tempfile::tempdir().map_err(|e| super::infra("carpeta temporal", e))?,
+    };
     let destino_target = tmp.path().join(NOMBRE_TARGET_BASE);
     // La base corre con el límite activo: su juez también cuenta. Una base rechazada no mide nada.
     let base = en_limite(tope, || {
@@ -1477,6 +1494,7 @@ pub fn calibrar_tarea_con(
         &|| memo.mutantes_muertos(&tarea),
         &|| target::digest_de_imagen(&tarea.imagen),
         compartidos.as_ref(),
+        Some(home),
     )?;
     // Los casos se escriben antes de `agregar`, también si el tope detuvo la calibración.
     let casos = match &medida.fila {
@@ -2866,6 +2884,72 @@ mod tests {
         )
         .expect("calibra con el repo de la tarea");
         assert_eq!(vistos.lock().expect("lock")[0], repo);
+    }
+
+    /// La carpeta temporal de la base vive dentro de `home/tmp`, no en el `/tmp` del sistema.
+    #[test]
+    fn calibra_carpeta_temporal_queda_dentro_de_home_tmp() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let destinos = Mutex::new(Vec::<PathBuf>::new());
+        let evaluador = |_: &Tarea, _: &Path, opciones: &OpcionesOraculo| {
+            if let Target::Guardar(destino) = &opciones.target {
+                destinos.lock().expect("lock").push(destino.clone());
+            }
+            Ok(veredicto_base())
+        };
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let vistos = destinos.lock().expect("lock");
+        assert_eq!(vistos.len(), 1, "la base recibe un target: {vistos:?}");
+        assert!(
+            vistos[0].starts_with(home.path().join("tmp")),
+            "la carpeta temporal no está en home/tmp: {}",
+            vistos[0].display()
+        );
+    }
+
+    /// Al terminar la calibración, su carpeta temporal ya no existe. Pasa también si la base falla.
+    #[test]
+    fn calibra_carpeta_temporal_se_borra_al_terminar_aunque_falle() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let destinos = Mutex::new(Vec::<PathBuf>::new());
+        let evaluador =
+            |_: &Tarea, _: &Path, opciones: &OpcionesOraculo| -> Result<Veredicto, ErrorOraculo> {
+                if let Target::Guardar(destino) = &opciones.target {
+                    destinos.lock().expect("lock").push(destino.clone());
+                }
+                Err(ErrorOraculo::Infra("evaluador roto".into()))
+            };
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect_err("el evaluador falla");
+        let vistos = destinos.lock().expect("lock");
+        let destino = vistos.first().expect("la base recibe un target");
+        let carpeta = destino.parent().expect("carpeta temporal");
+        assert!(
+            !carpeta.exists(),
+            "la carpeta temporal sobrevive a la calibración: {}",
+            carpeta.display()
+        );
     }
 
     /// Entrega sin `[entrega]` y con un repo sin Dockerfile: la fila es no aplicable. Ni la base ni los casos corren.
@@ -5209,6 +5293,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("mide")
     }
@@ -5337,6 +5422,7 @@ mod tests {
             &Vec::new,
             &|| None,
             1,
+            None,
             None,
         )
         .expect("mide")
@@ -6365,6 +6451,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("calibra");
         assert!(
@@ -6561,6 +6648,7 @@ mod tests {
             &|| None,
             CASOS_EN_PARALELO,
             None,
+            None,
         )
         .expect("calibra");
         assert!(medida.detencion.is_some(), "el límite detiene la medida");
@@ -6607,6 +6695,7 @@ mod tests {
             &Vec::new,
             &|| None,
             1,
+            None,
             None,
         )
         .expect("calibra");
@@ -6670,6 +6759,7 @@ mod tests {
                 &Vec::new,
                 &|| None,
                 hilos,
+                None,
                 None,
             )
             .expect("calibra")
@@ -6747,6 +6837,7 @@ mod tests {
             &|| None,
             CASOS_EN_PARALELO,
             None,
+            None,
         )
         .err()
         .expect("el error de un caso corta la calibración");
@@ -6783,6 +6874,7 @@ mod tests {
             &Vec::new,
             leer_digest,
             1,
+            None,
             None,
         )
         .expect("calibra")
@@ -6924,6 +7016,7 @@ mod tests {
             &Vec::new,
             &leer,
             1,
+            None,
             None,
         )
         .expect("calibra");
@@ -7068,6 +7161,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("calibra");
         let caso = medida
@@ -7118,6 +7212,7 @@ mod tests {
             &Vec::new,
             &|| None,
             1,
+            None,
             None,
         )
         .expect("calibra");
@@ -7953,6 +8048,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("mide");
         let fila = medida.fila.expect("hay fila");
@@ -7991,6 +8087,7 @@ mod tests {
             &Vec::new,
             &|| None,
             1,
+            None,
             None,
         )
         .expect("mide");
@@ -8039,6 +8136,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("mide");
         let fila = medida.fila.expect("hay fila");
@@ -8077,6 +8175,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("mide");
         assert_eq!(bases.load(Ordering::SeqCst), 1, "la base se juzga una vez");
@@ -8111,6 +8210,7 @@ mod tests {
             &Vec::new,
             &|| None,
             1,
+            None,
             None,
         )
         .expect("mide");
@@ -8147,6 +8247,7 @@ mod tests {
             &Vec::new,
             &|| None,
             1,
+            None,
             None,
         )
         .expect("mide");
