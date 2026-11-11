@@ -6841,3 +6841,7 @@ Dije que Arquitectura y Diseño de t1 daban veredicto en todos sus casos. En Dis
 - Nada más gasta P80 hasta la Tarea 83.
 
 **Preguntas al usuario:** ninguna nueva. El tope de P80 alcanza con el control por llamada. P95 a P100 siguen abiertas.
+
+## Vuelta del 2026-11-11 (4): brief de la Tarea 83
+
+Escribí `docs/builds/brief-local-83.md`, con base 5aa2dc6 y rama `laptop/tarea-83`. Trae 4 puntos: control de gasto por llamada con reserva atómica, estabilidad de ítems con 3 juicios de la base, extractos en los casos y marca de línea omitida. Los puntos 1 a 3 van en serie por `calibra.rs`, y el 4 va después del 1. La Tarea 82 pasó la suite con podman: 2859 verdes y 0 fallas. Su mezcla espera la orden del usuario.
