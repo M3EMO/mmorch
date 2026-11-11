@@ -94,6 +94,10 @@ pub struct Fila {
     /// Una fila sin el campo vale `None`. Con ítems del juez, `None` cuenta como vieja y no calibra.
     #[serde(default)]
     pub huella: Option<String>,
+    /// Ítems del juez que variaron entre los tres juicios de la base, en orden. No entran a la medición de la
+    /// dimensión. Una fila sin el campo vale vacía.
+    #[serde(default)]
+    pub inestables: Vec<String>,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -168,6 +172,12 @@ impl Calibraciones {
         }
     }
 
+    /// Ítems inestables de la fila más reciente de `dimension`. Vacía si la tarea no tiene fila.
+    pub fn inestables_de(&self, tarea: &str, dimension: Dimension) -> &[String] {
+        self.de(tarea, dimension)
+            .map_or(&[], |fila| fila.inestables.as_slice())
+    }
+
     /// Motivo por el que la fila más reciente de `dimension` no calibra por su huella: es de otro juez.
     /// `None` si no hay fila con muestra suficiente, o si su huella es la actual.
     pub fn motivo_sin_calibrar(&self, tarea: &str, dimension: Dimension) -> Option<&'static str> {
@@ -180,6 +190,26 @@ impl Calibraciones {
 
 /// Motivo de un puntaje cuya fila tiene otra huella: la calibración sale de otro juez.
 const MOTIVO_OTRO_JUEZ: &str = "calibración de otro juez";
+
+/// `true` si los ítems `inestables` de `dimension` dejan menos de la mitad de su peso estable (Tarea 83, punto 2).
+pub fn dimension_inestable(
+    rubricas: &[Rubrica],
+    dimension: Dimension,
+    inestables: &[String],
+) -> bool {
+    let de_la_dimension: Vec<Rubrica> = rubricas
+        .iter()
+        .filter(|r| Dimension::desde_clave(&r.id) == Some(dimension))
+        .cloned()
+        .collect();
+    let excluidos: BTreeSet<String> = inestables.iter().cloned().collect();
+    inestables::dimension_inestable(&inestables::pesos_de(&de_la_dimension), &excluidos)
+}
+
+/// Motivo de una dimensión inestable que nombra sus ítems.
+pub fn motivo_inestable(inestables: &[String]) -> String {
+    inestables::motivo(&inestables.iter().cloned().collect())
+}
 
 /// Media de los `valor` de las dimensiones calibradas y con veredicto, con pesos iguales. `None` si ninguna.
 pub fn global_de(puntajes: &[Puntaje]) -> Option<f32> {
@@ -241,6 +271,7 @@ use inyectar::{Defecto, Inyeccion};
 
 mod compartidos;
 mod estables;
+mod inestables;
 mod regla;
 mod sonda;
 mod target;
@@ -439,6 +470,8 @@ fn medida_detenida(detencion: Detencion) -> Medida {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TipoCaso {
     Base,
+    /// Juicio extra de la base (Tarea 83, punto 2). Reusa las sondas deterministas de la base y no guarda `target`.
+    BaseRepetida,
     Defecto(Dimension),
     Limpio,
 }
@@ -450,7 +483,7 @@ enum TipoCaso {
 fn reuso_de(tipo: TipoCaso, memo: &std::sync::Arc<MemoSondas>) -> Option<ReusoSondas> {
     let alcance = match tipo {
         TipoCaso::Base => return None,
-        TipoCaso::Limpio => Alcance::Deterministas,
+        TipoCaso::BaseRepetida | TipoCaso::Limpio => Alcance::Deterministas,
         TipoCaso::Defecto(dimension) => {
             let reusa_mutacion = matches!(
                 dimension,
@@ -820,6 +853,38 @@ fn calibrar_medida_con_hilos(
             dimension.clave()
         )));
     }
+    // Base repetida (Tarea 83, punto 2): las dimensiones con ítems del juez juzgan la base dos veces más. Las
+    // sondas no se repiten: `BaseRepetida` reusa las deterministas de la base.
+    let pesos = inestables::pesos_de(&rubricas_de(dimension));
+    let mut juicios = vec![base];
+    if tiene_items_de_juez(dimension) {
+        for _ in 0..inestables::JUICIOS_EXTRA {
+            let repetida = en_limite(tope, || {
+                evaluador(repo_bueno, TipoCaso::BaseRepetida, Target::Ninguno)
+            });
+            match (repetida, detencion_de_rechazo(tope)) {
+                (_, Some(detencion)) => return Ok(medida_detenida(detencion)),
+                (Err(error), None) => return Err(error),
+                (Ok(veredicto), None) => juicios.push(veredicto),
+            }
+        }
+    }
+    let refs: Vec<&Veredicto> = juicios.iter().collect();
+    let inestables = inestables::inestables_de(&refs, dimension, &pesos.del_juez);
+    // Una dimensión cuyos ítems estables pesan menos de la mitad no mide casos: ahorra el gasto del juez.
+    if inestables::dimension_inestable(&pesos, &inestables) {
+        let fila = Fila {
+            inestables: inestables.iter().cloned().collect(),
+            ..fila_no_aplica(tarea, dimension, semilla, &inestables::motivo(&inestables))
+        };
+        return Ok(Medida {
+            fila: Some(fila),
+            detencion: None,
+            casos: Vec::new(),
+            no_aplicables: Vec::new(),
+        });
+    }
+    let base = inestables::base_efectiva(&juicios[0], &refs, dimension, &inestables, &pesos.todos);
     // Sin carpeta, la base no dejó `target`: ningún caso reusa nada.
     let target_base = destino_target.is_dir().then_some(destino_target);
     let digest_base = leer_digest();
@@ -829,7 +894,11 @@ fn calibrar_medida_con_hilos(
         Vec::new()
     };
     let items: BTreeSet<&'static str> = defectos.iter().map(|d| d.item()).collect();
-    let items: Vec<&'static str> = items.into_iter().collect();
+    // Los ítems inestables no entran a las métricas por ítem.
+    let items: Vec<&'static str> = items
+        .into_iter()
+        .filter(|i| !inestables.contains(*i))
+        .collect();
     let capas: &[Vec<String>] = tarea
         .arquitectura
         .as_ref()
@@ -941,6 +1010,10 @@ fn calibrar_medida_con_hilos(
             (None, None) => {}
         }
     }
+    // Los ítems inestables salen de los veredictos de los casos antes de detectar, puntuar y cubrir.
+    for caso in &mut casos {
+        inestables::sin_inestables(&mut caso.veredicto, dimension, &inestables, &pesos.todos);
+    }
     // La detección se decide después de medir todos los casos, en orden de índice (Tarea 63, puntos 2 a 4).
     let ruidosos = finalizar_casos(&base, dimension, &items, &muertos, &mut casos);
     if let Some(d) = detencion.as_mut() {
@@ -953,6 +1026,7 @@ fn calibrar_medida_con_hilos(
         Some(Fila {
             reemplazos,
             ruidosos: ruidosos.into_iter().collect(),
+            inestables: inestables.iter().cloned().collect(),
             ..fila_de(
                 tarea,
                 dimension,
@@ -1045,6 +1119,7 @@ fn fila_de(
         no_aplica: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
+        inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
     }
 }
@@ -1334,6 +1409,7 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64, motivo: &st
         no_aplica: Some(motivo.into()),
         reemplazos: 0,
         ruidosos: Vec::new(),
+        inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
     }
 }
@@ -1989,6 +2065,7 @@ mod tests {
             no_aplica: None,
             reemplazos: 0,
             ruidosos: Vec::new(),
+            inestables: Vec::new(),
             huella: None,
         }
     }
@@ -1997,6 +2074,7 @@ mod tests {
     fn veredicto_base() -> Veredicto {
         Veredicto {
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Seguridad,
                 valor: 1.0,
@@ -2400,6 +2478,7 @@ mod tests {
             .expect("borra el Dockerfile");
         let base = Veredicto {
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Entrega,
                 valor: 1.0,
@@ -2429,6 +2508,7 @@ mod tests {
         let dir = copia_fixture();
         let base = Veredicto {
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Eficiencia,
                 valor: 1.0,
@@ -2459,6 +2539,7 @@ mod tests {
         let dir = copia_fixture();
         let base = Veredicto {
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Eficiencia,
                 valor: 1.0,
@@ -2668,6 +2749,7 @@ mod tests {
     fn veredicto_de_pruebas() -> Veredicto {
         Veredicto {
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Pruebas,
                 valor: 1.0,
@@ -3151,8 +3233,8 @@ mod tests {
             .count();
         assert_eq!(
             llamadas.len(),
-            medidos + 1,
-            "la base y cada caso llaman al evaluador"
+            medidos + 1 + inestables::JUICIOS_EXTRA,
+            "la base (tres juicios) y cada caso llaman al evaluador"
         );
         assert!(llamadas[0].base, "la primera llamada es la base");
         assert_eq!(
@@ -3184,7 +3266,7 @@ mod tests {
                 l.cmds
             );
         }
-        let limpios: Vec<&Llamada> = llamadas[1..]
+        let limpios: Vec<&Llamada> = llamadas[1 + inestables::JUICIOS_EXTRA..]
             .iter()
             .filter(|l| l.alcance == Some(Alcance::Deterministas))
             .collect();
@@ -3284,8 +3366,8 @@ mod tests {
             .count();
         assert_eq!(
             llamadas.len(),
-            medidos + 1,
-            "la base y cada caso llaman al evaluador"
+            medidos + 1 + inestables::JUICIOS_EXTRA,
+            "la base (tres juicios) y cada caso llaman al evaluador"
         );
         assert!(
             llamadas.iter().all(|l| l.juez == 1),
@@ -3310,7 +3392,7 @@ mod tests {
             1,
             "la base corre la mutación"
         );
-        let limpios: Vec<&Llamada> = llamadas[1..]
+        let limpios: Vec<&Llamada> = llamadas[1 + inestables::JUICIOS_EXTRA..]
             .iter()
             .filter(|l| l.alcance == Some(Alcance::Deterministas))
             .collect();
@@ -3435,16 +3517,23 @@ mod tests {
         limpios: &'a AtomicUsize,
         veredicto: fn(bool) -> Veredicto,
     ) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + 'a {
-        move |_: &Tarea, _: &Path, o: &OpcionesOraculo| {
+        move |_: &Tarea, ruta: &Path, o: &OpcionesOraculo| {
             let es_limpio = o
                 .reuso
                 .as_ref()
-                .is_some_and(|r| r.alcance == Alcance::Deterministas);
+                .is_some_and(|r| r.alcance == Alcance::Deterministas)
+                && es_copia_de_caso(ruta);
             if es_limpio {
                 limpios.fetch_add(1, Ordering::SeqCst);
             }
             Ok(veredicto(es_limpio))
         }
+    }
+
+    /// Si `ruta` es una copia de un caso. Las repeticiones de la base evalúan el repo bueno, no una copia.
+    fn es_copia_de_caso(ruta: &Path) -> bool {
+        ruta.file_name()
+            .is_some_and(|nombre| nombre.to_string_lossy().starts_with("caso-"))
     }
 
     /// Archivos de `home/calibracion/limpios/`. Falla si la carpeta no existe.
@@ -4034,6 +4123,7 @@ mod tests {
 
     pub(super) fn puntaje(dimension: Dimension, valor: f32) -> Puntaje {
         Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension,
             valor,
@@ -4204,8 +4294,30 @@ mod tests {
     }
 
     #[test]
+    fn inestables_de_da_los_de_la_fila_mas_reciente() {
+        let vieja = Fila {
+            inestables: vec!["diseno.errores".into()],
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let nueva = Fila {
+            inestables: vec!["diseno.ciclos".into()],
+            ..fila("memora", Dimension::Diseno, 2.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![nueva, vieja],
+        };
+        assert_eq!(
+            c.inestables_de("memora", Dimension::Diseno),
+            ["diseno.ciclos".to_string()]
+        );
+        assert!(c.inestables_de("otra", Dimension::Diseno).is_empty());
+    }
+
+    #[test]
     fn dimension_solo_de_sondas_con_huella_distinta_no_calibra() {
         let otra = Fila {
+            inestables: Vec::new(),
             huella: Some("vieja".into()),
             ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
         };
@@ -6469,21 +6581,26 @@ mod tests {
                 ..o.clone()
             };
             let veredicto = crate::oracle::evaluar_con(repo, tarea, &con_home, deps)?;
-            let limpio = o
+            let deterministas = o
                 .reuso
                 .as_ref()
                 .is_some_and(|r| r.alcance == Alcance::Deterministas);
-            let cuenta = if limpio {
-                &cuentas.limpios
+            // Una repetición de la base no cuenta: no es un caso ni la base única.
+            let cuenta = if deterministas && es_copia_de_caso(repo) {
+                Some(&cuentas.limpios)
             } else if o.memo.is_some() {
-                &cuentas.base
+                Some(&cuentas.base)
+            } else if deterministas {
+                None
             } else {
-                &cuentas.defectos
+                Some(&cuentas.defectos)
             };
-            cuenta.evaluaciones.fetch_add(1, Ordering::SeqCst);
-            cuenta
-                .juez
-                .fetch_add(juez.llamadas.load(Ordering::SeqCst), Ordering::SeqCst);
+            if let Some(cuenta) = cuenta {
+                cuenta.evaluaciones.fetch_add(1, Ordering::SeqCst);
+                cuenta
+                    .juez
+                    .fetch_add(juez.llamadas.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
             Ok(veredicto)
         }
     }
@@ -7049,5 +7166,193 @@ mod tests {
                 .as_deref(),
             Some("hallazgo_nuevo:t::nuevo"),
         );
+    }
+
+    const ITEM_MODULARIDAD: &str = "diseno.modularidad";
+    const ITEM_ROBUSTEZ: &str = "diseno.robustez";
+    const ITEM_ERRORES: &str = "diseno.errores";
+
+    /// Veredicto de Diseño con `items` del juez y valor 1.
+    fn diseno_con(items: &[(&str, u8)]) -> Veredicto {
+        Veredicto {
+            puntajes: vec![Puntaje {
+                items: items
+                    .iter()
+                    .map(|(item, nivel)| NivelItem {
+                        item: (*item).into(),
+                        nivel: *nivel,
+                        evidencia: vec![],
+                        fuente: Fuente::Juez {
+                            modelo: "deepseek-reasoner".into(),
+                        },
+                    })
+                    .collect(),
+                ..puntaje(Dimension::Diseno, 1.0)
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Nivel alterno de la base: el juicio `k` pone `bajo` si `k` es par y `alto` si es impar.
+    fn alterno(k: usize, bajo: u8, alto: u8) -> u8 {
+        if k.is_multiple_of(2) { bajo } else { alto }
+    }
+
+    #[test]
+    fn calibra_item_del_juez_que_alterna_en_la_base_queda_inestable_y_fuera_de_la_medicion() {
+        let (_t, tarea) = tarea_prueba();
+        let juicios = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            if matches!(tipo, TipoCaso::Base | TipoCaso::BaseRepetida) {
+                let k = juicios.fetch_add(1, Ordering::SeqCst);
+                let nivel = alterno(k, 0, 2);
+                return Ok(diseno_con(&[(ITEM_MODULARIDAD, nivel), (ITEM_ROBUSTEZ, 3)]));
+            }
+            Ok(diseno_con(&[(ITEM_MODULARIDAD, 0), (ITEM_ROBUSTEZ, 3)]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            6,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("mide");
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(fila.inestables, vec![ITEM_MODULARIDAD.to_string()]);
+        assert!(!medida.casos.is_empty(), "hay casos medidos");
+        for caso in &medida.casos {
+            assert!(
+                !caso.niveles_base.contains_key(ITEM_MODULARIDAD),
+                "caso {}",
+                caso.indice
+            );
+        }
+    }
+
+    #[test]
+    fn calibra_dimension_inestable_no_mide_casos_y_no_califica() {
+        let (_t, tarea) = tarea_prueba();
+        let llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let k = llamadas.fetch_add(1, Ordering::SeqCst);
+            let nivel = alterno(k, 0, 2);
+            Ok(diseno_con(&[
+                (ITEM_MODULARIDAD, nivel),
+                (ITEM_ROBUSTEZ, nivel),
+                (ITEM_ERRORES, nivel),
+            ]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            6,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("mide");
+        // Tres juicios de la base y ningún caso: los ítems inestables pesan 8 de 13.
+        assert_eq!(llamadas.load(Ordering::SeqCst), 3);
+        assert!(medida.casos.is_empty());
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(fila.n, 0);
+        assert_eq!(
+            fila.inestables,
+            vec![
+                ITEM_ERRORES.to_string(),
+                ITEM_MODULARIDAD.to_string(),
+                ITEM_ROBUSTEZ.to_string()
+            ]
+        );
+        let motivo = fila.no_aplica.clone().expect("motivo");
+        assert!(motivo.starts_with("inestable en esta tarea"), "{motivo}");
+        assert!(motivo.contains(ITEM_MODULARIDAD), "{motivo}");
+        assert!(!muestra_suficiente(&fila), "no califica");
+    }
+
+    #[test]
+    fn calibra_limpio_que_baja_dos_niveles_en_item_inestable_no_es_falsa_alarma() {
+        let (_t, tarea) = tarea_prueba();
+        let juicios = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            if matches!(tipo, TipoCaso::Base | TipoCaso::BaseRepetida) {
+                let k = juicios.fetch_add(1, Ordering::SeqCst);
+                let nivel = alterno(k, 2, 0);
+                return Ok(diseno_con(&[(ITEM_MODULARIDAD, nivel), (ITEM_ROBUSTEZ, 3)]));
+            }
+            // Las copias bajan el ítem inestable de 2 a 0, respecto del primer juicio.
+            Ok(diseno_con(&[(ITEM_MODULARIDAD, 0), (ITEM_ROBUSTEZ, 3)]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            6,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("mide");
+        let limpios: Vec<&Caso> = medida.casos.iter().filter(|c| !c.es_defecto).collect();
+        assert!(!limpios.is_empty(), "hay limpios medidos");
+        for caso in limpios {
+            assert!(!caso.detectado, "caso {}: no es falsa alarma", caso.indice);
+            assert!(
+                !caso.niveles_base.contains_key(ITEM_MODULARIDAD),
+                "caso {}",
+                caso.indice
+            );
+        }
+    }
+
+    #[test]
+    fn calibra_dimension_solo_de_sondas_mide_la_base_una_vez() {
+        let (_t, tarea) = tarea_prueba();
+        let base_llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            if matches!(tipo, TipoCaso::Base | TipoCaso::BaseRepetida) {
+                base_llamadas.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(veredicto_base())
+        };
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Seguridad,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("mide");
+        assert_eq!(base_llamadas.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn fila_sin_inestables_en_el_json_se_lee_vacia() {
+        let mut json = serde_json::to_value(fila_de_prueba("t", 1.0)).expect("serializa");
+        json.as_object_mut().expect("objeto").remove("inestables");
+        let fila: Fila = serde_json::from_value(json).expect("lee");
+        assert!(fila.inestables.is_empty());
     }
 }

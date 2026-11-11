@@ -634,6 +634,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "boolean",
           "default": false
         },
+        "inestables": {
+          "description": "Ítems del juez que variaron entre los tres juicios de la base, en orden. No entran a la medición de la\ndimensión. Una fila sin el campo vale vacía.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "items": {
           "description": "Exactitud balanceada de cada ítem de rúbrica, por ejemplo `seguridad.secretos`.",
           "type": "object",
@@ -1881,6 +1889,68 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           },
           "default": {}
         },
+        "items_inestables": {
+          "description": "Ítems del juez que `evaluar` excluyó por inestables, por dimensión. Un informe viejo lee vacío.",
+          "type": "object",
+          "properties": {
+            "arquitectura": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "completitud": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "diseno": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "eficiencia": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "entrega": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "estructura": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "funciona": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pruebas": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "seguridad": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
         "motivos_sin_calibrar": {
           "description": "Motivo de cada dimensión de `sin_calibrar` que no calibra por su huella. Clave: la dimensión.",
           "type": "object",
@@ -2235,6 +2305,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "evidencia_visible": [],
             "faltantes": [],
             "inestables": {},
+            "items_inestables": {},
             "motivos_sin_calibrar": {},
             "repeticiones": 0,
             "requisitos_pendientes": [],
@@ -2404,6 +2475,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": [],
           "items": {
             "$ref": "#/$defs/ItemFaltante"
+          }
+        },
+        "inestables": {
+          "description": "Ítems del juez que `evaluar` dejó fuera por inestables. No entran al `valor` ni a la cobertura.\nUn puntaje sin el campo vale vacía.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
           }
         },
         "items": {
@@ -2845,6 +2924,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "evidencia_visible": [],
         "faltantes": [],
         "inestables": {},
+        "items_inestables": {},
         "motivos_sin_calibrar": {},
         "repeticiones": 0,
         "requisitos_pendientes": [],
@@ -2970,6 +3050,68 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "additionalProperties": {
             "$ref": "#/$defs/TasaTest"
           },
+          "default": {}
+        },
+        "items_inestables": {
+          "description": "Ítems del juez que `evaluar` excluyó por inestables, por dimensión. Un informe viejo lee vacío.",
+          "type": "object",
+          "properties": {
+            "arquitectura": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "completitud": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "diseno": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "eficiencia": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "entrega": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "estructura": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "funciona": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pruebas": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "seguridad": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
           "default": {}
         },
         "motivos_sin_calibrar": {
@@ -3913,6 +4055,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "default": [],
       "items": {
         "$ref": "#/$defs/ItemFaltante"
+      }
+    },
+    "inestables": {
+      "description": "Ítems del juez que `evaluar` dejó fuera por inestables. No entran al `valor` ni a la cobertura.\nUn puntaje sin el campo vale vacía.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
       }
     },
     "items": {
@@ -5249,6 +5399,68 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           },
           "default": {}
         },
+        "items_inestables": {
+          "description": "Ítems del juez que `evaluar` excluyó por inestables, por dimensión. Un informe viejo lee vacío.",
+          "type": "object",
+          "properties": {
+            "arquitectura": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "completitud": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "diseno": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "eficiencia": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "entrega": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "estructura": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "funciona": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pruebas": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "seguridad": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
         "motivos_sin_calibrar": {
           "description": "Motivo de cada dimensión de `sin_calibrar` que no calibra por su huella. Clave: la dimensión.",
           "type": "object",
@@ -5580,6 +5792,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "evidencia_visible": [],
             "faltantes": [],
             "inestables": {},
+            "items_inestables": {},
             "motivos_sin_calibrar": {},
             "repeticiones": 0,
             "requisitos_pendientes": [],
@@ -5749,6 +5962,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": [],
           "items": {
             "$ref": "#/$defs/ItemFaltante"
+          }
+        },
+        "inestables": {
+          "description": "Ítems del juez que `evaluar` dejó fuera por inestables. No entran al `valor` ni a la cobertura.\nUn puntaje sin el campo vale vacía.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
           }
         },
         "items": {

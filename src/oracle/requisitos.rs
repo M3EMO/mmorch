@@ -160,6 +160,7 @@ pub fn puntaje_completitud(estados: &[EstadoRequisito]) -> Option<Puntaje> {
         })
         .collect();
     Some(Puntaje {
+        inestables: Vec::new(),
         motivo_sin_calibrar: None,
         dimension: Dimension::Completitud,
         valor,

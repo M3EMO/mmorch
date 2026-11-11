@@ -67,6 +67,7 @@ fn home_con_tarea(extra: &str) -> tempfile::TempDir {
 fn veredicto_plano() -> Veredicto {
     Veredicto {
         puntajes: vec![Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension: Dimension::Seguridad,
             valor: 1.0,
@@ -557,6 +558,7 @@ fn es_limpia(ruta: &Path) -> bool {
 fn veredicto_seguridad(valor: f32, sin: Option<&str>) -> Veredicto {
     Veredicto {
         puntajes: vec![Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension: Dimension::Seguridad,
             valor,
@@ -976,11 +978,13 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
         reemplazos: 0,
         ruidosos: Vec::new(),
         huella: None,
+        inestables: Vec::new(),
     };
     agregar(home.path(), &seguridad).expect("agrega seguridad");
     let cal = Calibraciones::cargar(home.path()).expect("carga");
     let mut puntajes = vec![
         Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension: Dimension::Eficiencia,
             valor: 0.5,
@@ -991,6 +995,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
             faltantes: vec![],
         },
         Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension: Dimension::Seguridad,
             valor: 0.8,
@@ -1120,6 +1125,7 @@ fn fila_vieja_sin_no_aplica_se_lee() {
         reemplazos: 0,
         ruidosos: Vec::new(),
         huella: None,
+        inestables: Vec::new(),
     };
     let mut vieja = serde_json::to_value(&fila).expect("serializa");
     vieja.as_object_mut().expect("objeto").remove("no_aplica");
@@ -1151,6 +1157,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
         reemplazos: 0,
         ruidosos: Vec::new(),
         huella: None,
+        inestables: Vec::new(),
     };
     agregar(home.path(), &antes).expect("agrega");
     let llamadas = Mutex::new(0u32);
@@ -1175,6 +1182,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
 fn veredicto_con(dimension: Dimension, valor: f32, sin: Option<&str>) -> Veredicto {
     Veredicto {
         puntajes: vec![Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension,
             valor,

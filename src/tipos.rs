@@ -261,6 +261,10 @@ pub struct Puntaje {
     /// `None` si está calibrado o si no hay fila con muestra suficiente.
     #[serde(default)]
     pub motivo_sin_calibrar: Option<String>,
+    /// Ítems del juez que `evaluar` dejó fuera por inestables. No entran al `valor` ni a la cobertura.
+    /// Un puntaje sin el campo vale vacía.
+    #[serde(default)]
+    pub inestables: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -348,6 +352,9 @@ pub struct Confianza {
     /// Motivo de cada dimensión de `sin_calibrar` que no calibra por su huella. Clave: la dimensión.
     #[serde(default)]
     pub motivos_sin_calibrar: BTreeMap<Dimension, String>,
+    /// Ítems del juez que `evaluar` excluyó por inestables, por dimensión. Un informe viejo lee vacío.
+    #[serde(default)]
+    pub items_inestables: BTreeMap<Dimension, Vec<String>>,
     /// Dimensiones sin veredicto, con su motivo.
     #[serde(default)]
     pub sin_veredicto: Vec<ParteSinVeredicto>,
@@ -644,6 +651,7 @@ mod tests {
                 total: 48,
             },
             puntajes: vec![Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Seguridad,
                 valor: 0.95,
@@ -824,6 +832,7 @@ mod tests {
             total: 16,
         });
         ida_y_vuelta(&Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension: Dimension::Eficiencia,
             valor: 0.5,
@@ -984,6 +993,14 @@ mod tests {
     }
 
     #[test]
+    fn tipos_puntaje_viejo_sin_inestables_se_lee_vacia() {
+        let texto = r#"{"dimension":"diseno","valor":0.5,"calibrada":false,
+            "exactitud_balanceada":0.7,"items":[],"sin_veredicto":null,"faltantes":[]}"#;
+        let p: Puntaje = serde_json::from_str(texto).expect("un puntaje viejo se acepta");
+        assert!(p.inestables.is_empty(), "{:?}", p.inestables);
+    }
+
+    #[test]
     fn tipos_puntaje_viejo_sin_motivo_sin_calibrar_se_lee_none() {
         let texto = r#"{"dimension":"diseno","valor":0.5,"calibrada":false,
             "exactitud_balanceada":0.7,"items":[],"sin_veredicto":null,"faltantes":[]}"#;
@@ -994,6 +1011,7 @@ mod tests {
     #[test]
     fn tipos_ida_y_vuelta_de_puntaje_con_motivo_sin_calibrar() {
         ida_y_vuelta(&Puntaje {
+            inestables: Vec::new(),
             dimension: Dimension::Diseno,
             valor: 0.5,
             calibrada: false,
@@ -1008,6 +1026,7 @@ mod tests {
     #[test]
     fn tipos_ida_y_vuelta_de_puntaje_sin_veredicto() {
         ida_y_vuelta(&Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension: Dimension::Diseno,
             valor: 0.0,

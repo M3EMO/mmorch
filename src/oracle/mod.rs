@@ -812,6 +812,7 @@ fn evaluar_con(
         &juez,
         entrega,
         &partes,
+        deps.calibracion,
     )?;
     let mut tasas = BTreeMap::new();
     for (id, tasa) in &contrato.tasas {
@@ -989,6 +990,7 @@ fn medir(
     juez: &JuezDiseno,
     entrega: ResultadoEntrega,
     partes: &Partes,
+    calibracion: &Calibraciones,
 ) -> Result<Medicion, ErrorOraculo> {
     let resultados = requisitos::desde_clasificaciones(contrato, oculto);
     let estados = requisitos::evaluar_requisitos(
@@ -1056,13 +1058,17 @@ fn medir(
             // Una dimensión que la calibración no pidió no se mide: sin veredicto, no un puntaje falso.
             _ if !partes.mide(dimension) => sin_veredicto_puntaje(dimension, NO_MEDIDA.into()),
             Dimension::Funciona => funciona(tarea, contrato, oculto, &entrega.escenarios),
-            Dimension::Diseno => puntaje_diseno(juez, resultado.as_ref(), &topes),
+            Dimension::Diseno => {
+                let excluidos = excluidos_de(calibracion, tarea, partes, juez.rubricas, dimension);
+                puntaje_diseno(juez, resultado.as_ref(), &topes, &excluidos)
+            }
             Dimension::Completitud => {
                 requisitos::puntaje_completitud(&estados).unwrap_or_else(|| {
                     sin_veredicto_puntaje(dimension, "ningún requisito tiene nivel medido".into())
                 })
             }
             _ => {
+                let excluidos = excluidos_de(calibracion, tarea, partes, juez.rubricas, dimension);
                 let de_la_dimension = sondas
                     .iter()
                     .filter(|s| s.dimension == dimension)
@@ -1105,7 +1111,8 @@ fn medir(
                     peso: peso_sondas(dimension, juez.rubricas, tarea),
                     puntaje: de_sondas,
                 };
-                let juez_parte = parte_juez(dimension, juez, resultado.as_ref(), &topes);
+                let juez_parte =
+                    parte_juez(dimension, juez, resultado.as_ref(), &topes, &excluidos);
                 // El peso medido de la cobertura usa el Ws real, sin el mínimo de 1 (desempate C).
                 let medido = peso_medido(&sondas) + juez_parte.as_ref().map_or(0, peso_medido);
                 let mut puntaje = juntar_partes(dimension, sondas, juez_parte);
@@ -1113,7 +1120,9 @@ fn medir(
                 if sin_modulos {
                     sumar_faltante_sin_modulos(&mut puntaje.faltantes);
                 }
-                aplicar_cobertura(dimension, juez.rubricas, medido, puntaje)
+                let puntaje =
+                    aplicar_cobertura(dimension, juez.rubricas, &excluidos, medido, puntaje);
+                aplicar_inestables(dimension, juez.rubricas, &excluidos, puntaje)
             }
         })
         .collect();
@@ -1230,8 +1239,14 @@ fn parte_juez(
     juez: &JuezDiseno,
     resultado: Option<&ResultadoJuez>,
     topes: &BTreeMap<String, u8>,
+    excluidos: &[String],
 ) -> Option<Parte> {
-    let rubrica = rubrica_del_juez(juez.rubricas, dimension)?;
+    let mut rubrica = rubrica_del_juez(juez.rubricas, dimension)?;
+    // Los ítems inestables no miden la dimensión: salen de la rúbrica antes de juzgar (Tarea 83, punto 2).
+    rubrica.item.retain(|i| !excluidos.contains(&i.id));
+    if rubrica.item.is_empty() {
+        return None;
+    }
     let Some(resultado) = resultado else {
         return Some(parte_juez_sin_veredicto(
             dimension,
@@ -1279,6 +1294,7 @@ fn parte_juez(
         .collect();
     Some(Parte {
         puntaje: Puntaje {
+            inestables: Vec::new(),
             motivo_sin_calibrar: None,
             dimension,
             valor,
@@ -1358,8 +1374,9 @@ fn puntaje_diseno(
     juez: &JuezDiseno,
     resultado: Option<&ResultadoJuez>,
     topes: &BTreeMap<String, u8>,
+    excluidos: &[String],
 ) -> Puntaje {
-    let parte = parte_juez(Dimension::Diseno, juez, resultado, topes);
+    let parte = parte_juez(Dimension::Diseno, juez, resultado, topes, excluidos);
     // Diseño no tiene sondas: su peso medido es el del juez (desempate C).
     let medido = parte.as_ref().map_or(0, peso_medido);
     let puntaje = parte.map(|parte| parte.puntaje).unwrap_or_else(|| {
@@ -1370,7 +1387,8 @@ fn puntaje_diseno(
         };
         sin_veredicto_puntaje(Dimension::Diseno, motivo.into())
     });
-    aplicar_cobertura(Dimension::Diseno, juez.rubricas, medido, puntaje)
+    let puntaje = aplicar_cobertura(Dimension::Diseno, juez.rubricas, excluidos, medido, puntaje);
+    aplicar_inestables(Dimension::Diseno, juez.rubricas, excluidos, puntaje)
 }
 
 /// Motivo de un ítem del juez sin nivel cuyo descarte nombra el gate de evidencia (desempate B').
@@ -1427,6 +1445,7 @@ fn juntar_partes(dimension: Dimension, sondas: Parte, juez: Option<Parte>) -> Pu
     }
     let valor = (ws as f32 * sondas.puntaje.valor + wj as f32 * vj) / (ws + wj) as f32;
     Puntaje {
+        inestables: Vec::new(),
         motivo_sin_calibrar: None,
         dimension,
         valor,
@@ -1480,11 +1499,13 @@ fn peso_sondas(dimension: Dimension, rubricas: &[Rubrica], tarea: &Tarea) -> u32
 }
 
 /// Peso total de la rúbrica de una dimensión: sonda, juez y mixto, sin filtrar por lenguaje (desempate C).
-fn peso_total(dimension: Dimension, rubricas: &[Rubrica]) -> u32 {
+/// Sin los ítems `excluidos` por inestables (Tarea 83, punto 2).
+fn peso_total(dimension: Dimension, rubricas: &[Rubrica], excluidos: &[String]) -> u32 {
     rubricas
         .iter()
         .filter(|r| r.id == dimension.clave())
         .flat_map(|r| r.item.iter())
+        .filter(|i| !excluidos.contains(&i.id))
         .map(|i| u32::from(i.peso))
         .sum()
 }
@@ -1499,13 +1520,14 @@ fn cubre_dos_tercios(medido: u32, total: u32) -> bool {
 fn aplicar_cobertura(
     dimension: Dimension,
     rubricas: &[Rubrica],
+    excluidos: &[String],
     medido: u32,
     puntaje: Puntaje,
 ) -> Puntaje {
     if rubrica_del_juez(rubricas, dimension).is_none() {
         return puntaje;
     }
-    let total = peso_total(dimension, rubricas);
+    let total = peso_total(dimension, rubricas, excluidos);
     if cubre_dos_tercios(medido, total) {
         return puntaje;
     }
@@ -1515,6 +1537,54 @@ fn aplicar_cobertura(
         None => motivo,
     };
     sin_veredicto_con_faltantes(dimension, motivo, puntaje.faltantes)
+}
+
+/// Ítems del juez que `evaluar` deja fuera de `dimension`: los inestables de su fila más reciente (Tarea 83,
+/// punto 2). Una medición de calibración no los quita: la calibración juzga la base con todos sus ítems.
+fn excluidos_de(
+    calibracion: &Calibraciones,
+    tarea: &Tarea,
+    partes: &Partes,
+    rubricas: &[Rubrica],
+    dimension: Dimension,
+) -> Vec<String> {
+    if partes.dimension.is_some() {
+        return Vec::new();
+    }
+    let Some(del_juez) = rubrica_del_juez(rubricas, dimension) else {
+        return Vec::new();
+    };
+    calibracion
+        .inestables_de(&tarea.nombre, dimension)
+        .iter()
+        .filter(|id| del_juez.item.iter().any(|i| i.id == **id))
+        .cloned()
+        .collect()
+}
+
+/// Marca los ítems inestables en `puntaje` (Tarea 83, punto 2). Sin ítems excluidos, no cambia nada.
+/// Si lo estable pesa menos de la mitad, la dimensión queda sin veredicto por inestable.
+fn aplicar_inestables(
+    dimension: Dimension,
+    rubricas: &[Rubrica],
+    excluidos: &[String],
+    puntaje: Puntaje,
+) -> Puntaje {
+    if excluidos.is_empty() {
+        return puntaje;
+    }
+    let inestables = excluidos.to_vec();
+    if !calibra::dimension_inestable(rubricas, dimension, excluidos) {
+        return Puntaje {
+            inestables,
+            ..puntaje
+        };
+    }
+    let motivo = calibra::motivo_inestable(excluidos);
+    Puntaje {
+        inestables,
+        ..sin_veredicto_con_faltantes(dimension, motivo, puntaje.faltantes)
+    }
 }
 
 /// Puntaje de una dimensión sin veredicto que lleva sus faltantes.
@@ -1670,6 +1740,7 @@ fn funciona(
     }
     let valor = partes.iter().sum::<f32>() / partes.len() as f32;
     Puntaje {
+        inestables: Vec::new(),
         motivo_sin_calibrar: None,
         dimension: DIMENSION,
         valor,
@@ -1706,6 +1777,7 @@ fn fraccion_pasa(c: &Clasificacion, entorno: &BTreeSet<String>) -> (u32, u32) {
 /// Puntaje de una dimensión sin veredicto: `valor` 0 y el motivo.
 fn sin_veredicto_puntaje(dimension: Dimension, motivo: String) -> Puntaje {
     Puntaje {
+        inestables: Vec::new(),
         motivo_sin_calibrar: None,
         dimension,
         valor: 0.0,
@@ -5372,7 +5444,7 @@ mod tests {
             nombre: MODELO_JUEZ,
             rubricas: &rubricas,
         };
-        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new());
+        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new(), &[]);
         assert_eq!(
             p.sin_veredicto.as_deref(),
             Some("cobertura 3 de 6 de peso, menor que dos tercios"),
@@ -5385,6 +5457,268 @@ mod tests {
             "{:?}",
             p.faltantes
         );
+    }
+
+    const CICLOS_ID: &str = "diseno.ciclos";
+
+    /// Rúbrica de diseño con `diseno.ciclos` como ítem del juez. Pesos: modularidad 3, ciclos 2 y tope 1.
+    fn rubrica_diseno_solo_juez() -> Rubrica {
+        let texto =
+            fixture_rubrica("diseno-valida.toml").replace("mide = \"sonda\"", "mide = \"juez\"");
+        Rubrica::desde_toml(&texto).expect("carga")
+    }
+
+    /// Calibración con una fila de `dimension` para `tarea` que lista `inestables`.
+    fn calibracion_con_inestables(
+        tarea: &str,
+        dimension: Dimension,
+        inestables: &[&str],
+    ) -> Calibraciones {
+        Calibraciones {
+            v: calibra::VERSION,
+            filas: vec![calibra::Fila {
+                tarea: tarea.into(),
+                dimension,
+                n: 0,
+                defectos: 0,
+                limpios: 0,
+                limpios_sin_veredicto: 0,
+                no_aplicable: 0,
+                semilla: 42,
+                ts: 1.0,
+                sensibilidad: None,
+                especificidad: None,
+                exactitud_balanceada: None,
+                items: BTreeMap::new(),
+                ruidosos: Vec::new(),
+                incompleta: false,
+                no_aplica: None,
+                reemplazos: 0,
+                huella: None,
+                inestables: inestables.iter().map(|i| (*i).into()).collect(),
+            }],
+        }
+    }
+
+    /// Juez de diseño que da `modularidad`, `tope` y `ciclos` con sus niveles. `None` no responde ese ítem.
+    fn juez_de_diseno(
+        modularidad: Option<i64>,
+        tope: Option<i64>,
+        ciclos: Option<i64>,
+    ) -> JuezFalso {
+        let mut items = Vec::new();
+        for (id, nivel) in [
+            (MODULARIDAD_ID, modularidad),
+            (TOPE_ID, tope),
+            (CICLOS_ID, ciclos),
+        ] {
+            if let Some(nivel) = nivel {
+                items.push(item_juez(id, nivel, json!([ev_lib()])));
+            }
+        }
+        JuezFalso::con(&respuesta_juez(json!(items), json!([])), 0.0)
+    }
+
+    #[test]
+    fn oraculo_diseno_excluye_el_item_inestable_del_puntaje() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let juez = juez_de_diseno(Some(2), Some(2), Some(0));
+        let rubricas = [rubrica_diseno_solo_juez()];
+        let calibracion = calibracion_con_inestables("tarea-rust", Dimension::Diseno, &[CICLOS_ID]);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                calibracion: &calibracion,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        assert_eq!(diseno.sin_veredicto, None, "{diseno:?}");
+        assert!(
+            diseno.items.iter().all(|i| i.item != CICLOS_ID),
+            "{:?}",
+            diseno.items
+        );
+        assert_eq!(diseno.inestables, [CICLOS_ID.to_string()]);
+        // (3·2 + 1·2) / (3·4) = 2/3: el ítem inestable no pesa en el valor.
+        assert!((diseno.valor - 2.0 / 3.0).abs() < 1e-6, "{}", diseno.valor);
+    }
+
+    #[test]
+    fn oraculo_diseno_cobertura_descuenta_el_peso_del_item_inestable() {
+        // Sin descontar, el juez mide 3 de 6 de peso: no llega a dos tercios. Sin `diseno.ciclos` (peso 2),
+        // mide 3 de 4 y sí llega.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = [rubrica_diseno_solo_juez()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let juez = juez_de_diseno(Some(2), None, None);
+        let sin = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        assert_eq!(
+            puntaje_de_prueba(&sin, Dimension::Diseno)
+                .sin_veredicto
+                .as_deref(),
+            Some("cobertura 3 de 6 de peso, menor que dos tercios")
+        );
+        let juez = juez_de_diseno(Some(2), None, None);
+        let calibracion = calibracion_con_inestables("tarea-rust", Dimension::Diseno, &[CICLOS_ID]);
+        let con = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                calibracion: &calibracion,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let diseno = puntaje_de_prueba(&con, Dimension::Diseno);
+        assert_eq!(diseno.sin_veredicto, None, "{diseno:?}");
+        assert!((diseno.valor - 2.0 / 3.0).abs() < 1e-6, "{}", diseno.valor);
+    }
+
+    #[test]
+    fn oraculo_diseno_con_estables_de_menos_de_la_mitad_queda_inestable() {
+        // Quitar modularidad (3) y ciclos (2) deja tope (1) de 6: menos de la mitad, la dimensión es inestable.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let juez = juez_de_diseno(Some(3), Some(2), Some(0));
+        let rubricas = [rubrica_diseno_solo_juez()];
+        let calibracion = calibracion_con_inestables(
+            "tarea-rust",
+            Dimension::Diseno,
+            &[MODULARIDAD_ID, CICLOS_ID],
+        );
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                calibracion: &calibracion,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        let motivo = diseno.sin_veredicto.as_deref().unwrap_or_default();
+        assert!(motivo.starts_with("inestable en esta tarea"), "{motivo}");
+        assert!(motivo.contains(MODULARIDAD_ID), "{motivo}");
+        assert!(motivo.contains(CICLOS_ID), "{motivo}");
+        assert_eq!(diseno.valor, 0.0, "{diseno:?}");
+        assert_eq!(diseno.inestables.len(), 2, "{diseno:?}");
+    }
+
+    #[test]
+    fn oraculo_fila_sin_inestables_deja_el_puntaje_de_diseno_igual_que_sin_fila() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = [rubrica_diseno_solo_juez()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let sin_fila = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez_de_diseno(Some(2), Some(2), Some(0))),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let calibracion = calibracion_con_inestables("tarea-rust", Dimension::Diseno, &[]);
+        let con_fila = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez_de_diseno(Some(2), Some(2), Some(0))),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                calibracion: &calibracion,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        assert_eq!(
+            puntaje_de_prueba(&con_fila, Dimension::Diseno),
+            puntaje_de_prueba(&sin_fila, Dimension::Diseno)
+        );
+    }
+
+    #[test]
+    fn oraculo_dimension_solo_de_sondas_no_cambia_con_inestables_en_su_fila() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let sin_fila = evaluar_con_deps(base.path(), &repo, deps_de(&correr, &herramientas(&[])));
+        let calibracion =
+            calibracion_con_inestables("tarea-rust", Dimension::Seguridad, &["seguridad.x"]);
+        let con_fila = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                calibracion: &calibracion,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let seguridad = puntaje_de_prueba(&con_fila, Dimension::Seguridad);
+        assert!(seguridad.inestables.is_empty(), "{seguridad:?}");
+        assert_eq!(
+            seguridad,
+            puntaje_de_prueba(&sin_fila, Dimension::Seguridad)
+        );
+    }
+
+    #[test]
+    fn oraculo_calibracion_no_quita_sus_propios_inestables() {
+        // Una medición de calibración (partes con dimensión) mide la base con todos sus ítems.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust(base.path());
+        let rubricas = [rubrica_diseno_solo_juez()];
+        let juez = juez_de_diseno(Some(2), Some(2), Some(0));
+        let calibracion = calibracion_con_inestables("tarea-rust", Dimension::Diseno, &[CICLOS_ID]);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let o = OpcionesOraculo {
+            partes: Some(partes_de(Dimension::Diseno, &rubricas, &tarea)),
+            ..opciones(&home)
+        };
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con(
+            &repo,
+            &tarea,
+            &o,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                calibracion: &calibracion,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        )
+        .expect("evalúa");
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        assert!(
+            diseno.items.iter().any(|i| i.item == CICLOS_ID),
+            "{:?}",
+            diseno.items
+        );
+        assert!(diseno.inestables.is_empty(), "{diseno:?}");
     }
 
     #[test]
@@ -5825,6 +6159,7 @@ mod tests {
             reemplazos: 0,
             ruidosos: Vec::new(),
             huella: None,
+            inestables: Vec::new(),
         })
         .collect();
         let calibracion = Calibraciones {
@@ -5862,6 +6197,7 @@ mod tests {
     fn parte_de(valor: f32, peso: u32) -> Parte {
         Parte {
             puntaje: Puntaje {
+                inestables: Vec::new(),
                 motivo_sin_calibrar: None,
                 dimension: Dimension::Estructura,
                 valor,
@@ -6194,7 +6530,7 @@ mod tests {
             nombre: MODELO_JUEZ,
             rubricas: &rubricas,
         };
-        let p = puntaje_diseno(&juez, None, &BTreeMap::new());
+        let p = puntaje_diseno(&juez, None, &BTreeMap::new(), &[]);
         assert_eq!(
             p.sin_veredicto.as_deref(),
             Some("cobertura 0 de 13 de peso, menor que dos tercios; juez no corrido"),
@@ -6272,7 +6608,7 @@ mod tests {
             ("diseno.robustez", 2),
             ("diseno.errores", 2),
         ]);
-        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new());
+        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new(), &[]);
         assert_eq!(
             p.sin_veredicto.as_deref(),
             Some("cobertura 8 de 13 de peso, menor que dos tercios"),
@@ -6305,7 +6641,7 @@ mod tests {
             ("diseno.errores", 2),
             ("diseno.documentacion", 2),
         ]);
-        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new());
+        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new(), &[]);
         assert_eq!(p.sin_veredicto, None, "{p:?}");
         assert!((p.valor - 2.0 / 3.0).abs() < 1e-6, "{}", p.valor);
     }
