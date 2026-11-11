@@ -6359,3 +6359,149 @@ El orden sigue el daño: primero lo que da una decisión falsa, después lo que 
 - **c)** Hacer a, y además sumar al dataset los 5 arreglos de broot después de medir el ajuste real. Las 3 tareas de S2 y `8f3ea21af75c` no entran al conjunto separado del recall. Recomendada: suma 5 tareas hoy sin minar, y las 3 de S2 ya tienen ficha aprobada.
 
 Con c, cambia la regla que fijé arriba en la sección 1: las 3 tareas de S2 dejan de ser solo piloto.
+
+## Vuelta del 2026-11-10 (1): V3 en ajuste real, `corre`, (f) y (g), D4
+
+**Estado.** La punta local es 47cff61, sin push. P84 va en 9,8129 de 12 USD. S2 va en 1,7544 de 5 USD por API. P95, P96, P97 y el final siguen sin respuesta.
+
+## 1. V3 en el ajuste real
+
+**Veredicto: el 4 de 5 vale, y pasa la regla fijada.** La regla pedía 3 o más de 5, a 3 líneas o menos. V3 dio 4.
+
+**Contra el azar.**
+- Con la ventana de 3 líneas, el azar da 3 o más con probabilidad 0,10. Eso solo no alcanza para descartarlo.
+- Los 4 aciertos están en la línea exacta. Con línea exacta, el azar da 0,003.
+- Además, el detalle de cada acierto describe el bug que arregla el commit. Eso no lo da el azar.
+- La línea exacta no estaba en la regla. Es un criterio más estricto, y los 4 lo cumplen. No es un ajuste a favor.
+
+**Lo que no dice.** Con 5 casos de un solo repo, el intervalo de 95 % para 4 de 5 va de 0,28 a 0,99. Dice "lejos del azar". No dice "recall de 0,8". Eso lo mide el final.
+
+**La etiqueta de `acfc065e13` queda válida.**
+- La fijé antes de medir. Sacarla después de ver que falló es un ajuste a favor.
+- No cambia la regla: con 4 de 4 o con 4 de 5, pasa igual.
+- Se informa como "posible mejora, no arreglo".
+- Si entra a D3, su `tipo` se revisa ahí. Un cambio de `tipo` no cambia su etiqueta en ajuste.
+
+## 2. Configuración del final: un archivo por defecto
+
+**Decisión: el final corre con `--incluir`, un archivo por defecto,** como `med_final.py`.
+
+**Razón.** V3 hace llamadas independientes por archivo. Cada prompt lleva la base, un foco y un solo archivo (`med_final.py`, función `llamar`). La llamada sobre el archivo del defecto es idéntica con o sin el resto del repo. Un acierto exige el mismo archivo. Entonces el recall esperado es igual en las dos configuraciones.
+
+**Lo que cambia es costo y densidad.**
+- Todo el repo mide la densidad. El ajuste real ya la midió: 16,0 por 1000 líneas.
+- Un archivo por defecto cuesta mucho menos: 30 copias por 4 focos son 120 llamadas.
+- Con 0,0259 USD de lista por llamada, medido en el ajuste real, son cerca de 3,1 USD de lista por cupo.
+
+**Condición.** La configuración de V3 no se toca entre el ajuste y el final. Si alguien cambia la base del prompt o los focos, el ajuste ya no vale para el final.
+
+**El Freno B se juzga con la densidad del ajuste real:** 16,0 por 1000, debajo de 50. No se dispara.
+
+**Si un defecto real del final toca varios archivos,** van todos los archivos que cambia el arreglo.
+
+## 3. Qué hace Root con 16 hallazgos por 1000 líneas
+
+Esto vale si V3 pasa el final y el usuario decide que V3 sea el buscador de Root. Esa decisión es suya, y llega después del final.
+
+1. **V3 corre solo sobre los archivos que el cambio toca.** Las llamadas son las mismas que se midieron, así que el recall por archivo se conserva.
+2. **Primero van los hallazgos en líneas cambiadas, más o menos 3.** Un defecto que el builder introduce vive en líneas que escribió. El resto va a un anexo.
+3. **Los hallazgos no entran a la decisión.** No disparan "no listo" ni "bloqueado". Van como "posibles defectos", con archivo, línea y detalle.
+4. **Razón del punto 3.** La precisión no está medida. De 2400 hallazgos, 4 tienen etiqueta. Con 16 por 1000, un repo de 10.000 líneas da cerca de 160 alarmas. Si bloquearan, casi todo daría "no listo".
+5. **Medir la precisión va al hito 1b.** Una muestra de 40 hallazgos del ajuste real. Un hallazgo cuenta como confirmado si un test escrito desde su detalle da rojo en el padre. Es un oráculo, no un juez.
+6. **Costo por evaluación:** archivos tocados por 4 llamadas por 0,0259 USD de lista. Un cambio de 5 archivos da cerca de 0,52 USD de lista por cupo.
+
+## 4. Orden de defectos, con (f) y (g)
+
+| Orden | Defecto | Causa | Arreglo mínimo | Test de aceptación | Destino |
+|---|---|---|---|---|---|
+| 1 | (a) "listo" con test oculto fallando | Igual que en la vuelta 70 | Igual que en la vuelta 70 | Igual que en la vuelta 70 | P95, después Tarea 80 |
+| 2 | (f) huella falsa | `HuellasOraculo.lineas` toma líneas largas y únicas de los archivos ocultos. No las compara con los archivos visibles (`src/observe/transcript.rs:69` y `huella_en_texto`, línea 548) | Al armar las huellas, se descarta toda línea oculta que también aparece en un archivo visible del estado inicial o del contrato. Si no queda ninguna línea, se informa "huella sin líneas distintivas", y siguen valiendo las rutas y los nombres | Test unitario: una línea oculta que aparece en `benches/` no dispara. Una línea oculta única sí dispara. La detección offline sobre el transcript guardado de t1 no da `oraculo_leido` | **Tarea 80, ya.** No pide pregunta: hoy invalida una corrida correcta |
+| 3 | (c) y (e) el juez solo lee el comienzo | Igual que en la vuelta 70 | Igual que en la vuelta 70. Además, el veredicto guarda los extractos leídos: archivo, primera línea y última línea | Igual que en la vuelta 70. Además, el veredicto JSON trae los extractos | Hito 1b, antes de D4 |
+| 4 | (b) bloqueo por avisos previos | Igual que en la vuelta 70 | Igual que en la vuelta 70 | Igual que en la vuelta 70 | P96, después hito 1b |
+| 5 | (d) alarma por `capas` | Igual que en la vuelta 70 | Regla de D3 | Chequeo C de D3 | Regla de D3 |
+| 6 | (g) especificidad 1,0 sin veredicto | Un limpio sin veredicto entra como verdadero negativo en la presentación | La fila muestra especificidad "sin dato" cuando ningún limpio tiene veredicto, y siempre muestra "k de n limpios con veredicto" | Test unitario: 1 limpio sin veredicto da "sin dato (0 de 1)", y no 1,0. Con 1 de 2 con veredicto, la especificidad usa solo ese 1 | **Tarea 80.** Es chico, y engaña al leer S2 |
+
+**Por qué (f) va antes que (c).** (f) convierte una corrida buena en inválida. Sin (f), la mitad de las corridas de D3 en repos con `benches/` o ejemplos pueden caer igual.
+
+**Tarea 80, ahora:** (f) y (g). Escribo el brief cuando el orquestador lo pida. (a) entra a la misma tarea solo si P95 responde a.
+
+## 5. La partición de función nueva para D3
+
+**Alcanza como partición.** Rojo en 6 de 6 y verde en 19 de 19 ids, sin fallos ajenos.
+
+**Falta, además del chequeo C del contrato:**
+1. **Repetición.** El verde se corrió una vez. Corré oculto y contrato 3 veces sobre el repo bueno, como `repeticiones = 3`. Un test inestable descarta la tarea o el id.
+2. **Copia escribible para todos.** `oculto.cmd` ya copia `/repo`. `contrato.cmd` también tiene que copiar, porque serie escribe imágenes. Es una regla de D3, sin código.
+3. **El repo bueno no contiene ningún test del parche.** Es un chequeo C de la vuelta 70.
+4. **Criterio 5.** Sigue sin medir en las 6.
+5. **`pruebas` llenos con ids de un junit real,** y `capas` del mapa real de módulos (defecto d).
+6. **Fichas por cupo,** con el método aprobado en P81. Después corre `r00t ficha revisar` y el chequeo de fuga.
+7. **Estratificación.** 5 de 6 son de broot. Eso depende de P97.
+
+## 6. V0
+
+**Acepto 2 de 5 como medición parcial.** No cambio la regla de una sola corrida.
+- Mi pedido de relanzar V0 fue un error mío: no sabía que ya había corrido.
+- V0 ya no decide nada. La hipótesis de familia la debilitó V1, y V3 ya está elegida.
+- Se informa como "V0: 2 de 5 lotes medidos, informativo".
+- P84 queda cerrado en 9,8129 USD. No se lanza nada más con ese tope.
+
+## 7. Proyección de D4 con `corre` medido
+
+**`corre`, medido en S2:**
+- Minutos: 16 a 22, media 19,7.
+- API, solo el juez final: 0,063 a 0,147 USD, media 0,091.
+- Cupo de lista: 0,71 a 1,19 USD, media 0,91.
+
+**Para 20 tareas, una corrida cada una:** 6,6 horas, 1,8 USD de API y 18,2 USD de lista por cupo.
+
+**Total de D4, escenario B,** con filas calibradas por tarea:
+
+| Parte | API | Cupo de lista | CPU |
+|---|---|---|---|
+| Calibración, juez de hoy | 29 USD (24 a 35) | 0 | 31 a 54 h |
+| Calibración, lectura ampliada | hasta 40 USD | 0 | sin dato |
+| `corre`, 20 tareas | 1,8 USD | 18,2 USD | 6,6 h |
+| Curva de recall con V3, 20 copias de 2 archivos | 0 | cerca de 4,1 USD | sin dato |
+
+**Escenario A:** 6,3 USD de calibración más 1,8 USD de `corre`. No calibra filas por tarea.
+
+**Ritmo del cupo.** El ajuste real gastó 54,4 USD de lista en 4 ventanas de 5 horas. Eso da cerca de 13,6 USD de lista por ventana, si cada ventana se usó entera. Con eso, `corre` de D4 pide cerca de 1,3 ventanas.
+
+**S3a sostiene.** Cada evaluación tardó 16,2 minutos o menos, y cada `corre` 22 o menos. B con la lectura de hoy da de 38 a 61 horas de CPU: menos de 3 días en serie.
+
+**Sigue sin dato:**
+- La salida del juez con la lectura ampliada.
+- Los minutos del saboteador.
+- Cuántas dimensiones de juez aplican por tarea.
+- `corre` con un solo dato por tarea. Una tarea inválida por (f) no cuenta como medición de calidad, pero sí de costo y minutos.
+
+**Presupuesto.** Del dataset quedan 38,4 USD o menos de API. B con la lectura de hoy entra. B con la lectura ampliada no entra. Eso va al usuario al cerrar D3.
+
+## 8. Qué corre en paralelo mientras el usuario responde
+
+**Sin depender de ninguna respuesta:**
+1. **Tarea 80 con (f) y (g).** Por cupo, con `ROOT_SIN_PODMAN=1`. La suite con podman va al mezclar.
+2. **D3 de función nueva:** las 3 repeticiones, el chequeo C del contrato, el criterio 5, los `pruebas` y las fichas. Es minería, no la suite de Root. Si tu restricción la incluye, dejá solo las fichas.
+3. **Medición offline de (c) y (e) sobre los 24 veredictos de Vd.** Root no guarda los extractos, pero son deterministas: los 5 archivos más grandes y los citados por sondas, desde el principio, con 6000 y 40000 caracteres. Reconstruílos y contá cuántos defectos caen adentro.
+4. **Colab:** medir cuántas VM simultáneas da la cuenta, dentro de las 50 unidades de P92. Prepara P97 a.
+5. **Detección offline de (f) sobre el transcript de t1,** con la regla nueva escrita en un script. Confirma la causa antes de la Tarea 80.
+
+**Lo que espera:**
+- El final sembrado y las copias del final real esperan P98.
+- (a) espera P95, y (b) espera P96.
+- La minería nueva espera P97.
+
+**Sin mezclar mediciones.** Hoy nada mide minutos. Si vuelve a correr un `corre`, corre solo. La Tarea 80 y las fichas comparten el cupo, y eso solo cambia cuándo terminan.
+
+## Preguntas para el usuario (2026-11-10, 1)
+
+P95, P96 y P97 siguen abiertas, tal como están en la vuelta del 2026-11-09 (4).
+
+**P98: V3 dio 4 de 5 en el ajuste real, y pasa la regla para abrir el final.** El final sellado se usa una sola vez. Hay dos partes: sembrados, con 30 defectos, y reales, que hoy tiene 11 defectos de 4 repos. La regla pide 15 reales para afirmar 0,8. Con 11, el resultado sale como "muestra corta", y Root sigue sin evaluar repos reales.
+
+- **a)** Abrir ahora solo los sembrados, con un archivo por defecto. Son cerca de 120 llamadas y 3,1 USD de lista por cupo, sin API. Los reales esperan a llegar a 15, con la minería de P97. Recomendada: no gasta el sellado de reales en una muestra que no puede pasar.
+- **b)** Abrir las dos partes ahora. Los reales dan "muestra corta", y su sellado queda gastado.
+- **c)** Esperar. No abrir nada hasta tener 15 reales.
+
+**Si elegís a en P98,** la minería de P97 también debe dar 4 reales o más de repos nuevos para el final. Esos repos no pueden ser broot ni los 4 del final.
