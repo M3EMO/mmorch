@@ -790,17 +790,27 @@ impl Drop for VigilaSenales {
     }
 }
 
-/// Qué hace `r00t corre` al recibir `senal`.
-/// Quita la copia de la credencial y los contenedores del builder de este proceso.
+/// Qué hace `r00t corre` al recibir `senal`. Primero termina el `podman run` en curso y quita los
+/// contenedores del builder. Después borra la copia de la credencial, aunque lo anterior falle.
 /// Luego llama a `salir` con el código de la señal.
 /// Si la copia ya no existe, no es error: la carrera con `GuardiaCredencial::cerrar` es normal.
 fn al_recibir_senal(corrida: &Corrida, senal: i32, programa: &str, salir: impl Fn(i32)) {
+    // El contenedor primero: la copia va montada en el builder vivo, y borrarla no la quita de ahí.
+    if let Err(error) = ejecutor::terminar_hijo_en_curso() {
+        eprintln!(
+            "r00t corre: al recibir una señal no se pudo terminar el builder en curso: {error}"
+        );
+    }
+    if let Err(error) = ejecutor::quitar_builders_de_este_proceso(programa, PLAZO_AL_SENAL) {
+        eprintln!(
+            "r00t corre: al recibir una señal no se pudieron quitar los contenedores del builder: {error}"
+        );
+    }
     if let Err(error) = quitar_credencial(corrida) {
         eprintln!(
             "r00t corre: al recibir una señal no se pudo borrar la copia de la credencial: {error}"
         );
     }
-    ejecutor::quitar_builders_de_este_proceso(programa, PLAZO_AL_SENAL);
     salir(codigo_de_senal(senal));
 }
 
@@ -3180,6 +3190,7 @@ mod tests {
 
     #[test]
     fn senal_sigterm_quita_la_copia_y_sale_con_143() {
+        let _serie = ejecutor::serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
         let corrida = corrida_de_prueba(tmp.path());
         let (podman, _log) = podman_falso(tmp.path(), &[]);
@@ -3196,6 +3207,7 @@ mod tests {
 
     #[test]
     fn senal_sigint_quita_la_copia_y_sale_con_130() {
+        let _serie = ejecutor::serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
         let corrida = corrida_de_prueba(tmp.path());
         let (podman, _log) = podman_falso(tmp.path(), &[]);
@@ -3212,6 +3224,7 @@ mod tests {
 
     #[test]
     fn senal_con_la_copia_ya_borrada_no_falla_y_sale() {
+        let _serie = ejecutor::serie_de_pruebas();
         // Carrera: `cerrar` ya borró la copia cuando llega la señal. Debe salir igual, sin error.
         let tmp = TempDir::new().expect("tmp");
         let corrida = corrida_de_prueba(tmp.path());
@@ -3226,6 +3239,7 @@ mod tests {
 
     #[test]
     fn senal_quita_los_contenedores_de_este_proceso_por_nombre() {
+        let _serie = ejecutor::serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
         let corrida = corrida_de_prueba(tmp.path());
         let pid = std::process::id();
@@ -3244,6 +3258,128 @@ mod tests {
             "{anotado}"
         );
         assert!(!anotado.contains("root-builder-1-0"), "{anotado}");
+    }
+
+    /// Hijo en curso falso, como `podman run`: un `sh` que anota su pid en `pidfile` y se reemplaza por `sleep`.
+    /// Corre en otro hilo. Espera a que quede registrado antes de devolver.
+    fn hijo_en_curso(base: &Path) -> (std::thread::JoinHandle<bool>, PathBuf) {
+        let pidfile = base.join("hijo.pid");
+        let args = vec![
+            "-c".to_string(),
+            format!("echo $$ > '{}'; exec sleep 30", pidfile.display()),
+        ];
+        let hilo = std::thread::spawn(move || {
+            ejecutor::correr_proceso("sh", &args, Duration::from_secs(10)).is_err()
+        });
+        let limite = Instant::now() + Duration::from_secs(5);
+        while ejecutor::pid_en_curso().is_none() || !pidfile.exists() {
+            assert!(
+                Instant::now() < limite,
+                "el hijo en curso no quedó registrado"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        (hilo, pidfile)
+    }
+
+    /// `podman` falso del orden. `ps` anota si el hijo en curso vive y da el nombre `nombre`.
+    /// `rm` anota si la copia de la credencial existe. Cada llamada va al log, en orden.
+    fn podman_del_orden(
+        base: &Path,
+        pidfile: &Path,
+        copia: &Path,
+        nombre: &str,
+    ) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = base.join("podman.log");
+        let cuerpo = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = ps ]; then\n\
+             p=$(cat '{pid}' 2>/dev/null)\n\
+             st=$(awk '{{print $3}}' /proc/$p/stat 2>/dev/null)\n\
+             if [ -n \"$st\" ] && [ \"$st\" != Z ]; then echo 'ps hijo=vivo' >> '{log}'; else echo 'ps hijo=muerto' >> '{log}'; fi\n\
+             echo {nombre}\n\
+             fi\n\
+             if [ \"$1\" = rm ]; then\n\
+             if [ -e '{copia}' ]; then echo 'rm copia=si' >> '{log}'; else echo 'rm copia=no' >> '{log}'; fi\n\
+             fi\n",
+            pid = pidfile.display(),
+            log = log.display(),
+            copia = copia.display(),
+        );
+        let ruta = base.join("podman-del-orden");
+        fs::write(&ruta, cuerpo).expect("script");
+        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+        (ruta, log)
+    }
+
+    /// `podman` falso con `cuerpo` como script, después de `#!/bin/sh`. Devuelve su ruta.
+    fn podman_con_cuerpo(base: &Path, cuerpo: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let ruta = base.join("podman-con-cuerpo");
+        fs::write(&ruta, format!("#!/bin/sh\n{cuerpo}\n")).expect("script");
+        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+        ruta
+    }
+
+    #[test]
+    fn senal_termina_el_hijo_quita_contenedores_y_borra_la_copia_en_ese_orden() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let (hilo, pidfile) = hijo_en_curso(tmp.path());
+        let nombre = format!("root-builder-{}-0", std::process::id());
+        let (podman, log) =
+            podman_del_orden(tmp.path(), &pidfile, &copia_de_prueba(&corrida), &nombre);
+        al_recibir_senal(&corrida, SIGTERM, podman.to_str().expect("ruta"), |_| {});
+        let anotado = fs::read_to_string(&log).expect("log");
+        assert_eq!(
+            anotado, "ps hijo=muerto\nrm copia=si\n",
+            "primero se mata el hijo, luego se quitan los contenedores con la copia aún puesta"
+        );
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "la copia se borra al final"
+        );
+        assert!(
+            hilo.join().expect("hilo del hijo"),
+            "el hijo murió con error"
+        );
+    }
+
+    #[test]
+    fn senal_con_rm_fallido_borra_la_copia_igual() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let nombre = format!("root-builder-{}-0", std::process::id());
+        let cuerpo = format!("if [ \"$1\" = ps ]; then echo {nombre}; exit 0; fi\nexit 1");
+        let podman = podman_con_cuerpo(tmp.path(), &cuerpo);
+        let codigo = Cell::new(None);
+        al_recibir_senal(&corrida, SIGTERM, podman.to_str().expect("ruta"), |c| {
+            codigo.set(Some(c));
+        });
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "la copia se borra aunque rm falle"
+        );
+        assert_eq!(codigo.get(), Some(143));
+    }
+
+    #[test]
+    fn senal_con_programa_inexistente_borra_la_copia_igual() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let codigo = Cell::new(None);
+        al_recibir_senal(&corrida, SIGINT, "/no/existe/podman", |c| {
+            codigo.set(Some(c));
+        });
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "la copia se borra aunque no haya podman"
+        );
+        assert_eq!(codigo.get(), Some(130));
     }
 
     #[test]

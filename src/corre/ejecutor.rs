@@ -6,6 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -302,10 +303,63 @@ fn revisar_plugin(plugin: &Path) -> Result<(), ErrorCorre> {
     }
 }
 
+/// Pid del hijo en curso de `correr_proceso_con_tope`. Sin valor si no hay hijo.
+static HIJO_EN_CURSO: Mutex<Option<u32>> = Mutex::new(None);
+
+/// Registra el pid de un hijo mientras vive. Al soltarlo, borra el registro.
+struct HijoRegistrado;
+
+impl HijoRegistrado {
+    fn nuevo(pid: u32) -> HijoRegistrado {
+        *HIJO_EN_CURSO.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
+        HijoRegistrado
+    }
+}
+
+impl Drop for HijoRegistrado {
+    fn drop(&mut self) {
+        *HIJO_EN_CURSO.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Termina con SIGKILL el hijo en curso, si lo hay. Sin hijo, no hace nada.
+pub fn terminar_hijo_en_curso() -> Result<(), ErrorCorre> {
+    let guardia = HIJO_EN_CURSO.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(pid) = *guardia else {
+        return Ok(());
+    };
+    let estado = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| ErrorCorre::Ejecutor(format!("no se pudo correr kill: {e}")))?;
+    if estado.success() {
+        Ok(())
+    } else {
+        Err(ErrorCorre::Ejecutor(format!(
+            "no se pudo terminar el hijo {pid}"
+        )))
+    }
+}
+
+/// Pid del hijo en curso, para los tests.
+#[cfg(test)]
+pub(crate) fn pid_en_curso() -> Option<u32> {
+    *HIJO_EN_CURSO.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Cerrojo de los tests que corren hijos o señales. Así una señal de un test no mata el hijo de otro.
+#[cfg(test)]
+pub(crate) fn serie_de_pruebas() -> std::sync::MutexGuard<'static, ()> {
+    static SERIE: Mutex<()> = Mutex::new(());
+    SERIE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Quita los contenedores del builder que lanzó este proceso: los que llevan `root-builder-<pid>-` en
 /// el nombre. Corre `<programa> ps` y luego `<programa> rm -f -t 0 <nombres>`, con `plazo` en total.
-/// Ignora los errores: quien llama está saliendo y no tiene a quién avisar.
-pub fn quitar_builders_de_este_proceso(programa: &str, plazo: Duration) {
+/// Devuelve el primer fallo: no se pudo correr el programa, un paso venció el plazo o salió con error.
+pub fn quitar_builders_de_este_proceso(programa: &str, plazo: Duration) -> Result<(), ErrorCorre> {
     let inicio = Instant::now();
     let prefijo = format!("root-builder-{}-", std::process::id());
     let filtro = format!("name={prefijo}");
@@ -318,9 +372,7 @@ pub fn quitar_builders_de_este_proceso(programa: &str, plazo: Duration) {
         filtro.as_str(),
     ];
     let args_ps: Vec<String> = args_ps.iter().map(|a| a.to_string()).collect();
-    let Ok(Fin::Termino(salida)) = correr_proceso(programa, &args_ps, plazo) else {
-        return;
-    };
+    let salida = correr_paso_de_quitar(programa, &args_ps, plazo, "ps")?;
     let nombres: Vec<String> = String::from_utf8_lossy(&salida.stdout)
         .lines()
         .map(str::trim)
@@ -328,12 +380,33 @@ pub fn quitar_builders_de_este_proceso(programa: &str, plazo: Duration) {
         .map(str::to_string)
         .collect();
     if nombres.is_empty() {
-        return;
+        return Ok(());
     }
     let mut args_rm: Vec<String> = ["rm", "-f", "-t", "0"].map(String::from).into();
     args_rm.extend(nombres);
     let restante = plazo.saturating_sub(inicio.elapsed());
-    let _ = correr_proceso(programa, &args_rm, restante);
+    correr_paso_de_quitar(programa, &args_rm, restante, "rm")?;
+    Ok(())
+}
+
+/// Corre un paso de `quitar_builders_de_este_proceso`. Solo sale bien si termina con código 0 dentro del plazo.
+fn correr_paso_de_quitar(
+    programa: &str,
+    args: &[String],
+    plazo: Duration,
+    paso: &str,
+) -> Result<SalidaClaude, ErrorCorre> {
+    match correr_proceso(programa, args, plazo)? {
+        Fin::Termino(salida) if salida.codigo == 0 => Ok(salida),
+        Fin::Termino(salida) => Err(ErrorCorre::Ejecutor(format!(
+            "{paso} de los contenedores salió con código {}: {}",
+            salida.codigo,
+            String::from_utf8_lossy(&salida.stderr).trim()
+        ))),
+        Fin::Vencio { .. } => Err(ErrorCorre::Ejecutor(format!(
+            "{paso} de los contenedores venció el plazo"
+        ))),
+    }
 }
 
 /// Nombre único de un contenedor del builder: `root-builder-<pid>-<contador>`.
@@ -344,7 +417,7 @@ fn nombre_unico() -> String {
 
 /// Fin de un proceso: terminó solo, o venció el plazo y se mató.
 #[derive(Debug, PartialEq, Eq)]
-enum Fin {
+pub(crate) enum Fin {
     Termino(SalidaClaude),
     /// Lo leído de `stdout` y `stderr` hasta el corte. Puede faltar si un nieto retiene la pipe.
     Vencio {
@@ -357,7 +430,11 @@ enum Fin {
 const GRACIA_LECTURA: Duration = Duration::from_secs(2);
 
 /// Corre `programa` con `args` y espera hasta `plazo`, con el tope del builder. Ver `correr_proceso_con_tope`.
-fn correr_proceso(programa: &str, args: &[String], plazo: Duration) -> Result<Fin, ErrorCorre> {
+pub(crate) fn correr_proceso(
+    programa: &str,
+    args: &[String],
+    plazo: Duration,
+) -> Result<Fin, ErrorCorre> {
     correr_proceso_con_tope(programa, args, plazo, TOPE_SALIDA_BUILDER)
 }
 
@@ -382,6 +459,7 @@ fn correr_proceso_con_tope(
                 "no se pudo lanzar {programa} (¿está instalado y en PATH?): {e}"
             ))
         })?;
+    let _registro = HijoRegistrado::nuevo(hijo.id());
     let salida = hijo.stdout.take().map(|f| leer_en_hilo_con(f, tope));
     let error = hijo.stderr.take().map(|f| leer_en_hilo_con(f, tope));
     let estado = esperar(&mut hijo, plazo).map_err(|e| {
@@ -763,6 +841,7 @@ mod tests {
 
     #[test]
     fn corre_proceso_devuelve_codigo_y_salida() {
+        let _serie = serie_de_pruebas();
         let args = vec![
             "-c".to_string(),
             "echo hola; echo mal >&2; exit 4".to_string(),
@@ -779,6 +858,7 @@ mod tests {
 
     #[test]
     fn corre_proceso_vence_el_plazo_y_no_espera_el_fin() {
+        let _serie = serie_de_pruebas();
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let inicio = std::time::Instant::now();
         let fin = correr_proceso("sh", &args, Duration::from_millis(100)).expect("corre");
@@ -791,6 +871,7 @@ mod tests {
 
     #[test]
     fn corre_proceso_vencido_conserva_lo_que_alcanzo_a_dar() {
+        let _serie = serie_de_pruebas();
         // `exec` hace que el `sleep` sea el proceso que se mata: nadie más retiene la pipe.
         let args = vec!["-c".to_string(), "echo parcial; exec sleep 5".to_string()];
         let fin = correr_proceso("sh", &args, Duration::from_secs(1)).expect("corre");
@@ -802,6 +883,7 @@ mod tests {
 
     #[test]
     fn corre_proceso_sin_programa_es_error_de_infraestructura() {
+        let _serie = serie_de_pruebas();
         let error = correr_proceso(
             "root-programa-inexistente-7c1e",
             &[],
@@ -816,6 +898,7 @@ mod tests {
 
     #[test]
     fn corre_proceso_con_tope_falla_si_stdout_pasa_el_tope() {
+        let _serie = serie_de_pruebas();
         let args = vec![
             "-c".to_string(),
             "head -c 5000 /dev/zero | tr '\\0' x".to_string(),
@@ -1005,6 +1088,7 @@ mod tests {
 
     #[test]
     fn quitar_builders_pide_por_nombre_solo_los_de_este_proceso() {
+        let _serie = serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
         let log = tmp.path().join("podman.log");
         let pid = std::process::id();
@@ -1013,7 +1097,8 @@ mod tests {
             log.display()
         );
         let programa = programa_falso(tmp.path(), &cuerpo);
-        quitar_builders_de_este_proceso(programa.to_str().expect("ruta"), Duration::from_secs(10));
+        quitar_builders_de_este_proceso(programa.to_str().expect("ruta"), Duration::from_secs(10))
+            .expect("quita los del proceso");
         let anotado = fs::read_to_string(&log).expect("log");
         assert!(
             anotado.contains(&format!(
@@ -1033,21 +1118,25 @@ mod tests {
 
     #[test]
     fn quitar_builders_sin_nombres_no_llama_a_rm() {
+        let _serie = serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
         let log = tmp.path().join("podman.log");
         let cuerpo = format!("echo \"$*\" >> '{}'", log.display());
         let programa = programa_falso(tmp.path(), &cuerpo);
-        quitar_builders_de_este_proceso(programa.to_str().expect("ruta"), Duration::from_secs(10));
+        quitar_builders_de_este_proceso(programa.to_str().expect("ruta"), Duration::from_secs(10))
+            .expect("sin nombres no hay error");
         let anotado = fs::read_to_string(&log).expect("log");
         assert!(!anotado.contains(" rm "), "{anotado}");
     }
 
     #[test]
     fn quitar_builders_respeta_el_plazo() {
+        let _serie = serie_de_pruebas();
         let tmp = TempDir::new().expect("tmp");
+        // `ps` vence: el plazo se corta y se avisa el fallo.
         let programa = programa_falso(tmp.path(), "exec sleep 30");
         let inicio = std::time::Instant::now();
-        quitar_builders_de_este_proceso(
+        let resultado = quitar_builders_de_este_proceso(
             programa.to_str().expect("ruta"),
             Duration::from_millis(300),
         );
@@ -1055,10 +1144,71 @@ mod tests {
             inicio.elapsed() < Duration::from_secs(10),
             "no espera el fin"
         );
+        assert!(resultado.is_err(), "vencer el plazo es un fallo");
     }
 
     #[test]
-    fn quitar_builders_con_programa_inexistente_no_falla() {
-        quitar_builders_de_este_proceso("/no/existe/podman", Duration::from_secs(1));
+    fn quitar_builders_con_programa_inexistente_avisa_el_error() {
+        let _serie = serie_de_pruebas();
+        let resultado =
+            quitar_builders_de_este_proceso("/no/existe/podman", Duration::from_secs(1));
+        assert!(resultado.is_err(), "sin programa no se quita nada");
+    }
+
+    #[test]
+    fn quitar_builders_con_rm_fallido_avisa_el_error() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let pid = std::process::id();
+        // `ps` da un nombre del proceso y `rm` sale con error.
+        let cuerpo =
+            format!("if [ \"$1\" = ps ]; then echo root-builder-{pid}-0; exit 0; fi\nexit 1");
+        let programa = programa_falso(tmp.path(), &cuerpo);
+        let resultado = quitar_builders_de_este_proceso(
+            programa.to_str().expect("ruta"),
+            Duration::from_secs(10),
+        );
+        assert!(resultado.is_err(), "un rm fallido es un error");
+    }
+
+    /// Hijo en curso falso: un `sh` que se reemplaza por `sleep`. Corre en otro hilo, como `podman run`.
+    fn lanzar_hijo_en_curso() -> std::thread::JoinHandle<bool> {
+        let args = vec!["-c".to_string(), "exec sleep 30".to_string()];
+        std::thread::spawn(move || correr_proceso("sh", &args, Duration::from_secs(10)).is_err())
+    }
+
+    /// Espera hasta que haya un hijo registrado. Si no lo hay en 5 s, falla.
+    fn esperar_hijo_registrado() {
+        let limite = Instant::now() + Duration::from_secs(5);
+        while pid_en_curso().is_none() {
+            assert!(Instant::now() < limite, "el hijo no quedó registrado");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn terminar_hijo_sin_hijo_en_curso_no_hace_nada() {
+        let _serie = serie_de_pruebas();
+        assert!(terminar_hijo_en_curso().is_ok());
+        assert_eq!(pid_en_curso(), None);
+    }
+
+    #[test]
+    fn terminar_hijo_mata_el_hijo_en_curso_y_libera_el_registro() {
+        let _serie = serie_de_pruebas();
+        let hilo = lanzar_hijo_en_curso();
+        esperar_hijo_registrado();
+        let inicio = Instant::now();
+        terminar_hijo_en_curso().expect("termina el hijo");
+        let murio_con_error = hilo.join().expect("hilo del hijo");
+        assert!(
+            murio_con_error,
+            "el hijo muere por la señal, no por su plazo"
+        );
+        assert!(
+            inicio.elapsed() < Duration::from_secs(5),
+            "no espera el plazo"
+        );
+        assert_eq!(pid_en_curso(), None, "el registro se limpia al terminar");
     }
 }

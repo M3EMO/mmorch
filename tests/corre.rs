@@ -229,14 +229,17 @@ fn credencial_falsa(usuario: &Path) {
     fs::write(carpeta.join(".credentials.json"), texto).expect("credencial falsa");
 }
 
-/// `podman` falso: `ps` no imprime nada y cualquier otro comando duerme 30 s.
+/// `podman` falso: `ps` no imprime nada y cualquier otro comando anota su pid en `bin/hijo.pid` y duerme 30 s.
 fn podman_falso(bin: &Path) {
     use std::os::unix::fs::PermissionsExt;
     fs::create_dir_all(bin).expect("bin");
     let ruta = bin.join("podman");
     fs::write(
         &ruta,
-        "#!/bin/sh\nif [ \"$1\" = ps ]; then exit 0; fi\nexec sleep 30\n",
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = ps ]; then exit 0; fi\necho $$ > '{}'\nexec sleep 30\n",
+            bin.join("hijo.pid").display()
+        ),
     )
     .expect("podman falso");
     fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
@@ -271,6 +274,18 @@ fn esperar_hasta(plazo: Duration, mut pred: impl FnMut() -> bool) -> bool {
     pred()
 }
 
+/// `true` si el proceso `pid` existe y no es zombi. Un zombi ya no corre.
+fn proceso_vivo(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit(") ")
+                .next()
+                .and_then(|resto| resto.chars().next())
+        })
+        .is_some_and(|estado| estado != 'Z')
+}
+
 /// Espera hasta `plazo` a que el proceso termine. Si no termina, lo mata y falla el test.
 fn esperar_salida(hijo: &mut Child, plazo: Duration) -> ExitStatus {
     let limite = Instant::now() + plazo;
@@ -286,8 +301,9 @@ fn esperar_salida(hijo: &mut Child, plazo: Duration) -> ExitStatus {
     }
 }
 
-/// Lanza `r00t corre` con la credencial falsa y el `podman` falso, espera a que la copia exista,
-/// manda la señal `senal` y comprueba que la copia se borra y que el código es `codigo`.
+/// Lanza `r00t corre` con la credencial falsa y el `podman` falso, espera a que la copia exista y a que
+/// el `run` del `podman` falso esté en curso. Manda la señal `senal` y comprueba que la copia se borra,
+/// que el código es `codigo` y que el `podman` falso no queda vivo.
 fn senal_quita_la_copia_y_sale_con(senal: &str, codigo: i32) {
     let e = escenario(true);
     credencial_falsa(&e.usuario);
@@ -316,6 +332,17 @@ fn senal_quita_la_copia_y_sale_con(senal: &str, codigo: i32) {
     });
     assert!(hay_copia, "la copia de la credencial no apareció");
     let copia = copias_vivas(&e.usuario).remove(0);
+    // El `run` del `podman` falso debe estar en curso antes de la señal.
+    let pidfile = e._tmp.path().join("bin").join("hijo.pid");
+    let hay_hijo = esperar_hasta(Duration::from_secs(15), || {
+        fs::read_to_string(&pidfile).is_ok_and(|texto| texto.trim().parse::<u32>().is_ok())
+    });
+    assert!(hay_hijo, "el podman falso no arrancó");
+    let pid_hijo: u32 = fs::read_to_string(&pidfile)
+        .expect("pid del hijo")
+        .trim()
+        .parse()
+        .expect("pid numérico");
 
     let enviada = Command::new("kill")
         .args([senal, &hijo.id().to_string()])
@@ -329,6 +356,17 @@ fn senal_quita_la_copia_y_sale_con(senal: &str, codigo: i32) {
         fs::symlink_metadata(&copia).is_err(),
         "la copia se borra al recibir {senal}: {}",
         copia.display()
+    );
+    let vivo = proceso_vivo(pid_hijo);
+    if vivo {
+        // Limpieza: el hijo no debe quedar corriendo si la prueba falla.
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid_hijo.to_string()])
+            .status();
+    }
+    assert!(
+        !vivo,
+        "el podman falso sigue vivo tras {senal}: pid {pid_hijo}"
     );
 }
 
