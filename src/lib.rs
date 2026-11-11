@@ -177,15 +177,13 @@ fn oraculo_calibrar(
         )));
     }
     let home = config::root_home();
-    // El gasto y el peor caso salen de `home`: la calibración no mira otra carpeta (decisión 48).
+    // El gasto sale de `home`: la calibración no mira otra carpeta (decisión 48).
     let gasto = |inicio: f64| {
         observe::uso::gasto_api_desde_en(&observe::ruta_eventos_en(&home), inicio)
             .map_err(|e| oracle::ErrorOraculo::Infra(format!("leer el gasto de API: {e}")))
     };
-    let peor = |partes: &oracle::Partes| oracle::calibra::peor_caso_de_home(&home, partes);
     let presupuesto = tope_usd.map(|usd| oracle::calibra::Presupuesto {
         usd,
-        peor_caso: &peor,
         gasto_desde: &gasto,
     });
     let calibrada = oracle::calibra::calibrar_tarea_con(
