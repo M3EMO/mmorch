@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use serde_json::{Map, json};
 
-use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES, huella_del_prompt};
+use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES, cota_bytes_de_prompt, huella_del_prompt};
 use super::memo::{Alcance, MemoSondas, ReusoSondas};
 use super::mutacion::MutanteMuerto;
 use super::rubrica::{Mide, Rubrica, cargar_embebidas};
@@ -1080,18 +1080,45 @@ const CORRIDA_CALIBRACION: &str = "oraculo-calibracion";
 /// Fase del `Gate` de tope de una calibración.
 const FASE_TOPE_CALIBRACION: &str = "calibracion-tope";
 
-/// Llamadas de juez que un caso puede hacer con sus partes: la elección y el tope de salida de cada una.
-fn llamadas_del_caso<'a>(jueces: &JuecesCaso<'a>, partes: &Partes) -> Vec<(&'a Eleccion, u32)> {
+/// Pedidos por juicio del juez de config (decisión 30). Su `juzgar_config` no reintenta: un pedido.
+const PEDIDOS_POR_JUICIO_CONFIG: u32 = 1;
+
+/// Una llamada de juez que un caso puede hacer: su elección, sus tokens de salida, la entrada máxima de cada
+/// pedido en bytes y cuántos pedidos hace por juicio.
+struct LlamadaJuez<'a> {
+    eleccion: &'a Eleccion,
+    max_tokens: u32,
+    entrada_bytes: u64,
+    pedidos: u32,
+}
+
+/// Llamadas de juez que un caso puede hacer con sus partes. `entrada_diseno` rige solo para el juez de diseño;
+/// el de config usa `MAX_ENTRADA_JUEZ_BYTES`.
+fn llamadas_del_caso<'a>(
+    jueces: &JuecesCaso<'a>,
+    partes: &Partes,
+    entrada_diseno: u64,
+) -> Vec<LlamadaJuez<'a>> {
     let mut llamadas = Vec::new();
     if partes.juez_diseno
         && let Some(eleccion) = jueces.diseno
     {
-        llamadas.push((eleccion, LimitesPrompt::default().max_tokens));
+        llamadas.push(LlamadaJuez {
+            eleccion,
+            max_tokens: LimitesPrompt::default().max_tokens,
+            entrada_bytes: entrada_diseno,
+            pedidos: PEDIDOS_POR_JUICIO_DISENO,
+        });
     }
     if partes.juez_config
         && let Some(eleccion) = jueces.config
     {
-        llamadas.push((eleccion, MAX_TOKENS_JUEZ));
+        llamadas.push(LlamadaJuez {
+            eleccion,
+            max_tokens: MAX_TOKENS_JUEZ,
+            entrada_bytes: MAX_ENTRADA_JUEZ_BYTES,
+            pedidos: PEDIDOS_POR_JUICIO_CONFIG,
+        });
     }
     llamadas
 }
@@ -1101,17 +1128,29 @@ fn precio_de_eleccion<'a>(cfg: &'a Config, eleccion: &Eleccion) -> Option<&'a Pr
     cfg.precios.get(eleccion.modelo.as_deref()?)
 }
 
-/// Peor caso en USD de un caso con `partes`: cada llamada de juez que las partes piden, con la entrada
-/// estimada y todo `max_tokens`, al precio de su modelo. Como `llamar_con`, cuenta cada intento posible. Sin
-/// precio para el modelo, el peor caso es infinito. Un caso sin llamadas de API vale 0.
+/// Peor caso en USD de un caso con `partes`: cada llamada de juez que las partes piden. Cada pedido lleva su
+/// entrada máxima y todo `max_tokens`, al precio de su modelo. Cada pedido cuenta hasta `INTENTOS_MAX`
+/// intentos, como `llamar_con`. Sin precio para el modelo, el peor caso es infinito. Sin llamadas, vale 0.
 pub fn peor_caso_de_caso(cfg: &Config, jueces: &JuecesCaso, partes: &Partes) -> f64 {
-    llamadas_del_caso(jueces, partes)
+    peor_caso_de_caso_con_entrada(cfg, jueces, partes, MAX_ENTRADA_JUEZ_BYTES)
+}
+
+/// Como `peor_caso_de_caso`, con la entrada del juez de diseño en `entrada_diseno_bytes` (la cota de su spec).
+/// Se acota a `MAX_ENTRADA_JUEZ_BYTES`: el juez no envía más que eso.
+pub fn peor_caso_de_caso_con_entrada(
+    cfg: &Config,
+    jueces: &JuecesCaso,
+    partes: &Partes,
+    entrada_diseno_bytes: u64,
+) -> f64 {
+    let entrada_diseno = entrada_diseno_bytes.min(MAX_ENTRADA_JUEZ_BYTES);
+    llamadas_del_caso(jueces, partes, entrada_diseno)
         .into_iter()
-        .fold(0.0, |total, (eleccion, max_tokens)| {
-            let costo = match precio_de_eleccion(cfg, eleccion) {
+        .fold(0.0, |total, llamada| {
+            let costo = match precio_de_eleccion(cfg, llamada.eleccion) {
                 Some(precio) => {
-                    f64::from(INTENTOS_MAX)
-                        * costo_peor_caso(precio, MAX_ENTRADA_JUEZ_BYTES, max_tokens)
+                    f64::from(llamada.pedidos * INTENTOS_MAX)
+                        * costo_peor_caso(precio, llamada.entrada_bytes, llamada.max_tokens)
                 }
                 None => f64::INFINITY,
             };
@@ -1121,11 +1160,12 @@ pub fn peor_caso_de_caso(cfg: &Config, jueces: &JuecesCaso, partes: &Partes) -> 
 
 /// Modelos de las llamadas que el caso puede hacer y no tienen precio en `cfg`.
 pub fn modelos_sin_precio(cfg: &Config, jueces: &JuecesCaso, partes: &Partes) -> Vec<String> {
-    llamadas_del_caso(jueces, partes)
+    llamadas_del_caso(jueces, partes, MAX_ENTRADA_JUEZ_BYTES)
         .into_iter()
-        .filter(|(eleccion, _)| precio_de_eleccion(cfg, eleccion).is_none())
-        .map(|(eleccion, _)| {
-            eleccion
+        .filter(|llamada| precio_de_eleccion(cfg, llamada.eleccion).is_none())
+        .map(|llamada| {
+            llamada
+                .eleccion
                 .modelo
                 .clone()
                 .unwrap_or_else(|| "(sin modelo)".into())
@@ -1140,6 +1180,16 @@ pub fn peor_caso_con_jueces(
     jueces: &JuecesCaso,
     partes: &Partes,
 ) -> Result<f64, ErrorOraculo> {
+    peor_caso_con_jueces_entrada(cfg, jueces, partes, MAX_ENTRADA_JUEZ_BYTES)
+}
+
+/// Como `peor_caso_con_jueces`, con la entrada del juez de diseño de `peor_caso_de_caso_con_entrada`.
+fn peor_caso_con_jueces_entrada(
+    cfg: &Config,
+    jueces: &JuecesCaso,
+    partes: &Partes,
+    entrada_diseno_bytes: u64,
+) -> Result<f64, ErrorOraculo> {
     let sin_precio = modelos_sin_precio(cfg, jueces, partes);
     if !sin_precio.is_empty() {
         return Err(ErrorOraculo::Eleccion(format!(
@@ -1147,12 +1197,26 @@ pub fn peor_caso_con_jueces(
             sin_precio.join(", ")
         )));
     }
-    Ok(peor_caso_de_caso(cfg, jueces, partes))
+    Ok(peor_caso_de_caso_con_entrada(
+        cfg,
+        jueces,
+        partes,
+        entrada_diseno_bytes,
+    ))
 }
 
 /// Peor caso en USD de un caso con `partes` en `home`: los jueces que `evaluar` armaría con el `root.toml` y
 /// las rutas de `home`. Sin partes de juez, vale 0 sin leer nada (decisión 48).
 pub fn peor_caso_de_home(home: &Path, partes: &Partes) -> Result<f64, ErrorOraculo> {
+    peor_caso_de_home_con_entrada(home, partes, MAX_ENTRADA_JUEZ_BYTES)
+}
+
+/// Como `peor_caso_de_home`, con la entrada del juez de diseño en `entrada_diseno_bytes`.
+fn peor_caso_de_home_con_entrada(
+    home: &Path,
+    partes: &Partes,
+    entrada_diseno_bytes: u64,
+) -> Result<f64, ErrorOraculo> {
     if !partes.juez_diseno && !partes.juez_config {
         return Ok(0.0);
     }
@@ -1171,8 +1235,35 @@ pub fn peor_caso_de_home(home: &Path, partes: &Partes) -> Result<f64, ErrorOracu
         diseno: diseno.as_ref().map(|juez| &juez.eleccion),
         config: config.as_ref().map(|juez| &juez.eleccion),
     };
-    peor_caso_con_jueces(&cfg, &jueces, partes)
+    peor_caso_con_jueces_entrada(&cfg, &jueces, partes, entrada_diseno_bytes)
 }
+
+/// Como `peor_caso_de_home`, con la entrada del juez de diseño acotada por la cota de la spec de `tarea`.
+/// Sin juez de diseño en `partes`, no lee la spec.
+pub fn peor_caso_de_home_con_tarea(
+    home: &Path,
+    tarea: &Tarea,
+    partes: &Partes,
+) -> Result<f64, ErrorOraculo> {
+    if !partes.juez_diseno {
+        return peor_caso_de_home_con_entrada(home, partes, MAX_ENTRADA_JUEZ_BYTES);
+    }
+    // El juez de diseño lee la spec del directorio de la tarea, como `juzgar_diseno`.
+    let spec = fs::read_to_string(tarea.dir.join(&tarea.spec))
+        .map_err(|e| super::infra("leer la spec del juez", e))?;
+    let rubricas =
+        cargar_embebidas().map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
+    let cota = cota_bytes_de_prompt(
+        &spec,
+        &tarea.requisito,
+        &rubricas,
+        &LimitesPrompt::default(),
+    );
+    peor_caso_de_home_con_entrada(home, partes, cota)
+}
+
+/// Pedidos por juicio del juez de diseño: el primero y el reintento.
+const PEDIDOS_POR_JUICIO_DISENO: u32 = 2;
 
 /// `oraculo calibrar` con tope opcional (decisión 48): como `calibrar_tarea`, con las dependencias
 /// inyectables. Con `presupuesto`, antes de la línea base y de cada caso compara el gasto más el peor caso
@@ -4442,14 +4533,133 @@ mod tests {
             juez_diseno: true,
             ..Partes::default()
         };
-        // Sonnet cuesta 2 USD por millón de entrada y 10 por millón de salida. Cada juez: la entrada
-        // estimada más todo `max_tokens`, por cada intento posible.
+        // Sonnet cuesta 2 USD por millón de entrada y 10 por millón de salida. Cada pedido: la entrada
+        // estimada más todo `max_tokens`, por cada intento posible. Diseño hace 2 pedidos (reintento) y
+        // config hace 1: en total 3 pedidos de 3 intentos cada uno.
         let por_intento = (MAX_ENTRADA_JUEZ_BYTES as f64 * 2.0
             + f64::from(crate::proveedores::MAX_TOKENS_JUEZ) * 10.0)
             / 1_000_000.0;
-        let esperado = 2.0 * f64::from(crate::proveedores::INTENTOS_MAX) * por_intento;
+        let esperado = (2.0 + 1.0) * f64::from(crate::proveedores::INTENTOS_MAX) * por_intento;
         let peor = peor_caso_de_caso(&cfg, &jueces, &partes);
         assert!((peor - esperado).abs() < 1e-9, "{peor} != {esperado}");
+    }
+
+    /// Costo de un intento con `entrada` bytes de entrada y todo `MAX_TOKENS_JUEZ` de salida, en Sonnet.
+    fn costo_por_intento(entrada: f64) -> f64 {
+        (entrada * 2.0 + f64::from(MAX_TOKENS_JUEZ) * 10.0) / 1_000_000.0
+    }
+
+    #[test]
+    fn calibra_peor_caso_de_juez_de_diseno_cuenta_sus_dos_pedidos() {
+        let cfg = Config::default();
+        let eleccion = eleccion_juez(MODELO_JUEZ);
+        let jueces = JuecesCaso {
+            diseno: Some(&eleccion),
+            config: None,
+        };
+        let partes = Partes {
+            dimension: Some(Dimension::Diseno),
+            juez_diseno: true,
+            ..Partes::default()
+        };
+        // El juez de diseño reintenta: 2 pedidos, cada uno con hasta INTENTOS_MAX intentos.
+        let esperado =
+            2.0 * f64::from(INTENTOS_MAX) * costo_por_intento(MAX_ENTRADA_JUEZ_BYTES as f64);
+        let peor = peor_caso_de_caso(&cfg, &jueces, &partes);
+        assert!((peor - esperado).abs() < 1e-9, "{peor} != {esperado}");
+    }
+
+    #[test]
+    fn calibra_peor_caso_del_juez_de_config_cuenta_un_pedido() {
+        let cfg = Config::default();
+        let eleccion = eleccion_juez(MODELO_JUEZ);
+        let jueces = JuecesCaso {
+            diseno: None,
+            config: Some(&eleccion),
+        };
+        let partes = Partes {
+            dimension: Some(Dimension::Entrega),
+            juez_config: true,
+            ..Partes::default()
+        };
+        // El juez de config no reintenta: 1 pedido con hasta INTENTOS_MAX intentos.
+        let esperado = f64::from(INTENTOS_MAX) * costo_por_intento(MAX_ENTRADA_JUEZ_BYTES as f64);
+        let peor = peor_caso_de_caso(&cfg, &jueces, &partes);
+        assert!((peor - esperado).abs() < 1e-9, "{peor} != {esperado}");
+    }
+
+    #[test]
+    fn calibra_peor_caso_con_entrada_chica_baja_y_crece_hasta_el_maximo() {
+        let cfg = Config::default();
+        let eleccion = eleccion_juez(MODELO_JUEZ);
+        let jueces = JuecesCaso {
+            diseno: Some(&eleccion),
+            config: None,
+        };
+        let partes = Partes {
+            dimension: Some(Dimension::Diseno),
+            juez_diseno: true,
+            ..Partes::default()
+        };
+        let chica = peor_caso_de_caso_con_entrada(&cfg, &jueces, &partes, 10_000);
+        let media = peor_caso_de_caso_con_entrada(&cfg, &jueces, &partes, 100_000);
+        let maximo = peor_caso_de_caso(&cfg, &jueces, &partes);
+        assert!(chica < media && media < maximo, "{chica} {media} {maximo}");
+        // Una entrada por encima del máximo no se envía: la cuenta se queda en el máximo.
+        let exceso = peor_caso_de_caso_con_entrada(&cfg, &jueces, &partes, u64::MAX);
+        assert_eq!(exceso, maximo);
+    }
+
+    #[test]
+    fn calibra_peor_caso_de_home_con_tarea_sin_juez_no_lee_la_spec() {
+        let home = tempfile::tempdir().expect("home");
+        let (_t, tarea) = tarea_prueba();
+        let seguridad = Partes {
+            dimension: Some(Dimension::Seguridad),
+            nativas: true,
+            ..Partes::default()
+        };
+        let peor =
+            peor_caso_de_home_con_tarea(home.path(), &tarea, &seguridad).expect("sin jueces");
+        assert_eq!(peor, 0.0);
+    }
+
+    #[test]
+    fn calibra_peor_caso_de_home_con_tarea_sin_spec_da_error_de_infra() {
+        let home = tempfile::tempdir().expect("home");
+        // `tarea_en` declara una spec que el directorio no tiene.
+        let (_t, tarea) = tarea_prueba();
+        let diseno = Partes {
+            dimension: Some(Dimension::Diseno),
+            juez_diseno: true,
+            ..Partes::default()
+        };
+        let error =
+            peor_caso_de_home_con_tarea(home.path(), &tarea, &diseno).expect_err("sin spec");
+        assert!(matches!(error, ErrorOraculo::Infra(_)), "{error:?}");
+    }
+
+    /// Imprime la cota nueva y la vieja del juez de diseño sobre la spec de T1 de S2 (mineria). Sin API.
+    /// Corre con `tools/test-seguro.sh calibra_cota_de_t1_de_s2_sin_api -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "lee la spec real de mineria/s2/t1 y solo imprime"]
+    fn calibra_cota_de_t1_de_s2_sin_api() {
+        let home = std::env::var("HOME").expect("HOME");
+        let ruta = Path::new(&home).join(".cache/root-wt/mineria/s2/t1/SPEC.md");
+        let spec = fs::read_to_string(&ruta)
+            .unwrap_or_else(|e| panic!("no se lee {}: {e}", ruta.display()));
+        let rubricas = cargar_embebidas().expect("rúbricas embebidas");
+        let limites = LimitesPrompt::default();
+        // Sin requisitos: tarea.toml no se lee en este test.
+        let nueva = cota_bytes_de_prompt(&spec, &[], &rubricas, &limites);
+        let intentos_nuevos = PEDIDOS_POR_JUICIO_DISENO * INTENTOS_MAX;
+        println!("spec: {} ({} bytes)", ruta.display(), spec.len());
+        println!("cota NUEVA: {nueva} bytes de entrada por intento");
+        println!("tokens de salida por intento: {}", limites.max_tokens);
+        println!("intentos por caso (juez de diseño): {intentos_nuevos}");
+        println!("cota VIEJA: {MAX_ENTRADA_JUEZ_BYTES} bytes de entrada por intento");
+        println!("tokens de salida por intento: {}", limites.max_tokens);
+        println!("intentos por caso (juez de diseño): {INTENTOS_MAX}");
     }
 
     #[test]
