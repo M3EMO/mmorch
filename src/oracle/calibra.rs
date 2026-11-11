@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use serde_json::{Map, json};
 
-use super::juez::{ExtractoGuardado, MAX_ENTRADA_JUEZ_BYTES, huella_del_prompt};
+use super::juez::{ExtractoGuardado, huella_del_prompt};
 use super::memo::{Alcance, MemoSondas, ReusoSondas};
 use super::mutacion::MutanteMuerto;
 use super::rubrica::{Mide, Rubrica, cargar_embebidas};
@@ -1209,10 +1209,6 @@ pub struct JuecesCaso<'a> {
     /// Juez de la configuración de Cargo (decisión 30): llama si las partes lo piden.
     pub config: Option<&'a Eleccion>,
 }
-
-/// Entrada de cada llamada de juez, en bytes UTF-8. Desde el desempate 24 es un límite real: un prompt más
-/// grande no se envía. Se conserva el nombre: es el mismo valor que `juez::MAX_ENTRADA_JUEZ_BYTES`.
-pub const ENTRADA_JUEZ_BYTES: u64 = MAX_ENTRADA_JUEZ_BYTES;
 
 /// Gasto de la calibración con tope: el `Gate` que registra su detención.
 const CORRIDA_CALIBRACION: &str = "oraculo-calibracion";
