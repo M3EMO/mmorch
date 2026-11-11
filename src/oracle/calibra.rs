@@ -1943,6 +1943,10 @@ const MOTIVO_SIN_CANDIDATO: &str = "sin candidato para inyectar";
 /// Motivo de un defecto de línea o de módulo sin lugar dentro del cambio de `bootstrap/`.
 const MOTIVO_FUERA_DEL_CAMBIO: &str = "ningún lugar del cambio admite este defecto";
 
+/// Motivo de un `ModuloBorrado` con estado inicial: borrar un módulo rompe el build y da una detección segura.
+const MOTIVO_MODULO_CON_INICIAL: &str =
+    "con estado inicial, borrar un módulo rompe el build y da una detección segura";
+
 /// Motivo de un `AssertBorrado` no aplicable: la base no dejó mutantes muertos.
 const MOTIVO_SIN_MUERTOS: &str = "la base no dio mutantes muertos";
 
@@ -1950,13 +1954,14 @@ const MOTIVO_SIN_MUERTOS: &str = "la base no dio mutantes muertos";
 const MOTIVO_SIN_TEST_DE_MUERTO: &str = "ningún mutante muerto tiene tests fallidos ubicables";
 
 /// Motivo de un caso sin inyección. `AssertBorrado` separa si la base no dio muertos de si ninguno tiene test.
-/// Con `con_rangos`, un defecto de línea o de módulo dice que ningún lugar del cambio lo admite.
-/// Los demás defectos usan el motivo común.
+/// Con `con_rangos`, `ModuloBorrado` dice que con estado inicial no aplica. `ComportamientoRoto` y `CuerpoVaciado`
+/// dicen que ningún lugar del cambio los admite. Los demás defectos usan el motivo común.
 fn motivo_sin_inyeccion(defecto: Defecto, sin_muertos: bool, con_rangos: bool) -> &'static str {
     match (defecto, sin_muertos) {
         (Defecto::AssertBorrado, true) => MOTIVO_SIN_MUERTOS,
         (Defecto::AssertBorrado, false) => MOTIVO_SIN_TEST_DE_MUERTO,
-        (Defecto::ComportamientoRoto | Defecto::ModuloBorrado, _) if con_rangos => {
+        (Defecto::ModuloBorrado, _) if con_rangos => MOTIVO_MODULO_CON_INICIAL,
+        (Defecto::ComportamientoRoto | Defecto::CuerpoVaciado, _) if con_rangos => {
             MOTIVO_FUERA_DEL_CAMBIO
         }
         _ => MOTIVO_SIN_CANDIDATO,
@@ -5541,8 +5546,12 @@ mod tests {
             "ningún lugar del cambio admite este defecto"
         );
         assert_eq!(
-            motivo_sin_inyeccion(Defecto::ModuloBorrado, false, true),
+            motivo_sin_inyeccion(Defecto::CuerpoVaciado, false, true),
             "ningún lugar del cambio admite este defecto"
+        );
+        assert_eq!(
+            motivo_sin_inyeccion(Defecto::ModuloBorrado, false, true),
+            MOTIVO_MODULO_CON_INICIAL
         );
         assert_eq!(
             motivo_sin_inyeccion(Defecto::ComportamientoRoto, false, false),
