@@ -236,22 +236,18 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
 
         // El plazo de este rol no supera el tope del ejecutor. El spawn y el registro van bajo el cerrojo.
         let plazo = l.plazo.min(self.timeout);
-        match correr_registrado(cerrojo, "podman", &args, plazo, TOPE_SALIDA_BUILDER)? {
+        // Si la espera falla o vence, el contenedor se borra por nombre con el plazo de limpieza.
+        match correr_registrado(
+            cerrojo,
+            "podman",
+            &args,
+            plazo,
+            TOPE_SALIDA_BUILDER,
+            Some(&nombre),
+        )? {
             Fin::Termino(salida) => clasificar_salida(salida),
-            Fin::Vencio { stdout, .. } => {
-                // Venció: se pide borrar el contenedor por nombre. Un fallo al borrar no tapa el aviso.
-                let _ = Command::new("podman")
-                    .args(["rm", "-f", "-t", "0", &nombre])
-                    .output();
-                // Lo que alcanzó a dar el builder sigue en `stdout`: quien llama lo guarda y lo cuenta.
-                Err(ErrorCorre::Cortado {
-                    mensaje: format!(
-                        "timeout tras {} s; se pidió borrar el contenedor {nombre}",
-                        plazo.as_secs()
-                    ),
-                    stdout,
-                })
-            }
+            // Lo que alcanzó a dar el builder sigue en `stdout`: quien llama lo guarda y lo cuenta.
+            Fin::Vencio { stdout, .. } => Err(cortar_vencido("podman", &nombre, plazo, stdout)),
         }
     }
 
@@ -493,6 +489,43 @@ fn correr_paso_de_quitar(
     }
 }
 
+/// Plazo del borrado por nombre de un contenedor del builder. Igual a `PLAZO_AL_SENAL` de `corrida.rs`.
+pub(crate) const PLAZO_LIMPIEZA_RM: Duration = Duration::from_secs(10);
+
+/// Pide borrar el contenedor `nombre` con `programa rm -f -t 0 <nombre>`. Espera hasta `plazo`.
+/// Un rm que vence o sale con error da `Err`. El plazo corta la espera: no cuelga.
+fn borrar_contenedor(programa: &str, nombre: &str, plazo: Duration) -> Result<(), ErrorCorre> {
+    let args: Vec<String> = ["rm", "-f", "-t", "0", nombre].map(String::from).into();
+    correr_paso_de_quitar(programa, &args, plazo, "rm").map(|_| ())
+}
+
+/// Corta un builder que venció: pide borrar su contenedor y guarda el `stdout` que dio.
+/// Si el borrado falla o vence su plazo, el mensaje lo dice.
+fn cortar_vencido(programa: &str, nombre: &str, plazo: Duration, stdout: Vec<u8>) -> ErrorCorre {
+    let segundos = plazo.as_secs();
+    let mensaje = match borrar_contenedor(programa, nombre, PLAZO_LIMPIEZA_RM) {
+        Ok(()) => format!("timeout tras {segundos} s; se pidió borrar el contenedor {nombre}"),
+        Err(fallo) => {
+            format!("timeout tras {segundos} s; no se borró el contenedor {nombre}: {fallo}")
+        }
+    };
+    ErrorCorre::Cortado { mensaje, stdout }
+}
+
+/// Tras un error de la espera, pide borrar el contenedor por nombre. Si el borrado falla, lo suma al error.
+fn error_con_borrado(error: ErrorCorre, programa: &str, nombre: &str) -> ErrorCorre {
+    let Err(fallo) = borrar_contenedor(programa, nombre, PLAZO_LIMPIEZA_RM) else {
+        return error;
+    };
+    let mensaje = match error {
+        ErrorCorre::Ejecutor(m) => m,
+        otro => otro.to_string(),
+    };
+    ErrorCorre::Ejecutor(format!(
+        "{mensaje}; no se borró el contenedor {nombre}: {fallo}"
+    ))
+}
+
 /// Nombre único de un contenedor del builder: `root-builder-<pid>-<contador>`.
 fn nombre_unico() -> String {
     let n = CONTADOR.fetch_add(1, Ordering::Relaxed);
@@ -549,7 +582,7 @@ fn correr_hijo(
     registrar: bool,
 ) -> Result<Fin, ErrorCorre> {
     if registrar {
-        return correr_registrado(estado_hijo(), programa, args, plazo, tope);
+        return correr_registrado(estado_hijo(), programa, args, plazo, tope, None);
     }
     let mut hijo = spawn_hijo(programa, args)?;
     let pipes = tomar_pipes(&mut hijo, tope);
@@ -569,12 +602,14 @@ fn tomar_pipes(hijo: &mut Child, tope: usize) -> Pipes {
 
 /// Lanza `programa` y lo registra como hijo en curso. El cerrojo entra tomado: el spawn y el registro
 /// van bajo él, y lo suelta antes de esperar. Con `terminando` o con otro hijo registrado, no lanza nada.
+/// Si la espera falla, borra por nombre el contenedor `contenedor`, si lo hay, con `programa`.
 fn correr_registrado(
     mut estado: MutexGuard<'static, EstadoHijo>,
     programa: &str,
     args: &[String],
     plazo: Duration,
     tope: usize,
+    contenedor: Option<&str>,
 ) -> Result<Fin, ErrorCorre> {
     if estado.terminando {
         return Err(ErrorCorre::Ejecutor(format!(
@@ -592,7 +627,11 @@ fn correr_registrado(
     llamar_costura(&COSTURA_ENTRE_SPAWN_Y_REGISTRO);
     estado.hijo = Some(hijo);
     drop(estado);
-    let espera = esperar_registrado(plazo);
+    // Sin el cerrojo: el borrado puede tardar hasta su plazo.
+    let espera = match (esperar_registrado(plazo), contenedor) {
+        (Err(error), Some(nombre)) => return Err(error_con_borrado(error, programa, nombre)),
+        (espera, _) => espera,
+    };
     fin_de_espera(programa, espera, pipes, tope)
 }
 
@@ -1403,6 +1442,86 @@ mod tests {
             Duration::from_secs(10),
         );
         assert!(resultado.is_err(), "un rm fallido es un error");
+    }
+
+    #[test]
+    fn error_de_la_espera_pide_borrar_el_contenedor_por_nombre() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let log = tmp.path().join("podman.log");
+        // Programa falso: `rm` se anota y sale bien. Cualquier otra llamada queda viva hasta que la maten.
+        let cuerpo = format!(
+            "echo \"$*\" >> '{}'\nif [ \"$1\" = rm ]; then exit 0; fi\nexec sleep 30",
+            log.display()
+        );
+        let programa = programa_falso(tmp.path(), &cuerpo);
+        let args = vec!["run".to_string()];
+        FALLO_DE_ESPERA.store(true, Ordering::Relaxed);
+        let resultado = correr_registrado(
+            estado_hijo(),
+            programa.to_str().expect("ruta"),
+            &args,
+            Duration::from_secs(20),
+            1000,
+            Some("root-builder-1-0"),
+        );
+        let anotado = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            matches!(resultado, Err(ErrorCorre::Ejecutor(_))),
+            "un error de la espera sale por Err: {resultado:?}"
+        );
+        assert!(
+            anotado.contains("rm -f -t 0 root-builder-1-0"),
+            "no pidió borrar el contenedor por nombre: {anotado}"
+        );
+    }
+
+    #[test]
+    fn rm_por_nombre_que_vence_su_plazo_se_informa() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        // Cualquier llamada, `rm` incluido, se queda dormida: el plazo debe cortarla.
+        let programa = programa_falso(tmp.path(), "exec sleep 30");
+        let inicio = Instant::now();
+        let error = borrar_contenedor(
+            programa.to_str().expect("ruta"),
+            "root-builder-1-0",
+            Duration::from_millis(300),
+        )
+        .expect_err("un rm que vence su plazo es un error");
+        assert!(
+            inicio.elapsed() < Duration::from_secs(5),
+            "no espera el fin del rm"
+        );
+        assert!(error.to_string().contains("venció"), "{error}");
+    }
+
+    /// Guarda: el vencimiento sigue borrando el contenedor por nombre y devuelve `Cortado` con su `stdout`.
+    #[test]
+    fn vencimiento_sigue_borrando_el_contenedor_por_nombre() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let log = tmp.path().join("podman.log");
+        let cuerpo = format!("echo \"$*\" >> '{}'\nexit 0", log.display());
+        let programa = programa_falso(tmp.path(), &cuerpo);
+        let error = cortar_vencido(
+            programa.to_str().expect("ruta"),
+            "root-builder-1-0",
+            Duration::from_secs(7),
+            b"parcial\n".to_vec(),
+        );
+        let anotado = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            anotado.contains("rm -f -t 0 root-builder-1-0"),
+            "no pidió borrar por nombre: {anotado}"
+        );
+        match error {
+            ErrorCorre::Cortado { mensaje, stdout } => {
+                assert_eq!(stdout, b"parcial\n".to_vec());
+                assert!(mensaje.contains("timeout tras 7 s"), "{mensaje}");
+            }
+            otro => panic!("debe dar Cortado: {otro:?}"),
+        }
     }
 
     /// Hijo en curso falso: un `sh` que se reemplaza por `sleep`. Corre en otro hilo, como `podman run`.
