@@ -7564,3 +7564,77 @@ Brief: `docs/builds/brief-local-92.md`, con base 9b47e65 y rama `laptop/tarea-92
 Los dos puntos tocan `entrega.rs`, así que van en serie.
 
 **Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
+
+## Vuelta del 2026-11-11 (15): Tarea 92, un hueco nuevo, y lo que sigue
+
+**Estado.** La Tarea 92 está en `laptop/tarea-92` (1ab1ac5), con 3072, 0 y 4 con podman. El orquestador probó a mano el envoltorio en `python:3.12-slim`. Con un `sh` y un `timeout` falsos en el venv, el envoltorio usó `/bin/sh` y `/usr/bin/timeout`, `python` salió del venv, y un código 3 llegó entero. Las mezclas de la 84 a la 92 y P95 a P101 esperan al usuario.
+
+## 1. Las 6 preguntas de la Tarea 92
+
+1. **El `sh` externo de `podman exec` sin ruta absoluta:** cambia en la Tarea 93. Usa la ruta que ya detecta la sesión. Es barato, y cierra el último nombre que se resuelve con un `PATH`.
+2. **Rechazar `..` y tratar `/repo` como carpeta de trabajo:** acepto.
+3. **La sonda de rutas con el `PATH` del sistema fijo:** acepto.
+4. **La causa de infraestructura de la sonda en `sin_veredicto`:** acepto.
+5. **Memoria de "hay red" por proceso y por imagen:** acepto.
+6. **Imagen local con Python:** el organizador se equivocó. `docker.io/library/python:3.12-slim` está en la laptop. La guarda con activación va con esa imagen en la Tarea 93.
+
+## 2. El hueco nuevo: el contenedor de evaluación corre como root
+
+**Lo que encontré.** `imagenes/oraculo-rust/Containerfile` no declara `USER`. `argumentos_separado` no pasa `--user`. Un test lo fija: `argumentos_separado_deja_el_contenedor_vivo_y_sin_rm` (`src/oracle/contenedor.rs:1313`). Las tareas de S2 usan `localhost/root-oraculo-rust:3`. Entonces el producto corre como root dentro del contenedor de evaluación.
+
+**Por qué importa.** El contenedor de evaluación vive durante todos los pasos. `instalar` es código del producto. Como root, puede reemplazar `/bin/sh` o `/usr/bin/timeout` del sistema. Después, el envoltorio de Root corre ese programa falso en cada escenario, y puede salir con 0. Las rutas absolutas de la Tarea 92 y el orden del `PATH` de la 91c no protegen contra eso.
+
+**Lo que no cambia.** Con podman sin root, el root del contenedor es el usuario del host. El host no corre riesgo. El riesgo es la integridad del veredicto, la misma clase de los MEDIUM 15 y 12.
+
+**Las suites no tienen este problema.** Cada suite corre en un contenedor nuevo, con `--rm`. Un cambio en `/bin/sh` no pasa de un contenedor al siguiente.
+
+**Decisión: el contenedor de evaluación corre sin root.**
+1. Se lanza con `--userns=keep-id`. El usuario del contenedor es el del host, sin privilegios adentro. Los montajes de `/salida` y de la caché siguen escribibles para ese usuario.
+2. El builder busca primero por qué el test fija "sin `--user`". El commit 10a58b7, del punto 2 de la Tarea 91, lo introdujo. Si había un motivo, como permisos de montaje, lo informa.
+3. **Guarda con podman:** un `instalar` que intenta reemplazar `/bin/sh` falla por permisos, y un escenario que debe fallar sigue fallando.
+4. **Guarda con podman:** el preludio de Rust y el de Python siguen funcionando sin root.
+
+## 3. El MEDIUM 8: cupo por rol y por vuelta
+
+**Lo que pasa hoy.** `r00t corre` rutea todos los roles una vez, al principio, con `TOKENS_RUTEO` (`src/corre/corrida.rs:172` a `178`). Si el cupo se agota durante la corrida, los roles siguientes se lanzan igual. `claude -p` choca contra el límite, y la corrida se pierde a mitad de camino.
+
+**Por qué vale ahora.** D3 y D4 lanzan muchas corridas por cupo. El ajuste real de V3 ya corrió en 4 tandas por el límite de 5 horas.
+
+**Decisión: se rutea otra vez antes de cada lanzamiento,** por rol y por vuelta, con `rutear_en` y `exigir_cupo`. Si el rol ya no va por cupo, la corrida para con el motivo "cupo agotado antes del rol X". La fila guarda lo que se hizo hasta ahí, como un corte de hoy.
+
+## 4. Los riesgos aceptados de las vueltas (12) a (14)
+
+| Riesgo | Sigue aceptado | Motivo |
+|---|---|---|
+| D2: un test pasado de rojo a verde mientras otro sigue rojo | Sí | Cerrarlo pide un proceso por test. Se revisa si D3 trae tareas con un solo test oculto |
+| MEDIUM-1: el producto controla parte de lo que ve el escenario | Sí, con la sección 2 | Sin root, el producto ya no puede tocar los programas del sistema. Solo controla sus propios archivos, que es lo que el escenario prueba |
+| LOW 3 de la 91c: un escenario vencido sigue vivo | Sí | El `timeout` interno lo corta |
+| LOW 4 de la 91c: la sonda no prueba la salida a internet | Sí | Es configuración del host |
+| LOW 5 de la 91c: un `RUN` intermitente da "necesita red" | Sí | Es un defecto del `Dockerfile`, de severidad 1 |
+
+## 5. Lo que queda sin esperar al usuario, en orden de valor
+
+1. **Tarea 93.** El contenedor de evaluación sin root, el cupo por rol y por vuelta, y el `sh` externo con ruta absoluta.
+2. **Después de la 93, no queda trabajo de alto valor que no dependa del usuario.** Lo que sigue sale de sus respuestas.
+3. **Trabajo chico, de bajo valor, que puede esperar:** pasar `calibra` de `/tmp` a `ROOT_HOME/tmp`, por la RAM. Más inyectores de juez para Diseño y Arquitectura esperan los datos de P101.
+
+**Lo que falta del usuario para seguir:**
+- **Las mezclas de la 84 a la 93.** Sin ellas no se aplican las capas, y nada de lo construido llega a `ROOT_HOME`.
+- **P101:** medir Diseño en t1. Sin ese dato no sé si D4 vale su costo.
+- **P97 y P99:** el dataset de función nueva. Sin ellos, D3 no arranca.
+- **P98:** el final sellado de V3.
+- **P95 y P96:** qué prometen "listo" y "bloqueado".
+- **P100:** los worktrees auxiliares.
+
+## 6. Tarea 93
+
+Brief: `docs/builds/brief-local-93.md`, con base 1ab1ac5 y rama `laptop/tarea-93`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Contenedor de evaluación sin root, `sh` externo con ruta absoluta, y guarda con Python | `src/oracle/contenedor.rs`, `src/oracle/entrega.rs`, `tests/entrega.rs` |
+| 2 | Cupo por rol y por vuelta | `src/corre/corrida.rs` |
+
+Los dos puntos no comparten archivos, y corren en paralelo.
+
+**Preguntas al usuario:** ninguna nueva. P95 a P101 siguen abiertas.
