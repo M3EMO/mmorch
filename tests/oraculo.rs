@@ -1114,9 +1114,15 @@ fn pendiente_colab_malformado_no_tumba_evaluar_y_avisa() {
         v.pendientes[0].colab, None,
         "queda pendiente, sin verde falso"
     );
-    assert_eq!(v.avisos.len(), 1, "{:?}", v.avisos);
+    // Solo los avisos de Colab: el aviso de Seguridad sin estado inicial es otro asunto.
+    let avisos_colab: Vec<&String> = v
+        .avisos
+        .iter()
+        .filter(|a| a.starts_with("colab.json"))
+        .collect();
+    assert_eq!(avisos_colab.len(), 1, "{:?}", v.avisos);
     assert!(
-        v.avisos[0].starts_with("colab.json ilegible: "),
+        avisos_colab[0].starts_with("colab.json ilegible: "),
         "{:?}",
         v.avisos
     );
@@ -1146,7 +1152,13 @@ fn pendiente_colab_valido_no_da_aviso() {
     fs::write(carpeta.join("colab.json"), valido).expect("colab.json");
     let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
     assert_eq!(v.pendientes[0].colab.as_deref(), Some("pasa"));
-    assert!(v.avisos.is_empty(), "{:?}", v.avisos);
+    // Solo los avisos de Colab: el aviso de Seguridad sin estado inicial es otro asunto.
+    let avisos_colab: Vec<&String> = v
+        .avisos
+        .iter()
+        .filter(|a| a.starts_with("colab.json"))
+        .collect();
+    assert!(avisos_colab.is_empty(), "{:?}", v.avisos);
 }
 
 /// Imagen con pytest instalado (la de la Tarea 23). Los tests de colección de pytest la usan.
