@@ -105,9 +105,14 @@ fn correr_en_podman(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
 /// Errores del Oracle. Salen con código 3, salvo `Ficha` (2). Ante uno de ellos no hay veredicto.
 #[derive(Debug, ErrorDerive)]
 pub enum ErrorOraculo {
-    /// Infraestructura: podman ausente, timeout, error de podman o E/S.
+    /// Infraestructura: podman ausente, error de podman o E/S. Un plazo vencido es `PlazoVencido`.
     #[error("error de infraestructura del oráculo: {0}")]
     Infra(String),
+    /// Venció el plazo de una corrida en contenedor: el contenedor se eliminó. Sale con código 3.
+    #[error(
+        "error de infraestructura del oráculo: timeout tras {segundos} s; contenedor {contenedor} eliminado"
+    )]
+    PlazoVencido { segundos: f64, contenedor: String },
     /// El junit falta o está mal formado.
     #[error("junit inválido: {0}")]
     Junit(String),
@@ -2211,9 +2216,6 @@ const MOTIVO_SUITE_SIN_JUNIT: &str = "la suite falló y no dejó junit";
 /// Motivo de una suite que el plazo de una calibración cortó sin junit. Su caso se reemplaza (Tarea 107).
 pub(crate) const MOTIVO_SUITE_PLAZO: &str = "la suite pasó su plazo";
 
-/// Inicio del error de `contenedor::ejecutar` cuando vence el plazo de una corrida.
-const PREFIJO_VENCIMIENTO: &str = "timeout tras ";
-
 /// Plazo de cada suite en las corridas de una calibración (Tarea 107). Sin él, vale `OpcionesOraculo::timeout`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct PlazosSuites {
@@ -2286,7 +2288,7 @@ fn plazo_de_corrida(dir: &str) -> Option<Duration> {
 /// Si la corrida de `dir` venció su plazo de calibración y no dejó el junit `xml` en `salida`.
 /// El caso de la calibración reemplaza esa inyección. Fuera de una calibración, nunca es así.
 fn vence_plazo_sin_salida(dir: &str, error: &ErrorOraculo, salida: &Path, xml: &str) -> bool {
-    let vencio = matches!(error, ErrorOraculo::Infra(m) if m.starts_with(PREFIJO_VENCIMIENTO));
+    let vencio = matches!(error, ErrorOraculo::PlazoVencido { .. });
     vencio && plazo_de_corrida(dir).is_some() && junit::leer_de_salida(&salida.join(xml)).is_none()
 }
 
@@ -4551,7 +4553,47 @@ mod tests {
 
     /// Error que da `contenedor::ejecutar` cuando vence el plazo de una corrida.
     fn vencimiento() -> ErrorOraculo {
-        ErrorOraculo::Infra("timeout tras 1200 s; contenedor x eliminado".into())
+        ErrorOraculo::PlazoVencido {
+            segundos: 1200.0,
+            contenedor: "x".into(),
+        }
+    }
+
+    #[test]
+    fn plazo_vencido_se_reconoce_por_variante_no_por_texto() {
+        let salida = tempfile::tempdir().expect("salida");
+        let vencido = ErrorOraculo::PlazoVencido {
+            segundos: 5.0,
+            contenedor: "otro".into(),
+        };
+        let texto_viejo = ErrorOraculo::Infra("timeout tras 5 s; x".into());
+        con_plazos_suites(Some(plazos_de_prueba()), || {
+            assert!(vence_plazo_sin_salida(
+                DIR_OCULTO,
+                &vencido,
+                salida.path(),
+                XML_OCULTO
+            ));
+            assert!(!vence_plazo_sin_salida(
+                DIR_OCULTO,
+                &texto_viejo,
+                salida.path(),
+                XML_OCULTO
+            ));
+        });
+    }
+
+    #[test]
+    fn plazo_vencido_con_su_mensaje_de_siempre_y_codigo_3() {
+        let error = ErrorOraculo::PlazoVencido {
+            segundos: 1200.0,
+            contenedor: "x".into(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "error de infraestructura del oráculo: timeout tras 1200 s; contenedor x eliminado"
+        );
+        assert_eq!(error.codigo_de_salida(), 3);
     }
 
     #[test]
@@ -4581,7 +4623,7 @@ mod tests {
     }
 
     #[test]
-    fn plazo_vencido_fuera_de_calibracion_sigue_siendo_error_de_infra() {
+    fn plazo_vencido_fuera_de_calibracion_sigue_siendo_error() {
         let base = tempfile::tempdir().expect("base");
         let tarea = tarea_nextest_de_prueba(base.path(), Vec::new());
         let correr = |_: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
@@ -4598,13 +4640,13 @@ mod tests {
             &correr,
         );
         assert!(
-            matches!(&s, Err(ErrorOraculo::Infra(m)) if m.starts_with("timeout tras")),
+            matches!(&s, Err(ErrorOraculo::PlazoVencido { .. })),
             "{s:?}"
         );
     }
 
     #[test]
-    fn plazo_vencido_con_junit_en_calibracion_sigue_siendo_error_de_infra() {
+    fn plazo_vencido_con_junit_en_calibracion_sigue_siendo_error() {
         let base = tempfile::tempdir().expect("base");
         let tarea = tarea_nextest_de_prueba(base.path(), Vec::new());
         let correr = |e: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
@@ -4624,7 +4666,7 @@ mod tests {
             )
         });
         assert!(
-            matches!(&s, Err(ErrorOraculo::Infra(m)) if m.starts_with("timeout tras")),
+            matches!(&s, Err(ErrorOraculo::PlazoVencido { .. })),
             "{s:?}"
         );
     }

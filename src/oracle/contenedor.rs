@@ -199,6 +199,14 @@ fn montaje(args: &mut Vec<String>, origen: &Path, destino: &str, opciones: &str)
     args.push(format!("{}:{destino}:{opciones}", origen.display()));
 }
 
+/// Error de un contenedor que venció su plazo. Lleva el plazo y el nombre del contenedor eliminado.
+fn error_de_plazo(timeout: Duration, nombre: &str) -> ErrorOraculo {
+    ErrorOraculo::PlazoVencido {
+        segundos: timeout.as_secs_f64(),
+        contenedor: nombre.to_string(),
+    }
+}
+
 /// Corre el comando en un contenedor nuevo y devuelve su resultado.
 pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
     validar_rutas(e)?;
@@ -213,10 +221,7 @@ pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
         Ok(Some(estado)) => estado,
         Ok(None) => {
             terminar(&mut hijo, &nombre);
-            return Err(ErrorOraculo::Infra(format!(
-                "timeout tras {} s; contenedor {nombre} eliminado",
-                e.timeout.as_secs_f64()
-            )));
+            return Err(error_de_plazo(e.timeout, &nombre));
         }
         // Sin esto, un fallo al consultar el proceso dejaría el contenedor corriendo.
         Err(err) => {
@@ -792,6 +797,16 @@ mod tests {
             .recv_timeout(plazo)
             .expect("el turno queda libre mientras un caso espera al juez");
         juez_tx.send(()).expect("responde");
+    }
+
+    #[test]
+    fn error_de_plazo_lleva_el_plazo_y_el_nombre_del_contenedor() {
+        let error = error_de_plazo(Duration::from_secs(1200), "root-x");
+        assert!(
+            matches!(&error, ErrorOraculo::PlazoVencido { segundos, contenedor }
+                if *segundos == 1200.0 && contenedor == "root-x"),
+            "{error:?}"
+        );
     }
 
     fn ejecucion() -> Ejecucion {
