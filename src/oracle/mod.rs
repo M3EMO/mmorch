@@ -8,6 +8,7 @@ pub mod colab;
 pub mod configs;
 pub mod contenedor;
 pub mod descarga;
+pub mod eficiencia;
 pub mod entrega;
 pub mod evidencia;
 pub mod historial;
