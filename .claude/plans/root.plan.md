@@ -9165,3 +9165,66 @@ Es un script del orquestador, no código de Root. Estas son sus reglas.
 **Costo.** Son 3 compilaciones del paquete y 3 corridas de tests por lado. La calibración solo mide eficiencia cuando calibra Eficiencia (`partes.mide`). La calibración automática de Eficiencia queda para otra tarea.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (39): la 115, el barrido de los tests, y el brief de la 116
+
+**Estado.**
+- La Tarea 115 terminó en `laptop/tarea-115` (3084bdc), desde eee0aa0, con 3406, 0 y 4 sin podman. Nada con podman se probó.
+- **La causa de los 137 está confirmada.** `contenedor::ejecutar` (`src/oracle/contenedor.rs:214`) llama a `barrer_al_arrancar("podman")` con el podman real. Un test sin podman de un builder barre con la regla de su base, y mata contenedores de otra suite.
+- `laptop/cadena-110-117` (e19886e) junta la 110, 111, 114, 113, 112 y 117, sin conflictos. Su suite con podman corre ahora. Después se le suma la 115.
+- La serie 113 recalibró el `ROOT_HOME` real. Repite la 112, salvo `tarea_hash`, por las capas nuevas.
+
+## 1. Las diez preguntas de la 115
+
+1. **La memoria pico incluye a `rustc`: no se acepta.** Si el repo compila más código, la razón de memoria sube sin que el producto use más memoria. Eso puede dar un "no listo" falso. Hasta el arreglo, la memoria queda sin valor, con el motivo "la medida incluye la compilación". El arreglo va en la Tarea 119.
+2. **El global cambia en toda tarea Rust con `bootstrap/`:** acepto. Es lo que pidió el usuario en P95. El informe de la próxima calibración lo debe decir.
+3. **Calibrar Eficiencia corre la medición automática: sí, y entra a la calibración.** La dimensión calibrada debe ser la misma que la evaluación usa.
+4. **El costo de tiempo: no se acepta como está.** Cada corrida parte de un `target` frío y compila las dependencias otra vez. En broot son minutos por corrida, y son 12 corridas. La Tarea 119 da un `target` fijo por lado.
+5. **El piso de 2 %:** acepto. Una regresión apenas sobre el piso baja poco el valor, y el "no listo" pide más de 1,5 veces.
+6. **La escala referencia / medida:** acepto. Es P105 a.
+7. **Una medida con id desconocido no dispara: no se acepta.** Root falla cerrado. Una regresión de más de 1,5 veces dispara siempre, con una frase genérica que nombra el id. Va en la 119.
+8. **El empate del resumen:** se desempata por un orden fijo: tiempo de los tests, memoria, compilación y tamaño. Va en la 119.
+9. **El resumen sin el ruido:** acepto.
+10. **Un nombre de test raro deja la medida sin valor:** acepto. Un filtro inseguro es peor que una medida sin valor.
+
+## 2. El barrido desde un test sin podman
+
+**Decisión: un test sin podman no puede llamar al podman real.**
+- Con `ROOT_SIN_PODMAN=1`, un test promete no usar podman. El barrido rompe esa promesa.
+- El daño no es solo la regla vieja. Desde la 112, el barrido ya respeta a un dueño vivo. Pero cada test igual pierde tiempo en `podman ps`, y eso pesa en los tests de plazo bajo carga.
+- La idea de "el mismo programa que la ejecución" no alcanza. `lanzar` (`src/oracle/contenedor.rs:443`) también usa el literal `"podman"`. Los dos programas ya son el mismo.
+
+**El arreglo: la Tarea 118.**
+1. `barrer_al_arrancar` (`src/limpieza.rs:37`) vuelve enseguida si `ROOT_SIN_PODMAN` vale exactamente `"1"`. Usa `entorno::debe_saltear`, la misma regla de los tests.
+2. Es un solo lugar. Lo llaman `contenedor::ejecutar` y `entrega.rs:1613`.
+3. Vale también en el binario. Los tests de `tests/` corren `r00t` como proceso aparte, y ese proceso también barrería.
+4. **Una auditoría, sin cambios de código:** el builder lista cada test sin `saltar_sin_podman` que llega a un podman real. Son los lugares con el literal `"podman"`: `contenedor.rs`, `descarga.rs:1305`, `entrega.rs:208`, `calibra/target.rs:52`, `corre/ejecutor.rs:242` y `corre/corrida.rs:796`. Su arreglo se decide con esa lista.
+
+**La 118 no tiene que ir antes de la 116.** Las dos salen de bases con la 112, y su barrido respeta a un dueño vivo. La 118 es chica y no comparte archivos con la 116. Puede arrancar ya, desde e19886e.
+
+## 3. La Tarea 119: la medición de eficiencia, usable
+
+1. **Un `/salida` fijo por lado.** Cada lado guarda su `target` entre llamadas. Las dependencias se compilan una vez por lado.
+2. **La memoria sin `rustc`.** Una llamada compila con `--no-run`. Otra llamada, en un contenedor nuevo, solo corre los tests y lee `memory.peak`.
+3. **Un id desconocido** con razón mayor que 1,5 dispara, con una frase genérica.
+4. **El empate** se desempata por el orden fijo de la sección 1.
+5. **Archivos probables:** `src/oracle/eficiencia.rs`, el ejecutor de contenedor de `perfiles/herramientas.rs` o `calibra/defectos.rs`, e `informe.rs`.
+
+La 119 va antes de la primera evaluación real con eficiencia. Puede correr en paralelo con la 116: la 116 solo lee `eficiencia_auto`.
+
+## 4. El diseño de la 116
+
+**El problema del orden.** Hoy `correr_interno` (`src/corre/corrida.rs:153`) quita la copia de la credencial (paso h, `guardia.cerrar`) antes de evaluar (paso i). Una vuelta más, después de evaluar, necesita la credencial otra vez.
+
+**La vuelta de eficiencia.**
+1. Root evalúa, como hoy.
+2. **Si `eficiencia_auto` trae una regresión por encima del ruido,** y la corrida terminó bien, Root lanza una vuelta más.
+3. **El rol de la vuelta** es el último rol de la configuración que salió con 0. Lleva `--resume` con su última sesión.
+4. **Su instrucción** nombra cada medida con regresión, su razón y los dos números. Pide bajarla sin cambiar el comportamiento.
+5. **Antes de lanzar:** se vuelve a rutear por cupo, como cada vuelta (Tarea 93). Se espera la vigencia del login. Se copia otra vez la credencial, con la misma función que usa `reabrir_corrida`, y con su propia guardia.
+6. **Después de la vuelta:** se revisa su transcript con las huellas del oráculo (paso g). Se quita la credencial. Se arma otro estado final, y se evalúa otra vez.
+7. **La segunda evaluación es la que cuenta.** La fila guarda también la primera regresión, en un campo nuevo.
+8. **Una sola vuelta.** Si la regresión sigue, la fila la lleva, y la regla de P105 a decide.
+9. **Sin cupo, o con un rol que no arranca:** la corrida no falla. La fila lleva la primera evaluación y el motivo.
+
+**Preguntas al usuario:** ninguna nueva.
