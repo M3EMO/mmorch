@@ -1109,9 +1109,17 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "MutanteEstado": {
-      "description": "Un mutante de la muestra y su estado. `nombre` es el `name` del reporte de cargo-mutants.",
+      "description": "Un mutante de la muestra y su estado. `nombre` es el `name` del reporte de cargo-mutants.\n`duracion_segundos` es la suma de sus fases (`Build`, `Test`). `None` si el reporte no la trae.",
       "type": "object",
       "properties": {
+        "duracion_segundos": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
         "estado": {
           "$ref": "#/$defs/EstadoMutante"
         },

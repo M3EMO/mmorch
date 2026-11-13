@@ -5560,6 +5560,7 @@ mod tests {
         MutanteEstado {
             nombre: nombre.into(),
             estado,
+            duracion_segundos: None,
         }
     }
 

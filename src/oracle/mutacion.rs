@@ -104,10 +104,13 @@ pub enum EstadoMutante {
 }
 
 /// Un mutante de la muestra y su estado. `nombre` es el `name` del reporte de cargo-mutants.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// `duracion_segundos` es la suma de sus fases (`Build`, `Test`). `None` si el reporte no la trae.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MutanteEstado {
     pub nombre: String,
     pub estado: EstadoMutante,
+    #[serde(default)]
+    pub duracion_segundos: Option<f64>,
 }
 
 thread_local! {
@@ -260,6 +263,16 @@ fn duracion_de_test(fases: &[FaseResultado]) -> Option<f64> {
         .filter(|d| d.is_finite())
 }
 
+/// Suma en segundos de las fases de una corrida, ignorando las no finitas. `None` si ninguna trae duración.
+fn duracion_total(fases: &[FaseResultado]) -> Option<f64> {
+    let finitas: Vec<f64> = fases
+        .iter()
+        .filter_map(|f| f.duration)
+        .filter(|d| d.is_finite())
+        .collect();
+    (!finitas.is_empty()).then(|| finitas.iter().sum())
+}
+
 /// `"Baseline"` o `{"Mutant": {...}}`: forma externa de serde.
 #[derive(Deserialize)]
 enum Escenario {
@@ -301,6 +314,8 @@ struct Viable {
     log_path: Option<String>,
     /// Verdadero si el resumen es `Timeout`: no se le atribuyen tests.
     timeout: bool,
+    /// Suma de las fases de la corrida del mutante, en segundos. `None` si no trae duración.
+    duracion_segundos: Option<f64>,
 }
 
 /// Lectura del reporte: los viables en orden del archivo y la duración de la base, o el motivo por el que
@@ -338,6 +353,7 @@ fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
             estado,
             log_path: resultado.log_path.clone(),
             timeout: resultado.summary == "Timeout",
+            duracion_segundos: duracion_total(&resultado.phase_results),
         };
         match &resultado.scenario {
             Escenario::Baseline => match resultado.summary.as_str() {
@@ -472,6 +488,7 @@ pub fn parsear_outcomes(
             .map(|v| MutanteEstado {
                 nombre: v.nombre.clone(),
                 estado: v.estado,
+                duracion_segundos: v.duracion_segundos,
             })
             .collect(),
         base_segundos,
@@ -1915,6 +1932,7 @@ mod tests {
         MutanteEstado {
             nombre: nombre.into(),
             estado,
+            duracion_segundos: None,
         }
     }
 
@@ -2035,6 +2053,52 @@ mod tests {
         let _ = sonda_mutacion(&con_reporte(BASE_CON_FASES), &tarea_pruebas(60));
         let _ = sonda_mutacion(&falta_la_herramienta(), &tarea_pruebas(60));
         assert_eq!(tomar_base_segundos(), None, "la sonda sin reporte la vacía");
+    }
+
+    /// Dos mutantes viables con fases Build y Test. `m1` suma 3,5 y `m2` suma 0,75.
+    const DURACION_POR_MUTANTE: &str = r#"{"total_mutants":2,"outcomes":[
+        {"scenario":"Baseline","summary":"Success","phase_results":[
+            {"phase":"Build","duration":3.0,"summary":"Success"},
+            {"phase":"Test","duration":12.5,"summary":"Success"}]},
+        {"scenario":{"Mutant":{"name":"m1","file":"src/a.rs","span":{"start":{"line":1}}}},"summary":"CaughtMutant","phase_results":[
+            {"phase":"Build","duration":1.5,"summary":"Success"},
+            {"phase":"Test","duration":2.0,"summary":"Failure"}]},
+        {"scenario":{"Mutant":{"name":"m2","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"MissedMutant","phase_results":[
+            {"phase":"Build","duration":0.5,"summary":"Success"},
+            {"phase":"Test","duration":0.25,"summary":"Success"}]}]}"#;
+
+    #[test]
+    fn mutante_estado_trae_la_duracion_de_cada_mutante() {
+        let r = parsear_outcomes(
+            DURACION_POR_MUTANTE,
+            60,
+            &[],
+            &nombres_del_reporte(DURACION_POR_MUTANTE),
+        )
+        .expect("parsea");
+        let duraciones: Vec<Option<f64>> = r.mutantes.iter().map(|m| m.duracion_segundos).collect();
+        assert_eq!(duraciones, vec![Some(3.5), Some(0.75)], "{:?}", r.mutantes);
+    }
+
+    #[test]
+    fn reporte_sin_duraciones_da_el_estado_de_hoy() {
+        let r = parsear_outcomes(
+            MUERTOS_MIXTOS,
+            60,
+            &[],
+            &nombres_del_reporte(MUERTOS_MIXTOS),
+        )
+        .expect("parsea");
+        assert_eq!(
+            r.mutantes,
+            vec![
+                est("a1", EstadoMutante::Muerto),
+                est("b3", EstadoMutante::Vivo),
+                est("b4", EstadoMutante::Vencido),
+                est("c5", EstadoMutante::Muerto),
+            ]
+        );
+        assert!(r.mutantes.iter().all(|m| m.duracion_segundos.is_none()));
     }
 
     #[test]
