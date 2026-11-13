@@ -225,12 +225,7 @@ impl Calibraciones {
 
     /// Marca cada puntaje con su calibración de la versión de Root, con las filas de todas las tareas medidas
     /// (`version_en`). `tarea` y `tarea_hash` son la tarea que se evalúa y el hash actual de su `tarea.toml`
-    /// (`hash_de_tarea`). Los otros hashes se leen de `ROOT_HOME`.
-    pub fn aplicar(&self, tarea: &str, tarea_hash: &str, puntajes: &mut [Puntaje]) {
-        self.aplicar_en(&crate::config::root_home(), tarea, tarea_hash, puntajes);
-    }
-
-    /// Como `aplicar`, con `home` como `ROOT_HOME` para leer los `tarea.toml` de las otras tareas.
+    /// (`hash_de_tarea`). Los otros hashes se leen de `home/oraculos/<tarea>/tarea.toml`.
     pub fn aplicar_en(&self, home: &Path, tarea: &str, tarea_hash: &str, puntajes: &mut [Puntaje]) {
         for puntaje in puntajes {
             let version = self.version_en(home, tarea, tarea_hash, puntaje.dimension);
@@ -298,16 +293,6 @@ impl Calibraciones {
             .filter(|f| huella_vigente(f, dimension) && tarea_vigente(f, tarea_hash))
             .max_by(|a, b| a.ts.total_cmp(&b.ts))
             .map_or(&[], |fila| fila.inestables.as_slice())
-    }
-
-    /// Motivo por el que `dimension` no calibra en la versión, con `ROOT_HOME` de `aplicar`.
-    pub fn motivo_sin_calibrar(
-        &self,
-        tarea: &str,
-        tarea_hash: &str,
-        dimension: Dimension,
-    ) -> Option<&'static str> {
-        self.motivo_sin_calibrar_en(&crate::config::root_home(), tarea, tarea_hash, dimension)
     }
 
     /// Motivo por el que `dimension` no calibra, con `home` como `ROOT_HOME`. `None` si alguna fila cuenta, sea o no
@@ -2957,7 +2942,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
-    /// Fila que cuenta para `aplicar` con `tarea_hash` "" y la huella actual: 16 defectos y 16 limpios, todos bien.
+    /// Fila que cuenta para `aplicar_en` con `tarea_hash` "" y la huella actual: 16 defectos y 16 limpios, todos bien.
     fn fila(tarea: &str, dimension: Dimension, ts: f64, exactitud: Option<f32>) -> Fila {
         Fila {
             tarea_hash: Some(String::new()),
@@ -5103,6 +5088,7 @@ mod tests {
 
     #[test]
     fn calibra_limpios_sin_veredicto_hasta_el_20_por_ciento_calibra() {
+        let home = tempfile::tempdir().expect("home");
         let dentro = Fila {
             limpios: 10,
             limpios_sin_veredicto: 2,
@@ -5118,7 +5104,7 @@ mod tests {
                 filas: vec![fila],
             };
             let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
-            c.aplicar("memora", "", &mut puntajes);
+            c.aplicar_en(home.path(), "memora", "", &mut puntajes);
             assert_eq!(puntajes[0].calibrada, calibrada);
         }
     }
@@ -5309,6 +5295,7 @@ mod tests {
 
     #[test]
     fn calibra_global_promedia_solo_calibradas_con_veredicto() {
+        let home = tempfile::tempdir().expect("home");
         let c = Calibraciones {
             v: VERSION,
             filas: vec![
@@ -5329,7 +5316,7 @@ mod tests {
                 ..puntaje(Dimension::Funciona, 0.0)
             },
         ];
-        c.aplicar("memora", "", &mut puntajes);
+        c.aplicar_en(home.path(), "memora", "", &mut puntajes);
         // Diseño no está calibrada; Funciona está calibrada pero sin veredicto.
         let global = global_de(&puntajes).expect("hay una calibrada");
         assert!((global - 0.6).abs() < 1e-6, "{global}");
@@ -5337,14 +5324,16 @@ mod tests {
 
     #[test]
     fn calibra_global_sin_calibradas_es_none() {
+        let home = tempfile::tempdir().expect("home");
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.9)];
-        Calibraciones::default().aplicar("memora", "", &mut puntajes);
+        Calibraciones::default().aplicar_en(home.path(), "memora", "", &mut puntajes);
         assert_eq!(global_de(&puntajes), None);
     }
 
     /// Guarda: una fila "no aplica" tiene 0 defectos y 0 limpios. Aunque su exactitud valga 1.0, no calibra.
     #[test]
     fn calibra_fila_no_aplica_no_calibra_aunque_tenga_exactitud() {
+        let home = tempfile::tempdir().expect("home");
         let mut no_aplica = fila("memora", Dimension::Seguridad, 1.0, Some(1.0));
         no_aplica.defectos = 0;
         no_aplica.limpios = 0;
@@ -5354,7 +5343,7 @@ mod tests {
             filas: vec![no_aplica],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.9)];
-        c.aplicar("memora", "", &mut puntajes);
+        c.aplicar_en(home.path(), "memora", "", &mut puntajes);
         assert!(!puntajes[0].calibrada, "una fila no aplica no calibra");
         assert_eq!(puntajes[0].exactitud_balanceada, None);
     }
@@ -5369,12 +5358,13 @@ mod tests {
 
     /// Aplica una sola fila a un puntaje de `dimension` y dice si la calibra.
     fn calibra_con_una_fila(fila: Fila, dimension: Dimension) -> bool {
+        let home = tempfile::tempdir().expect("home");
         let c = Calibraciones {
             v: VERSION,
             filas: vec![fila],
         };
         let mut puntajes = vec![puntaje(dimension, 0.8)];
-        c.aplicar("memora", "", &mut puntajes);
+        c.aplicar_en(home.path(), "memora", "", &mut puntajes);
         puntajes[0].calibrada
     }
 
@@ -5417,30 +5407,32 @@ mod tests {
 
     #[test]
     fn fila_con_otro_tarea_toml_no_calibra_y_da_su_motivo() {
+        let home = tempfile::tempdir().expect("home");
         let c = Calibraciones {
             v: VERSION,
             filas: vec![fila_con_tarea_hash(Some("tarea-vieja".into()))],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
-        c.aplicar("memora", "tarea-actual", &mut puntajes);
+        c.aplicar_en(home.path(), "memora", "tarea-actual", &mut puntajes);
         assert!(!puntajes[0].calibrada);
         assert_eq!(
-            c.motivo_sin_calibrar("memora", "tarea-actual", Dimension::Seguridad),
+            c.motivo_sin_calibrar_en(home.path(), "memora", "tarea-actual", Dimension::Seguridad),
             Some("calibración con otro tarea.toml")
         );
     }
 
     #[test]
     fn fila_sin_tarea_hash_no_calibra() {
+        let home = tempfile::tempdir().expect("home");
         let c = Calibraciones {
             v: VERSION,
             filas: vec![fila_con_tarea_hash(None)],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
-        c.aplicar("memora", "tarea-actual", &mut puntajes);
+        c.aplicar_en(home.path(), "memora", "tarea-actual", &mut puntajes);
         assert!(!puntajes[0].calibrada);
         assert_eq!(
-            c.motivo_sin_calibrar("memora", "tarea-actual", Dimension::Seguridad),
+            c.motivo_sin_calibrar_en(home.path(), "memora", "tarea-actual", Dimension::Seguridad),
             Some(MOTIVO_SIN_CASOS)
         );
     }
@@ -5883,12 +5875,13 @@ mod tests {
 
     #[test]
     fn motivo_de_otro_juez_aparece_con_huella_vieja() {
+        let home = tempfile::tempdir().expect("home");
         let c = Calibraciones {
             v: VERSION,
             filas: vec![fila_de_diseno_con_huella(Some("vieja".into()))],
         };
         assert_eq!(
-            c.motivo_sin_calibrar("memora", "", Dimension::Diseno),
+            c.motivo_sin_calibrar_en(home.path(), "memora", "", Dimension::Diseno),
             Some("calibración de otro juez")
         );
         let vigente = Calibraciones {
@@ -5898,11 +5891,11 @@ mod tests {
             )))],
         };
         assert_eq!(
-            vigente.motivo_sin_calibrar("memora", "", Dimension::Diseno),
+            vigente.motivo_sin_calibrar_en(home.path(), "memora", "", Dimension::Diseno),
             None
         );
         assert_eq!(
-            c.motivo_sin_calibrar("otra", "", Dimension::Diseno),
+            c.motivo_sin_calibrar_en(home.path(), "otra", "", Dimension::Diseno),
             Some(MOTIVO_SIN_CASOS)
         );
     }
@@ -5990,6 +5983,7 @@ mod tests {
 
     #[test]
     fn calibra_n_dos_con_un_defecto_y_un_limpio_acertados_calibra_el_oraculo() {
+        let home = tempfile::tempdir().expect("home");
         let base = veredicto_base();
         let fila = calibrar(
             Path::new(FIXTURE),
@@ -6009,7 +6003,7 @@ mod tests {
             filas: vec![fila],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.0)];
-        c.aplicar(&tarea, &hash, &mut puntajes);
+        c.aplicar_en(home.path(), &tarea, &hash, &mut puntajes);
         assert!(
             puntajes[0].calibrada,
             "un defecto detectado y un limpio bien calibran un oráculo"
@@ -6019,6 +6013,7 @@ mod tests {
 
     #[test]
     fn calibra_cinco_defectos_y_cinco_limpios_acertados_si_califica() {
+        let home = tempfile::tempdir().expect("home");
         let base = veredicto_base();
         let fila = calibrar(
             Path::new(FIXTURE),
@@ -6038,13 +6033,14 @@ mod tests {
             filas: vec![fila],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.0)];
-        c.aplicar(&tarea, &hash, &mut puntajes);
+        c.aplicar_en(home.path(), &tarea, &hash, &mut puntajes);
         assert!(puntajes[0].calibrada);
         assert_eq!(puntajes[0].exactitud_balanceada, Some(1.0));
     }
 
     #[test]
     fn calibra_cuatro_de_cuatro_no_alcanza_la_cota_de_wilson() {
+        let home = tempfile::tempdir().expect("home");
         for (defectos, limpios) in [(4, 16), (16, 4)] {
             let c = Calibraciones {
                 v: VERSION,
@@ -6057,7 +6053,7 @@ mod tests {
                 )],
             };
             let mut puntajes = vec![puntaje(Dimension::Diseno, 0.8)];
-            c.aplicar("memora", "", &mut puntajes);
+            c.aplicar_en(home.path(), "memora", "", &mut puntajes);
             assert!(
                 !puntajes[0].calibrada,
                 "{defectos} defectos y {limpios} limpios"
@@ -6137,6 +6133,7 @@ mod tests {
 
     #[test]
     fn calibra_aplicar_fila_incompleta_no_calibra_aunque_la_exactitud_llegue_a_0_9() {
+        let home = tempfile::tempdir().expect("home");
         let mut incompleta = fila("memora", Dimension::Seguridad, 2.0, Some(0.95));
         incompleta.incompleta = true;
         let c = Calibraciones {
@@ -6144,7 +6141,7 @@ mod tests {
             filas: vec![incompleta],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
-        c.aplicar("memora", "", &mut puntajes);
+        c.aplicar_en(home.path(), "memora", "", &mut puntajes);
         assert!(!puntajes[0].calibrada);
         assert!(global_de(&puntajes).is_none());
     }
@@ -6685,6 +6682,7 @@ mod tests {
 
     #[test]
     fn calibra_dos_limpios_de_cinco_con_plazo_vencido_no_calibra() {
+        let home = tempfile::tempdir().expect("home");
         let base = veredicto_de(Dimension::Estructura, 1.0, None);
         let vencidos = std::sync::atomic::AtomicUsize::new(0);
         let medida = medir_con_error(Dimension::Estructura, &base, 10, |limpia, base| {
@@ -6703,7 +6701,8 @@ mod tests {
             filas: vec![fila.clone()],
         };
         let mut puntajes = vec![puntaje(Dimension::Estructura, 0.8)];
-        calibraciones.aplicar(
+        calibraciones.aplicar_en(
+            home.path(),
             &fila.tarea,
             fila.tarea_hash.as_deref().unwrap_or(""),
             &mut puntajes,
@@ -10700,5 +10699,27 @@ mod tests {
             ..Version::default()
         };
         assert!(!version.calibrada(false), "0 de 0 limpios no prueba nada");
+    }
+
+    /// Guarda: el módulo de pruebas no llama a la versión que lee `ROOT_HOME`. Las cadenas van partidas
+    /// con `concat!` para que este test no se encuentre a sí mismo.
+    #[test]
+    fn calibra_pruebas_no_leen_root_home_implicito() {
+        const FUENTE: &str = include_str!("calibra.rs");
+        let inicio = FUENTE
+            .find(concat!("mod ", "tests"))
+            .expect("el módulo de pruebas está");
+        let pruebas = &FUENTE[inicio..];
+        let prohibidas = [
+            concat!("root_", "home()"),
+            concat!(".aplicar", "("),
+            concat!(".motivo_sin_calibrar", "("),
+        ];
+        for prohibida in prohibidas {
+            assert!(
+                !pruebas.contains(prohibida),
+                "las pruebas llaman `{prohibida}`: usen la versión `_en` con un home de prueba"
+            );
+        }
     }
 }

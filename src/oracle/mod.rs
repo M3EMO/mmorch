@@ -906,7 +906,7 @@ fn evaluar_con(
     let mut puntajes = medicion.puntajes;
     let tarea_hash = calibra::hash_de_tarea(tarea)?;
     deps.calibracion
-        .aplicar(&tarea.nombre, &tarea_hash, &mut puntajes);
+        .aplicar_en(&home, &tarea.nombre, &tarea_hash, &mut puntajes);
     // Un puntaje que la tarea no pide no se calibra: `global` y `sin_calibrar` no lo cuentan.
     for puntaje in puntajes.iter_mut().filter(|p| p.no_aplica.is_some()) {
         puntaje.calibrada = false;
@@ -918,7 +918,7 @@ fn evaluar_con(
     {
         puntaje.motivo_sin_calibrar = deps
             .calibracion
-            .motivo_sin_calibrar(&tarea.nombre, &tarea_hash, puntaje.dimension)
+            .motivo_sin_calibrar_en(&home, &tarea.nombre, &tarea_hash, puntaje.dimension)
             .map(str::to_string);
     }
     let sin_calibrar = sin_calibrar(&puntajes);
@@ -7922,6 +7922,65 @@ mod tests {
             global_sdlc < global_ecc,
             "sdlc {global_sdlc} debe quedar bajo ecc {global_ecc}"
         );
+    }
+
+    /// La calibración de otra tarea cuenta solo si el `tarea.toml` de esa tarea sale del home de la evaluación.
+    #[test]
+    fn oraculo_calibra_con_el_tarea_toml_del_home_de_la_evaluacion() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let toml_otra = "nombre = \"otra-tarea\"\n";
+        let carpeta_otra = home.join("oraculos").join("otra-tarea");
+        fs::create_dir_all(&carpeta_otra).expect("carpeta de otra tarea");
+        fs::write(carpeta_otra.join("tarea.toml"), toml_otra).expect("tarea.toml de otra tarea");
+        let fila = calibra::Fila {
+            tarea_hash: Some(crate::goal::calcular_hash(toml_otra.as_bytes())),
+            plazo_mutantes: None,
+            duracion_contrato: None,
+            duracion_oculto: None,
+            repo_origen: None,
+            inyecciones_distintas: Some(16),
+            equivalentes_excluidos: 0,
+            tarea: "otra-tarea".into(),
+            dimension: Dimension::Funciona,
+            n: 32,
+            defectos: 16,
+            limpios: 16,
+            limpios_sin_veredicto: 0,
+            no_aplicable: 0,
+            defectos_en_piso: 0,
+            omisiones: 0,
+            semilla: 42,
+            ts: 1.0,
+            sensibilidad: Some(1.0),
+            especificidad: Some(1.0),
+            exactitud_balanceada: Some(1.0),
+            items: BTreeMap::new(),
+            incompleta: false,
+            no_aplica: None,
+            inestable: None,
+            reemplazos: 0,
+            ruidosos: Vec::new(),
+            casos_ruidosos: 0,
+            huella: Some(calibra::huella_de(Dimension::Funciona)),
+            inestables: Vec::new(),
+            extractos_base: Vec::new(),
+        };
+        let calibracion = Calibraciones {
+            v: calibra::VERSION,
+            filas: vec![fila],
+        };
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let deps = Dependencias {
+            calibracion: &calibracion,
+            ..deps_de(&correr, &fabrica)
+        };
+        let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
+        let funciona = puntaje_de_prueba(&v, Dimension::Funciona);
+        assert!(funciona.calibrada, "{funciona:?}");
     }
 
     /// Parte de Estructura con `valor` y `peso`, sin veredicto ni faltantes.

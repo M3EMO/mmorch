@@ -987,7 +987,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
             faltantes: vec![],
         },
     ];
-    cal.aplicar("calibra-fixture", "", &mut puntajes);
+    cal.aplicar_en(home.path(), "calibra-fixture", "", &mut puntajes);
     assert!(!puntajes[0].calibrada, "eficiencia no aplicable no calibra");
     assert!(puntajes[1].calibrada, "seguridad sí calibra");
     assert_eq!(
