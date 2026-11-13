@@ -1130,7 +1130,12 @@ fn medir(
     // Las sondas de configs van después de las de herramientas (Tarea 31). Hadolint es la única que llama
     // al ejecutor.
     if partes.configs {
-        sondas.extend(configs::sondas_configs_locales(repo, tarea));
+        let mut de_configs = configs::sondas_configs_locales(repo, tarea);
+        if let Some(base) = base {
+            let inicial = bootstrap.is_dir().then_some(bootstrap.as_path());
+            previos::marcar_configs(&mut de_configs, base, inicial, repo);
+        }
+        sondas.extend(de_configs);
     }
     if partes.hadolint {
         sondas.push(configs::sonda_hadolint_de(ej, repo, tarea));

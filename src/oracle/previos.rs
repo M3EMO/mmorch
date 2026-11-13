@@ -8,6 +8,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::oracle::configs;
 use crate::oracle::historial;
 use crate::oracle::pendientes;
 use crate::oracle::perfiles;
@@ -17,7 +18,7 @@ use crate::oracle::tarea::{Requisito, Tarea};
 use crate::tipos::{Dimension, Fuente, Hallazgo};
 
 /// Sube cuando cambia una sonda de Seguridad. Cambia la clave de la línea base guardada.
-pub const VERSION_SONDAS_SEGURIDAD: u32 = 2;
+pub const VERSION_SONDAS_SEGURIDAD: u32 = 3;
 
 /// Aviso del veredicto cuando la tarea no trae `bootstrap/`.
 pub const AVISO_SIN_ESTADO_INICIAL: &str =
@@ -33,6 +34,9 @@ pub struct LineaBase {
     pub gitleaks: BTreeMap<String, Vec<u32>>,
     #[serde(default)]
     pub nativas: BTreeMap<String, Vec<u32>>,
+    /// Hallazgos de Seguridad de las sondas de configs (secretos y reglas de Dockerfile).
+    #[serde(default)]
+    pub configs: BTreeMap<String, Vec<u32>>,
 }
 
 /// Línea base de `bootstrap/`. Sale de la memoria de `home` si la clave coincide. Si no, corre las sondas
@@ -70,11 +74,21 @@ const CARPETA: &str = "previos";
 /// La base suma su huella de contenido. Sin huella, suma solo si va montada.
 /// `None` si `bootstrap/` no se puede leer: entonces no hay memoria y la línea base se calcula.
 fn clave_de(tarea: &Tarea, bootstrap: &Path, ej: &dyn EjecutorHerramienta) -> Option<String> {
+    clave_de_version(tarea, bootstrap, ej, VERSION_SONDAS_SEGURIDAD)
+}
+
+/// Igual que `clave_de`, con la versión de las sondas dada. Los tests usan una versión vieja.
+fn clave_de_version(
+    tarea: &Tarea,
+    bootstrap: &Path,
+    ej: &dyn EjecutorHerramienta,
+    version_sondas: u32,
+) -> Option<String> {
     let version = historial::hash_de_version(bootstrap).ok()?;
     let mut digest = Sha256::new();
     for parte in [
         version,
-        VERSION_SONDAS_SEGURIDAD.to_string(),
+        version_sondas.to_string(),
         tarea.imagen.clone(),
         tarea.lenguaje.clone(),
         ej.huella_rustsec()
@@ -125,6 +139,19 @@ fn calcular(tarea: &Tarea, bootstrap: &Path, ej: &dyn EjecutorHerramienta) -> (L
             base.nativas.entry(clave_base(h)).or_default().push(h.linea);
         }
     }
+    let de_configs = configs::sondas_configs_locales(bootstrap, tarea);
+    completa &= de_configs
+        .iter()
+        .filter(|s| s.dimension == Dimension::Seguridad)
+        .all(|s| s.valor.is_some());
+    for sonda in de_configs
+        .iter()
+        .filter(|s| s.dimension == Dimension::Seguridad)
+    {
+        for h in &sonda.hallazgos {
+            base.configs.entry(clave_base(h)).or_default().push(h.linea);
+        }
+    }
     (base, completa)
 }
 
@@ -173,6 +200,28 @@ pub fn marcar(
 ) {
     let mut refs: Vec<&mut Hallazgo> = hallazgos.iter_mut().collect();
     marcar_refs(&mut refs, base, cambios);
+}
+
+/// Marca `previo` en los hallazgos de Seguridad de las sondas de configs, con `base.configs`.
+/// Con `inicial`, la regla es la de las nativas: un hallazgo en un rango cambiado sale nuevo.
+pub fn marcar_configs(
+    sondas: &mut [ResultadoSonda],
+    base: &LineaBase,
+    inicial: Option<&Path>,
+    repo: &Path,
+) {
+    let todos: Vec<Hallazgo> = sondas
+        .iter()
+        .filter(|s| s.dimension == Dimension::Seguridad)
+        .flat_map(|s| s.hallazgos.iter().cloned())
+        .collect();
+    let marca = inicial.map(|i| cambios_para_marca(i, repo, &todos));
+    let mut refs: Vec<&mut Hallazgo> = sondas
+        .iter_mut()
+        .filter(|s| s.dimension == Dimension::Seguridad)
+        .flat_map(|s| s.hallazgos.iter_mut())
+        .collect();
+    marcar_refs(&mut refs, &base.configs, marca.as_ref());
 }
 
 /// Marca los hallazgos de gitleaks con `base.gitleaks` y los de cargo audit con `base.cargo_audit`.
@@ -258,16 +307,18 @@ fn es_ilegible(ruta: &Path) -> bool {
         && fs::read_to_string(ruta).is_err()
 }
 
-/// Copia de las sondas de Seguridad sin sus hallazgos previos, salvo los de gitleaks. Un secreto que
-/// ya estaba cuenta en el puntaje. El valor de cada sonda que lo tenga sale de sus hallazgos que quedan.
+/// Copia de las sondas de Seguridad sin sus hallazgos previos, salvo los secretos de gitleaks y de configs.
+/// Un secreto que ya estaba cuenta en el puntaje. El valor de cada sonda que lo tenga sale de sus hallazgos que quedan.
 pub fn quitar_previos(sondas: &[ResultadoSonda], reqs: &[Requisito]) -> Vec<ResultadoSonda> {
     sondas
         .iter()
         .map(|sonda| {
             let mut copia = sonda.clone();
-            copia
-                .hallazgos
-                .retain(|h| !h.previo || es_sonda(&h.fuente, "gitleaks"));
+            copia.hallazgos.retain(|h| {
+                !h.previo
+                    || es_sonda(&h.fuente, "gitleaks")
+                    || es_sonda(&h.fuente, "configs-secretos")
+            });
             if copia.valor.is_some() {
                 copia.valor = Some(puntuar_hallazgos(&copia.hallazgos, reqs));
             }
@@ -674,6 +725,153 @@ mod tests {
         };
         let limpia = quitar_previos(std::slice::from_ref(&sonda), &[]);
         assert_eq!(limpia, vec![sonda], "un secreto previo sigue en el puntaje");
+    }
+
+    /// Un secreto en YAML: la clave es secreta y el valor es literal.
+    const YAML_CON_SECRETO: &str = "db:\n  password: s3cr3t-valor\n";
+
+    /// Escribe `config.yml` con `texto` en `dir`.
+    fn config_en(dir: &Path, texto: &str) {
+        fs::write(dir.join("config.yml"), texto).expect("escribe config.yml");
+    }
+
+    /// Hallazgos de la fuente `configs-secretos` de `sondas`.
+    fn secretos_de(sondas: &[ResultadoSonda]) -> Vec<Hallazgo> {
+        sondas
+            .iter()
+            .flat_map(|s| s.hallazgos.iter())
+            .filter(|h| es_sonda(&h.fuente, "configs-secretos"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn previos_secreto_de_configs_igual_en_bootstrap_queda_previo() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let bootstrap = tempfile::tempdir().expect("temp dir");
+        let repo = tempfile::tempdir().expect("temp dir");
+        config_en(bootstrap.path(), YAML_CON_SECRETO);
+        config_en(repo.path(), YAML_CON_SECRETO);
+        let (_tarea_dir, tarea) = tarea_rust();
+        let ej = EjecutorContado::nuevo();
+
+        let base = linea_base(home.path(), &tarea, bootstrap.path(), &ej);
+        assert_eq!(
+            base.configs.len(),
+            1,
+            "el secreto del inicio va a la base: {base:?}"
+        );
+
+        let mut sondas = configs::sondas_configs_locales(repo.path(), &tarea);
+        marcar_configs(&mut sondas, &base, Some(bootstrap.path()), repo.path());
+        let secretos = secretos_de(&sondas);
+        assert_eq!(secretos.len(), 1, "{secretos:?}");
+        assert_eq!(secretos[0].severidad, 3);
+        assert!(secretos[0].previo, "igual que en bootstrap/: es previo");
+    }
+
+    #[test]
+    fn previos_secreto_de_configs_solo_en_el_repo_queda_nuevo() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let bootstrap = tempfile::tempdir().expect("temp dir");
+        let repo = tempfile::tempdir().expect("temp dir");
+        config_en(bootstrap.path(), "db:\n  host: localhost\n");
+        config_en(repo.path(), YAML_CON_SECRETO);
+        let (_tarea_dir, tarea) = tarea_rust();
+        let ej = EjecutorContado::nuevo();
+
+        let base = linea_base(home.path(), &tarea, bootstrap.path(), &ej);
+        assert!(
+            base.configs.is_empty(),
+            "bootstrap/ no tiene secreto: {base:?}"
+        );
+
+        let mut sondas = configs::sondas_configs_locales(repo.path(), &tarea);
+        marcar_configs(&mut sondas, &base, Some(bootstrap.path()), repo.path());
+        let secretos = secretos_de(&sondas);
+        assert_eq!(secretos.len(), 1, "{secretos:?}");
+        assert!(!secretos[0].previo, "no estaba en bootstrap/: es nuevo");
+    }
+
+    #[test]
+    fn previos_quitar_previos_deja_el_secreto_previo_de_configs() {
+        let mut secreto = crear_hallazgo(
+            Dimension::Seguridad,
+            3,
+            "config.yml",
+            2,
+            "password",
+            "clave con forma de secreto y valor literal",
+            "configs-secretos",
+            &[],
+        );
+        secreto.previo = true;
+        let valor = puntuar_hallazgos(std::slice::from_ref(&secreto), &[]);
+        let sonda = ResultadoSonda {
+            dimension: Dimension::Seguridad,
+            valor: Some(valor),
+            motivo: None,
+            hallazgos: vec![secreto],
+        };
+        let limpia = quitar_previos(std::slice::from_ref(&sonda), &[]);
+        assert_eq!(
+            limpia,
+            vec![sonda],
+            "un secreto de configs previo sigue en el puntaje"
+        );
+    }
+
+    #[test]
+    fn previos_linea_base_con_la_version_vieja_no_se_reusa() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let bootstrap = tempfile::tempdir().expect("temp dir");
+        fs::write(bootstrap.path().join("Cargo.lock"), CARGO_LOCK).expect("escribe el lock");
+        let (_tarea_dir, tarea) = tarea_rust();
+        let ej = EjecutorContado::nuevo();
+
+        let vieja = clave_de_version(&tarea, bootstrap.path(), &ej, 2).expect("hay clave");
+        assert_ne!(
+            Some(vieja.clone()),
+            clave_de(&tarea, bootstrap.path(), &ej),
+            "la versión nueva de las sondas cambia la clave"
+        );
+        let marcada = LineaBase {
+            cargo_audit: BTreeMap::from([("MARCA|3".to_string(), vec![1])]),
+            ..LineaBase::default()
+        };
+        let ruta = home
+            .path()
+            .join(CARPETA)
+            .join(&tarea.nombre)
+            .join(format!("{vieja}.json"));
+        guardar(&ruta, &marcada).expect("guarda la base con la clave vieja");
+
+        let base = linea_base(home.path(), &tarea, bootstrap.path(), &ej);
+        assert_ne!(base, marcada, "la base con la clave vieja no se reusa");
+        assert!(ej.cuantos() > 0, "la base se recalcula con las sondas");
+    }
+
+    #[test]
+    fn previos_sonda_de_configs_sin_veredicto_no_guarda_la_base() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let bootstrap = tempfile::tempdir().expect("temp dir");
+        fs::write(bootstrap.path().join("Cargo.lock"), CARGO_LOCK).expect("escribe el lock");
+        // Bytes que no son UTF-8: la sonda de secretos no da veredicto.
+        fs::create_dir_all(bootstrap.path().join("src")).expect("crea src");
+        fs::write(bootstrap.path().join("src/lib.rs"), "pub fn f() {}\n").expect("escribe lib.rs");
+        fs::write(bootstrap.path().join("config.yml"), [0xff, 0xfe, b'\n'])
+            .expect("escribe config.yml");
+        let (_tarea_dir, tarea) = tarea_rust();
+        let ej = EjecutorContado::nuevo();
+
+        let _ = linea_base(home.path(), &tarea, bootstrap.path(), &ej);
+        let corridos = ej.cuantos();
+        assert!(corridos > 0, "la primera llamada corre sondas");
+        let _ = linea_base(home.path(), &tarea, bootstrap.path(), &ej);
+        assert!(
+            ej.cuantos() > corridos,
+            "sin veredicto no se guarda: la segunda llamada corre sondas otra vez"
+        );
     }
 
     /// Nombres de los archivos de `carpeta`, ordenados.
