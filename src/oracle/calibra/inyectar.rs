@@ -13,7 +13,7 @@ use crate::oracle::perfiles::rust::{LimitesEstructura, analizar};
 use crate::tipos::Dimension;
 
 /// Defecto que se inyecta en una copia. Cada uno apunta a una dimensión y a un ítem de rúbrica.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Defecto {
     SecretoEnCodigo,
     PanicoEnEntrada,
@@ -111,6 +111,62 @@ pub struct Inyeccion {
     pub operador: Option<String>,
 }
 
+/// Identidad de una inyección: qué defecto, dónde y cuál edición. Dos casos con la misma identidad inyectan lo mismo.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Identidad {
+    pub defecto: Defecto,
+    pub archivo: String,
+    pub linea: u32,
+    pub edicion: String,
+}
+
+/// Identidades ya elegidas o inválidas. Un reemplazo no elige ninguna de ellas.
+pub type Excluidos = BTreeSet<Identidad>;
+
+/// Identidad de un lugar de inyección. `linea` es 0 en los defectos de archivo entero.
+fn identidad_de_lugar(defecto: Defecto, archivo: &str, linea: u32, edicion: &str) -> Identidad {
+    Identidad {
+        defecto,
+        archivo: archivo.to_string(),
+        linea,
+        edicion: edicion.to_string(),
+    }
+}
+
+impl Inyeccion {
+    /// Identidad de la inyección aplicada. Regla: la línea de los defectos de archivo entero se normaliza a 0,
+    /// porque su línea no distingue dos aplicaciones. Esos son `SecretoEnCodigo`, `CicloEntreCapas`, `ArchivoDios`,
+    /// `ModuloBorrado` y `DockerfileRoot`. `ComportamientoRoto` usa su operador como edición. `AssertBorrado` usa
+    /// el archivo y el nombre de su mutante muerto, no el archivo de los tests que apagó.
+    pub fn identidad(&self) -> Identidad {
+        match self.defecto {
+            Defecto::ComportamientoRoto => identidad_de_lugar(
+                self.defecto,
+                &self.archivo,
+                self.linea,
+                self.operador.as_deref().unwrap_or(""),
+            ),
+            Defecto::AssertBorrado => identidad_de_lugar(
+                self.defecto,
+                self.mutante_archivo.as_deref().unwrap_or(""),
+                0,
+                self.mutante.as_deref().unwrap_or(""),
+            ),
+            Defecto::PanicoEnEntrada
+            | Defecto::BucleCuadratico
+            | Defecto::ErrorTragado
+            | Defecto::CuerpoVaciado => {
+                identidad_de_lugar(self.defecto, &self.archivo, self.linea, "")
+            }
+            Defecto::SecretoEnCodigo
+            | Defecto::CicloEntreCapas
+            | Defecto::ArchivoDios
+            | Defecto::ModuloBorrado
+            | Defecto::DockerfileRoot => identidad_de_lugar(self.defecto, &self.archivo, 0, ""),
+        }
+    }
+}
+
 /// Lo que `inyectar_con` necesita además de la copia y la semilla.
 pub struct Contexto<'a> {
     /// Capas de `[arquitectura]` de la tarea.
@@ -127,6 +183,8 @@ pub struct Contexto<'a> {
     /// `CuerpoVaciado` vacía solo funciones que ya existían, y `ModuloBorrado` no aplica.
     /// `None`: `CuerpoVaciado` elige cualquier función de producción.
     pub inicial: Option<&'a Path>,
+    /// Identidades que la elección no puede tomar: las ya usadas y las inválidas. Vacío: no excluye nada.
+    pub excluidos: &'a Excluidos,
 }
 
 /// Aplica `defecto` a la copia de repo Rust en `dir`. `capas` son las de `[arquitectura]` de la tarea.
@@ -146,6 +204,7 @@ pub fn inyectar(
         muertos: &[],
         cambios: None,
         inicial: None,
+        excluidos: &BTreeSet::new(),
     };
     inyectar_con(defecto, dir, &contexto, semilla)
 }
@@ -163,29 +222,30 @@ pub fn inyectar_con(
     let mut apagado = None;
     let mut operador: Option<String> = None;
     let mut cuerpo_en_cambio = false;
+    let ex = contexto.excluidos;
     let lugar = match defecto {
-        Defecto::SecretoEnCodigo => secreto(dir, &mut rng)?,
-        Defecto::PanicoEnEntrada => panico(dir, &mut rng)?,
-        Defecto::BucleCuadratico => bucle(dir, contexto.camino_caliente, &mut rng)?,
-        Defecto::CicloEntreCapas => ciclo(dir, contexto.capas, &mut rng)?,
-        Defecto::ArchivoDios => dios(dir, contexto.limites, &mut rng)?,
+        Defecto::SecretoEnCodigo => secreto(dir, &mut rng, ex)?,
+        Defecto::PanicoEnEntrada => panico(dir, &mut rng, ex)?,
+        Defecto::BucleCuadratico => bucle(dir, contexto.camino_caliente, &mut rng, ex)?,
+        Defecto::CicloEntreCapas => ciclo(dir, contexto.capas, &mut rng, ex)?,
+        Defecto::ArchivoDios => dios(dir, contexto.limites, &mut rng, ex)?,
         Defecto::ModuloBorrado => {
-            modulo_borrado(dir, &mut rng, contexto.cambios, contexto.inicial)?
+            modulo_borrado(dir, &mut rng, contexto.cambios, contexto.inicial, ex)?
         }
-        Defecto::ErrorTragado => error_tragado(dir, &mut rng)?,
+        Defecto::ErrorTragado => error_tragado(dir, &mut rng, ex)?,
         Defecto::AssertBorrado => {
-            apagado = assert_borrado(dir, contexto.muertos, &mut rng)?;
+            apagado = assert_borrado(dir, contexto.muertos, &mut rng, ex)?;
             apagado.as_ref().map(|a| (a.archivo.clone(), a.linea))
         }
-        Defecto::DockerfileRoot => dockerfile(dir)?,
+        Defecto::DockerfileRoot => dockerfile(dir, ex)?,
         Defecto::CuerpoVaciado => {
             let (lugar, en_cambio) =
-                cuerpo_vaciado(dir, &mut rng, contexto.cambios, contexto.inicial)?;
+                cuerpo_vaciado(dir, &mut rng, contexto.cambios, contexto.inicial, ex)?;
             cuerpo_en_cambio = en_cambio;
             lugar
         }
         Defecto::ComportamientoRoto => {
-            comportamiento(dir, &mut rng, contexto.cambios, contexto.inicial)?.map(
+            comportamiento(dir, &mut rng, contexto.cambios, contexto.inicial, ex)?.map(
                 |(archivo, linea, op)| {
                     operador = op;
                     (archivo, linea)
@@ -275,6 +335,21 @@ impl Prng {
             lista.get(self.indice(lista.len()))
         }
     }
+
+    /// Como `elegir`, sin los candidatos cuya identidad está en `excluidos`. Sin exclusiones da lo mismo que `elegir`.
+    fn elegir_libre<T: Clone>(
+        &mut self,
+        candidatos: &[T],
+        excluidos: &Excluidos,
+        identidad: impl Fn(&T) -> Identidad,
+    ) -> Option<T> {
+        let libres: Vec<T> = candidatos
+            .iter()
+            .filter(|c| !excluidos.contains(&identidad(c)))
+            .cloned()
+            .collect();
+        self.elegir(&libres).cloned()
+    }
 }
 
 /// Partes de un texto por `\n`. Unirlas de nuevo con `unir` da el texto original, con su último salto.
@@ -354,9 +429,12 @@ fn clave_sintetica(rng: &mut Prng) -> String {
 }
 
 /// Agrega una constante con una clave sintética al final de un archivo de `src/`.
-fn secreto(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+fn secreto(dir: &Path, rng: &mut Prng, excluidos: &Excluidos) -> io::Result<Lugar> {
     let archivos = rust_en(dir, "src")?;
-    let Some(archivo) = rng.elegir(&archivos).cloned() else {
+    let libre = rng.elegir_libre(&archivos, excluidos, |a| {
+        identidad_de_lugar(Defecto::SecretoEnCodigo, a, 0, "")
+    });
+    let Some(archivo) = libre else {
         return Ok(None);
     };
     let clave = clave_sintetica(rng);
@@ -383,7 +461,7 @@ fn posicion_de_parseo(linea: &str) -> Option<usize> {
 }
 
 /// Cambia el `?` de una línea que parsea entrada por `.unwrap()`. El código sigue compilando.
-fn panico(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+fn panico(dir: &Path, rng: &mut Prng, excluidos: &Excluidos) -> io::Result<Lugar> {
     let mut candidatos: Vec<(String, usize)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
@@ -394,7 +472,10 @@ fn panico(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
             }
         }
     }
-    let Some((archivo, i)) = rng.elegir(&candidatos).cloned() else {
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, i)| {
+        identidad_de_lugar(Defecto::PanicoEnEntrada, a, *i as u32 + 1, "")
+    });
+    let Some((archivo, i)) = libre else {
         return Ok(None);
     };
     let mut lineas = partir(&leer(dir, &archivo)?);
@@ -444,7 +525,12 @@ fn en_camino(linea: &str, camino: &[String]) -> bool {
 }
 
 /// Inserta un bucle cuadrático al inicio de una función de producción. Con `camino`, solo de las listadas.
-fn bucle(dir: &Path, camino: &[String], rng: &mut Prng) -> io::Result<Lugar> {
+fn bucle(
+    dir: &Path,
+    camino: &[String],
+    rng: &mut Prng,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
     let mut candidatos: Vec<(String, usize)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
@@ -458,7 +544,11 @@ fn bucle(dir: &Path, camino: &[String], rng: &mut Prng) -> io::Result<Lugar> {
             }
         }
     }
-    let Some((archivo, i)) = rng.elegir(&candidatos).cloned() else {
+    // El bucle queda una línea debajo de la firma: su línea reportada es `i + 2`.
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, i)| {
+        identidad_de_lugar(Defecto::BucleCuadratico, a, *i as u32 + 2, "")
+    });
+    let Some((archivo, i)) = libre else {
         return Ok(None);
     };
     let mut lineas = partir(&leer(dir, &archivo)?);
@@ -482,7 +572,12 @@ fn archivo_de_modulo(dir: &Path, modulo: &str) -> Option<String> {
 }
 
 /// Un `use` de una capa anterior en un módulo de una capa posterior: el ciclo entre capas.
-fn ciclo(dir: &Path, capas: &[Vec<String>], rng: &mut Prng) -> io::Result<Lugar> {
+fn ciclo(
+    dir: &Path,
+    capas: &[Vec<String>],
+    rng: &mut Prng,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
     if capas.len() < 2 {
         return Ok(None);
     }
@@ -500,7 +595,11 @@ fn ciclo(dir: &Path, capas: &[Vec<String>], rng: &mut Prng) -> io::Result<Lugar>
             }
         }
     }
-    let Some((archivo, superior)) = rng.elegir(&candidatos).cloned() else {
+    // Dos candidatos del mismo archivo tienen la misma identidad: el archivo entero es el defecto.
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, _)| {
+        identidad_de_lugar(Defecto::CicloEntreCapas, a, 0, "")
+    });
+    let Some((archivo, superior)) = libre else {
         return Ok(None);
     };
     let mut texto = leer(dir, &archivo)?;
@@ -513,7 +612,12 @@ fn ciclo(dir: &Path, capas: &[Vec<String>], rng: &mut Prng) -> io::Result<Lugar>
 /// Agrega funciones de relleno a un módulo de primer nivel de `src/`, hasta que el archivo pasa el límite de
 /// archivo y una función pasa el de función. Los demás archivos no cambian. Cada función de relleno es válida,
 /// no tiene dependencias y no tiene uso. Devuelve el archivo y la línea de su primera función.
-fn dios(dir: &Path, limites: &LimitesEstructura, rng: &mut Prng) -> io::Result<Lugar> {
+fn dios(
+    dir: &Path,
+    limites: &LimitesEstructura,
+    rng: &mut Prng,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
     let mut destinos: Vec<String> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let nombre = archivo.trim_start_matches("src/");
@@ -525,7 +629,10 @@ fn dios(dir: &Path, limites: &LimitesEstructura, rng: &mut Prng) -> io::Result<L
             destinos.push(archivo);
         }
     }
-    let Some(destino) = rng.elegir(&destinos).cloned() else {
+    let libre = rng.elegir_libre(&destinos, excluidos, |a| {
+        identidad_de_lugar(Defecto::ArchivoDios, a, 0, "")
+    });
+    let Some(destino) = libre else {
         return Ok(None);
     };
     let mut texto = leer(dir, &destino)?;
@@ -612,6 +719,7 @@ fn modulo_borrado(
     rng: &mut Prng,
     cambios: Option<&Rangos>,
     inicial: Option<&Path>,
+    excluidos: &Excluidos,
 ) -> io::Result<Lugar> {
     if inicial.is_some() {
         return Ok(None);
@@ -632,7 +740,10 @@ fn modulo_borrado(
             dir.join(&archivo).is_file() && archivo_tocado(cambios, &archivo)
         })
         .collect();
-    let Some(modulo) = rng.elegir(&candidatos).cloned() else {
+    let libre = rng.elegir_libre(&candidatos, excluidos, |m| {
+        identidad_de_lugar(Defecto::ModuloBorrado, &format!("src/{m}.rs"), 0, "")
+    });
+    let Some(modulo) = libre else {
         return Ok(None);
     };
     let archivo = format!("src/{modulo}.rs");
@@ -737,6 +848,7 @@ fn cuerpo_vaciado(
     rng: &mut Prng,
     cambios: Option<&Rangos>,
     inicial: Option<&Path>,
+    excluidos: &Excluidos,
 ) -> io::Result<(Lugar, bool)> {
     // (archivo, cuerpo, cruza el cambio)
     let mut candidatos: Vec<(String, Cuerpo, bool)> = Vec::new();
@@ -766,7 +878,11 @@ fn cuerpo_vaciado(
             }
         }
     }
-    let Some((archivo, cuerpo, en_cambio)) = rng.elegir(&candidatos).cloned() else {
+    // La línea reportada es la de la firma, 1-based.
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, c, _)| {
+        identidad_de_lugar(Defecto::CuerpoVaciado, a, c.firma as u32 + 1, "")
+    });
+    let Some((archivo, cuerpo, en_cambio)) = libre else {
         return Ok((None, false));
     };
     let lineas = partir(&leer(dir, &archivo)?);
@@ -831,7 +947,7 @@ fn empieza_sentencia(lineas: &[String], i: usize) -> bool {
 }
 
 /// Cambia una sentencia `expr?;` por `let _ = expr;`: el error se traga.
-fn error_tragado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+fn error_tragado(dir: &Path, rng: &mut Prng, excluidos: &Excluidos) -> io::Result<Lugar> {
     let mut candidatos: Vec<(String, usize)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
@@ -842,7 +958,10 @@ fn error_tragado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
             }
         }
     }
-    let Some((archivo, i)) = rng.elegir(&candidatos).cloned() else {
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, i)| {
+        identidad_de_lugar(Defecto::ErrorTragado, a, *i as u32 + 1, "")
+    });
+    let Some((archivo, i)) = libre else {
         return Ok(None);
     };
     let mut lineas = partir(&leer(dir, &archivo)?);
@@ -868,11 +987,12 @@ struct Apagado {
 
 /// Apaga con `#[ignore]` los tests de un mutante muerto de `muertos`. La semilla elige el mutante por su
 /// posición. Si ese mutante no sirve, prueba el siguiente, en orden. Sin muertos que sirvan, no aplica: no hay
-/// apagado al azar.
+/// apagado al azar. Salta los mutantes excluidos sin tocar la copia.
 fn assert_borrado(
     dir: &Path,
     muertos: &[MutanteMuerto],
     rng: &mut Prng,
+    excluidos: &Excluidos,
 ) -> io::Result<Option<Apagado>> {
     if muertos.is_empty() {
         return Ok(None);
@@ -880,6 +1000,11 @@ fn assert_borrado(
     let inicio = rng.indice(muertos.len());
     for k in 0..muertos.len() {
         let mutante = &muertos[(inicio + k) % muertos.len()];
+        let identidad =
+            identidad_de_lugar(Defecto::AssertBorrado, &mutante.archivo, 0, &mutante.nombre);
+        if excluidos.contains(&identidad) {
+            continue;
+        }
         if let Some(apagado) = apagar_tests(dir, mutante)? {
             return Ok(Some(apagado));
         }
@@ -1010,9 +1135,17 @@ fn es_user_no_root(linea: &str) -> bool {
         .is_some_and(|usuario| !matches!(usuario.trim(), "root" | "0"))
 }
 
-/// Quita el `USER` no root del Dockerfile: la imagen corre como root.
-fn dockerfile(dir: &Path) -> io::Result<Lugar> {
-    if !dir.join("Dockerfile").is_file() {
+/// Quita el `USER` no root del Dockerfile: la imagen corre como root. Es un solo candidato: si ya está excluido,
+/// no hay nada que elegir.
+fn dockerfile(dir: &Path, excluidos: &Excluidos) -> io::Result<Lugar> {
+    if !dir.join("Dockerfile").is_file()
+        || excluidos.contains(&identidad_de_lugar(
+            Defecto::DockerfileRoot,
+            "Dockerfile",
+            0,
+            "",
+        ))
+    {
         return Ok(None);
     }
     let lineas = partir(&leer(dir, "Dockerfile")?);
@@ -1061,7 +1194,12 @@ fn posicion_de_igualdad(linea: &str) -> Option<usize> {
 /// Cambia el primer ` == ` de una línea de producción de `src/` por ` != `: la comparación sale invertida.
 /// Usa solo las líneas de antes de `#[cfg(test)]`. `Ok(None)` si no hay ninguna comparación de ese tipo.
 /// Con `cambios`, solo las líneas que caen dentro de un rango del cambio.
-fn igualdad_invertida(dir: &Path, rng: &mut Prng, cambios: Option<&Rangos>) -> io::Result<Lugar> {
+fn igualdad_invertida(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
     let mut candidatos: Vec<(String, usize)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
@@ -1074,7 +1212,10 @@ fn igualdad_invertida(dir: &Path, rng: &mut Prng, cambios: Option<&Rangos>) -> i
             }
         }
     }
-    let Some((archivo, i)) = rng.elegir(&candidatos).cloned() else {
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, i)| {
+        identidad_de_lugar(Defecto::ComportamientoRoto, a, *i as u32 + 1, "")
+    });
+    let Some((archivo, i)) = libre else {
         return Ok(None);
     };
     let mut lineas = partir(&leer(dir, &archivo)?);
@@ -1289,6 +1430,7 @@ fn comportamiento_con_inicial(
     rng: &mut Prng,
     cambios: Option<&Rangos>,
     inicial: &Path,
+    excluidos: &Excluidos,
 ) -> io::Result<Option<(String, u32, Option<String>)>> {
     let mut candidatos: Vec<(String, usize, Edicion)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
@@ -1307,7 +1449,10 @@ fn comportamiento_con_inicial(
             }
         }
     }
-    let Some((archivo, i, edicion)) = rng.elegir(&candidatos).cloned() else {
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, i, e)| {
+        identidad_de_lugar(Defecto::ComportamientoRoto, a, *i as u32 + 1, &e.operador)
+    });
+    let Some((archivo, i, edicion)) = libre else {
         return Ok(None);
     };
     let mut lineas = partir(&leer(dir, &archivo)?);
@@ -1324,13 +1469,12 @@ fn comportamiento(
     rng: &mut Prng,
     cambios: Option<&Rangos>,
     inicial: Option<&Path>,
+    excluidos: &Excluidos,
 ) -> io::Result<Option<(String, u32, Option<String>)>> {
     match inicial {
-        Some(inicial) => comportamiento_con_inicial(dir, rng, cambios, inicial),
-        None => {
-            Ok(igualdad_invertida(dir, rng, cambios)?
-                .map(|(archivo, linea)| (archivo, linea, None)))
-        }
+        Some(inicial) => comportamiento_con_inicial(dir, rng, cambios, inicial, excluidos),
+        None => Ok(igualdad_invertida(dir, rng, cambios, excluidos)?
+            .map(|(archivo, linea)| (archivo, linea, None))),
     }
 }
 
@@ -1584,7 +1728,9 @@ mod tests {
     /// `true` si `bucle` elige la única función de un archivo con la firma `firma`.
     fn bucle_elige_la_funcion(firma: &str) -> bool {
         let dir = repo_de(&[("src/lib.rs", &format!("{firma}\n    1\n}}\n"))]);
-        bucle(dir.path(), &[], &mut Prng(7)).expect("E/S").is_some()
+        bucle(dir.path(), &[], &mut Prng(7), &Excluidos::new())
+            .expect("E/S")
+            .is_some()
     }
 
     #[test]
@@ -1798,6 +1944,7 @@ mod tests {
                 limites: &limites,
                 muertos: &[],
                 inicial: None,
+                excluidos: &BTreeSet::new(),
                 cambios: None,
             };
             let inyeccion = inyectar_con(Defecto::ArchivoDios, dir.path(), &contexto, 42)
@@ -1958,6 +2105,7 @@ mod tests {
             camino_caliente: &[],
             limites: &limites,
             inicial: None,
+            excluidos: &BTreeSet::new(),
             muertos,
             cambios: None,
         };
@@ -2021,6 +2169,7 @@ mod tests {
             capas: &capas,
             camino_caliente: &[],
             inicial: None,
+            excluidos: &BTreeSet::new(),
             limites: &limites,
             muertos: &[muerto_de_leer_numero()],
             cambios: None,
@@ -2298,6 +2447,246 @@ mod tests {
         assert_eq!(arbol(dir.path()), antes, "no toca el repo");
     }
 
+    fn identidad_de(defecto: Defecto, archivo: &str) -> Identidad {
+        Identidad {
+            defecto,
+            archivo: archivo.into(),
+            linea: 0,
+            edicion: String::new(),
+        }
+    }
+
+    fn identidad_de_numero(n: &u32) -> Identidad {
+        Identidad {
+            defecto: Defecto::PanicoEnEntrada,
+            archivo: "src/x.rs".into(),
+            linea: *n,
+            edicion: String::new(),
+        }
+    }
+
+    /// Contexto sin capas, mutantes ni cambios: solo `inicial` y `excluidos` varían.
+    fn contexto_con<'a>(
+        capas: &'a [Vec<String>],
+        limites: &'a LimitesEstructura,
+        inicial: Option<&'a Path>,
+        excluidos: &'a Excluidos,
+    ) -> Contexto<'a> {
+        Contexto {
+            capas,
+            camino_caliente: &[],
+            limites,
+            muertos: &[],
+            cambios: None,
+            inicial,
+            excluidos,
+        }
+    }
+
+    #[test]
+    fn elegir_libre_sin_exclusiones_elige_como_elegir() {
+        let candidatos: Vec<u32> = (1..=7).collect();
+        let vacio = Excluidos::new();
+        for semilla in 0..200u64 {
+            let libre = Prng::nuevo(semilla).elegir_libre(&candidatos, &vacio, identidad_de_numero);
+            let plano = Prng::nuevo(semilla).elegir(&candidatos).copied();
+            assert_eq!(libre, plano, "semilla {semilla}");
+        }
+    }
+
+    #[test]
+    fn elegir_libre_no_elige_un_excluido_y_sin_restantes_no_elige_nada() {
+        let candidatos = vec![1u32, 2, 3];
+        let excluidos: Excluidos = [identidad_de_numero(&1), identidad_de_numero(&2)]
+            .into_iter()
+            .collect();
+        for semilla in 0..50u64 {
+            let elegido =
+                Prng::nuevo(semilla).elegir_libre(&candidatos, &excluidos, identidad_de_numero);
+            assert_eq!(elegido, Some(3), "semilla {semilla}");
+        }
+        let todos: Excluidos = candidatos.iter().map(identidad_de_numero).collect();
+        assert_eq!(
+            Prng::nuevo(0).elegir_libre(&candidatos, &todos, identidad_de_numero),
+            None
+        );
+    }
+
+    /// Con `excluidos` igual a la identidad elegida, la misma semilla no vuelve a elegirla. Si `identidad()` no
+    /// coincide con la que `elegir_libre` filtra, la misma inyección sale otra vez y la prueba falla.
+    fn no_repite_la_elegida(
+        defecto: Defecto,
+        repo: &dyn Fn() -> tempfile::TempDir,
+        semilla: u64,
+        con_inicial: bool,
+    ) {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let vacio = Excluidos::new();
+        let previo = repo();
+        let inicial = con_inicial.then(|| previo.path());
+        let primera = repo();
+        let elegida = inyectar_con(
+            defecto,
+            primera.path(),
+            &contexto_con(&capas, &limites, inicial, &vacio),
+            semilla,
+        )
+        .expect("E/S")
+        .expect("aplica");
+        let excluidos: Excluidos = [elegida.identidad()].into_iter().collect();
+        let segunda = repo();
+        let otra = inyectar_con(
+            defecto,
+            segunda.path(),
+            &contexto_con(&capas, &limites, inicial, &excluidos),
+            semilla,
+        )
+        .expect("E/S");
+        assert!(
+            otra.is_none_or(|o| o.identidad() != elegida.identidad()),
+            "{defecto:?} repite {:?}",
+            elegida.identidad()
+        );
+    }
+
+    #[test]
+    fn excluir_la_elegida_no_la_repite_en_cada_defecto_con_identidad_de_linea() {
+        let fixture: &dyn Fn() -> tempfile::TempDir = &copia_fixture;
+        no_repite_la_elegida(Defecto::PanicoEnEntrada, fixture, 3, false);
+        no_repite_la_elegida(Defecto::BucleCuadratico, fixture, 5, false);
+        no_repite_la_elegida(Defecto::ErrorTragado, fixture, 7, false);
+        no_repite_la_elegida(Defecto::CuerpoVaciado, fixture, 9, false);
+        no_repite_la_elegida(Defecto::SecretoEnCodigo, fixture, 1, false);
+        let igualdades: &dyn Fn() -> tempfile::TempDir = &|| {
+            repo_de(&[(
+                "src/lib.rs",
+                "pub fn uno(x: u32) -> bool {\n    x == 1\n}\n\npub fn dos(x: u32) -> bool {\n    x == 2\n}\n",
+            )])
+        };
+        no_repite_la_elegida(Defecto::ComportamientoRoto, igualdades, 2, false);
+        let mayores: &dyn Fn() -> tempfile::TempDir = &|| {
+            repo_de(&[(
+                "src/lib.rs",
+                "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n\npub fn dos(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+            )])
+        };
+        no_repite_la_elegida(Defecto::ComportamientoRoto, mayores, 4, true);
+    }
+
+    #[test]
+    fn reemplazo_no_elige_ni_una_identidad_usada_ni_una_invalida() {
+        let excluidos: Excluidos = [
+            identidad_de(Defecto::SecretoEnCodigo, "src/almacen.rs"),
+            identidad_de(Defecto::SecretoEnCodigo, "src/comandos.rs"),
+        ]
+        .into_iter()
+        .collect();
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        for semilla in 0..40u64 {
+            let dir = copia_fixture();
+            let inyeccion = inyectar_con(
+                Defecto::SecretoEnCodigo,
+                dir.path(),
+                &contexto_con(&capas, &limites, None, &excluidos),
+                semilla,
+            )
+            .expect("E/S")
+            .expect("aplica");
+            assert!(
+                inyeccion.archivo != "src/almacen.rs" && inyeccion.archivo != "src/comandos.rs",
+                "semilla {semilla}: {}",
+                inyeccion.archivo
+            );
+        }
+    }
+
+    #[test]
+    fn dockerfile_excluido_no_es_aplicable_y_no_toca_el_repo() {
+        let dir = copia_fixture();
+        let antes = arbol(dir.path());
+        let excluidos: Excluidos = [identidad_de(Defecto::DockerfileRoot, "Dockerfile")]
+            .into_iter()
+            .collect();
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let resultado = inyectar_con(
+            Defecto::DockerfileRoot,
+            dir.path(),
+            &contexto_con(&capas, &limites, None, &excluidos),
+            1,
+        )
+        .expect("E/S");
+        assert_eq!(resultado, None);
+        assert_eq!(arbol(dir.path()), antes);
+    }
+
+    #[test]
+    fn assert_borrado_salta_el_mutante_excluido() {
+        let dir = copia_con_test_de_leer_numero();
+        let antes = arbol(dir.path());
+        let muerto = muerto_de_leer_numero();
+        let muertos = vec![muerto.clone()];
+        let excluidos: Excluidos = [Identidad {
+            defecto: Defecto::AssertBorrado,
+            archivo: muerto.archivo.clone(),
+            linea: 0,
+            edicion: muerto.nombre.clone(),
+        }]
+        .into_iter()
+        .collect();
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            muertos: &muertos,
+            ..contexto_con(&capas, &limites, None, &excluidos)
+        };
+        let resultado =
+            inyectar_con(Defecto::AssertBorrado, dir.path(), &contexto, 1).expect("E/S");
+        assert_eq!(resultado, None);
+        assert_eq!(arbol(dir.path()), antes);
+    }
+
+    #[test]
+    fn identidad_de_los_defectos_de_archivo_entero_tiene_linea_cero() {
+        let dir = copia_fixture();
+        let inyeccion = inyectar(Defecto::SecretoEnCodigo, dir.path(), &capas_fixture(), 1)
+            .expect("E/S")
+            .expect("aplica");
+        assert!(inyeccion.linea > 0, "{inyeccion:?}");
+        assert_eq!(
+            inyeccion.identidad(),
+            identidad_de(Defecto::SecretoEnCodigo, &inyeccion.archivo)
+        );
+    }
+
+    #[test]
+    fn identidad_de_assert_borrado_es_el_mutante_elegido() {
+        let dir = copia_con_test_de_leer_numero();
+        let muerto = muerto_de_leer_numero();
+        let muertos = vec![muerto.clone()];
+        let excluidos = Excluidos::new();
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            muertos: &muertos,
+            ..contexto_con(&capas, &limites, None, &excluidos)
+        };
+        let inyeccion = inyectar_con(Defecto::AssertBorrado, dir.path(), &contexto, 1)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(
+            inyeccion.identidad(),
+            Identidad {
+                defecto: Defecto::AssertBorrado,
+                archivo: muerto.archivo,
+                linea: 0,
+                edicion: muerto.nombre,
+            }
+        );
+    }
+
     #[test]
     fn inyectar_dockerfile_quita_el_user_no_root() {
         let (inyeccion, antes, despues) = aplicar(Defecto::DockerfileRoot, 42);
@@ -2348,6 +2737,7 @@ mod tests {
         let contexto = Contexto {
             capas: &capas,
             inicial: None,
+            excluidos: &BTreeSet::new(),
             camino_caliente: camino,
             limites: &limites,
             muertos: &[],
@@ -2701,6 +3091,7 @@ pub fn dos(x: u32) -> bool {
         let limites = LimitesEstructura::default();
         let contexto = Contexto {
             inicial: None,
+            excluidos: &BTreeSet::new(),
             capas: &capas,
             camino_caliente: &[],
             limites: &limites,
@@ -2845,6 +3236,7 @@ pub fn dos(x: u32) -> bool {
             muertos: &[],
             cambios: Some(cambios),
             inicial: Some(inicial),
+            excluidos: &BTreeSet::new(),
         };
         inyectar_con(Defecto::ComportamientoRoto, dir, &contexto, semilla)
     }
@@ -3101,6 +3493,7 @@ pub fn dos(x: u32) -> bool {
             muertos: &[],
             cambios: Some(cambios),
             inicial: Some(inicial),
+            excluidos: &BTreeSet::new(),
         };
         inyectar_con(defecto, dir, &contexto, semilla)
     }

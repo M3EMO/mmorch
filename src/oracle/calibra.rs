@@ -8,6 +8,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -393,7 +394,7 @@ fn huella_vigente(fila: &Fila, dimension: Dimension) -> bool {
 
 pub mod inyectar;
 
-use inyectar::{Defecto, Inyeccion};
+use inyectar::{Defecto, Excluidos, Inyeccion};
 
 mod compartidos;
 mod estables;
@@ -743,6 +744,12 @@ struct Ronda<'a> {
     mutantes_base: &'a [MutanteEstado],
     /// Plazo fijo por mutante de los casos, de la duración de la base. `None`: la base no trajo duración.
     plazo_mutantes: Option<u64>,
+    /// Lo que excluye cada caso en su primera inyección, por índice. Vacío en los impares. Ver `preelegir`.
+    previos: Vec<Excluidos>,
+    /// Casos sin candidatos distintos (ver `preelegir`). Se miden como no aplicables, sin copiar.
+    agotado: Vec<bool>,
+    /// Identidades ya elegidas o inválidas. Lo lee y lo suma cada reemplazo. Nunca se repite una inyección.
+    usadas: Mutex<Excluidos>,
 }
 
 impl Ronda<'_> {
@@ -871,6 +878,74 @@ fn explicado_por_apagados(
     !muerto.tests.is_empty() && muerto.tests.iter().all(|t| apagados.contains(t))
 }
 
+/// Lo que `preelegir` decide antes de medir: qué excluye cada caso, si se agotó y todo lo elegido.
+struct Preelegidas {
+    /// Lo que excluye el caso `i` en su primera inyección. Vacío en los impares y en los casos sin elección.
+    previos: Vec<Excluidos>,
+    /// `true` si el caso `i` no tiene candidatos distintos: los demás casos ya inyectan todos los suyos.
+    agotado: Vec<bool>,
+    /// Identidades de todas las inyecciones preelegidas.
+    usadas: Excluidos,
+}
+
+/// Aplica el defecto de `r` con `excluidos` sobre la copia `copia`. No evalúa nada: la copia se usa y se borra
+/// en el mismo lugar que los casos. Sin sonda, `limites` son los de la sonda de estructura.
+fn inyectar_en(
+    r: &Ronda,
+    defecto: Defecto,
+    copia: &Path,
+    excluidos: &Excluidos,
+    limites: &crate::oracle::perfiles::rust::LimitesEstructura,
+    semilla: u64,
+) -> Result<Option<Inyeccion>, ErrorOraculo> {
+    let contexto = inyectar::Contexto {
+        capas: r.capas,
+        camino_caliente: r.camino,
+        limites,
+        muertos: r.muertos,
+        cambios: r.cambios,
+        inicial: r.inicial,
+        excluidos,
+    };
+    inyectar::inyectar_con(defecto, copia, &contexto, semilla)
+        .map_err(|e| super::infra("inyectar un defecto", e))
+}
+
+/// Elige en serie la inyección de cada caso con defecto (los pares), en orden de índice, antes de medir. Cada caso
+/// excluye las inyecciones que eligieron los anteriores, así dos casos no inyectan lo mismo. Si no queda candidato
+/// distinto, pero el defecto sí aplica sin exclusiones, el caso queda agotado. Si no aplica ni así, se mide como
+/// siempre y sale su motivo normal.
+fn preelegir(r: &Ronda, n: usize) -> Result<Preelegidas, ErrorOraculo> {
+    let limites = crate::oracle::perfiles::rust::LimitesEstructura::default();
+    let mut pre = Preelegidas {
+        previos: vec![Excluidos::new(); n],
+        agotado: vec![false; n],
+        usadas: Excluidos::new(),
+    };
+    for i in (0..n).step_by(2) {
+        let defecto = r.defectos[(i / 2) % r.defectos.len()];
+        let semilla = r.semilla.wrapping_add(i as u64);
+        let copia = r.tmp.join(format!("pre-{i}"));
+        let previo = pre.usadas.clone();
+        super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
+        let elegida = inyectar_en(r, defecto, &copia, &previo, &limites, semilla)?;
+        borrado::borrar_dir_dentro(r.tmp, &copia)
+            .map_err(|e| super::infra("borrar una copia", e))?;
+        if let Some(inyeccion) = elegida {
+            pre.usadas.insert(inyeccion.identidad());
+            pre.previos[i] = previo;
+            continue;
+        }
+        super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
+        let sin_exclusiones =
+            inyectar_en(r, defecto, &copia, &Excluidos::new(), &limites, semilla)?;
+        borrado::borrar_dir_dentro(r.tmp, &copia)
+            .map_err(|e| super::infra("borrar una copia", e))?;
+        pre.agotado[i] = sin_exclusiones.is_some();
+    }
+    Ok(pre)
+}
+
 /// Mide el caso `i`. Los pares llevan un defecto: el de `defectos[(i / 2) % len]`, la misma rotación de los
 /// casos en serie. Los impares son limpios. Un defecto sin candidato medible da un caso no aplicable.
 fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
@@ -926,17 +1001,22 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         });
     }
     let defecto = r.defectos[(i / 2) % r.defectos.len()];
+    // Un caso agotado: todos sus candidatos distintos ya los inyectan otros casos. No copia ni evalúa.
+    if r.agotado[i] {
+        return Ok(Medido {
+            reemplazos: 0,
+            caso: None,
+            detencion: None,
+            no_aplicable: Some(NoAplicable {
+                indice: i as u32,
+                defecto,
+                motivo: MOTIVO_DISTINTOS_AGOTADOS.to_string(),
+            }),
+        });
+    }
     let semilla_caso = r.semilla.wrapping_add(i as u64);
     // La tarea no declara límites de estructura: se usan los de la sonda (`sondas_nativas`).
     let limites = crate::oracle::perfiles::rust::LimitesEstructura::default();
-    let contexto = inyectar::Contexto {
-        capas: r.capas,
-        camino_caliente: r.camino,
-        limites: &limites,
-        muertos: r.muertos,
-        cambios: r.cambios,
-        inicial: r.inicial,
-    };
     // Un defecto que rompe la construcción, o que la suite no ejecuta, se reemplaza por el siguiente
     // candidato, hasta `MAX_REEMPLAZOS` veces. Cada intento inválido suma a `invalidos`, también el del caso agotado.
     let mut invalidos = 0u32;
@@ -955,12 +1035,24 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         let semilla_k = semilla_caso.wrapping_add(u64::from(k) * 1_000_003);
         let copia = r.tmp.join(format!("caso-{i}"));
         super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
-        let aplicado = inyectar::inyectar_con(defecto, &copia, &contexto, semilla_k)
-            .map_err(|e| super::infra("inyectar un defecto", e))?;
+        // El caso excluye lo que eligieron los anteriores. Un reemplazo excluye todo lo usado y suma su elección
+        // bajo el mismo cerrojo: así dos reemplazos que corren a la vez no eligen la misma inyección.
+        let aplicado = if k == 0 {
+            inyectar_en(r, defecto, &copia, &r.previos[i], &limites, semilla_k)?
+        } else {
+            let mut usadas = r.usadas.lock().unwrap_or_else(|e| e.into_inner());
+            let elegida = inyectar_en(r, defecto, &copia, &usadas, &limites, semilla_k)?;
+            if let Some(inyeccion) = &elegida {
+                usadas.insert(inyeccion.identidad());
+            }
+            elegida
+        };
         let Some(inyeccion) = aplicado else {
             borrado::borrar_dir_dentro(r.tmp, &copia)
                 .map_err(|e| super::infra("borrar una copia", e))?;
-            motivo_sin_caso = if ultimo_descarte_sonda {
+            motivo_sin_caso = if k > 0 {
+                MOTIVO_DISTINTOS_AGOTADOS
+            } else if ultimo_descarte_sonda {
                 MOTIVO_SIN_EJECUTAR
             } else {
                 motivo_sin_inyeccion(defecto, r.muertos.is_empty(), r.cambios.is_some())
@@ -1209,7 +1301,7 @@ fn calibrar_medida_con_hilos(
     let cambios = bootstrap
         .is_dir()
         .then(|| crate::oracle::cambios::rangos_cambiados(&bootstrap, repo_bueno));
-    let ronda = Ronda {
+    let mut ronda = Ronda {
         semilla,
         dimension,
         defectos: &defectos,
@@ -1234,7 +1326,15 @@ fn calibrar_medida_con_hilos(
         compartidos,
         mutantes_base: &mutantes_base,
         plazo_mutantes,
+        previos: Vec::new(),
+        agotado: Vec::new(),
+        usadas: Mutex::new(Excluidos::new()),
     };
+    // Las elecciones de los casos se hacen antes de lanzar los hilos: así cada caso sabe qué excluir.
+    let pre = preelegir(&ronda, n)?;
+    ronda.previos = pre.previos;
+    ronda.agotado = pre.agotado;
+    ronda.usadas = Mutex::new(pre.usadas);
     let hilos = hilos.max(1);
     let (tx, rx) = mpsc::channel::<(usize, Result<Medido, ErrorOraculo>)>();
     // El coordinador suelta su envío cuando ya no lanza: si un hilo muere sin enviar, `recv` falla en vez de
@@ -2098,6 +2198,9 @@ fn motivo_sin_inyeccion(defecto: Defecto, sin_muertos: bool, con_rangos: bool) -
 /// Motivo de un caso no aplicable: todos los reemplazos rompieron la construcción.
 const MOTIVO_AGOTADAS: &str = "inyecciones inválidas agotadas";
 
+/// Motivo de un caso no aplicable: no quedan candidatos distintos de los que otros casos ya inyectan.
+const MOTIVO_DISTINTOS_AGOTADOS: &str = "no aplica: candidatos distintos agotados";
+
 /// Motivo de un caso no aplicable: la sonda vio que ningún candidato cae en una función que la suite ejecuta.
 const MOTIVO_SIN_EJECUTAR: &str =
     "ninguna línea candidata está en una función que la suite ejecute";
@@ -2658,10 +2761,7 @@ mod tests {
         assert_eq!(fila.sensibilidad, Some(1.0));
         assert_eq!(fila.especificidad, Some(1.0));
         assert_eq!(fila.exactitud_balanceada, Some(1.0));
-        assert_eq!(
-            (fila.defectos, fila.limpios, fila.no_aplicable),
-            (10, 10, 0)
-        );
+        assert_eq!((fila.defectos, fila.limpios, fila.no_aplicable), (5, 10, 5));
         assert_eq!(fila.items.get("seguridad.secretos"), Some(&1.0));
         assert_eq!(fila.items.get("seguridad.panico_en_entrada"), Some(&1.0));
     }
@@ -2825,10 +2925,10 @@ mod tests {
         assert_eq!(fila.items.get("seguridad.panico_en_entrada"), Some(&0.5));
         assert_eq!(
             fila.sensibilidad,
-            Some(0.5),
-            "5 de 10 defectos, los del secreto"
+            Some(0.8),
+            "4 de 5 defectos medidos: los 4 del secreto"
         );
-        assert_eq!(fila.exactitud_balanceada, Some(0.75));
+        assert_eq!(fila.exactitud_balanceada, Some(0.9));
     }
 
     #[test]
@@ -3036,7 +3136,7 @@ mod tests {
         let ev = falso(dir.path(), &base, |_, _, base| base.clone());
         let fila =
             calibrar_con(&tarea, Dimension::Eficiencia, 10, 42, dir.path(), &ev).expect("hay fila");
-        assert_eq!((fila.defectos, fila.no_aplicable), (5, 0));
+        assert_eq!((fila.defectos, fila.no_aplicable), (1, 4));
     }
 
     #[test]
@@ -3891,7 +3991,7 @@ mod tests {
             .count();
         assert_eq!(
             llamadas.len(),
-            medidos + 1 + inestables::JUICIOS_EXTRA,
+            medidos + inestables::JUICIOS_EXTRA,
             "la base (tres juicios) y cada caso llaman al evaluador"
         );
         assert!(llamadas[0].base, "la primera llamada es la base");
@@ -4021,7 +4121,7 @@ mod tests {
             .count();
         assert_eq!(
             llamadas.len(),
-            medidos + 1 + inestables::JUICIOS_EXTRA,
+            medidos + inestables::JUICIOS_EXTRA,
             "la base (tres juicios) y cada caso llaman al evaluador"
         );
         assert!(
@@ -5282,9 +5382,10 @@ mod tests {
             Path::new(FIXTURE),
             &base,
             |limpia, _, base| if limpia { base.clone() } else { hundido(base) },
-            10,
+            20,
         );
-        assert_eq!((fila.defectos, fila.limpios), (5, 5));
+        // Con 10 casos Seguridad da 4 defectos: el fixture tiene 4 archivos con secretos y un solo parseo. Con 20, 5.
+        assert_eq!((fila.defectos, fila.limpios), (5, 10));
         let tarea = fila.tarea.clone();
         let hash = fila
             .tarea_hash
@@ -5706,15 +5807,14 @@ mod tests {
             (1, 0, 1, 1)
         );
         assert_eq!(fila.sensibilidad, None);
-        // La inyección inicial más los MAX_REEMPLAZOS reemplazos, todos inválidos: cada intento suma 1.
-        assert_eq!(fila.reemplazos, MAX_REEMPLAZOS + 1);
+        // Tres archivos de módulo (`lib.rs` no cuenta): tres intentos inválidos. El cuarto no tiene candidato.
+        assert_eq!(fila.reemplazos, 3);
     }
 
     const MUERTA: &str = "pub fn sin_uso(a: i32) -> bool {\n    a == 1\n}\n";
     /// La firma ocupa varias líneas: la sonda tiene que caer en el cuerpo (Tarea 66, punto 4).
     const VIVA: &str = "pub fn usada(\n    a: i32,\n) -> bool {\n    a == 2\n}\n";
     const FUERA_DE_FN: &str = "pub const EN_CONSTANTE: bool = 1 == 1;\n";
-    const MOTIVO_EXACTO: &str = "ninguna línea candidata está en una función que la suite ejecute";
 
     /// Copia del fixture con los archivos `archivos` en `src/`. Cada uno tiene un `==` candidato.
     fn copia_con_sondas(archivos: &[(&str, &str)]) -> TempDir {
@@ -5845,6 +5945,116 @@ mod tests {
         .expect("mide")
     }
 
+    /// Evaluador de copias: la base (igual al repo) da `base`; una copia cambiada da `base` con su valor en cero.
+    fn evaluador_que_baja(
+        repo: &Path,
+        base: &Veredicto,
+    ) -> impl Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync {
+        let arbol_base = arbol(repo);
+        let base = base.clone();
+        move |ruta: &Path, _: TipoCaso, _: Target| {
+            if arbol(ruta) == arbol_base {
+                Ok(base.clone())
+            } else {
+                Ok(bajada(&base))
+            }
+        }
+    }
+
+    /// Mide `n` casos de `dimension` en `repo` con `ev`, en un hilo. Sin muertos ni `bootstrap/`.
+    fn medir_dimension(
+        tarea: &Tarea,
+        dimension: Dimension,
+        repo: &Path,
+        n: usize,
+        semilla: u64,
+        ev: &(dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
+    ) -> Medida {
+        calibrar_medida_con_hilos(
+            tarea,
+            dimension,
+            n,
+            semilla,
+            repo,
+            ev,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide")
+    }
+
+    /// Entrega con un solo candidato (el `USER` del Dockerfile): el primer caso con defecto lo usa y los
+    /// siguientes quedan como agotados, no como copias iguales.
+    #[test]
+    fn un_solo_candidato_deja_los_casos_con_defecto_repetidos_como_agotados() {
+        let dir = copia_fixture();
+        let base = veredicto_de(Dimension::Entrega, 1.0, None);
+        let tarea = tarea_en(dir.path(), "");
+        let ev = evaluador_que_baja(dir.path(), &base);
+        let medida = medir_dimension(&tarea, Dimension::Entrega, dir.path(), 6, 42, &ev);
+        let con_defecto = medida
+            .casos
+            .iter()
+            .filter(|c| c.inyeccion.is_some())
+            .count();
+        let agotados = medida
+            .no_aplicables
+            .iter()
+            .filter(|no| no.motivo == MOTIVO_DISTINTOS_AGOTADOS)
+            .count();
+        assert_eq!(
+            (con_defecto, agotados),
+            (1, 2),
+            "{:?} {:?}",
+            (con_defecto, agotados),
+            medida.no_aplicables
+        );
+    }
+
+    /// Tres casos con defecto en Seguridad, con varias semillas: cada uno inyecta una identidad distinta.
+    /// Con cuatro candidatos de secreto, dos casos pueden caer en el mismo archivo si no se excluyen.
+    #[test]
+    fn casos_con_defecto_inyectan_identidades_distintas() {
+        let dir = copia_fixture();
+        let base = veredicto_de(Dimension::Seguridad, 1.0, None);
+        let tarea = tarea_en(dir.path(), "");
+        let ev = evaluador_que_baja(dir.path(), &base);
+        for semilla in 0..20u64 {
+            let medida = medir_dimension(&tarea, Dimension::Seguridad, dir.path(), 6, semilla, &ev);
+            let inyectadas: Vec<_> = medida
+                .casos
+                .iter()
+                .filter_map(|c| c.inyeccion.as_ref())
+                .map(Inyeccion::identidad)
+                .collect();
+            assert_eq!(inyectadas.len(), 3, "semilla {semilla}: {inyectadas:?}");
+            let distintas: BTreeSet<_> = inyectadas.iter().collect();
+            assert_eq!(distintas.len(), 3, "semilla {semilla}: {inyectadas:?}");
+        }
+    }
+
+    /// Dos mediciones con la misma semilla inyectan lo mismo en cada caso.
+    #[test]
+    fn misma_semilla_inyecta_lo_mismo_en_cada_caso() {
+        let dir = copia_fixture();
+        let base = veredicto_de(Dimension::Seguridad, 1.0, None);
+        let tarea = tarea_en(dir.path(), "");
+        let ev = evaluador_que_baja(dir.path(), &base);
+        let inyectados = |m: &Medida| -> Vec<(u32, Option<Inyeccion>)> {
+            m.casos
+                .iter()
+                .map(|c| (c.indice, c.inyeccion.clone()))
+                .collect()
+        };
+        let a = medir_dimension(&tarea, Dimension::Seguridad, dir.path(), 6, 42, &ev);
+        let b = medir_dimension(&tarea, Dimension::Seguridad, dir.path(), 6, 42, &ev);
+        assert_eq!(inyectados(&a), inyectados(&b));
+    }
+
     #[test]
     fn calibra_con_bootstrap_los_defectos_de_linea_caen_en_el_cambio() {
         let (dir, tarea) = tarea_con_bootstrap(true);
@@ -5859,7 +6069,7 @@ mod tests {
             .filter(|c| c.inyeccion.is_some())
             .collect();
         assert!(
-            con_defecto.len() >= 4,
+            con_defecto.len() == 1,
             "casos con defecto: {}",
             con_defecto.len()
         );
@@ -6033,10 +6243,10 @@ mod tests {
             .as_ref()
             .expect("hay fila: queda el caso limpio");
         assert_eq!(fila.no_aplicable, 1);
-        assert_eq!(fila.reemplazos, MAX_REEMPLAZOS + 1);
-        assert_eq!(sondas.load(Ordering::SeqCst), (MAX_REEMPLAZOS + 1) as usize);
+        assert_eq!(fila.reemplazos, 1);
+        assert_eq!(sondas.load(Ordering::SeqCst), 1);
         assert_eq!(medida.no_aplicables.len(), 1);
-        assert_eq!(medida.no_aplicables[0].motivo, MOTIVO_EXACTO);
+        assert_eq!(medida.no_aplicables[0].motivo, MOTIVO_DISTINTOS_AGOTADOS);
     }
 
     /// Mide `n` casos de `dimension` con el evaluador falso `regla` (la base es `base_dir`, como en `falso`).
@@ -7052,10 +7262,7 @@ mod tests {
         );
         assert_eq!(medida.no_aplicables.len(), 1);
         assert_eq!(medida.no_aplicables[0].indice, 0);
-        assert_eq!(
-            medida.no_aplicables[0].motivo,
-            "inyecciones inválidas agotadas"
-        );
+        assert_eq!(medida.no_aplicables[0].motivo, MOTIVO_DISTINTOS_AGOTADOS);
     }
 
     #[test]
@@ -7145,7 +7352,7 @@ mod tests {
                 fila.no_aplicable,
                 fila.reemplazos
             ),
-            (0, 1, 1, MAX_REEMPLAZOS + 1),
+            (0, 1, 1, 5),
             "el defecto agota sus reemplazos y no cuenta como medido"
         );
     }
@@ -8153,7 +8360,11 @@ mod tests {
         )
         .expect("calibra diseño");
         let renglones = renglones_guardados(&segunda);
-        let con_defecto = renglones.iter().filter(|c| c.es_defecto).count();
+        // Un renglón agotado es de defecto, pero no tiene archivo ni se evalúa: no cuenta.
+        let con_defecto = renglones
+            .iter()
+            .filter(|c| c.es_defecto && c.archivo.is_some())
+            .count();
         assert!(
             renglones.iter().any(|c| !c.es_defecto),
             "hay limpios de Diseño"
