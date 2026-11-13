@@ -103,7 +103,7 @@ fn pid_del_nombre(nombre: &str) -> Option<u32> {
 /// Dice si `pid` cuenta como `r00t` vivo en `raiz_proc`. Cuenta como vivo si es este proceso, si
 /// corre el mismo binario o si su cmdline es `r00t` o `r00t-<sha>`. Sin carpeta o cmdline ilegible
 /// cuenta como muerto.
-fn r00t_vivo(pid: u32, raiz_proc: &Path) -> bool {
+pub(crate) fn r00t_vivo(pid: u32, raiz_proc: &Path) -> bool {
     pid == std::process::id()
         || fs::read(raiz_proc.join(pid.to_string()).join("cmdline"))
             .is_ok_and(|cmdline| es_r00t(&cmdline))

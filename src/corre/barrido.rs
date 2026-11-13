@@ -2,10 +2,8 @@
 //! `.credentials.json` de las carpetas de corridas cuyo proceso ya no vive, no es `r00t` o es otro
 //! proceso con el pid reusado. Deja un `Gate` por cada copia barrida. El `Gate` nunca lleva el contenido de la copia.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use serde_json::{Map, json};
@@ -24,8 +22,6 @@ const PREFIJO: &str = "corre-";
 const FASE_BARRIDO: &str = "barrido";
 /// Carpeta donde Linux muestra los procesos vivos.
 const PROCESOS: &str = "/proc";
-/// Nombre del programa `r00t`. Su proceso es el único que puede dejar una corrida viva.
-const NOMBRE_R00T: &str = "r00t";
 
 /// Resultado de un barrido: ids de las corridas barridas y de las que dieron error.
 /// "Barrida" quiere decir que su copia se borró.
@@ -133,9 +129,9 @@ const TICKS_POR_SEG: u64 = 100;
 const MARGEN_S: u64 = 300;
 
 /// Por qué la corrida `id` está muerta. `None` si su proceso vive, es `r00t` y es la misma corrida.
-/// Un pid sin carpeta en `raiz_proc` no vive. Un cmdline que no es de `r00t` está muerto. Un
-/// cmdline ilegible es de otro usuario: no es `r00t` nuestro. Un proceso que empezó después de la
-/// corrida es otro proceso con el pid reusado.
+/// Un pid sin carpeta en `raiz_proc` no vive. Un cmdline ilegible es de otro usuario: no es `r00t`
+/// nuestro. Un proceso que no cuenta como `r00t` vivo está muerto (regla de `limpieza::r00t_vivo`).
+/// Un proceso que empezó después de la corrida es otro proceso con el pid reusado.
 fn motivo_de_muerte(id: &str, raiz_proc: &Path) -> Option<String> {
     let Some(pid) = pid_de(id) else {
         return Some("el id no tiene pid legible".to_string());
@@ -144,14 +140,14 @@ fn motivo_de_muerte(id: &str, raiz_proc: &Path) -> Option<String> {
     if !carpeta.exists() {
         return Some(format!("el pid {pid} no vive"));
     }
-    let cmdline = match fs::read(carpeta.join("cmdline")) {
-        Ok(cmdline) => cmdline,
+    match fs::read(carpeta.join("cmdline")) {
+        Ok(_) => {}
         Err(fuente) if fuente.kind() == io::ErrorKind::NotFound => {
             return Some(format!("el pid {pid} no vive"));
         }
         Err(_) => return Some(format!("el cmdline del pid {pid} es ilegible")),
-    };
-    if !es_r00t(&cmdline) {
+    }
+    if !crate::limpieza::r00t_vivo(pid, raiz_proc) {
         return Some(format!("el pid {pid} no es r00t"));
     }
     motivo_si_pid_reusado(id, pid, raiz_proc)
@@ -192,15 +188,6 @@ fn btime_del_sistema(raiz_proc: &Path) -> Option<u64> {
     stat.lines()
         .find_map(|linea| linea.strip_prefix("btime "))
         .and_then(|valor| valor.trim().parse().ok())
-}
-
-/// Dice si el cmdline (argumentos separados por NUL) empieza con un programa `r00t`. Mira solo el
-/// primer argumento, por su nombre base. Un cmdline vacío no es `r00t`.
-fn es_r00t(cmdline: &[u8]) -> bool {
-    let primero = cmdline.split(|byte| *byte == 0).next().unwrap_or_default();
-    Path::new(OsStr::from_bytes(primero))
-        .file_name()
-        .is_some_and(|nombre| nombre == NOMBRE_R00T)
 }
 
 /// El pid de un id `corre-<tarea>-<config>-<segundos>-<pid>-<contador>`. Se toma desde el final,
@@ -330,22 +317,23 @@ mod tests {
         assert!(sin_token(&e.eventos), "el Gate no lleva el contenido");
     }
 
-    /// Test que cambió de valor: antes el pid propio contaba como vivo. Ahora la regla es el cmdline:
-    /// el proceso de test no es `r00t`, así que su corrida se barre.
+    /// El pid propio cuenta como vivo (`limpieza::r00t_vivo`). Su corrida no se barre. Los segundos
+    /// del id son los de ahora: el proceso de test empezó antes, así que no pasa el margen.
     #[test]
-    fn corrida_con_pid_del_proceso_de_test_no_r00t_se_barre() {
+    fn corrida_con_pid_del_proceso_de_test_se_conserva() {
         let e = escenario();
-        let id = format!("corre-memo-ecc-test-100-{}-0", std::process::id());
+        let ahora = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("reloj")
+            .as_secs();
+        let id = format!("corre-memo-ecc-test-{ahora}-{}-0", std::process::id());
         let copia = corrida_con_copia(&e.raiz, &id);
         barrer(&e.raiz, &e.eventos).expect("barre");
         assert!(
-            fs::symlink_metadata(&copia).is_err(),
-            "el proceso de test no es r00t: la copia se barre"
+            copia.is_file(),
+            "el pid propio cuenta como vivo: la copia queda"
         );
-        let gates = gates_de_barrido(&e.eventos);
-        assert_eq!(gates.len(), 1, "un Gate de barrido");
-        assert!(motivo(&gates[0]).contains("no es r00t"), "motivo nuevo");
-        assert!(sin_token(&e.eventos));
+        assert!(gates_de_barrido(&e.eventos).is_empty(), "sin Gate");
     }
 
     /// Crea `<raiz_proc>/<pid>/cmdline` con `cmdline`: un proceso falso para `barrer_con_proc`.
@@ -365,6 +353,24 @@ mod tests {
         let copia = corrida_con_copia(&e.raiz, &id);
         barrer_con_proc(&e.raiz, &e.eventos, &raiz_proc).expect("barre");
         assert!(copia.is_file(), "el pid es de r00t: la copia queda");
+        assert!(gates_de_barrido(&e.eventos).is_empty(), "sin Gate");
+    }
+
+    #[test]
+    fn r00t_con_sha_vivo_no_se_barre() {
+        let e = escenario();
+        let raiz_proc = e.base.join("proc");
+        let pid = 4000150;
+        // `r00t-<sha>` es el nombre del programa r00t con su sha: sigue siendo r00t.
+        proceso_falso(
+            &raiz_proc,
+            pid,
+            b"/usr/bin/r00t-abc123\0corre\0--tarea\0memo\0",
+        );
+        let id = format!("corre-memo-ecc-test-100-{pid}-0");
+        let copia = corrida_con_copia(&e.raiz, &id);
+        barrer_con_proc(&e.raiz, &e.eventos, &raiz_proc).expect("barre");
+        assert!(copia.is_file(), "el pid es de r00t-<sha>: la copia queda");
         assert!(gates_de_barrido(&e.eventos).is_empty(), "sin Gate");
     }
 
