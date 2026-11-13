@@ -8398,3 +8398,63 @@ P95 y P97 a P102 siguen abiertas.
 - **a)** "Listo" exige veredicto en toda dimensión que aplica. Sin juez, la decisión es "sin decisión".
 - **b)** "Listo" sigue como hoy, pero el resumen dice qué dimensiones quedaron sin medir. Por ejemplo: "listo; Diseño y Arquitectura sin medir: el juez no corrió". Recomendada: hoy el juez no cambia la decisión, así que exigirlo haría depender "listo" de tener una clave, y no del producto. El resumen deja claro qué no se midió.
 - **c)** Dejarlo como está, sin la línea nueva.
+
+## Vuelta del 2026-11-14 (27): la 104, un hueco más en los secretos, y Tarea 105
+
+**Estado.** La 104 y la 104b están en `laptop/tarea-104` (3b48385), sobre la 103. Con podman dieron 3243, 0 y 4, y 3246, 0 y 4. La revisión del orquestador halló una regresión en la 104, y la 104b la arregló con `es_fuente_de_secretos`. La evaluación real dio lo mismo que con la 103. t1 no tiene hallazgos de configs, así que ningún dato real ejercita la 104. Esperan al usuario las mezclas de la 84 a la 104, P95, P97 a P102 y P103.
+
+## 1. El hueco que dejó abierto la 104b
+
+**Lo que encontré.** `es_fuente_de_secretos` (`src/oracle/previos.rs:273`) reconoce un secreto por su fuente: `gitleaks` o `configs-secretos`. Pero hay dos fuentes más que dan secretos:
+- **La regla "secreto literal en ENV o ARG"** de `reglas_dockerfile` (`src/oracle/configs.rs:657`) emite con la fuente `dockerfile`. Un secreto previo en un `Dockerfile` sale como aviso, y no bloquea. Es la pregunta abierta del informe de la 104b.
+- **El inventario de la descarga** (`src/oracle/descarga/inventario.rs:983`) da un hallazgo de Seguridad de severidad 3 por cada secreto escrito en el repo. Su fuente es `descarga` (`src/oracle/descarga.rs:276`).
+
+**Hoy el caso de la descarga no hace daño.** Esa fuente no entra a la línea base, así que su hallazgo nunca es previo, y bloquea siempre. Pero si alguien la agrega a la línea base, deja de bloquear sin que falle ningún test.
+
+**Además, el detalle de la revisión.** `FUENTES_DE_SECRETOS` repite como literales `"gitleaks"` y `"configs-secretos"`. Las constantes existen en `src/oracle/juez.rs:36` y en `src/oracle/configs.rs:18`. Un cambio de nombre allí rompería el bloqueo en silencio.
+
+**Decisión.**
+1. **Una sola lista de fuentes de secretos,** armada con las constantes de cada sonda, no con literales: la de gitleaks, la de `configs-secretos` y la de la descarga.
+2. **La regla de `ENV` o `ARG` emite con la fuente de secretos de configs,** `configs-secretos`. Es un secreto, y debe bloquear como cualquier otro.
+3. **Un test por emisor de secretos.** Para cada sonda que da un secreto, un secreto previo bloquea. Así una fuente nueva que se olvide en la lista hace fallar un test.
+
+## 2. Las preguntas de la 104
+
+1. **Ampliar `es_secreto` a `configs-secretos`:** lo hizo la 104b. Acepto.
+2. **La descarga en la línea base: no hace falta.** Sus hallazgos de Seguridad son todos secretos, y un secreto bloquea siempre, sea previo o no. Agregarla a la línea base solo cambiaría la nota del informe. Con la sección 1, igual queda reconocida como fuente de secretos.
+3. **Las reglas de Dockerfile previas, como correr como root, pueden quedar previas:** acepto. Es la regla de P96 a. La excepción es el secreto en `ENV` o `ARG`, por la sección 1.
+4. **hadolint no corre sobre `bootstrap/`:** acepto. hadolint es de Entrega, no de Seguridad, así que no cuenta para el bloqueo de P96.
+5. **La pregunta abierta de la 104b,** el secreto en `ENV` o `ARG`: queda resuelta por la sección 1.
+
+## 3. Cómo medir la 104 con datos, sin API
+
+Una calibración no sirve acá. Lo que hay que probar es la decisión de bloqueo, no la detección de una dimensión.
+
+**Medición del orquestador, sin código y sin API**, con el binario de la 105, sobre una copia de `ROOT_HOME` con t1. El cambio va en `bootstrap/` y en el repo de la copia, nunca en el `ROOT_HOME` real.
+
+| Variante | `bootstrap/` | Repo evaluado | Decisión esperada |
+|---|---|---|---|
+| 1 | Un YAML con un secreto | El mismo YAML | "bloqueado", con la nota "estaba en el estado inicial" |
+| 2 | Sin el YAML | Con el YAML | "bloqueado" |
+| 3 | Un `Dockerfile` con `ENV` de un secreto | El mismo `Dockerfile` | "bloqueado", con la nota |
+| 4 | Un `Dockerfile` que corre como root | El mismo `Dockerfile` | "listo", con el aviso previo |
+
+El secreto es falso y con forma de clave conocida, como `CLAVE_AWS` de los tests. Nunca es una clave real.
+
+**Lectura.** Las cuatro dan lo esperado: el cambio de la 104 y de la 105 queda probado con datos reales. La variante 3 hoy da "listo", por el hueco de la sección 1.
+
+## 4. Tarea 105
+
+Brief: `docs/builds/brief-local-105.md`, con base 3b48385 y rama `laptop/tarea-105`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Una sola lista de fuentes de secretos, con constantes | `src/oracle/previos.rs`, y la visibilidad de las constantes en `src/oracle/juez.rs`, `src/oracle/configs.rs` y `src/oracle/descarga.rs` |
+| 2 | La regla de `ENV` o `ARG` emite con `configs-secretos` | `src/oracle/configs.rs` |
+| 3 | Un test por emisor de secretos | `src/oracle/previos.rs` o `tests/` |
+
+Los puntos 1 y 2 tocan `configs.rs`. El 1 solo cambia la visibilidad de una constante. Van en serie: 1, 2 y 3.
+
+**Después de la 105 no queda trabajo de código que no dependa del usuario.** Quedan la medición de la sección 3, la de los "delete field" de la vuelta (26), y lo que el orquestador aplica después de las mezclas.
+
+**Preguntas al usuario:** ninguna nueva. P95 y P97 a P103 siguen abiertas.
