@@ -8597,3 +8597,53 @@ Brief: `docs/builds/brief-local-107.md`, con base 88169de y rama `laptop/tarea-1
 - El orquestador construye la imagen `:4` con podman después de mezclar. El builder no corre podman.
 
 **Preguntas al usuario:** ninguna nueva. P95 y P97 a P103 siguen abiertas.
+
+## Vuelta del 2026-11-14 (30): la 107, los plazos que abortan, y Tarea 108
+
+**Estado.** La Tarea 107 está en `laptop/tarea-107` (d7dfcb0). La suite con podman de fd25323 dio 16 rojos: el barrido borraba contenedores de hilos vivos del binario de tests. La 107b lo arregló, y la suite dio 3314, 0 y 4. El orquestador construyó la imagen `root-oraculo-rust:4`. Esperan al usuario las mezclas de la 84 a la 107, P95, P97 a P103 y Colab.
+
+**Lo medido con la 107 (medición 110).** t3 Funciona ya no cuelga. nextest cortó el test en bucle a los 5 minutos, y la fila dio 3 de 3 en 18 minutos. Ninguna fila deja contenedores vivos. El resto de las filas no cambió.
+
+**La 107b tuvo un defecto que yo no vi en el brief.** Pedí "la regla de `/proc` del barrido de `corre`". Esa regla cuenta como muerto todo pid cuyo cmdline no es `r00t`. El binario de tests se llama `root-<hash>`, y el orquestador mide con `r00t-<sha>`. La 107b la reemplazó en `src/limpieza.rs` por tres reglas: el pid propio, el mismo ejecutable por `/proc/<pid>/exe`, o un nombre `r00t` o `r00t-*`.
+
+## 1. Las doce preguntas de la 107
+
+1. **El margen de 300 s en el barrido:** no hace falta. La regla nueva solo quita contenedores de un r00t muerto. Si otro r00t reusó el pid, el contenedor se conserva. Ese error queda del lado de no borrar, y el próximo barrido lo vuelve a mirar.
+2. **`corre` usa `limpieza.rs`: sí, en la 108.** Las dos copias de la regla ya se separaron una vez, y la de `corre` todavía tiene el defecto: un `r00t-<sha>` vivo cuenta como muerto. Ese barrido borra credenciales, así que puede dejar sin credencial a una corrida viva. `corre::barrido` pasa a usar `r00t_vivo` de `limpieza.rs`, y conserva su chequeo de hora de inicio contra el id de la corrida, con su margen de 300 s.
+3. **Sin registrar las señales, error de infraestructura:** acepto. Sin la limpieza por señal, un corte deja contenedores vivos. Falla cerrado, igual que `colab`.
+4. **La señal no mata el `podman run` hijo:** acepto. Un contenedor creado justo después lo quita el próximo barrido.
+5. **La duración de la base es la corrida más lenta de cada suite:** acepto. El plazo vale por corrida.
+6. **Un plazo de Root vencido con junit presente aborta la calibración: cambia.** Ver la sección 2.
+7. **Un limpio que vence el plazo aborta la calibración: cambia.** Ver la sección 2.
+8. **El plazo se reconoce por el texto "timeout tras ": cambia.** Las preguntas 6 y 7 dependen de reconocer ese caso. Un cambio de texto en `contenedor.rs:217` rompería la regla en silencio. `ErrorOraculo` suma una variante para el plazo vencido. `mod.rs:2215` deja de comparar texto.
+9. **El estado de duraciones es local del hilo:** acepto. Es el patrón de la sonda de mutación.
+10. **Hasta cinco copias más del repo por caso con defecto:** acepto.
+11. **Una inyección que no se vuelve a aplicar da error:** acepto. Es una señal de no determinismo, y conviene que se vea.
+12. **Perder el motivo de la sonda en un reemplazo sin candidatos:** acepto.
+
+## 2. Ningún plazo de Root aborta una calibración
+
+**La regla:** un plazo vencido le dice algo al caso, no a toda la calibración.
+
+1. **Un caso con defecto cuyo plazo de Root vence es una inyección inválida,** con o sin junit. Va a reemplazo, con el motivo "la suite pasó su plazo". Con junit también, porque el plazo vencido dice que la corrida no terminó como se esperaba.
+2. **Un limpio cuyo plazo de Root vence queda sin veredicto,** con el motivo "la suite pasó su plazo". No aborta. Cuenta en `limpios_sin_veredicto`.
+3. **La regla de hoy sigue:** con más de 20 % de limpios sin veredicto, la dimensión no calibra (`MAX_LIMPIOS_SIN_VEREDICTO_PCT`). Un host con mucha carga no hace calibrar nada que no debía.
+4. **La base cuyo plazo vence** sigue abortando. Sin base no hay contra qué comparar.
+5. **¿Un rojo puede volverse verde? No.** Un reemplazo o un "sin veredicto" nunca cuentan como verde.
+
+## 3. Tarea 108
+
+Brief: `docs/builds/brief-local-108.md`, con base d7dfcb0 y rama `laptop/tarea-108`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | El plazo vencido como variante de `ErrorOraculo` | `src/oracle/mod.rs`, `src/oracle/contenedor.rs` |
+| 2 | Ningún plazo de Root aborta la calibración | `src/oracle/calibra.rs` |
+| 3 | `corre::barrido` usa `r00t_vivo` de `limpieza.rs` | `src/corre/barrido.rs`, `src/limpieza.rs` |
+
+- El punto 2 usa la variante del punto 1. Van en serie.
+- El punto 3 corre en paralelo.
+
+**Después de la 108 no queda trabajo de código que no dependa del usuario.** Funciona en t1 y Completitud en t1 tienen límites de la tarea, no de Root. Solo más tareas los arreglan, y eso espera P97.
+
+**Preguntas al usuario:** ninguna nueva. P95 y P97 a P103 siguen abiertas.
