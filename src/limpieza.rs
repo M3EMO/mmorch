@@ -1,7 +1,7 @@
 //! Limpieza de los contenedores de `oraculo evaluar`, `calibrar` y `auditar`.
 //! Cada contenedor lleva en su nombre el pid del `r00t` que lo creó: `<prefijo><pid>-<n>`.
 //! Al recibir SIGINT o SIGTERM, el proceso quita los suyos. Al arrancar un contenedor, quita los
-//! de pids que ya no son un `r00t` vivo. SIGKILL no se atrapa: el barrido cubre ese caso.
+//! de dueños muertos o reusados. SIGKILL no se atrapa: el barrido cubre ese caso.
 //!
 //! Este módulo no toma el turno de podman. La señal puede llegar mientras el hilo principal tiene
 //! el turno en un contenedor largo. Tomarlo dejaría la limpieza colgada.
@@ -77,14 +77,26 @@ pub(crate) fn nombres_de_pid(nombres: &[String], pid: u32) -> Vec<String> {
         .collect()
 }
 
-/// Los nombres de la familia de este código cuyo pid no es un `r00t` vivo en `raiz_proc`.
-pub(crate) fn huerfanos(nombres: &[String], raiz_proc: &Path) -> Vec<String> {
-    nombres
+/// Los nombres de la familia de este código cuyo dueño no vive en `raiz_proc`. Un nombre de la
+/// familia sin pid legible cuenta como huérfano.
+pub(crate) fn huerfanos(contenedores: &[Contenedor], raiz_proc: &Path) -> Vec<String> {
+    contenedores
         .iter()
-        .filter(|nombre| de_la_familia(nombre))
-        .filter(|nombre| !pid_del_nombre(nombre).is_some_and(|pid| r00t_vivo(pid, raiz_proc)))
-        .cloned()
+        .filter(|c| de_la_familia(&c.nombre))
+        .filter(|c| match pid_del_nombre(&c.nombre) {
+            None => true,
+            Some(pid) => !dueno_vivo(pid, c.creado, raiz_proc),
+        })
+        .map(|c| c.nombre.clone())
         .collect()
+}
+
+/// Un contenedor de la familia, tal como lo lista podman.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Contenedor {
+    nombre: String,
+    /// Segundos desde la época en que se creó. `None` si podman no dio una hora legible.
+    creado: Option<u64>,
 }
 
 /// Verdadero si el nombre empieza con un prefijo de este código.
@@ -98,6 +110,68 @@ fn pid_del_nombre(nombre: &str) -> Option<u32> {
         .iter()
         .find_map(|prefijo| nombre.strip_prefix(prefijo))?;
     resto.split('-').next()?.parse().ok()
+}
+
+/// Margen en segundos entre el arranque del dueño y la creación de su contenedor. La laptop se
+/// suspende y NTP corrige el reloj, así que `btime` deriva. Un dueño vivo no debe verse como pid
+/// reusado por ese corrimiento.
+const MARGEN_DUENO_S: u64 = 300;
+/// Ticks del reloj del kernel por segundo (`USER_HZ`). En Linux es 100.
+const TICKS_POR_SEG: u64 = 100;
+
+/// Qué se sabe del dueño de un contenedor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Dueno {
+    /// El pid existe y arrancó a tiempo para ser el dueño.
+    Vivo,
+    /// No hay carpeta del pid en `/proc`.
+    NoExiste,
+    /// El pid existe, pero arrancó más de `MARGEN_DUENO_S` después de la creación: es otro proceso.
+    Reusado,
+}
+
+/// Dice qué pasa con el dueño `pid` de un contenedor creado en `referencia` (segundos desde la
+/// época). El nombre del binario no cuenta. Sin hora de creación o de arranque, cuenta como vivo:
+/// el error va del lado de no borrar.
+pub(crate) fn dueno_de(pid: u32, referencia: Option<u64>, raiz_proc: &Path) -> Dueno {
+    if pid == std::process::id() {
+        return Dueno::Vivo;
+    }
+    if !raiz_proc.join(pid.to_string()).exists() {
+        return Dueno::NoExiste;
+    }
+    let (Some(referencia), Some(inicio)) = (referencia, inicio_de_proceso(pid, raiz_proc)) else {
+        return Dueno::Vivo;
+    };
+    if inicio > referencia + MARGEN_DUENO_S {
+        Dueno::Reusado
+    } else {
+        Dueno::Vivo
+    }
+}
+
+/// Dice si el dueño `pid` de un contenedor creado en `referencia` vive. Ver `dueno_de`.
+pub(crate) fn dueno_vivo(pid: u32, referencia: Option<u64>, raiz_proc: &Path) -> bool {
+    dueno_de(pid, referencia, raiz_proc) == Dueno::Vivo
+}
+
+/// Segundos de inicio del proceso `pid`: `btime` más el `starttime` en ticks. `None` si `stat` o
+/// `btime` no se pueden leer o parsear.
+pub(crate) fn inicio_de_proceso(pid: u32, raiz_proc: &Path) -> Option<u64> {
+    let stat = fs::read_to_string(raiz_proc.join(pid.to_string()).join("stat")).ok()?;
+    // El comm va entre paréntesis y puede tener espacios o `)`: se parte después del último `)`.
+    // Después del `)` el primer campo es el 3 (state). El campo 22 (starttime) es el índice 19.
+    let despues_del_comm = stat.rsplit_once(')')?.1;
+    let ticks: u64 = despues_del_comm.split_whitespace().nth(19)?.parse().ok()?;
+    Some(btime_del_sistema(raiz_proc)? + ticks / TICKS_POR_SEG)
+}
+
+/// Segundos desde el arranque del sistema, de la línea `btime` de `<raiz_proc>/stat`.
+fn btime_del_sistema(raiz_proc: &Path) -> Option<u64> {
+    let stat = fs::read_to_string(raiz_proc.join("stat")).ok()?;
+    stat.lines()
+        .find_map(|linea| linea.strip_prefix("btime "))
+        .and_then(|valor| valor.trim().parse().ok())
 }
 
 /// Dice si `pid` cuenta como `r00t` vivo en `raiz_proc`. Cuenta como vivo si es este proceso, si
@@ -133,14 +207,19 @@ fn es_r00t(cmdline: &[u8]) -> bool {
 }
 
 /// Lista los contenedores que coinciden con `root-` en `programa ps`. Sin filtrar por familia.
-fn listar(programa: &str, plazo: Duration) -> Result<Vec<String>, ErrorOraculo> {
+///
+/// El formato pide el nombre y la hora de creación en segundos desde la época:
+/// `{{.ListContainer.Created.Unix}}`. La plantilla `{{.Created}}` de `podman ps` da texto
+/// `Y-M-D H:M:S`, no epoch, y por eso no sirve. Si la hora llega en un formato ilegible, `creado`
+/// queda en `None`. Un `None` hace que el contenedor se conserve.
+fn listar(programa: &str, plazo: Duration) -> Result<Vec<Contenedor>, ErrorOraculo> {
     let salida = correr(
         programa,
         &[
             "ps",
             "-a",
             "--format",
-            "{{.Names}}",
+            "{{.Names}} {{.ListContainer.Created.Unix}}",
             "--filter",
             "name=root-",
         ],
@@ -153,13 +232,24 @@ fn listar(programa: &str, plazo: Duration) -> Result<Vec<String>, ErrorOraculo> 
             salida.stderr.trim()
         )));
     }
-    Ok(salida
-        .stdout
+    Ok(parsear_listado(&salida.stdout))
+}
+
+/// Parte la salida de `ps` en contenedores. Cada línea: nombre, espacio, epoch. Las líneas vacías
+/// se saltan. Un epoch que no parsea, o que falta, deja `creado` en `None`.
+fn parsear_listado(salida: &str) -> Vec<Contenedor> {
+    salida
         .lines()
-        .map(str::trim)
-        .filter(|linea| !linea.is_empty())
-        .map(str::to_string)
-        .collect())
+        .filter_map(|linea| {
+            let mut partes = linea.split_whitespace();
+            let nombre = partes.next()?;
+            let creado = partes.next().and_then(|texto| texto.parse().ok());
+            Some(Contenedor {
+                nombre: nombre.to_string(),
+                creado,
+            })
+        })
+        .collect()
 }
 
 /// Corre `rm -f -t 0` con `nombres`. Un código distinto de cero es error.
@@ -186,7 +276,11 @@ fn correr(programa: &str, args: &[&str], plazo: Duration) -> Result<SalidaPodman
 
 /// Quita los contenedores de este proceso. Devuelve sus nombres.
 fn quitar_de_pid(programa: &str, pid: u32, plazo: Duration) -> Result<Vec<String>, ErrorOraculo> {
-    let nombres = nombres_de_pid(&listar(programa, plazo)?, pid);
+    let nombres: Vec<String> = listar(programa, plazo)?
+        .into_iter()
+        .map(|c| c.nombre)
+        .collect();
+    let nombres = nombres_de_pid(&nombres, pid);
     if nombres.is_empty() {
         return Ok(nombres);
     }
@@ -306,10 +400,28 @@ mod tests {
         SERIE.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// `podman` falso: anota cada llamada en su log. Responde `ps` con `nombres`.
-    fn podman_falso(base: &Path, nombres: &[String]) -> (PathBuf, PathBuf) {
+    /// Hora de arranque de la máquina de los tests, en segundos desde la época.
+    const BTIME: u64 = 1_700_000_000;
+
+    /// Un contenedor de prueba con la hora de creación `creado`.
+    fn contenedor(nombre: &str, creado: Option<u64>) -> Contenedor {
+        Contenedor {
+            nombre: nombre.to_string(),
+            creado,
+        }
+    }
+
+    /// `podman` falso: anota cada llamada en su log. Responde `ps` con una línea por contenedor:
+    /// nombre y epoch. Sin hora, solo el nombre.
+    fn podman_falso(base: &Path, contenedores: &[Contenedor]) -> (PathBuf, PathBuf) {
         let log = base.join("podman.log");
-        let lista: String = nombres.iter().map(|n| format!("echo {n}\n")).collect();
+        let lista: String = contenedores
+            .iter()
+            .map(|c| match c.creado {
+                Some(segundos) => format!("echo {} {segundos}\n", c.nombre),
+                None => format!("echo {}\n", c.nombre),
+            })
+            .collect();
         let cuerpo = format!(
             "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\n{lista}fi\n",
             log.display()
@@ -329,12 +441,24 @@ mod tests {
         raiz
     }
 
+    /// Un `/proc` falso con un proceso `pid` que arrancó `ticks` después de `btime`. Escribe
+    /// `stat` del proceso y la línea `btime` de `<raiz>/stat`.
+    fn proc_con_inicio(base: &Path, pid: u32, cmdline: &[u8], btime: u64, ticks: u64) -> PathBuf {
+        let raiz = proc_con(base, pid, cmdline);
+        let carpeta = raiz.join(pid.to_string());
+        let stat =
+            format!("{pid} (r00t) S 1 {pid} {pid} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {ticks}\n");
+        fs::write(carpeta.join("stat"), stat).expect("stat");
+        fs::write(raiz.join("stat"), format!("cpu  1 2 3\nbtime {btime}\n")).expect("btime");
+        raiz
+    }
+
     #[test]
     fn senal_quita_los_contenedores_de_este_pid_y_no_otros() {
         let _serie = serie();
         let tmp = TempDir::new().expect("tmp");
         let pid = std::process::id();
-        let nombres = vec![
+        let nombres = [
             format!("root-oraculo-{pid}-0"),
             format!("root-entrega-esc-{pid}-1"),
             format!("root-entrega-eval-{pid}-2"),
@@ -342,7 +466,8 @@ mod tests {
             format!("root-oraculo-1{pid}-0"),
             format!("root-builder-{pid}-0"),
         ];
-        let (podman, log) = podman_falso(tmp.path(), &nombres);
+        let contenedores: Vec<Contenedor> = nombres.iter().map(|n| contenedor(n, None)).collect();
+        let (podman, log) = podman_falso(tmp.path(), &contenedores);
         let codigo = Cell::new(None);
         al_recibir_senal(podman.to_str().expect("ruta"), SIGTERM, |c| {
             codigo.set(Some(c))
@@ -408,19 +533,25 @@ mod tests {
     }
 
     #[test]
-    fn barrido_quita_contenedor_de_pid_muerto_y_conserva_r00t_vivo() {
+    fn barrido_quita_contenedor_de_pid_muerto_y_conserva_dueno_vivo() {
         let _serie = serie();
         let tmp = TempDir::new().expect("tmp");
         let vivo = 4242;
         let muerto = 5151;
-        let proc_falso = proc_con(tmp.path(), vivo, b"/usr/bin/r00t\0oraculo\0evaluar\0");
-        let nombres = vec![
-            format!("root-oraculo-{vivo}-0"),
-            format!("root-oraculo-{muerto}-1"),
-            format!("root-entrega-esc-{muerto}-2"),
-            format!("root-builder-{muerto}-3"),
+        let proc_falso = proc_con_inicio(
+            tmp.path(),
+            vivo,
+            b"/usr/bin/r00t\0oraculo\0evaluar\0",
+            BTIME,
+            0,
+        );
+        let contenedores = vec![
+            contenedor(&format!("root-oraculo-{vivo}-0"), Some(BTIME + 100)),
+            contenedor(&format!("root-oraculo-{muerto}-1"), Some(BTIME + 100)),
+            contenedor(&format!("root-entrega-esc-{muerto}-2"), Some(BTIME + 100)),
+            contenedor(&format!("root-builder-{muerto}-3"), Some(BTIME + 100)),
         ];
-        let (podman, log) = podman_falso(tmp.path(), &nombres);
+        let (podman, log) = podman_falso(tmp.path(), &contenedores);
         let quitados =
             barrer(podman.to_str().expect("ruta"), &proc_falso, PLAZO_BARRIDO).expect("barrido");
         assert_eq!(
@@ -446,68 +577,178 @@ mod tests {
     }
 
     #[test]
-    fn pid_reusado_por_otro_programa_cuenta_como_muerto() {
-        let tmp = TempDir::new().expect("tmp");
-        let proc_falso = proc_con(tmp.path(), 777, b"/usr/bin/bash\0-l\0");
-        let nombres = vec!["root-oraculo-777-0".to_string()];
-        assert_eq!(
-            huerfanos(&nombres, &proc_falso),
-            vec!["root-oraculo-777-0".to_string()],
-            "un cmdline que no es r00t cuenta como muerto"
-        );
-    }
-
-    #[test]
     fn pid_propio_cuenta_como_vivo_aunque_no_tenga_carpeta() {
         let tmp = TempDir::new().expect("tmp");
         let raiz = tmp.path().join("proc");
         fs::create_dir_all(&raiz).expect("proc");
-        let nombres = vec![format!("root-oraculo-{}-0", std::process::id())];
+        let contenedores = vec![contenedor(
+            &format!("root-oraculo-{}-0", std::process::id()),
+            Some(BTIME),
+        )];
         assert!(
-            huerfanos(&nombres, &raiz).is_empty(),
+            huerfanos(&contenedores, &raiz).is_empty(),
             "el pid de este proceso se conserva"
         );
     }
 
     #[test]
-    fn cmdline_root_con_guion_y_sha_cuenta_como_vivo() {
+    fn dueno_vivo_llamado_root_hash_que_arranco_antes_se_conserva() {
         let tmp = TempDir::new().expect("tmp");
-        let proc_falso = proc_con(tmp.path(), 4242, b"/x/r00t-88169de\0oraculo\0");
-        let nombres = vec!["root-oraculo-4242-0".to_string()];
+        let proc_falso = proc_con_inicio(tmp.path(), 4242, b"/x/root-abc123\0", BTIME, 0);
+        let contenedores = vec![contenedor("root-oraculo-4242-0", Some(BTIME + 100))];
         assert!(
-            huerfanos(&nombres, &proc_falso).is_empty(),
-            "un binario r00t-<sha> cuenta como vivo"
+            huerfanos(&contenedores, &proc_falso).is_empty(),
+            "el nombre del binario no cuenta: el dueño arrancó antes de la creación"
         );
     }
 
     #[test]
-    fn cmdline_r00tkit_cuenta_como_muerto() {
+    fn dueno_que_arranco_400_s_despues_de_la_creacion_se_quita() {
         let tmp = TempDir::new().expect("tmp");
-        let proc_falso = proc_con(tmp.path(), 4242, b"r00tkit\0");
-        let nombres = vec!["root-oraculo-4242-0".to_string()];
+        let proc_falso = proc_con_inicio(tmp.path(), 4242, b"/x/r00t\0", BTIME, 40_000);
+        let contenedores = vec![contenedor("root-oraculo-4242-0", Some(BTIME))];
         assert_eq!(
-            huerfanos(&nombres, &proc_falso),
+            huerfanos(&contenedores, &proc_falso),
             vec!["root-oraculo-4242-0".to_string()],
-            "r00tkit no es r00t"
+            "un pid reusado, que arrancó 400 s después, se quita"
         );
     }
 
     #[test]
-    fn exe_del_binario_actual_cuenta_como_vivo() {
+    fn dueno_que_arranco_300_s_despues_se_conserva() {
+        let tmp = TempDir::new().expect("tmp");
+        let proc_falso = proc_con_inicio(tmp.path(), 4242, b"/x/r00t\0", BTIME, 30_000);
+        let contenedores = vec![contenedor("root-oraculo-4242-0", Some(BTIME))];
+        assert!(
+            huerfanos(&contenedores, &proc_falso).is_empty(),
+            "en el borde de 300 s el dueño se conserva"
+        );
+    }
+
+    #[test]
+    fn dueno_sin_carpeta_en_proc_se_quita() {
         let tmp = TempDir::new().expect("tmp");
         let raiz = tmp.path().join("proc");
-        let carpeta = raiz.join("4242");
-        fs::create_dir_all(&carpeta).expect("proc");
-        fs::write(carpeta.join("cmdline"), b"/x/root-abc123\0").expect("cmdline");
-        std::os::unix::fs::symlink(
-            std::env::current_exe().expect("exe actual"),
-            carpeta.join("exe"),
-        )
-        .expect("enlace exe");
-        let nombres = vec!["root-oraculo-4242-0".to_string()];
+        fs::create_dir_all(&raiz).expect("proc");
+        let contenedores = vec![contenedor("root-oraculo-4242-0", Some(BTIME))];
+        assert_eq!(
+            huerfanos(&contenedores, &raiz),
+            vec!["root-oraculo-4242-0".to_string()],
+            "sin carpeta el dueño no existe"
+        );
+    }
+
+    #[test]
+    fn contenedor_sin_hora_de_creacion_se_conserva() {
+        let tmp = TempDir::new().expect("tmp");
+        let proc_falso = proc_con_inicio(tmp.path(), 4242, b"/x/root-abc123\0", BTIME, 40_000);
+        let contenedores = vec![contenedor("root-oraculo-4242-0", None)];
         assert!(
-            huerfanos(&nombres, &raiz).is_empty(),
-            "un proceso con el mismo binario cuenta como vivo"
+            huerfanos(&contenedores, &proc_falso).is_empty(),
+            "sin hora de creación el contenedor se conserva"
+        );
+    }
+
+    #[test]
+    fn dueno_sin_hora_de_arranque_se_conserva() {
+        let tmp = TempDir::new().expect("tmp");
+        let proc_falso = proc_con(tmp.path(), 4242, b"/x/root-abc123\0");
+        let contenedores = vec![contenedor("root-oraculo-4242-0", Some(BTIME))];
+        assert!(
+            huerfanos(&contenedores, &proc_falso).is_empty(),
+            "sin stat el dueño se conserva"
+        );
+    }
+
+    #[test]
+    fn nombre_de_la_familia_sin_pid_legible_cuenta_como_huerfano() {
+        let tmp = TempDir::new().expect("tmp");
+        let raiz = tmp.path().join("proc");
+        fs::create_dir_all(&raiz).expect("proc");
+        let contenedores = vec![contenedor("root-oraculo-x-0", Some(BTIME))];
+        assert_eq!(
+            huerfanos(&contenedores, &raiz),
+            vec!["root-oraculo-x-0".to_string()],
+            "sin pid legible el nombre cuenta como huérfano"
+        );
+    }
+
+    #[test]
+    fn parsear_listado_lee_nombre_y_epoch() {
+        assert_eq!(
+            parsear_listado("root-oraculo-1-0 1700000100\nroot-entrega-esc-1-1 1700000200\n"),
+            vec![
+                contenedor("root-oraculo-1-0", Some(1_700_000_100)),
+                contenedor("root-entrega-esc-1-1", Some(1_700_000_200)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parsear_listado_epoch_ilegible_da_none() {
+        assert_eq!(
+            parsear_listado("root-oraculo-1-0 2026-11-13 10:00:00\n"),
+            vec![contenedor("root-oraculo-1-0", None)],
+            "un texto Y-M-D H:M:S no parsea: sin hora"
+        );
+    }
+
+    #[test]
+    fn parsear_listado_linea_con_solo_nombre_da_none() {
+        assert_eq!(
+            parsear_listado("root-oraculo-1-0\n"),
+            vec![contenedor("root-oraculo-1-0", None)]
+        );
+    }
+
+    #[test]
+    fn parsear_listado_salta_lineas_vacias() {
+        assert_eq!(
+            parsear_listado("\n   \nroot-oraculo-1-0 5\n\n"),
+            vec![contenedor("root-oraculo-1-0", Some(5))]
+        );
+    }
+
+    #[test]
+    fn listar_lee_la_hora_de_creacion_de_podman_real() {
+        crate::saltar_sin_podman!();
+        // Copia del nombre de la imagen de `oracle::calibra::defectos::IMAGEN_HERRAMIENTAS`, que
+        // es `pub(super)` y no se alcanza desde aquí.
+        const IMAGEN: &str = "localhost/root-oraculo-rust:2";
+        struct Quitar(String);
+        impl Drop for Quitar {
+            fn drop(&mut self) {
+                let _ = Command::new("podman").args(["rm", "-f", &self.0]).output();
+            }
+        }
+        let epoch = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("reloj")
+                .as_secs()
+        };
+        let nombre = format!("root-oraculo-{}-9999", std::process::id());
+        let _guarda = Quitar(nombre.clone());
+        let antes = epoch();
+        let creo = Command::new("podman")
+            .args(["create", "--name", &nombre, IMAGEN, "true"])
+            .output()
+            .expect("podman create");
+        assert!(
+            creo.status.success(),
+            "{}",
+            String::from_utf8_lossy(&creo.stderr)
+        );
+        let despues = epoch();
+        let contenedores = listar("podman", Duration::from_secs(30)).expect("listar");
+        let hallado = contenedores
+            .iter()
+            .find(|c| c.nombre == nombre)
+            .expect("el contenedor aparece en el listado");
+        let creado = hallado.creado.expect("hora de creación legible");
+        assert!(
+            creado >= antes.saturating_sub(5) && creado <= despues + 5,
+            "creado {creado} fuera de [{antes}, {despues}]"
         );
     }
 
