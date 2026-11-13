@@ -6,11 +6,8 @@
 //! Este módulo no toma el turno de podman. La señal puede llegar mientras el hilo principal tiene
 //! el turno en un contenedor largo. Tomarlo dejaría la limpieza colgada.
 
-use std::env;
-use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::process::Command;
@@ -32,8 +29,6 @@ const PLAZO_AL_SENAL: Duration = Duration::from_secs(10);
 const PLAZO_BARRIDO: Duration = PLAZO_LIMPIEZA;
 /// Carpeta donde Linux muestra los procesos vivos.
 const PROCESOS: &str = "/proc";
-/// Nombre base del programa `r00t`. Los binarios `r00t-<sha>` también cuentan como `r00t`.
-const NOMBRE_R00T: &str = "r00t";
 /// Programa de podman en producción.
 const PODMAN: &str = "podman";
 
@@ -52,7 +47,7 @@ pub(crate) fn barrer_al_arrancar(programa: &str) {
     }
 }
 
-/// Quita los contenedores cuyo pid no es un `r00t` vivo en `raiz_proc`. Devuelve sus nombres.
+/// Quita los contenedores cuyo dueño no vive en `raiz_proc`. Devuelve sus nombres.
 pub(crate) fn barrer(
     programa: &str,
     raiz_proc: &Path,
@@ -119,20 +114,21 @@ const MARGEN_DUENO_S: u64 = 300;
 /// Ticks del reloj del kernel por segundo (`USER_HZ`). En Linux es 100.
 const TICKS_POR_SEG: u64 = 100;
 
-/// Qué se sabe del dueño de un contenedor.
+/// Qué se sabe del dueño de algo que un proceso creó. Lo usan `barrer` (referencia = hora de
+/// creación del contenedor) y `corre::barrido` (referencia = segundos del id de la corrida).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Dueno {
     /// El pid existe y arrancó a tiempo para ser el dueño.
     Vivo,
     /// No hay carpeta del pid en `/proc`.
     NoExiste,
-    /// El pid existe, pero arrancó más de `MARGEN_DUENO_S` después de la creación: es otro proceso.
+    /// El pid existe, pero arrancó más de `MARGEN_DUENO_S` después de la referencia: es otro proceso.
     Reusado,
 }
 
-/// Dice qué pasa con el dueño `pid` de un contenedor creado en `referencia` (segundos desde la
-/// época). El nombre del binario no cuenta. Sin hora de creación o de arranque, cuenta como vivo:
-/// el error va del lado de no borrar.
+/// Dice qué pasa con el dueño `pid`, creado en `referencia` (segundos desde la época). El nombre
+/// del binario no cuenta: solo importan la existencia del pid y su hora de arranque. Sin hora de
+/// referencia o de arranque, cuenta como vivo: el error va del lado de no borrar.
 pub(crate) fn dueno_de(pid: u32, referencia: Option<u64>, raiz_proc: &Path) -> Dueno {
     if pid == std::process::id() {
         return Dueno::Vivo;
@@ -157,7 +153,7 @@ pub(crate) fn dueno_vivo(pid: u32, referencia: Option<u64>, raiz_proc: &Path) ->
 
 /// Segundos de inicio del proceso `pid`: `btime` más el `starttime` en ticks. `None` si `stat` o
 /// `btime` no se pueden leer o parsear.
-pub(crate) fn inicio_de_proceso(pid: u32, raiz_proc: &Path) -> Option<u64> {
+fn inicio_de_proceso(pid: u32, raiz_proc: &Path) -> Option<u64> {
     let stat = fs::read_to_string(raiz_proc.join(pid.to_string()).join("stat")).ok()?;
     // El comm va entre paréntesis y puede tener espacios o `)`: se parte después del último `)`.
     // Después del `)` el primer campo es el 3 (state). El campo 22 (starttime) es el índice 19.
@@ -172,38 +168,6 @@ fn btime_del_sistema(raiz_proc: &Path) -> Option<u64> {
     stat.lines()
         .find_map(|linea| linea.strip_prefix("btime "))
         .and_then(|valor| valor.trim().parse().ok())
-}
-
-/// Dice si `pid` cuenta como `r00t` vivo en `raiz_proc`. Cuenta como vivo si es este proceso, si
-/// corre el mismo binario o si su cmdline es `r00t` o `r00t-<sha>`. Sin carpeta o cmdline ilegible
-/// cuenta como muerto.
-pub(crate) fn r00t_vivo(pid: u32, raiz_proc: &Path) -> bool {
-    pid == std::process::id()
-        || fs::read(raiz_proc.join(pid.to_string()).join("cmdline"))
-            .is_ok_and(|cmdline| es_r00t(&cmdline))
-        || mismo_binario(pid, raiz_proc)
-}
-
-/// Dice si `<raiz_proc>/<pid>/exe` apunta al mismo archivo que este programa. Si una ruta no se
-/// puede resolver, devuelve `false`.
-fn mismo_binario(pid: u32, raiz_proc: &Path) -> bool {
-    let exe = raiz_proc.join(pid.to_string()).join("exe");
-    match (
-        fs::canonicalize(exe),
-        env::current_exe().and_then(fs::canonicalize),
-    ) {
-        (Ok(del_pid), Ok(propio)) => del_pid == propio,
-        _ => false,
-    }
-}
-
-/// Dice si el primer argumento del cmdline (separado por NUL) es `r00t` o `r00t-<sha>`. Mira solo
-/// el nombre base. `r00tkit` no cuenta.
-fn es_r00t(cmdline: &[u8]) -> bool {
-    let primero = cmdline.split(|byte| *byte == 0).next().unwrap_or_default();
-    Path::new(OsStr::from_bytes(primero))
-        .file_name()
-        .is_some_and(|nombre| nombre == NOMBRE_R00T || nombre.as_bytes().starts_with(b"r00t-"))
 }
 
 /// Lista los contenedores que coinciden con `root-` en `programa ps`. Sin filtrar por familia.
@@ -588,6 +552,34 @@ mod tests {
         assert!(
             huerfanos(&contenedores, &raiz).is_empty(),
             "el pid de este proceso se conserva"
+        );
+    }
+
+    #[test]
+    fn dueno_de_dice_no_existe_reusado_o_vivo() {
+        let tmp = TempDir::new().expect("tmp");
+        let vacio = tmp.path().join("vacio");
+        fs::create_dir_all(&vacio).expect("proc");
+        assert_eq!(dueno_de(4242, Some(BTIME), &vacio), Dueno::NoExiste);
+
+        let reusado = proc_con_inicio(
+            &tmp.path().join("reusado"),
+            4242,
+            b"/x/r00t\0",
+            BTIME,
+            40_000,
+        );
+        assert_eq!(
+            dueno_de(4242, Some(BTIME), &reusado),
+            Dueno::Reusado,
+            "arrancó 400 s después de la referencia"
+        );
+
+        let vivo = proc_con_inicio(&tmp.path().join("vivo"), 4242, b"/x/r00t\0", BTIME, 0);
+        assert_eq!(
+            dueno_de(4242, Some(BTIME), &vivo),
+            Dueno::Vivo,
+            "arrancó antes de la referencia"
         );
     }
 
