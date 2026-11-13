@@ -8946,3 +8946,75 @@ P104 sigue abierta.
 - **a)** La escala premia una mejora. Si el cambio es más rápido o más liviano que el estado inicial, Eficiencia sube, y el informe lo dice. Hoy la escala solo baja.
 - **b)** Root empuja la mejora. El informe nombra la medida que más empeoró, o la que más se puede ganar, como próximo paso. En `r00t corre`, el builder recibe esa medida antes de cerrar, y tiene una vuelta para mejorarla. Recomendada: es lo que hace un project manager con una regresión. Además usa la misma medición de la parte "a", sin otra herramienta.
 - **c)** Root mismo es más eficiente: cada evaluación tarda menos y gasta menos.
+
+## Vuelta del 2026-11-14 (35): P106 b y c, la 111, y el orden desde la 113
+
+**Estado.** La Tarea 111 (P102 a) terminó en `laptop/tarea-111` (0bdc78b), con 3341, 0 y 4 sin podman. Tocó `src/oracle/mod.rs` en tres tests, fuera de su tabla. La 112 se construye desde 64361fa. Las suites con podman de la 110 y la 111 corren solas.
+
+**Respuestas del usuario, del 2026-11-13, literales:** P106: "b Y c". Además: "Puede hacerse websearch para buscar mejoras u otras investigaciones".
+
+## 1. P106 b: Root empuja la mejora
+
+**La medición, con la investigación de regresiones.**
+- **Tiempo:** 3 corridas de cada lado, y se compara el **mínimo**, no la mediana. Es lo que hace rustc-perf: el mínimo es el menos ruidoso para el tiempo.
+- **Memoria pico:** `memory.peak` del cgroup v2 del contenedor. `perf` no anda en podman sin root, así que no se usa.
+- **Tamaño del binario y tiempo de compilación:** una sola medida de cada lado alcanza para el tamaño. La compilación usa el mínimo de 3, igual que el tiempo.
+- **Una diferencia es ruido** si es menor que la dispersión de la propia referencia, con un piso de 2 %. Es el piso de Perfherder.
+- **La regla de P105 a no cambia:** más de 1,5 veces, por encima del ruido, da "no listo". Una regresión menor baja la escala.
+
+**El informe.**
+1. Nombra la medida que más empeoró, con su razón y los números de los dos lados. Por ejemplo: "la suite tarda 1,3 veces más: 4,1 s contra 3,2 s".
+2. Si ninguna medida empeoró por encima del ruido, dice "sin regresiones de eficiencia".
+3. **"La que más se puede ganar" no se informa.** Sin una meta, "ganar" no tiene medida. Root solo nombra lo que empeoró frente al estado inicial.
+
+**En `r00t corre`.**
+1. Al terminar el builder, Root evalúa. Si hay una regresión de eficiencia por encima del ruido, el builder recibe **una vuelta más**, con la medida, su razón y los dos números.
+2. Después de esa vuelta, Root evalúa otra vez. Esa evaluación es la que cuenta.
+3. **Una sola vuelta.** Si la regresión sigue, el resultado la informa, y P105 a decide si da "no listo".
+4. La vuelta va por cupo, como las demás, con el ruteo por vuelta de la Tarea 93.
+
+## 2. P106 c: Root mismo más eficiente
+
+**Primero se mide, sin código.** El orquestador corre una calibración de t1 y anota el tiempo de cada fase: copias, compilación, suites, mutación y juez. La línea de tiempo sale de los registros de cada caso. Sin ese reparto, ordenar las mejoras es adivinar.
+
+**El hallazgo de `cp -r` vale, en los cuatro lugares.** `cp -r` pone fechas nuevas. cargo compara la fecha de cada fuente con su huella, y recompila todo aunque el `target` venga sembrado. Root ya usa `cp -a --reflink=auto` para el `target` (`copiar_target`, Tarea 59). Los cuatro lugares son: `src/oracle/calibra/target_podman.rs:17`, `src/oracle/calibra/defectos.rs:327` y `:429`, y `src/oracle/descarga.rs:141`. En la descarga no hay un `target` sembrado. Igual va `cp -a`, para que las cuatro copias sigan la misma regla.
+
+**Las mejoras, ordenadas por ganancia sobre costo.** La ganancia exacta la dice la medición.
+
+| Orden | Mejora | Costo | Por qué |
+|---|---|---|---|
+| 1 | `cp -a` en las cuatro copias | Mínimo | Evita recompilar todo en cada caso con `target` sembrado |
+| 2 | Perfil de tests sin debuginfo, con `CARGO_PROFILE_TEST_DEBUG=0` en suites y mutación | Mínimo | La documentación de cargo-mutants lo sugiere. Compila y enlaza menos |
+| 3 | cargo-mutants con nextest como herramienta de tests | Bajo | Corta en el primer fallo, y eso alcanza para matar un mutante |
+| 4 | cargo-mutants sobre su copia, con `--in-place`, y con el `target` sembrado | Bajo | Root ya trabaja sobre una copia. Reusa la compilación |
+| 5 | `-j2` en cargo-mutants | Medio | La laptop tiene 8 núcleos y 15 GB. Cada job pide unos 2 GB de `target` |
+| 6 | El enlazador `mold` en una imagen `:5` | Medio | La documentación cita un 20 %. Cambia la imagen, así que va con su propia etiqueta |
+
+- Las mejoras 1 y 2 van ya. Las 3 a 6 esperan la medición del reparto.
+- **Ninguna cambia un resultado.** Cada una lleva una guarda: la serie 112 se repite igual.
+
+## 3. Las siete preguntas de la 111
+
+1. **Un oráculo exige al menos un limpio con veredicto:** acepto. Con cero limpios, "todos dieron bien" no prueba nada.
+2. **Se descartan las filas sin huella:** acepto. Las dimensiones de oráculo se recalibran sin API.
+3. **`aplicar` lee `root_home()`: cambia en la Tarea 114.** `mod.rs` llama a `aplicar_en` con el `home` de la evaluación. Va después de la 110 y la 111, porque las dos tocan `mod.rs`.
+4. **`inestables_de` usa la misma vigencia: sí, en la Tarea 114.** Una lista de inestables de una fila vieja no debe excluir ítems.
+5. **Una fila por tarea, la más reciente:** acepto. Dos corridas con semillas distintas pueden repetir inyecciones. Para más casos, se sube `n` en una sola corrida.
+6. **Sensibilidad y especificidad por separado:** acepto.
+7. **El conflicto en `mod.rs` con la 110:** lo resuelve el orquestador al encadenar, como en la cadena 98 a 100.
+
+## 4. El orden desde la 113
+
+| Tarea | Qué | Depende de | Base |
+|---|---|---|---|
+| 113 | P95: todo test rojo no inestable da "no listo". P104 b: una dimensión inestable cuenta como medida | La 110 | 741a43d, arranca ya |
+| 114 | `aplicar_en` con `home`, `!sin_valor()` en los lectores de calibración, e `inestables_de` con la vigencia de la 111 | La 110 y la 111 | Las dos encadenadas |
+| 115 | P105 a: eficiencia sin declararla, con la medición de la sección 1 | La 110 | 741a43d, o la punta de la 113 |
+| 116 | P106 b: la vuelta de eficiencia en `r00t corre` | La 115 | Punta de la 115 |
+| 117 | P106 c: `cp -a` en las cuatro copias, y el perfil sin debuginfo | Nada | 64361fa, arranca ya |
+
+**En paralelo ahora:** la 112, la 113 y la 117. Entre ellas no comparten archivos.
+
+**Un roce de la 113 con la 111.** La 113 suma `es_motivo_inestable` en `src/oracle/calibra.rs`, junto a `PREFIJO_INESTABLE`. Es una función nueva, sin otro cambio. El orquestador la resuelve al encadenar la 114.
+
+**Preguntas al usuario:** ninguna nueva.
