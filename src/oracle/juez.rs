@@ -33,7 +33,7 @@ const FASE: &str = "juez-diseno";
 /// Marca que se agrega al final de un extracto recortado.
 const MARCA_RECORTE: &str = "…[recortado]";
 /// Sonda que reporta secretos. Su línea es un secreto: no sale al prompt.
-const SONDA_GITLEAKS: &str = "gitleaks";
+pub(crate) const SONDA_GITLEAKS: &str = "gitleaks";
 /// Texto que reemplaza la línea de un hallazgo de `gitleaks` en un extracto.
 const LINEA_OMITIDA: &str = "[línea con un secreto omitida]";
 const NIVEL_MAX: i64 = 3;

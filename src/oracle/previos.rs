@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::oracle::configs;
+use crate::oracle::descarga;
 use crate::oracle::historial;
+use crate::oracle::juez;
 use crate::oracle::pendientes;
 use crate::oracle::perfiles;
 use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, Herramienta, sondas_de};
@@ -267,9 +269,13 @@ fn marcar_refs(
 }
 
 /// Sondas que encuentran secretos. Sus hallazgos son secretos.
-pub const FUENTES_DE_SECRETOS: [&str; 2] = ["gitleaks", "configs-secretos"];
+pub const FUENTES_DE_SECRETOS: [&str; 3] = [
+    juez::SONDA_GITLEAKS,
+    configs::SONDA_SECRETOS,
+    descarga::SONDA_DESCARGA,
+];
 
-/// Verdadero si `fuente` es una sonda de secretos: gitleaks o configs-secretos.
+/// Verdadero si `fuente` es una sonda de secretos: gitleaks, configs-secretos o la descarga.
 pub fn es_fuente_de_secretos(fuente: &Fuente) -> bool {
     FUENTES_DE_SECRETOS
         .iter()
@@ -721,6 +727,30 @@ mod tests {
             "clave",
             "clave en el código",
             "gitleaks",
+            &[],
+        );
+        secreto.previo = true;
+        let valor = puntuar_hallazgos(std::slice::from_ref(&secreto), &[]);
+        let sonda = ResultadoSonda {
+            dimension: Dimension::Seguridad,
+            valor: Some(valor),
+            motivo: None,
+            hallazgos: vec![secreto],
+        };
+        let limpia = quitar_previos(std::slice::from_ref(&sonda), &[]);
+        assert_eq!(limpia, vec![sonda], "un secreto previo sigue en el puntaje");
+    }
+
+    #[test]
+    fn previos_quitar_previos_deja_el_secreto_previo_de_la_descarga() {
+        let mut secreto = crear_hallazgo(
+            Dimension::Seguridad,
+            3,
+            "src/lib.rs",
+            1,
+            "clave",
+            "clave en el código",
+            descarga::SONDA_DESCARGA,
             &[],
         );
         secreto.previo = true;

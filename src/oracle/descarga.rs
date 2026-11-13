@@ -121,6 +121,7 @@ pub fn cache_de_con_error(
 /// Prefijo de cada suite: deja la caché de dependencias visible para cargo, sin escribir en ella.
 pub const PRELUDIO: &str = "export CARGO_HOME=/tmp/cargo-home && mkdir -p \"$CARGO_HOME\" && cp /cache/config.toml \"$CARGO_HOME/config.toml\" && ";
 
+pub(crate) const SONDA_DESCARGA: &str = "descarga";
 const CARPETA_CACHE: &str = "cache";
 const CARPETA_RUST: &str = "rust";
 const CARPETA_PYTHON: &str = "python";
@@ -273,7 +274,7 @@ fn hallazgo_en(
         linea,
         cita: cita.into(),
         detalle,
-        fuente: Fuente::Sonda("descarga".into()),
+        fuente: Fuente::Sonda(SONDA_DESCARGA.into()),
         id,
         impacto: Vec::new(),
         previo: false,

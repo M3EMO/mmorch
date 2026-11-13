@@ -15,7 +15,7 @@ use crate::oracle::tarea::{Requisito, Tarea};
 use crate::tipos::{Dimension, Hallazgo};
 
 const SONDA_ESTRUCTURA: &str = "configs";
-const SONDA_SECRETOS: &str = "configs-secretos";
+pub(crate) const SONDA_SECRETOS: &str = "configs-secretos";
 const SONDA_DOCKERFILE: &str = "dockerfile";
 const SONDA_HADOLINT: &str = "hadolint";
 /// Detalle de la regla (b): el último stage corre como root. La sonda de entrega lo reusa.
