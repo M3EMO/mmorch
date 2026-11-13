@@ -2964,7 +2964,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "$ref": "#/$defs/Conteo"
         },
         "contrato_fallidos": {
-          "description": "Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Un test que ningún\nrequisito prueba con `contrato:` da `NoListo` (`test_contrato_fuera_de_requisitos`). Un veredicto\nviejo lee vacío.",
+          "description": "Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Todo test estable\nque falla da `NoListo` (`test_contrato_falla`), lo pruebe o no un requisito. Un veredicto viejo lee\nvacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -3053,7 +3053,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "$ref": "#/$defs/Conteo"
         },
         "ocultos_fallidos": {
-          "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da\n`NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.",
+          "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Todo test estable que falla da\n`NoListo` (`test_oculto_falla`), lo pruebe o no un requisito. Un veredicto viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -5568,7 +5568,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "$ref": "#/$defs/Conteo"
     },
     "contrato_fallidos": {
-      "description": "Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Un test que ningún\nrequisito prueba con `contrato:` da `NoListo` (`test_contrato_fuera_de_requisitos`). Un veredicto\nviejo lee vacío.",
+      "description": "Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Todo test estable\nque falla da `NoListo` (`test_contrato_falla`), lo pruebe o no un requisito. Un veredicto viejo lee\nvacío.",
       "type": "array",
       "default": [],
       "items": {
@@ -5657,7 +5657,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "$ref": "#/$defs/Conteo"
     },
     "ocultos_fallidos": {
-      "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da\n`NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.",
+      "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Todo test estable que falla da\n`NoListo` (`test_oculto_falla`), lo pruebe o no un requisito. Un veredicto viejo lee vacío.",
       "type": "array",
       "default": [],
       "items": {

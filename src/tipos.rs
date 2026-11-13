@@ -455,17 +455,17 @@ pub struct Veredicto {
     /// Dimensiones con veredicto que todavía no están calibradas. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub sin_calibrar: Vec<Dimension>,
-    /// Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da
-    /// `NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.
+    /// Ids ordenados de los tests ocultos que fallan de forma estable. Todo test estable que falla da
+    /// `NoListo` (`test_oculto_falla`), lo pruebe o no un requisito. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub ocultos_fallidos: Vec<String>,
     /// Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Vacío si no hay revisión guardada
     /// para el spec. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub ambiguedades: Vec<String>,
-    /// Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Un test que ningún
-    /// requisito prueba con `contrato:` da `NoListo` (`test_contrato_fuera_de_requisitos`). Un veredicto
-    /// viejo lee vacío.
+    /// Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Todo test estable
+    /// que falla da `NoListo` (`test_contrato_falla`), lo pruebe o no un requisito. Un veredicto viejo lee
+    /// vacío.
     #[serde(default)]
     pub contrato_fallidos: Vec<String>,
     /// Hallazgos del juez de diseño que se descartaron, con su motivo. No cuentan para ningún puntaje.
