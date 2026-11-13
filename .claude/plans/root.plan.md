@@ -8768,3 +8768,106 @@ P95, P97, P98, P99, P101 y P102 siguen abiertas.
 
 - **a)** Dejarlo así. Una dimensión inestable cuenta como sin veredicto, y la tarea da "sin decisión".
 - **b)** Una dimensión inestable cuenta como medida: Root la midió y encontró que el juez no es confiable ahí. "Listo" puede salir, y el resumen la nombra: "Diseño inestable en esta tarea". Recomendada: la inestabilidad es una propiedad medida del juez en esa tarea, no una medición que faltó. Con a, el ruido del juez decidiría si una tarea puede estar lista.
+
+## Vuelta del 2026-11-14 (33): las respuestas del usuario, y el plan desde la Tarea 111
+
+**Estado.** La Tarea 110 (P103 a) se construye en `laptop/tarea-110`, desde 64361fa. El orquestador aplicó en el `ROOT_HOME` real lo medido en `home-111`: imagen `:4`, nextest nuevo, ids ampliados, `con_tests/` y el equivalente de t1. El respaldo está en `~/.local/share/root-respaldo-2026-11-13`. Faltan `armar_s2.py` y la recalibración. **Las capas no están en esa lista:** son el paso 5 de la vuelta (32), y van antes de medir Arquitectura.
+
+**Respuestas del usuario, del 2026-11-13, literales:**
+- P95: "p95 por que no detecta el test rojo? la idea no es solo de funcionamiento si no de eficiencia. Si hay algo que haga mas lento de lo que deberia, mas pesado de lo que deberia u otra cosa entonces deberia dar mal o una escala continua."
+- P97: "c". P98: "c". P99: "a". P101: "a". P102: "a".
+- P104 sigue abierta.
+
+## 1. P95, primera parte: un test oculto rojo da mal
+
+**Lo que pide el usuario:** un test oculto rojo "debería dar mal o una escala continua". El texto me deja elegir, y elijo las dos cosas a la vez:
+- **La decisión da mal.** Todo test oculto rojo, que no es inestable, dispara "no listo", con su id y su requisito. Ya no depende de la completitud mínima.
+- **La escala continua se queda.** Funciona y Completitud ya son escalas de 0 a 1. Un test rojo las sigue bajando según su peso, y el informe las muestra.
+
+**Lo que no cambia:** un test inestable no dispara. Lo cubre la regla de inestables de hoy.
+
+## 2. P95, segunda parte: la eficiencia cuenta sin declararla
+
+**Lo que pide el usuario:** "Si hay algo que haga mas lento de lo que deberia, mas pesado de lo que deberia u otra cosa entonces deberia dar mal o una escala continua." Hoy Eficiencia solo se mide si la tarea trae `[eficiencia]`, y ninguna tarea de S2 lo trae.
+
+**El diseño de la medición, que es técnico:**
+1. **La referencia es el estado inicial,** `bootstrap/`. Existe en toda tarea minada, y también en una evaluación real de un cambio. "Más lento de lo que debería" se lee como "más lento que antes del cambio".
+2. **Lo que se mide, sin declarar nada:**
+   - el tiempo de la suite del contrato, con la mediana de 3 corridas;
+   - la memoria pico de esa suite, medida en el contenedor;
+   - el tamaño del binario de release;
+   - el tiempo de compilación.
+3. **El resultado es una razón contra la referencia, por medida.** Por ejemplo, 1,4 veces más lento.
+4. **El ruido se mide.** La referencia también corre 3 veces. Una diferencia menor que la variación de la propia referencia no cuenta.
+5. **Una tarea que trae `[eficiencia]`** sigue con su banco, como hoy. La medición automática se suma.
+
+**Lo que el texto no fija, y va en P105:** desde qué regresión "da mal", y si "da mal" es "no listo" o solo una escala más baja.
+
+## 3. P101 a: medir Diseño y Arquitectura en t1
+
+- **Tope nuevo de S2:** 7 USD. Lo gastado por API en S2 va en 3,1641 USD, según la última cuenta del orquestador. Quedan cerca de 3,84 USD.
+- **Gasto previsto:** cerca de 1,05 USD por dimensión. Son 3 juicios de la base, 5 defectos y 5 limpios, a cerca de 0,08 USD por juicio. Las dos juntas suman cerca de 2,1 USD.
+- **Cómo:** `calibrar --dimension diseno --n 10` y `calibrar --dimension arquitectura --n 10` en t1, con `--tope-usd` igual a lo que queda de los 7 USD. El control por llamada de la Tarea 83 frena antes de pasarlo.
+- **Antes de Arquitectura,** las capas de t1 deben estar aplicadas y verificadas con el binario mezclado.
+- **Lectura, con P102 a.** Con una sola tarea, 5 defectos dan una cota de Wilson de 0,57 como mucho. El resultado dice si el juez detecta algo en un repo real. No calibra ninguna dimensión todavía.
+
+## 4. P102 a: qué significa "calibrada"
+
+**La decisión del usuario:** en las dimensiones de juez, "calibrada" pide una cota inferior de Wilson de 0,8 o más, con los casos de todas las tareas juntos, por versión de Root. En las dimensiones de oráculo, pide un defecto detectado y todos los limpios bien.
+
+**El diseño.**
+1. **La unidad es la versión, no la tarea.** Una versión es la huella de la fila: prompt, rúbricas y versión de sondas (Tareas 81 y 89).
+2. **Se juntan las filas vigentes de todas las tareas con la misma huella.** Una fila vigente tiene su `tarea_hash` actual y no es anterior a la 106.
+3. **Dimensiones de juez:** calibrada si la cota inferior de Wilson al 95 % es de 0,8 o más en la sensibilidad, y también en la especificidad. Se cuentan inyecciones distintas y limpios con veredicto.
+4. **Dimensiones de oráculo:** calibrada si hay al menos un defecto detectado, y si todos los limpios con veredicto dieron bien.
+5. **Una dimensión que no aplica en ninguna tarea** queda "sin calibrar: ningún caso aplicable", como dice la vuelta (20).
+6. **`calibrar`** muestra la cota de Wilson de la versión y cuántos casos faltan para llegar a 0,8.
+
+## 5. P97 c, P98 c y P99 a
+
+**P97 c: minar otra reserva, y sumar los 5 arreglos de broot.**
+1. **Los 5 arreglos de broot entran al dataset ya.** El ajuste real ya se midió (4 de 5). Las 3 tareas de S2 y `8f3ea21af75c` no entran al conjunto separado del recall.
+2. **La reserva nueva** sigue el diseño de Colab de la vuelta (32). Colab corre el filtro barato: "¿pasa `cargo test` en la punta?". La admisión con los criterios 1 a 5 corre en la laptop, en un solo entorno.
+3. **Los repos nuevos dan tareas de los dos tipos:** arreglo y función nueva.
+4. **Además dan reales para el final,** por P98 c. Esos repos no pueden ser broot ni los 4 del final.
+
+**P98 c: no abrir nada del final hasta tener 15 reales.** Los reales nuevos se sellan al minarse, con la misma regla de siempre: la etiqueta se fija antes de medir.
+
+**P99 a: la ficha declara la interfaz.** Va con la regla de la vuelta del 2026-11-10 (4):
+- los nombres salen del rojo de compilación;
+- las firmas salen de `diff.txt`;
+- un E0624 entra como "hacer público";
+- la fuga exime solo esos nombres;
+- el chequeo de esbozos con `todo!()` prueba que la interfaz está completa. Corre en contenedor.
+
+Todo esto vive en los scripts de minería, no en Root.
+
+## 6. Quién hace qué
+
+**El orquestador, sin código de Root:**
+1. Aplicar y verificar las capas de t1 a t3, actualizar `armar_s2.py` y recalibrar sin API. Son los pasos 5, 8 y 9 de la vuelta (32).
+2. P101 a: las dos calibraciones de t1, con el tope de 7 USD.
+3. P97 c: sumar los 5 de broot, y minar la reserva nueva con Colab y la laptop.
+4. P99 a: las fichas con interfaz, el chequeo de fuga nuevo y el chequeo de esbozos.
+5. P98 c: sellar los reales nuevos al minarlos, sin abrir nada.
+6. La medición de Colab de la vuelta (32): cuánto tarda la suite sin podman en una VM.
+
+**Un builder, con código de Root:**
+
+| Tarea | Qué | Depende de | Archivos principales |
+|---|---|---|---|
+| 111 | P102 a: "calibrada" por versión | Nada. Corre en paralelo con la 110 | `src/oracle/calibra.rs`, `src/lib.rs` |
+| 112 | P95: un test oculto rojo da "no listo" | La 110, que toca `informe.rs` | `src/oracle/informe.rs` |
+| 113 | P95: eficiencia sin declararla | P105, y la 110 por `mod.rs` | `src/oracle/mod.rs`, un módulo nuevo, los comandos de la imagen |
+
+Brief de la 111: `docs/builds/brief-local-111.md`, con base 64361fa y rama `laptop/tarea-111`. No toca los archivos de la 110.
+
+## Preguntas para el usuario (2026-11-14, 33)
+
+P104 sigue abierta.
+
+**P105: pediste que la eficiencia cuente aunque la tarea no la declare.** Root compararía el cambio contra el estado de antes del cambio: el tiempo de los tests, la memoria pico, el tamaño del binario y el tiempo de compilación. Cada medida da una razón, por ejemplo "1,4 veces más lento". Falta decidir qué hace Root con esa razón.
+
+- **a)** Una regresión de más de 1,5 veces en cualquier medida, que además pasa la variación propia de la referencia, da "no listo". Una regresión menor solo baja la escala de Eficiencia. Recomendada: da mal cuando el empeoramiento es claro, y una escala continua cuando es chico. El 1,5 deja margen para el ruido de la medición.
+- **b)** Nunca da "no listo". La regresión solo baja la escala de Eficiencia, y el informe la muestra.
+- **c)** Igual que a, pero con otro umbral. Decime cuál.
