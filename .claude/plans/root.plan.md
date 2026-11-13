@@ -8332,3 +8332,69 @@ Brief: `docs/builds/brief-local-103.md`. Base: punta de `laptop/tarea-102`, que 
 El grupo B usa el campo que agrega el A, así que va después.
 
 **Preguntas al usuario:** ninguna nueva. P95 y P97 a P102 siguen abiertas.
+
+## Vuelta del 2026-11-13 (26): la 103, "listo" sin juez, y Tarea 104
+
+**Estado.** La 103 y la 103b están en `laptop/tarea-103` (22d0732), sobre la 102 (a301c80). Con podman dieron 3238, 0 y 4. La 103b arregló el HIGH y los MEDIUM de la revisión de seguridad. Las mezclas de la 84 a la 103 y P95, P97 a P102 esperan al usuario. P96 tiene respuesta: "a".
+
+**La evaluación real con la 103 muestra que P96 a funciona.** El repo bueno de t1 dio "listo", con 123 avisos previos que no bloquean. El repo de t1 que no compila dio "no listo", con `no_compila`. Es la primera vez que una tarea de S2 da una decisión distinta de "bloqueado".
+
+## 1. Las preguntas de la 103 y la 103b
+
+1. **La regla del secreto previo queda `bloqueo_seguridad`:** acepto. La frase ya dice que estaba en el estado inicial.
+2. **La línea del resumen sin id:** acepto sin tocar el gate. El gate de redacción cuida el texto del LLM. Esa línea la escribe Root después, con datos medidos. No hace falta que cite un id.
+3. **`avisos_previos` en `Informe`, en `src/tipos.rs`:** acepto. Solo agrega.
+4. **El aviso de cargo audit es el primer token `RUSTSEC-`:** acepto.
+5. **La fuente de un juez se nombra "juez <modelo>":** acepto.
+6. **"Avisos previos" entre "Riesgos" y "Confianza":** acepto.
+7. **Las sondas de configs, hadolint y la descarga nunca son previo: cambia.** Esas sondas también dan hallazgos de Seguridad, por ejemplo en `src/oracle/configs.rs`. Un hallazgo de severidad 3 que ya estaba en el estado inicial bloquearía igual. Eso contradice la respuesta del usuario: "bloquea solo lo que el cambio introduce". La línea base suma esas fuentes, con la misma regla de id. Un secreto en un YAML sigue bloqueando siempre. Va a la Tarea 104.
+8. **No guardar una línea base incompleta:** acepto. El costo de recalcular sin RustSec es menor que fijar un fallo de infraestructura.
+9. **La atribución de los commits por modelo:** acepto que quede así. Dice qué modelo construyó cada commit, y eso es exacto.
+10. **`rangos_cambiados` corre siempre que hay `bootstrap/`:** acepto.
+
+**La 103b:** acepto sus 6 puntos. El punto 5 sin rojo es correcto: `rename` cuida un corte a mitad de escritura, y eso no se ve desde afuera.
+
+## 2. "Listo" con las dimensiones de juez sin veredicto
+
+**Lo que leí.** Hoy la decisión no usa las dimensiones de juez:
+- `bloqueos` mira requisitos que pesan para bloquear, Seguridad nueva y secretos.
+- `no_listo` mira tests ocultos, contrato, Completitud mínima y `no_compila`.
+- Diseño, Arquitectura y Estructura no disparan ninguna regla, ni con juez ni sin él.
+
+**Entonces el caso de t1 no es un error de código.** Con juez o sin juez, la decisión de t1 habría sido "listo". El juez solo cambia lo que el informe muestra.
+
+**Pero sí es una pregunta de producto:** qué promete "listo". Va en P103.
+
+## 3. Los 13 "delete field"
+
+**Lo medido.** cargo-mutants 27.1.0 ignora también `--exclude-re` para ese tipo de mutante. Corren siempre. `fuera_de_la_muestra` los saca del puntaje, así que el puntaje es correcto.
+
+**Decisión: se acepta el costo de tiempo, por ahora.**
+1. El puntaje ya está protegido. El único daño es tiempo.
+2. **Medición, sin código:** el orquestador mide cuánto tardan esos 13 en una corrida de t1, con el estado por mutante.
+3. **Si pesan más de un cuarto de la corrida,** se prueba una versión más nueva de cargo-mutants en una imagen de prueba. Si respeta el filtro, se sube la imagen.
+4. Reportar el error a cargo-mutants es una acción hacia afuera, y no la hago sin el usuario.
+5. **El comentario de `EXCLUIR_DELETE_FIELD` cambia en la 104.** Hoy dice que se excluyen, y no es así. Dirá que 27.1.0 ignora el filtro para ese tipo, y que `fuera_de_la_muestra` protege el puntaje. `--exclude-re` se queda, para una versión que lo respete.
+
+## 4. Qué trabajo queda que no depende del usuario
+
+**La Tarea 104, chica.** Brief: `docs/builds/brief-local-104.md`, con base 22d0732 y rama `laptop/tarea-104`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | La línea base suma las sondas de Seguridad de configs, hadolint y la descarga | `src/oracle/previos.rs` |
+| 2 | El comentario de `EXCLUIR_DELETE_FIELD` | `src/oracle/mutacion.rs` |
+
+Los dos puntos no comparten archivos.
+
+**Después de la 104 no queda trabajo de código que no dependa del usuario.** Queda la medición del punto 3 de la sección 3, y lo que el orquestador aplica después de las mezclas: las capas, el comando nuevo de nextest, `con_tests/` y los ids ocultos ampliados.
+
+## Preguntas para el usuario (2026-11-13, 26)
+
+P95 y P97 a P102 siguen abiertas.
+
+**P103: hoy, Root puede dar "listo" aunque el juez no haya corrido, por ejemplo sin clave de API.** En t1 pasó así: Diseño y Arquitectura quedaron sin veredicto, y la decisión fue "listo". Hoy ninguna regla de la decisión usa esas dimensiones, ni con juez ni sin él.
+
+- **a)** "Listo" exige veredicto en toda dimensión que aplica. Sin juez, la decisión es "sin decisión".
+- **b)** "Listo" sigue como hoy, pero el resumen dice qué dimensiones quedaron sin medir. Por ejemplo: "listo; Diseño y Arquitectura sin medir: el juez no corrió". Recomendada: hoy el juez no cambia la decisión, así que exigirlo haría depender "listo" de tener una clave, y no del producto. El resumen deja claro qué no se midió.
+- **c)** Dejarlo como está, sin la línea nueva.
