@@ -738,8 +738,23 @@ fn ejecutar_descarga(
     ejecucion: &Ejecucion,
     credenciales: &[Credencial],
 ) -> Result<(), Diagnostico> {
-    let resultado = match contenedor::ejecutar(ejecucion) {
+    ejecutar_descarga_con(&contenedor::ejecutar, ejecucion, credenciales)
+}
+
+/// Igual que `ejecutar_descarga`, con el ejecutor de contenedores inyectado para los tests.
+fn ejecutar_descarga_con(
+    correr: &dyn Fn(&Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
+    ejecucion: &Ejecucion,
+    credenciales: &[Credencial],
+) -> Result<(), Diagnostico> {
+    let resultado = match correr(ejecucion) {
         Err(ErrorOraculo::Infra(m)) => Err(Diagnostico::Infra(m)),
+        Err(ErrorOraculo::PlazoVencido {
+            segundos,
+            contenedor,
+        }) => Err(Diagnostico::Infra(format!(
+            "timeout tras {segundos} s; contenedor {contenedor} eliminado"
+        ))),
         Err(otro) => Err(Diagnostico::Desconocido(otro.to_string())),
         Ok(resultado) if resultado.codigo == 0 => Ok(()),
         Ok(resultado) => Err(diagnosticar(&resultado.stderr)),
@@ -2280,5 +2295,30 @@ source = \"git+http://host/x?rev=1#abc1234\"\n";
         let txt = String::from_utf8(cola).expect("la cola es UTF-8 válido");
         assert!(txt.ends_with("fin"), "{txt:?}");
         assert!(!txt.contains('\u{FFFD}'), "{txt:?}");
+    }
+
+    #[test]
+    fn descarga_plazo_vencido_da_infra_con_el_mensaje_de_timeout() {
+        let falso = |_: &Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            Err(ErrorOraculo::PlazoVencido {
+                segundos: 600.0,
+                contenedor: "root-x".into(),
+            })
+        };
+        let diagnostico = ejecutar_descarga_con(&falso, &ejecucion(), &[])
+            .expect_err("un plazo vencido es un fallo de descarga");
+        assert_eq!(
+            diagnostico,
+            Diagnostico::Infra("timeout tras 600 s; contenedor root-x eliminado".into())
+        );
+        match error_de(diagnostico) {
+            ErrorOraculo::Infra(m) => {
+                assert_eq!(
+                    m,
+                    "infraestructura: timeout tras 600 s; contenedor root-x eliminado"
+                );
+            }
+            otro => panic!("debe ser Infra, es {otro:?}"),
+        }
     }
 }
