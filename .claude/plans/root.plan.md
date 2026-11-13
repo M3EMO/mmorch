@@ -8647,3 +8647,42 @@ Brief: `docs/builds/brief-local-108.md`, con base d7dfcb0 y rama `laptop/tarea-1
 **Después de la 108 no queda trabajo de código que no dependa del usuario.** Funciona en t1 y Completitud en t1 tienen límites de la tarea, no de Root. Solo más tareas los arreglan, y eso espera P97.
 
 **Preguntas al usuario:** ninguna nueva. P95 y P97 a P103 siguen abiertas.
+
+## Vuelta del 2026-11-14 (31): la 108, un plazo que cambia de nombre, y Tarea 109
+
+**Estado.** La Tarea 108 está en `laptop/tarea-108` (1f60826). La suite con podman de d6d0b72 dio un rojo: un test con podman esperaba `Infra`, y la 108 lo cambió a `PlazoVencido`. La 108b corrigió el test, y la suite dio 3322, 0 y 4, sin barridos. La serie 111 repite la 110 en las doce filas. Esperan al usuario las mezclas de la 84 a la 108, P95, P97 a P103 y Colab.
+
+**Lo que enseña el rojo de la 108.** Un test con `saltar_sin_podman` no corre en la suite del builder. Cambiar una variante de error sin buscar sus lectores deja rojos que solo ve la suite con podman. Por eso la 109 empieza por buscar a todos los lectores del error nuevo.
+
+## 1. Las seis preguntas de la 108
+
+1. **El plazo vencido en `descarga.rs:741`: se arregla en la 109.** Hoy cae en `Diagnostico::Desconocido`, y el mensaje cambia a "la descarga falló: error de infraestructura del oráculo". Un plazo vencido sigue siendo infraestructura. `PlazoVencido` va a `Diagnostico::Infra`, con el mismo texto de hoy.
+   - **Y no es el único lugar.** `contenedor::ejecutar` es la única fuente de `PlazoVencido`. Varios llamadores miran solo `ErrorOraculo::Infra`: `descarga.rs:742`, `descarga.rs:1326` y `contenedor.rs:726`, entre otros. La 109 une los llamadores de `contenedor::ejecutar` de codegraph y de grep, y decide en cada uno.
+2. **El motivo del limpio vencido, "suite sin veredicto: la suite pasó su plazo":** acepto.
+3. **Un limpio vencido no se comparte entre dimensiones:** acepto. Cada dimensión con juez lo vuelve a correr, y eso es lo correcto: el plazo puede vencer por la carga del host.
+4. **El pid propio cuenta como vivo en el barrido de `corre`:** acepto. El margen de 300 s sigue como barrera.
+5. **`mismo_binario` basta para el barrido de credenciales:** acepto. Un pid reusado por el mismo ejecutable lo corrige el margen.
+6. **Un limpio vencido pierde sus otros puntajes:** acepto. Ese limpio no midió nada.
+
+## 2. Los huecos de tests
+
+**El test del 20 % no aísla su regla.** Con n = 10, también lo corta `MIN_LIMPIOS`. Un test de calibración con n de 20 o más costaría tiempo sin necesidad. La regla vive en `aplicar`, que es una función pura.
+- **Decisión:** dos tests unitarios sobre `aplicar`, con una fila armada a mano y `MIN_LIMPIOS` cumplido. Con 2 de 10 limpios sin veredicto, 20 %, la dimensión calibra. Con 3 de 10, 30 %, no calibra.
+
+**Diseño y Arquitectura no tienen test de limpio vencido.** Solo Estructura lo tiene. Las dimensiones de juez pasan por otro camino: la base se juzga 3 veces (Tarea 83).
+- **Decisión:** un test con un juez falso, en Diseño, donde un limpio vence el plazo. La calibración sigue, y el limpio queda sin veredicto.
+
+## 3. Tarea 109
+
+Brief: `docs/builds/brief-local-109.md`, con base 1f60826 y rama `laptop/tarea-109`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Todo lector de `contenedor::ejecutar` trata `PlazoVencido` como infraestructura | `src/oracle/descarga.rs`, `src/oracle/contenedor.rs`, y los llamadores que salgan de la búsqueda |
+| 2 | Los tests del 20 % y del limpio vencido con juez | `src/oracle/calibra.rs`, solo tests |
+
+Los dos puntos no comparten archivos, y corren en paralelo.
+
+**Después de la 109 no queda trabajo de código que no dependa del usuario.**
+
+**Preguntas al usuario:** ninguna nueva. P95 y P97 a P103 siguen abiertas.
