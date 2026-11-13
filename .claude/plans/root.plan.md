@@ -9062,3 +9062,37 @@ P104 sigue abierta.
 **Los archivos no chocan.** La 110, la 111 y la 112 no tocan `contenedor.rs`, `descarga.rs`, `defectos.rs` ni `target_podman.rs`. La 113 toca `informe.rs` y `calibra.rs`.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (37): la 113, el brief de la 114, y la 115 espera
+
+**Estado.**
+- La Tarea 113 terminó en `laptop/tarea-113` (ec3573b), sobre la 110, con 3351, 0 y 4 sin podman. Tocó tests de `src/oracle/mod.rs` fuera de su tabla.
+- El orquestador encadenó la 111 sobre la 110 en `laptop/cadena-110-111` (04cf8e7), sin conflictos.
+- La 117 se construye desde 64361fa.
+- Las suites con podman de la 110 a la 113 corren después de la recalibración del `ROOT_HOME` real.
+
+## 1. Las tres preguntas de la 113
+
+1. **La edición de tres tests en `mod.rs`:** acepto. Solo cambió aserciones que leían el nombre de una regla reemplazada. El hook no deja pasar un commit con la suite en rojo. **El error es mío:** el brief prohibía todo `tests/` y `mod.rs`, y no previó los tests que leen el nombre de una regla. Desde la 114, cada brief permite editar un test de cualquier archivo que lea un literal que la tarea cambia.
+2. **Una dimensión que bloquea e inestable da "sin decisión":** acepto. Sigue el punto 2.6 del brief.
+3. **Los comentarios de `src/tipos.rs` y `docs/interfaces.md` con los nombres viejos: van en la Tarea 115.** La 114 sale de 04cf8e7, que no trae los nombres nuevos de la 113. La base de la 115 sí los traerá.
+
+## 2. La 114 y la 115 chocan en `src/oracle/mod.rs`
+
+- **La 114** cambia dos llamadas de `evaluar_con` en `mod.rs`: `aplicar` y `motivo_sin_calibrar` pasan a la versión con `home`.
+- **La 115** suma la medición de eficiencia en la evaluación. Eso toca `mod.rs`, y también `informe.rs`, por la regla de "no listo".
+
+**Va primero la 114.**
+- Es chica, y su base, 04cf8e7, ya existe.
+- **Arregla un riesgo de las suites que vienen.** Varios tests de `calibra.rs` llaman a `aplicar` y a `motivo_sin_calibrar`. Esas funciones leen el `ROOT_HOME` real. El orquestador está por recalibrar ese `ROOT_HOME`. Esos tests pueden cambiar de valor por los datos del usuario, no por el código.
+
+**La 115 espera.** Su base será una cadena con la 110, la 111, la 113 y la 114. El orquestador encadena la 113 sobre la punta de la 114. No escribo su brief en esta vuelta.
+
+## 3. El alcance de la 114
+
+1. **`evaluar_con` pasa el `home` de la evaluación** a `aplicar_en` y a `motivo_sin_calibrar_en` (`src/oracle/mod.rs:909` y `:921`).
+2. **`aplicar` y `motivo_sin_calibrar` se borran,** si después del punto 1 solo los usan tests. Esos tests pasan a la versión con `home`, con una carpeta temporal.
+3. **`inestables_de` usa la vigencia de la 111:** pide la huella actual y un `tarea_hash` igual al actual. Una fila sin huella o sin `tarea_hash` no sirve.
+4. **Los lectores de un `Puntaje` que preguntan "¿tiene valor?" usan `!sin_valor()`.** Hoy leen `sin_veredicto`, y ven un `no_aplica` como un 0 medido.
+
+**Preguntas al usuario:** ninguna nueva.
