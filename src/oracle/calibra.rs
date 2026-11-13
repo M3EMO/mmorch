@@ -9,7 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -22,8 +22,9 @@ use super::mutacion::{EstadoMutante, MutanteEstado, MutanteMuerto};
 use super::rubrica::{Mide, Rubrica, cargar_embebidas};
 use super::tarea::{Equivalente, Tarea};
 use super::{
-    AVISO_TARGET_FRIO, CARPETA_TEMPORALES, ErrorOraculo, OpcionesOraculo, Partes, Target,
-    partes_de, temporal,
+    AVISO_TARGET_FRIO, CARPETA_TEMPORALES, DuracionesSuites, ErrorOraculo, MOTIVO_SUITE_PLAZO,
+    OpcionesOraculo, Partes, PlazosSuites, Target, con_plazos_suites, partes_de, temporal,
+    tomar_duraciones_suites,
 };
 use crate::borrado;
 use crate::config::Config;
@@ -44,6 +45,27 @@ const MIN_DEFECTOS_APLICABLES: u32 = 5;
 const MIN_LIMPIOS: u32 = 5;
 /// Porcentaje máximo de casos limpios sin veredicto para calibrar una dimensión. Más que esto, la medida no calibra.
 const MAX_LIMPIOS_SIN_VEREDICTO_PCT: u32 = 20;
+/// Multiplicador del plazo de cada suite en una calibración, sobre su duración en la base (Tarea 107).
+const MULTIPLICADOR_PLAZO_SUITE: u64 = 10;
+/// Plazo mínimo de cada suite en una calibración, en segundos (Tarea 107).
+const MINIMO_PLAZO_SUITE_SEGUNDOS: u64 = 600;
+
+/// Plazo de una suite en una calibración: `MULTIPLICADOR_PLAZO_SUITE` veces su duración en la base, con piso
+/// `MINIMO_PLAZO_SUITE_SEGUNDOS`. Sin duración, vale el piso.
+fn plazo_de_suite(duracion_base: Option<u64>) -> Duration {
+    let calculado = duracion_base
+        .unwrap_or(0)
+        .saturating_mul(MULTIPLICADOR_PLAZO_SUITE);
+    Duration::from_secs(calculado.max(MINIMO_PLAZO_SUITE_SEGUNDOS))
+}
+
+/// Plazos de los casos, de las duraciones de las suites en la base. Redondea cada duración hacia arriba.
+fn plazos_de_base(duraciones: DuracionesSuites) -> PlazosSuites {
+    PlazosSuites {
+        contrato: plazo_de_suite(duraciones.contrato.map(|s| s.ceil() as u64)),
+        oculto: plazo_de_suite(duraciones.oculto.map(|s| s.ceil() as u64)),
+    }
+}
 
 /// Una medición de una dimensión de una tarea, con su muestra.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -138,6 +160,13 @@ pub struct Fila {
     /// entradas repetidas (mismo archivo, línea y edición). Una fila sin el campo vale 0.
     #[serde(default)]
     pub equivalentes_excluidos: u32,
+    /// Segundos que tardó la suite del contrato en la base: su corrida más lenta. Sale el plazo de los casos
+    /// (`plazo_de_suite`). `None` si la base no corrió la suite o la fila es anterior a la Tarea 107.
+    #[serde(default)]
+    pub duracion_contrato: Option<f64>,
+    /// Segundos que tardó la suite oculta en la base: su corrida más lenta. Igual que `duracion_contrato`.
+    #[serde(default)]
+    pub duracion_oculto: Option<f64>,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -751,6 +780,8 @@ struct Ronda<'a> {
     mutantes_base: &'a [MutanteEstado],
     /// Plazo fijo por mutante de los casos, de la duración de la base. `None`: la base no trajo duración.
     plazo_mutantes: Option<u64>,
+    /// Plazo de cada suite en los casos, de la duración de la base (Tarea 107).
+    plazos_suites: PlazosSuites,
     /// Principal y reservas de cada caso, por índice, en orden de intento. Vacía si el caso no tiene principal.
     /// Ver `preelegir`.
     candidatos: Vec<Vec<Candidato>>,
@@ -789,12 +820,14 @@ impl Medido {
     }
 }
 
-/// Lo que devuelve evaluar una copia: el veredicto, si reusó el `target` y la muestra de mutación que midió.
+/// Lo que devuelve evaluar una copia: el veredicto, si reusó el `target`, la muestra de mutación que midió y
+/// si una suite pasó su plazo (`vencio`).
 struct Evaluada {
     veredicto: Veredicto,
     reusado: bool,
     mutantes: Vec<MutanteEstado>,
     filtro: String,
+    vencio: bool,
 }
 
 /// Evalúa la copia `copia` del caso `i` como `tipo`. Reusa el `target` de la base si `puede_reusar` lo permite.
@@ -825,7 +858,9 @@ fn evaluar_copia(
     // Los casos corren con el plazo de la base: un plazo automático cambiaría con los tests que se apagan.
     let veredicto = con_caso(&id, || {
         super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
-            en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+            con_plazos_suites(Some(r.plazos_suites), || {
+                en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+            })
         })
     })?;
     let mutantes = super::mutacion::tomar_muestra();
@@ -834,11 +869,16 @@ fn evaluar_copia(
         .avisos
         .iter()
         .any(|aviso| aviso.starts_with(AVISO_TARGET_FRIO));
+    let vencio = veredicto
+        .avisos
+        .iter()
+        .any(|aviso| aviso.ends_with(MOTIVO_SUITE_PLAZO));
     Ok(Evaluada {
         veredicto,
         reusado: reusa && !frio,
         mutantes,
         filtro,
+        vencio,
     })
 }
 
@@ -1045,12 +1085,19 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             reusado,
             mutantes,
             filtro,
+            vencio,
         } = evaluar_copia(r, &copia, TipoCaso::Limpio, i)?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
         // Un juez rechazado por el límite no mide: su veredicto no se guarda ni cuenta.
         if let Some(detencion) = juez_rechazado(r.tope) {
             return Ok(Medido::detenido(0, detencion));
+        }
+        // Un limpio no tiene inyección que reemplazar. Si su suite pasó el plazo, no hay caso que medir.
+        if vencio {
+            return Err(ErrorOraculo::Infra(format!(
+                "una copia limpia {MOTIVO_SUITE_PLAZO}: la calibración no la mide"
+            )));
         }
         if let Some(c) = compartido {
             c.guardar(i as u32, &veredicto)?;
@@ -1092,6 +1139,8 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     // Cada candidato ya está elegido: la principal y sus reservas, en orden. Un candidato que no compila, o que
     // la suite no ejecuta, se descarta y sigue el próximo. Cada descarte inválido suma a `invalidos`.
     let mut invalidos = 0u32;
+    // Si el último descarte fue por plazo de una suite. Decide el motivo al agotar los candidatos.
+    let mut ultimo_plazo = false;
     let mut medido = None;
     // Sin candidatos, el defecto no tiene lugar. Con candidatos, si ninguno sirve, se agotan las reservas.
     let motivo_sin_caso = if r.candidatos[i].is_empty() {
@@ -1130,6 +1179,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             reusado,
             mutantes,
             filtro,
+            vencio,
         } = super::mutacion::con_archivo_acotado(acotado, || {
             evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)
         })?;
@@ -1138,8 +1188,15 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         if let Some(detencion) = juez_rechazado(r.tope) {
             return Ok(Medido::detenido(invalidos, detencion));
         }
+        // La suite pasó su plazo sin junit: la inyección es inválida, como una que no compila.
+        if vencio {
+            invalidos += 1;
+            ultimo_plazo = true;
+            continue;
+        }
         if rompe_la_compilacion(r.base, &veredicto, r.dimension) {
             invalidos += 1;
+            ultimo_plazo = false;
             continue;
         }
         // Un comportamiento roto que no cambia nada frente a la base puede caer fuera de lo que la suite ejecuta.
@@ -1150,8 +1207,10 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             if let Some(detencion) = juez_rechazado(r.tope) {
                 return Ok(Medido::detenido(invalidos, detencion));
             }
-            if sin_efecto {
+            // `None`: la sonda pasó el plazo. Sin efecto o con plazo, la inyección se descarta.
+            if sin_efecto != Some(false) {
                 invalidos += 1;
+                ultimo_plazo = sin_efecto.is_none();
                 continue;
             }
         }
@@ -1159,6 +1218,12 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         break;
     }
     let Some((inyeccion, veredicto, reusado, mutantes, filtro)) = medido else {
+        // Si el último candidato descartado pasó su plazo, el motivo lo dice.
+        let motivo = if ultimo_plazo {
+            MOTIVO_SUITE_PLAZO
+        } else {
+            motivo_sin_caso
+        };
         return Ok(Medido {
             reemplazos: invalidos,
             caso: None,
@@ -1166,7 +1231,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             no_aplicable: Some(NoAplicable {
                 indice: i as u32,
                 defecto,
-                motivo: motivo_sin_caso.to_string(),
+                motivo: motivo.to_string(),
             }),
         });
     };
@@ -1196,13 +1261,14 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
 }
 
 /// Si la suite no ejecuta la línea de `inyeccion` (Tarea 66, punto 4). Copia el repo bueno, inserta la sonda al
-/// inicio de la fn que contiene la línea y evalúa esa copia. `true` si la sonda no cambia nada frente a la base.
-/// `false` si la línea no está en una fn (no se puede probar) o si la sonda sí cambia el veredicto.
+/// inicio de la fn que contiene la línea y evalúa esa copia. `Some(true)` si la sonda no cambia nada frente a la
+/// base. `Some(false)` si la línea no está en una fn (no se puede probar) o si la sonda sí cambia el veredicto.
+/// `None` si una suite de la sonda pasó su plazo (Tarea 107).
 fn la_suite_no_la_ejecuta(
     r: &Ronda,
     i: usize,
     inyeccion: &Inyeccion,
-) -> Result<bool, ErrorOraculo> {
+) -> Result<Option<bool>, ErrorOraculo> {
     let copia = r.tmp.join(format!("caso-{i}-sonda"));
     super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
     let ruta = copia.join(&inyeccion.archivo);
@@ -1210,12 +1276,19 @@ fn la_suite_no_la_ejecuta(
     let Some(sondada) = sonda::con_panic_en_funcion(&fuente, inyeccion.linea as usize) else {
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
-        return Ok(false);
+        return Ok(Some(false));
     };
     fs::write(&ruta, sondada).map_err(|e| super::infra("escribir la sonda", e))?;
-    let Evaluada { veredicto, .. } = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)?;
+    let Evaluada {
+        veredicto, vencio, ..
+    } = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)?;
     borrado::borrar_dir_dentro(r.tmp, &copia).map_err(|e| super::infra("borrar una copia", e))?;
-    Ok(motivo_de_deteccion(r.base, &veredicto, r.dimension, &BTreeSet::new()).is_none())
+    if vencio {
+        return Ok(None);
+    }
+    Ok(Some(
+        motivo_de_deteccion(r.base, &veredicto, r.dimension, &BTreeSet::new()).is_none(),
+    ))
 }
 
 /// Como `calibrar_medida`, con `hilos` casos a la vez (1 corre en serie). Un coordinador lanza los casos en
@@ -1266,6 +1339,8 @@ fn calibrar_medida_con_hilos(
     // Vacía la muestra de mutación del hilo: lo que quede después es de la base.
     let _ = super::mutacion::tomar_muestra();
     let _ = super::mutacion::tomar_base_segundos();
+    // Vacía las duraciones de las suites del hilo: lo que quede después es de la base (Tarea 107).
+    let _ = tomar_duraciones_suites();
     // La base corre con el límite activo: su juez también cuenta. Una base rechazada no mide nada.
     let base = en_limite(tope, || {
         evaluador(
@@ -1278,6 +1353,8 @@ fn calibrar_medida_con_hilos(
     let mutantes_base = super::mutacion::tomar_muestra();
     // Plazo de los casos: el de la base, sin tocar. La base y las repetidas corren con el automático.
     let plazo_mutantes = super::mutacion::tomar_base_segundos().map(super::mutacion::plazo_de_base);
+    // Duración de cada suite en la base: fija el plazo de sus casos y queda en la fila.
+    let duraciones_base = tomar_duraciones_suites();
     let base = match (base, detencion_de_rechazo(tope)) {
         (_, Some(detencion)) => return Ok(medida_detenida(detencion)),
         (Err(error), None) => return Err(error),
@@ -1386,6 +1463,7 @@ fn calibrar_medida_con_hilos(
         compartidos,
         mutantes_base: &mutantes_base,
         plazo_mutantes,
+        plazos_suites: plazos_de_base(duraciones_base),
         candidatos: Vec::new(),
         agotado: Vec::new(),
         curadas: identidades_de_equivalentes(equivalentes_de(tarea)),
@@ -1491,6 +1569,8 @@ fn calibrar_medida_con_hilos(
         Some(Fila {
             reemplazos,
             plazo_mutantes,
+            duracion_contrato: duraciones_base.contrato,
+            duracion_oculto: duraciones_base.oculto,
             ruidosos: ruidosos.into_iter().collect(),
             inestables: inestables.iter().cloned().collect(),
             extractos_base,
@@ -1620,6 +1700,8 @@ fn fila_de(
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
         plazo_mutantes: None,
+        duracion_contrato: None,
+        duracion_oculto: None,
         repo_origen: None,
         inyecciones_distintas: Some(inyecciones_distintas),
         equivalentes_excluidos: cuantos_equivalentes(tarea),
@@ -1951,6 +2033,8 @@ fn fila_no_aplica(
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
         plazo_mutantes: None,
+        duracion_contrato: None,
+        duracion_oculto: None,
         repo_origen: None,
         inyecciones_distintas: Some(0),
         equivalentes_excluidos: cuantos_equivalentes(tarea),
@@ -2704,6 +2788,8 @@ mod tests {
         Fila {
             tarea_hash: None,
             plazo_mutantes: None,
+            duracion_contrato: None,
+            duracion_oculto: None,
             repo_origen: None,
             inyecciones_distintas: None,
             equivalentes_excluidos: 0,
@@ -5893,6 +5979,138 @@ mod tests {
         assert_eq!(fila.sensibilidad, None);
         // Tres archivos de módulo (`lib.rs` no cuenta): tres intentos inválidos. El cuarto no tiene candidato.
         assert_eq!(fila.reemplazos, 3);
+    }
+
+    /// Veredicto de una copia cuya suite pasó su plazo sin junit: sin veredicto y con el aviso de la suite.
+    fn con_plazo(base: &Veredicto) -> Veredicto {
+        let mut v = con_motivo(
+            base,
+            "suite del contrato sin veredicto: la suite pasó su plazo",
+        );
+        v.avisos.push(format!("contrato: {MOTIVO_SUITE_PLAZO}"));
+        v
+    }
+
+    /// Mide como `calibrar_con`, pero devuelve la medida entera: su fila y sus casos no aplicables.
+    fn medida_de(
+        base_dir: &Path,
+        base: &Veredicto,
+        regla: impl Fn(bool, &BTreeMap<String, String>, &Veredicto) -> Veredicto + Sync,
+        n: usize,
+    ) -> Medida {
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(base_dir, base, regla);
+        let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| ev(ruta);
+        calibrar_medida(
+            &tarea,
+            Dimension::Estructura,
+            n,
+            42,
+            base_dir,
+            &sin_tipo,
+            None,
+            &Vec::new,
+            &|| None,
+            None,
+            None,
+        )
+        .expect("calibra")
+    }
+
+    #[test]
+    fn calibra_suite_que_pasa_su_plazo_se_reemplaza_como_inyeccion_invalida() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let primera = Mutex::new(true);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                base.clone()
+            } else if std::mem::replace(&mut *primera.lock().expect("lock"), false) {
+                con_plazo(base)
+            } else {
+                con_hallazgo_de_sonda(base, Dimension::Estructura)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("calibra");
+        assert_eq!(
+            (
+                fila.n,
+                fila.defectos,
+                fila.limpios,
+                fila.no_aplicable,
+                fila.reemplazos
+            ),
+            (2, 1, 1, 0, 1)
+        );
+        assert_eq!(fila.sensibilidad, Some(1.0));
+    }
+
+    #[test]
+    fn calibra_suite_que_pasa_su_plazo_en_todos_los_candidatos_da_su_motivo() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let medida = medida_de(
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| {
+                if limpia {
+                    base.clone()
+                } else {
+                    con_plazo(base)
+                }
+            },
+            2,
+        );
+        assert_eq!(medida.no_aplicables.len(), 1);
+        assert_eq!(medida.no_aplicables[0].motivo, MOTIVO_SUITE_PLAZO);
+        assert_eq!(medida.fila.as_ref().expect("fila").reemplazos, 3);
+    }
+
+    #[test]
+    fn calibra_limpio_que_pasa_su_plazo_es_error_y_no_se_mide() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |_, _, base| con_plazo(base));
+        let r = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        );
+        assert!(
+            matches!(&r, Err(ErrorOraculo::Infra(m)) if m.contains(MOTIVO_SUITE_PLAZO)),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn calibra_plazo_de_suite_es_10_veces_la_base_con_piso_de_600() {
+        assert_eq!(plazo_de_suite(Some(20)), Duration::from_secs(600));
+        assert_eq!(plazo_de_suite(Some(120)), Duration::from_secs(1200));
+        assert_eq!(plazo_de_suite(None), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn calibra_plazos_de_base_redondean_hacia_arriba_y_separan_las_suites() {
+        let p = plazos_de_base(DuracionesSuites {
+            contrato: Some(20.2),
+            oculto: Some(120.0),
+        });
+        assert_eq!(
+            p.contrato,
+            Duration::from_secs(600),
+            "20,2 s sube a 21: 210 s, piso 600"
+        );
+        assert_eq!(p.oculto, Duration::from_secs(1200));
     }
 
     const MUERTA: &str = "pub fn sin_uso(a: i32) -> bool {\n    a == 1\n}\n";
@@ -9749,6 +9967,20 @@ mod tests {
             .remove("plazo_mutantes");
         let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
         assert_eq!(leida.plazo_mutantes, None);
+    }
+
+    #[test]
+    fn calibra_fila_vieja_sin_duraciones_de_suite_lee_none() {
+        let fila = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        let objeto = vieja.as_object_mut().expect("objeto");
+        objeto.remove("duracion_contrato");
+        objeto.remove("duracion_oculto");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!(
+            (leida.duracion_contrato, leida.duracion_oculto),
+            (None, None)
+        );
     }
 
     const EQUIVALENTE_DE_PRUEBA: &str = "\n[calibracion]\n\n[[calibracion.equivalentes]]\n\

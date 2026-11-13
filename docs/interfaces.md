@@ -652,6 +652,24 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "dimension": {
           "$ref": "#/$defs/Dimension"
         },
+        "duracion_contrato": {
+          "description": "Segundos que tardó la suite del contrato en la base: su corrida más lenta. Sale el plazo de los casos\n(`plazo_de_suite`). `None` si la base no corrió la suite o la fila es anterior a la Tarea 107.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "duracion_oculto": {
+          "description": "Segundos que tardó la suite oculta en la base: su corrida más lenta. Igual que `duracion_contrato`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
         "equivalentes_excluidos": {
           "description": "Entradas de `[calibracion].equivalentes` que la corrida aplicó: el largo de la lista declarada, sin\nentradas repetidas (mismo archivo, línea y edición). Una fila sin el campo vale 0.",
           "type": "integer",

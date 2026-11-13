@@ -2208,6 +2208,88 @@ const MOTIVO_NO_COMPILA: &str = "la suite no compila";
 /// esperado cuenta como fallado, igual que con `MOTIVO_NO_COMPILA`.
 const MOTIVO_SUITE_SIN_JUNIT: &str = "la suite falló y no dejó junit";
 
+/// Motivo de una suite que el plazo de una calibración cortó sin junit. Su caso se reemplaza (Tarea 107).
+pub(crate) const MOTIVO_SUITE_PLAZO: &str = "la suite pasó su plazo";
+
+/// Inicio del error de `contenedor::ejecutar` cuando vence el plazo de una corrida.
+const PREFIJO_VENCIMIENTO: &str = "timeout tras ";
+
+/// Plazo de cada suite en las corridas de una calibración (Tarea 107). Sin él, vale `OpcionesOraculo::timeout`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PlazosSuites {
+    pub(crate) contrato: Duration,
+    pub(crate) oculto: Duration,
+}
+
+/// Duración en segundos de la corrida más lenta de cada suite. `None` si la suite no corrió.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct DuracionesSuites {
+    pub(crate) contrato: Option<f64>,
+    pub(crate) oculto: Option<f64>,
+}
+
+thread_local! {
+    /// Duraciones de las suites de este hilo. La base de una calibración las saca tras evaluarse.
+    static DURACIONES_SUITES: std::cell::RefCell<DuracionesSuites> =
+        std::cell::RefCell::new(DuracionesSuites::default());
+    /// Plazos de las suites de las corridas de este hilo. `None`: vale `OpcionesOraculo::timeout`.
+    static PLAZOS_SUITES: std::cell::RefCell<Option<PlazosSuites>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Anota una corrida de la suite `dir` que duró `segundos`. Gana la corrida más lenta de la suite.
+fn anotar_duracion(dir: &str, segundos: f64) {
+    DURACIONES_SUITES.with(|d| {
+        let mut d = d.borrow_mut();
+        let suite = if dir == DIR_CONTRATO {
+            &mut d.contrato
+        } else {
+            &mut d.oculto
+        };
+        *suite = Some(suite.map_or(segundos, |previo| previo.max(segundos)));
+    });
+}
+
+/// Saca las duraciones de las suites de este hilo y las deja vacías.
+pub(crate) fn tomar_duraciones_suites() -> DuracionesSuites {
+    DURACIONES_SUITES.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
+/// Corre `f` con los plazos `plazos` de las suites en este hilo. Sin plazos, cada suite usa `OpcionesOraculo::timeout`.
+pub(crate) fn con_plazos_suites<T>(plazos: Option<PlazosSuites>, f: impl FnOnce() -> T) -> T {
+    /// Devuelve el plazo anterior al salir del ámbito.
+    struct Restaura(Option<PlazosSuites>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = self.0.take();
+            PLAZOS_SUITES.with(|p| *p.borrow_mut() = anterior);
+        }
+    }
+    let anterior = PLAZOS_SUITES.with(|p| p.replace(plazos));
+    let _restaura = Restaura(anterior);
+    f()
+}
+
+/// Plazo de la suite `dir` en este hilo. `None` si la corrida no es de una calibración.
+fn plazo_de_corrida(dir: &str) -> Option<Duration> {
+    PLAZOS_SUITES.with(|p| {
+        p.borrow().as_ref().map(|p| {
+            if dir == DIR_CONTRATO {
+                p.contrato
+            } else {
+                p.oculto
+            }
+        })
+    })
+}
+
+/// Si la corrida de `dir` venció su plazo de calibración y no dejó el junit `xml` en `salida`.
+/// El caso de la calibración reemplaza esa inyección. Fuera de una calibración, nunca es así.
+fn vence_plazo_sin_salida(dir: &str, error: &ErrorOraculo, salida: &Path, xml: &str) -> bool {
+    let vencio = matches!(error, ErrorOraculo::Infra(m) if m.starts_with(PREFIJO_VENCIMIENTO));
+    vencio && plazo_de_corrida(dir).is_some() && junit::leer_de_salida(&salida.join(xml)).is_none()
+}
+
 /// Corre una suite `repeticiones` veces. Después corre solo sus tests inestables,
 /// hasta `repeticiones_inestable` corridas en total. Una suite de pytest lista antes lo que pytest
 /// recolecta: su junit vale solo si trae exactamente eso y su código cuadra con las fallas (A5).
@@ -2524,20 +2606,27 @@ fn correr_una(
         xml.to_string()
     };
     borrar_xml(c.salida, &xml_corrida)?;
-    let juicio = correr_suite(c, cmd, dir, &xml_corrida, correr).and_then(|resultado| {
-        // Nextest sale con 101 cuando el build falla. No hay junit que leer, ni falta de junit que contar.
-        if es_nextest(cmd) && resultado.codigo == 101 {
-            return Ok(Err(MOTIVO_NO_COMPILA.into()));
+    let juicio = match correr_suite(c, cmd, dir, &xml_corrida, correr) {
+        // Con plazo de calibración, una corrida cortada sin junit no es infraestructura: el caso la reemplaza.
+        Err(error) if vence_plazo_sin_salida(dir, &error, c.salida, &xml_corrida) => {
+            Ok(Err(MOTIVO_SUITE_PLAZO.into()))
         }
-        // Nextest sale con 100 cuando algún test falla. Sin junit, la suite falló sin reporte.
-        if es_nextest(cmd)
-            && resultado.codigo == 100
-            && junit::leer_de_salida(&c.salida.join(&xml_corrida)).is_none()
-        {
-            return Ok(Err(MOTIVO_SUITE_SIN_JUNIT.into()));
-        }
-        juzgar_junit(c, &xml_corrida, &resultado, pytest, esperados)
-    });
+        otro => otro.and_then(|resultado| {
+            anotar_duracion(dir, resultado.segundos);
+            // Nextest sale con 101 cuando el build falla. No hay junit que leer, ni falta de junit que contar.
+            if es_nextest(cmd) && resultado.codigo == 101 {
+                return Ok(Err(MOTIVO_NO_COMPILA.into()));
+            }
+            // Nextest sale con 100 cuando algún test falla. Sin junit, la suite falló sin reporte.
+            if es_nextest(cmd)
+                && resultado.codigo == 100
+                && junit::leer_de_salida(&c.salida.join(&xml_corrida)).is_none()
+            {
+                return Ok(Err(MOTIVO_SUITE_SIN_JUNIT.into()));
+            }
+            juzgar_junit(c, &xml_corrida, &resultado, pytest, esperados)
+        }),
+    };
     if oculta {
         borrar_xml(c.salida, &xml_corrida)?;
     }
@@ -2615,7 +2704,13 @@ fn coleccion_de(
         .map_err(|e| infra("borrar la lista de tests de la corrida anterior", e))?;
     // Los flags se quitan antes del preludio de caché: su `pip` no es el `pytest` de la suite.
     // La colección no escribe junit: el nombre `XML_OCULTO` no se usa aquí.
-    let resultado = correr_suite(c, &comando_de_coleccion(cmd), dir, XML_OCULTO, correr)?;
+    let resultado = match correr_suite(c, &comando_de_coleccion(cmd), dir, XML_OCULTO, correr) {
+        // Con plazo de calibración, una recolección cortada sin lista no tiene veredicto: el caso la reemplaza.
+        Err(error) if vence_plazo_sin_salida(dir, &error, c.salida, ARCHIVO_COLECCION) => {
+            return Ok(Err(MOTIVO_SUITE_PLAZO.into()));
+        }
+        otro => otro?,
+    };
     // Ausente, enlace, sobre el tope o ilegible: lo mismo que ausente (M16).
     let Some(texto) = junit::leer_de_salida(&ruta) else {
         return Err(sin_junit(c, ARCHIVO_COLECCION, &resultado));
@@ -2831,7 +2926,7 @@ fn ejecucion_de_suite(c: &Corrida, cmd: &str, dir: &str) -> Ejecucion {
         salida: c.salida.to_path_buf(),
         cmd: cmd.to_string(),
         env: Vec::new(),
-        timeout: c.o.timeout,
+        timeout: plazo_de_corrida(dir).unwrap_or(c.o.timeout),
         red: false,
         cache: c.cache.clone(),
         cache_rw: false,
@@ -4444,6 +4539,173 @@ mod tests {
         };
         assert_eq!(c.conteo, Conteo { pasa: 1, total: 2 });
         assert!(!c.avisos.contains(&MOTIVO_NO_COMPILA.to_string()));
+    }
+
+    /// Plazos de calibración de prueba: 600 s para la suite del contrato y 1200 s para la oculta.
+    fn plazos_de_prueba() -> PlazosSuites {
+        PlazosSuites {
+            contrato: Duration::from_secs(600),
+            oculto: Duration::from_secs(1200),
+        }
+    }
+
+    /// Error que da `contenedor::ejecutar` cuando vence el plazo de una corrida.
+    fn vencimiento() -> ErrorOraculo {
+        ErrorOraculo::Infra("timeout tras 1200 s; contenedor x eliminado".into())
+    }
+
+    #[test]
+    fn plazo_de_calibracion_vencido_sin_junit_es_sin_veredicto_con_su_motivo() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_nextest_de_prueba(base.path(), Vec::new());
+        let correr = |_: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            Err(vencimiento())
+        };
+        let s = con_plazos_suites(Some(plazos_de_prueba()), || {
+            correr_suite_en(
+                base.path(),
+                &tarea,
+                &tarea.oculto,
+                DIR_OCULTO,
+                XML_OCULTO,
+                "oculto",
+                &BTreeSet::new(),
+                &correr,
+            )
+        })
+        .expect("en una calibración el vencimiento no es infraestructura");
+        assert!(
+            matches!(&s, Suite::SinVeredicto(m) if m == MOTIVO_SUITE_PLAZO),
+            "{s:?}"
+        );
+    }
+
+    #[test]
+    fn plazo_vencido_fuera_de_calibracion_sigue_siendo_error_de_infra() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_nextest_de_prueba(base.path(), Vec::new());
+        let correr = |_: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            Err(vencimiento())
+        };
+        let s = correr_suite_en(
+            base.path(),
+            &tarea,
+            &tarea.oculto,
+            DIR_OCULTO,
+            XML_OCULTO,
+            "oculto",
+            &BTreeSet::new(),
+            &correr,
+        );
+        assert!(
+            matches!(&s, Err(ErrorOraculo::Infra(m)) if m.starts_with("timeout tras")),
+            "{s:?}"
+        );
+    }
+
+    #[test]
+    fn plazo_vencido_con_junit_en_calibracion_sigue_siendo_error_de_infra() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_nextest_de_prueba(base.path(), Vec::new());
+        let correr = |e: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            fs::write(e.salida.join(XML_OCULTO), JUNIT_VERDE_NEXTEST).expect("junit");
+            Err(vencimiento())
+        };
+        let s = con_plazos_suites(Some(plazos_de_prueba()), || {
+            correr_suite_en(
+                base.path(),
+                &tarea,
+                &tarea.oculto,
+                DIR_OCULTO,
+                XML_OCULTO,
+                "oculto",
+                &BTreeSet::new(),
+                &correr,
+            )
+        });
+        assert!(
+            matches!(&s, Err(ErrorOraculo::Infra(m)) if m.starts_with("timeout tras")),
+            "{s:?}"
+        );
+    }
+
+    #[test]
+    fn plazo_de_calibracion_es_el_de_cada_suite_en_su_corrida() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_nextest_de_prueba(base.path(), Vec::new());
+        let plazos_vistos = std::cell::RefCell::new(Vec::new());
+        let correr = |e: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            fs::write(e.salida.join(XML_OCULTO), JUNIT_VERDE_NEXTEST).expect("junit");
+            plazos_vistos.borrow_mut().push(e.timeout);
+            Ok(resultado_falso(0, ""))
+        };
+        let correr_oculta = || {
+            correr_suite_en(
+                base.path(),
+                &tarea,
+                &tarea.oculto,
+                DIR_OCULTO,
+                XML_OCULTO,
+                "oculto",
+                &BTreeSet::new(),
+                &correr,
+            )
+        };
+        con_plazos_suites(Some(plazos_de_prueba()), correr_oculta).expect("sin infra");
+        correr_oculta().expect("sin infra");
+        assert_eq!(
+            *plazos_vistos.borrow(),
+            vec![Duration::from_secs(1200), Duration::from_secs(3600)],
+            "en la calibración, el plazo de la oculta; fuera, el de OpcionesOraculo"
+        );
+    }
+
+    #[test]
+    fn duracion_de_la_corrida_queda_en_la_base_y_tomar_la_saca() {
+        let _ = tomar_duraciones_suites();
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_nextest_de_prueba(base.path(), Vec::new());
+        let correr = |e: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            fs::write(e.salida.join(XML_OCULTO), JUNIT_VERDE_NEXTEST).expect("junit");
+            Ok(contenedor::Resultado {
+                segundos: 12.5,
+                ..resultado_falso(0, "")
+            })
+        };
+        correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        let duraciones = tomar_duraciones_suites();
+        assert_eq!(duraciones.oculto, Some(12.5));
+        assert_eq!(duraciones.contrato, None, "el contrato no corrió");
+        assert_eq!(tomar_duraciones_suites(), DuracionesSuites::default());
+    }
+
+    #[test]
+    fn plazo_de_calibracion_con_junit_y_codigo_100_cuenta_como_hoy() {
+        // Guarda: un test cortado por nextest deja junit y código 100. Es un fallo, no un reemplazo.
+        let junit = r#"<testsuite>
+  <testcase classname="tests.test_a" name="t1"/>
+  <testcase classname="tests.test_a" name="t2"><failure message="x"/></testcase>
+</testsuite>"#;
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_nextest_de_prueba(base.path(), Vec::new());
+        let correr = ejecutor_nextest(100, Some(junit), XML_OCULTO);
+        let s = con_plazos_suites(Some(plazos_de_prueba()), || {
+            correr_suite_en(
+                base.path(),
+                &tarea,
+                &tarea.oculto,
+                DIR_OCULTO,
+                XML_OCULTO,
+                "oculto",
+                &BTreeSet::new(),
+                &correr,
+            )
+        })
+        .expect("sin infra");
+        let Suite::Clasificada(c) = s else {
+            panic!("debía dar Clasificada: {s:?}");
+        };
+        assert_eq!(c.conteo, Conteo { pasa: 1, total: 2 });
     }
 
     #[test]
@@ -6703,6 +6965,8 @@ mod tests {
             filas: vec![calibra::Fila {
                 tarea_hash: None,
                 plazo_mutantes: None,
+                duracion_contrato: None,
+                duracion_oculto: None,
                 repo_origen: None,
                 inyecciones_distintas: None,
                 equivalentes_excluidos: 0,
@@ -7417,6 +7681,8 @@ mod tests {
         .map(|dimension| calibra::Fila {
             tarea_hash: None,
             plazo_mutantes: None,
+            duracion_contrato: None,
+            duracion_oculto: None,
             repo_origen: None,
             inyecciones_distintas: None,
             equivalentes_excluidos: 0,
