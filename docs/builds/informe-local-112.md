@@ -20,7 +20,7 @@ Rama `laptop/tarea-112`, base 64361fa. Todo se corrió con `ROOT_SIN_PODMAN=1`.
 | Punto | Defecto | Tests vistos en rojo | Commit |
 |---|---|---|---|
 | 1, el dueño por tiempo | El barrido daba por muerto un dueño vivo de otro binario (`root-<hash>`) | `dueno_vivo_llamado_root_hash_que_arranco_antes_se_conserva`, `dueno_que_arranco_400_s_despues_de_la_creacion_se_quita`, `dueno_sin_hora_de_arranque_se_conserva`, `contenedor_sin_hora_de_creacion_se_conserva` | 37f1c02 |
-| 2, una sola regla con `corre` | `corre::barrido` tenía su propia regla por nombre y su propia lectura de la hora de arranque | `corrida_de_proceso_vivo_llamado_root_hash_que_arranco_antes_no_se_barre` | ver `git log` (segundo commit) |
+| 2, una sola regla con `corre` | `corre::barrido` tenía su propia regla por nombre y su propia lectura de la hora de arranque | `corrida_de_proceso_vivo_llamado_root_hash_que_arranco_antes_no_se_barre` | f1f75ad |
 
 Guardas del punto 1: `dueno_que_arranco_300_s_despues_se_conserva`, `dueno_sin_carpeta_en_proc_se_quita`, `pid_propio_cuenta_como_vivo_aunque_no_tenga_carpeta`, `parsear_listado_*`. Dos de ellos pasaron ya con la regla vieja, por coincidencia.
 Guardas del punto 2: los tests de barrido de las Tareas 84, 85, 87 y 108, incluido el margen de 300 s. Quedaron sin cambios, salvo los dos de la sección 5.
