@@ -9018,3 +9018,47 @@ P104 sigue abierta.
 **Un roce de la 113 con la 111.** La 113 suma `es_motivo_inestable` en `src/oracle/calibra.rs`, junto a `PREFIJO_INESTABLE`. Es una función nueva, sin otro cambio. El orquestador la resuelve al encadenar la 114.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (36): la 112 y el brief de la 117
+
+**Estado.**
+- La Tarea 112 terminó en `laptop/tarea-112` (0af07a4), con 3336, 0 y 4 sin podman.
+- El orquestador probó el formato con podman 5.8.9: `podman ps -a --format '{{.Names}} {{.ListContainer.Created.Unix}}'` da el nombre y los segundos desde la época.
+- La imagen `localhost/root-oraculo-rust:2` existe.
+- La 113 se construye desde 741a43d. Las suites con podman de la 110, la 111 y la 112 corren solas, de a una.
+
+## 1. Las cuatro preguntas de la 112
+
+1. **Un pid que existe sin `stat` legible cuenta como vivo:** acepto. En Linux, `/proc/<pid>/stat` es legible para todo proceso del mismo espacio de pids. Fedora no monta `/proc` con `hidepid`. El caso casi no ocurre, y el error va del lado de no borrar.
+2. **El pid propio siempre vive:** acepto. Un proceso no puede barrer sus propios contenedores vivos.
+3. **Un contenedor de la familia sin pid legible se sigue quitando:** acepto. Ese nombre viene de antes de la Tarea 107. Ningún proceso vivo puede ser su dueño.
+4. **El pid de otro usuario sin permiso cuenta como vivo:** acepto, por la misma razón que la 1.
+
+**Una nota sin pregunta.** El test `listar_lee_la_hora_de_creacion_de_podman_real` copia el literal `localhost/root-oraculo-rust:2`. Si esa imagen se borra, el test falla. Va a una tarea futura: exponer la constante de la imagen como `pub(crate)` y leerla desde el test.
+
+## 2. Lo que el código dice de la 117
+
+**Los cuatro `cp -r` no tocan la calibración real.** Leí los cuatro lugares en 64361fa:
+- `target_podman.rs:17` es una constante de un test con podman.
+- `defectos.rs:327` y `:429` son constantes de tests con podman.
+- `descarga.rs:141` genera el `Cargo.lock`. No compila nada.
+
+**Las suites de producción no copian el repo.** Corren sobre `/repo`, con `CARGO_TARGET_DIR=/salida/target`. La mutación ya usa `cp -a`, en `mutacion.rs:643` y `:694`.
+
+**Además, `cp -r` solo recompila el crate del producto.** Las dependencias vienen del vendor, y su fecha no cambia. En esos tests el crate del producto se recompila igual, porque cambia una fuente.
+
+**Conclusión: `cp -a` no gana tiempo.** La investigación lo puso primero por error. Va igual en la 117, porque cuesta poco y deja una sola regla de copia. El informe no debe esperar ganancia de ese punto.
+
+**El perfil sin debuginfo sí toca producción.** Un solo lugar lo cubre: `opciones` en `src/oracle/contenedor.rs:141`. Todo contenedor recibe ahí sus `-e`.
+- **El riesgo:** el `target` sembrado guarda la huella del perfil. Si un comando lleva la variable y otro no, cargo recompila todo.
+- **Por eso:** la variable va en todo contenedor, y no en cada comando.
+- La primera evaluación después del cambio recompila una vez el `target` sembrado.
+
+**¿La 117 necesita la medición del reparto antes de arrancar? No.**
+- Ninguno de los dos cambios cambia un resultado.
+- El costo es bajo.
+- La 117 mide su propia ganancia en el host, sin podman.
+
+**Los archivos no chocan.** La 110, la 111 y la 112 no tocan `contenedor.rs`, `descarga.rs`, `defectos.rs` ni `target_podman.rs`. La 113 toca `informe.rs` y `calibra.rs`.
+
+**Preguntas al usuario:** ninguna nueva.
