@@ -371,41 +371,35 @@ fn cubre(prueba: &str, test: &str) -> bool {
     test == prueba || test.starts_with(&format!("{prueba}::"))
 }
 
-/// Tests ocultos que fallan y que ningún requisito prueba. Un requisito prueba un test si lo nombra en
-/// `pruebas` o `bordes`, por id exacto o por archivo. Una referencia `contrato:` apunta al contrato y no
-/// cubre un test oculto.
-fn tests_fuera_de_requisitos(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
-    v.ocultos_fallidos
+/// Ids de los requisitos que prueban `test`. Un requisito lo prueba si lo nombra en `pruebas` o `bordes`, por
+/// id exacto o por archivo. Con `contrato` falso cuentan las referencias sin prefijo, de la suite oculta. Con
+/// `contrato` verdadero cuentan las `contrato:`. Cada referencia apunta a una sola de las dos suites.
+fn requisitos_que_prueban<'a>(tarea: &'a Tarea, test: &str, contrato: bool) -> Vec<&'a str> {
+    tarea
+        .requisito
         .iter()
-        .filter(|test| {
-            !tarea.requisito.iter().any(|r| {
-                r.pruebas
-                    .iter()
-                    .chain(&r.bordes)
-                    .any(|prueba| cubre(prueba, test))
+        .filter(|r| {
+            r.pruebas.iter().chain(&r.bordes).any(|prueba| {
+                match prueba.strip_prefix(PREFIJO_CONTRATO) {
+                    Some(referencia) => contrato && cubre(referencia, test),
+                    None => !contrato && cubre(prueba, test),
+                }
             })
         })
-        .cloned()
+        .map(|r| r.id.as_str())
         .collect()
 }
 
-/// Tests del contrato que fallan y que ningún requisito prueba. Un requisito lo prueba si nombra el test con
-/// `contrato:` en `pruebas` o `bordes`, por id exacto o por archivo. Una referencia sin prefijo apunta a la
-/// suite oculta y no lo cubre.
-fn tests_contrato_fuera_de_requisitos(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
-    v.contrato_fallidos
-        .iter()
-        .filter(|test| {
-            !tarea.requisito.iter().any(|r| {
-                r.pruebas.iter().chain(&r.bordes).any(|prueba| {
-                    prueba
-                        .strip_prefix(PREFIJO_CONTRATO)
-                        .is_some_and(|referencia| cubre(referencia, test))
-                })
-            })
-        })
-        .cloned()
-        .collect()
+/// Frase de un test que falla: nombra a los requisitos que lo prueban, o dice que ninguno lo prueba.
+fn frase_de_test_que_falla(quien: &str, test: &str, requisitos: &[&str]) -> String {
+    match requisitos {
+        [] => format!("El {quien} {test} falla y ningún requisito lo prueba."),
+        [uno] => format!("El {quien} {test} falla; lo prueba el requisito {uno}."),
+        _ => format!(
+            "El {quien} {test} falla; lo prueban los requisitos {}.",
+            unir(requisitos)
+        ),
+    }
 }
 
 /// Verdadero si la rúbrica de `dimension` tiene algún ítem con `bloquea = true`.
@@ -493,9 +487,10 @@ fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     salida
 }
 
-/// Reglas de no listo: un producto o sus tests que no compilan, un test oculto o del contrato que falla y
-/// ningún requisito prueba, la completitud con veredicto bajo su mínimo, y una dimensión calibrada bajo su mínimo de
-/// `[decision.minimo]`. Una completitud sin veredicto no dispara aquí: `sin_decision` la cubre si no hay evidencia.
+/// Reglas de no listo: un producto o sus tests que no compilan; cada test oculto o del contrato que falla, lo
+/// cubra o no un requisito (`test_oculto_falla`, `test_contrato_falla`); la completitud con veredicto bajo su
+/// mínimo; y una dimensión calibrada bajo su mínimo de `[decision.minimo]`. Una completitud sin veredicto no
+/// dispara aquí: `sin_decision` la cubre si no hay evidencia.
 fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Disparo> {
     let mut salida = Vec::new();
     if v.no_compila {
@@ -505,17 +500,19 @@ fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Dispar
             hallazgo: None,
         });
     }
-    for id in tests_fuera_de_requisitos(v, tarea) {
+    for test in &v.ocultos_fallidos {
+        let quienes = requisitos_que_prueban(tarea, test, false);
         salida.push(Disparo {
-            regla: format!("test_oculto_fuera_de_requisitos: {id}"),
-            frase: format!("El test oculto {id} falla y ningún requisito lo prueba."),
+            regla: format!("test_oculto_falla: {test}"),
+            frase: frase_de_test_que_falla("test oculto", test, &quienes),
             hallazgo: None,
         });
     }
-    for id in tests_contrato_fuera_de_requisitos(v, tarea) {
+    for test in &v.contrato_fallidos {
+        let quienes = requisitos_que_prueban(tarea, test, true);
         salida.push(Disparo {
-            regla: format!("test_contrato_fuera_de_requisitos: {id}"),
-            frase: format!("El test del contrato {id} falla y ningún requisito lo prueba."),
+            regla: format!("test_contrato_falla: {test}"),
+            frase: frase_de_test_que_falla("test del contrato", test, &quienes),
             hallazgo: None,
         });
     }
@@ -2181,11 +2178,7 @@ modulos = ["config"]
         )
         .expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(
-            i.motivo.contains("test_oculto_fuera_de_requisitos"),
-            "{}",
-            i.motivo
-        );
+        assert!(i.motivo.contains("test_oculto_falla"), "{}", i.motivo);
         assert!(
             !i.motivo.contains("dimension_sin_veredicto"),
             "{}",
@@ -2297,7 +2290,7 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_oculto_que_falla_fuera_de_requisitos_da_no_listo_y_lo_nombra() {
+    fn informe_oculto_que_falla_sin_requisito_da_no_listo_y_lo_nombra() {
         // Desempate 11: un test oculto que falla y no prueba ningún requisito es una promesa del producto.
         // La regla no depende de `completitud_minima`: con el mínimo en cero, sigue en `NoListo`.
         let mut v = ecc();
@@ -2308,11 +2301,7 @@ modulos = ["config"]
         };
         let i = informar(&v, &tarea(), &reglas, &BTreeSet::new(), None).expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(
-            i.motivo.contains("test_oculto_fuera_de_requisitos"),
-            "{}",
-            i.motivo
-        );
+        assert!(i.motivo.contains("test_oculto_falla"), "{}", i.motivo);
         assert!(
             i.motivo.contains("tests/extra.py::caso_suelto"),
             "{}",
@@ -2321,8 +2310,8 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_oculto_que_falla_dentro_de_un_requisito_no_dispara_la_regla() {
-        // `tests/t.py::flaky` es la prueba de R1 en la tarea de prueba: el requisito lo cubre.
+    fn informe_oculto_que_falla_dentro_de_un_requisito_da_no_listo_y_lo_dispara() {
+        // Cambio de la Tarea 113: `tests/t.py::flaky` es la prueba de R1. Antes no disparaba; ahora sí.
         let mut v = ecc();
         v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
         let i = informar(
@@ -2333,15 +2322,16 @@ modulos = ["config"]
             None,
         )
         .expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
-            !i.motivo.contains("test_oculto_fuera_de_requisitos"),
+            i.motivo.contains("test_oculto_falla: tests/t.py::flaky"),
             "{}",
             i.motivo
         );
     }
 
     #[test]
-    fn informe_test_del_contrato_que_falla_fuera_de_requisitos_da_no_listo() {
+    fn informe_test_del_contrato_que_falla_sin_requisito_da_no_listo() {
         // Decisión 50: un test del contrato que falla y que ningún requisito prueba con `contrato:` da `NoListo`.
         let mut v = ecc();
         v.contrato_fallidos = vec!["tests/contrato.py::suelto".into()];
@@ -2354,11 +2344,7 @@ modulos = ["config"]
         )
         .expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(
-            i.motivo.contains("test_contrato_fuera_de_requisitos"),
-            "{}",
-            i.motivo
-        );
+        assert!(i.motivo.contains("test_contrato_falla"), "{}", i.motivo);
         assert!(
             i.motivo.contains("tests/contrato.py::suelto"),
             "{}",
@@ -2371,11 +2357,7 @@ modulos = ["config"]
         };
         let i = informar(&v, &tarea(), &reglas, &BTreeSet::new(), None).expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(
-            i.motivo.contains("test_contrato_fuera_de_requisitos"),
-            "{}",
-            i.motivo
-        );
+        assert!(i.motivo.contains("test_contrato_falla"), "{}", i.motivo);
     }
 
     #[test]
@@ -2436,8 +2418,9 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_test_del_contrato_que_falla_dentro_de_un_requisito_no_dispara_la_regla() {
-        // Decisión 50: una referencia `contrato:` cubre el test del contrato, por id exacto o por archivo.
+    fn informe_test_del_contrato_dentro_de_un_requisito_da_no_listo_y_lo_dispara() {
+        // Cambio de la Tarea 113: una referencia `contrato:` cubre el test, pero la regla dispara igual.
+        // El test se nombra por id exacto o por archivo, y en ambos casos sale `test_contrato_falla`.
         let mut t = tarea();
         t.requisito[0]
             .pruebas
@@ -2446,8 +2429,10 @@ modulos = ["config"]
         v.contrato_fallidos = vec!["tests/contrato.py::caso".into()];
         let i =
             informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
-            !i.motivo.contains("test_contrato_fuera_de_requisitos"),
+            i.motivo
+                .contains("test_contrato_falla: tests/contrato.py::caso"),
             "{}",
             i.motivo
         );
@@ -2460,8 +2445,10 @@ modulos = ["config"]
         v.contrato_fallidos = vec!["tests/contrato.py::otro".into()];
         let i =
             informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
-            !i.motivo.contains("test_contrato_fuera_de_requisitos"),
+            i.motivo
+                .contains("test_contrato_falla: tests/contrato.py::otro"),
             "{}",
             i.motivo
         );
@@ -2481,11 +2468,7 @@ modulos = ["config"]
         )
         .expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(
-            i.motivo.contains("test_contrato_fuera_de_requisitos"),
-            "{}",
-            i.motivo
-        );
+        assert!(i.motivo.contains("test_contrato_falla"), "{}", i.motivo);
     }
 
     #[test]
@@ -2497,11 +2480,117 @@ modulos = ["config"]
         v.ocultos_fallidos = vec!["tests/extra.py::caso_suelto".into()];
         let i =
             informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
+        assert!(i.motivo.contains("test_oculto_falla"), "{}", i.motivo);
+    }
+
+    /// Pone la completitud de `v` en `valor`. La dimensión ya tiene veredicto en `ecc()`.
+    fn con_completitud(v: &mut Veredicto, valor: f32) {
+        let p = v
+            .puntajes
+            .iter_mut()
+            .find(|p| p.dimension == Dimension::Completitud)
+            .expect("hay completitud");
+        p.valor = valor;
+    }
+
+    #[test]
+    fn informe_test_oculto_que_falla_cubierto_por_requisito_da_no_listo() {
+        // Regla nueva: un test oculto que falla da `NoListo` aunque un requisito lo pruebe.
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
+        con_completitud(&mut v, 0.95);
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
-            i.motivo.contains("test_oculto_fuera_de_requisitos"),
+            i.motivo.contains("test_oculto_falla: tests/t.py::flaky"),
             "{}",
             i.motivo
         );
+    }
+
+    #[test]
+    fn informe_test_oculto_que_falla_nombra_el_test_y_su_requisito() {
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
+        let disparos = no_listo(&v, &tarea(), &ReglasDecision::default());
+        let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
+        assert_eq!(
+            frases,
+            vec!["El test oculto tests/t.py::flaky falla; lo prueba el requisito R1."]
+        );
+    }
+
+    #[test]
+    fn informe_test_oculto_probado_por_dos_requisitos_los_nombra_a_los_dos() {
+        let mut t = tarea();
+        t.requisito[1].bordes.push("tests/t.py::flaky".into());
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
+        let disparos = no_listo(&v, &t, &ReglasDecision::default());
+        let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
+        assert_eq!(
+            frases,
+            vec!["El test oculto tests/t.py::flaky falla; lo prueban los requisitos R1 y R2."]
+        );
+    }
+
+    #[test]
+    fn informe_test_oculto_sin_requisito_da_no_listo_con_frase_de_ninguno() {
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/extra.py::caso_suelto".into()];
+        let disparos = no_listo(&v, &tarea(), &ReglasDecision::default());
+        let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
+        assert_eq!(
+            frases,
+            vec!["El test oculto tests/extra.py::caso_suelto falla y ningún requisito lo prueba."]
+        );
+    }
+
+    #[test]
+    fn informe_test_del_contrato_cubierto_por_requisito_da_no_listo_y_lo_nombra() {
+        let mut t = tarea();
+        t.requisito[0]
+            .pruebas
+            .push("contrato:tests/contrato.py::caso".into());
+        let mut v = ecc();
+        v.contrato_fallidos = vec!["tests/contrato.py::caso".into()];
+        con_completitud(&mut v, 0.95);
+        let i =
+            informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo
+                .contains("test_contrato_falla: tests/contrato.py::caso"),
+            "{}",
+            i.motivo
+        );
+        let disparos = no_listo(&v, &t, &ReglasDecision::default());
+        let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
+        assert_eq!(
+            frases,
+            vec!["El test del contrato tests/contrato.py::caso falla; lo prueba el requisito R1."]
+        );
+    }
+
+    #[test]
+    fn informe_test_oculto_inestable_fuera_de_ocultos_fallidos_no_dispara() {
+        // Un test inestable no es un fallo estable: no entra en `ocultos_fallidos`.
+        let mut v = ecc();
+        v.inestables = vec!["tests/extra.py::flaky".into()];
+        let i = informe_de(&v);
+        assert!(!i.motivo.contains("test_oculto_falla"), "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_secreto_con_test_oculto_rojo_da_bloqueado() {
+        // Guarda: un secreto bloquea aunque haya un test oculto que falla.
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto", "gitleaks", true));
+        v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert_eq!(i.bloqueantes, vec!["h-secreto".to_string()]);
     }
 
     #[test]
@@ -2558,7 +2647,7 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_test_oculto_fuera_de_requisitos_da_no_listo_con_seguridad_sin_veredicto() {
+    fn informe_test_oculto_que_falla_da_no_listo_con_seguridad_sin_veredicto() {
         // Tarea 32: la evidencia de un test oculto que falla da `NoListo` aunque Seguridad no tenga veredicto.
         let mut v = ecc();
         v.ocultos_fallidos = vec!["tests/extra.py::caso_suelto".into()];
@@ -2578,11 +2667,7 @@ modulos = ["config"]
         )
         .expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(
-            i.motivo.contains("test_oculto_fuera_de_requisitos"),
-            "{}",
-            i.motivo
-        );
+        assert!(i.motivo.contains("test_oculto_falla"), "{}", i.motivo);
         assert!(
             !i.motivo.contains("dimension_que_bloquea_sin_veredicto"),
             "{}",

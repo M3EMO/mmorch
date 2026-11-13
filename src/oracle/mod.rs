@@ -3367,8 +3367,8 @@ mod tests {
             Some(Decision::NoListo)
         );
         assert_eq!(v.estado, Estado::Rojo);
-        // Con el mínimo en 0,75, el mismo conteo ya no da no listo: el conteo no decide. Sin juez, Diseño no
-        // tiene veredicto y P103 a deja la decisión en sin decisión, no en listo.
+        // Con el mínimo en 0,75, la completitud ya no dispara. El test oculto t4 sigue rojo y da no listo
+        // por `test_oculto_falla` (Tarea 113): la decisión sale de las reglas y no del conteo.
         let reglas = ReglasDecision {
             completitud_minima: 0.75,
             ..ReglasDecision::default()
@@ -3379,11 +3379,19 @@ mod tests {
             ..deps_de(&correr, &herramientas_falsas)
         };
         let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
-        assert_eq!(
-            v.informe.as_ref().map(|i| i.decision),
-            Some(Decision::SinDecision)
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(informe.decision, Decision::NoListo, "{}", informe.motivo);
+        assert!(
+            informe.motivo.contains("test_oculto_falla"),
+            "{}",
+            informe.motivo
         );
-        assert_eq!(v.estado, Estado::SinVeredicto);
+        assert!(
+            !informe.motivo.contains("completitud_bajo_minimo"),
+            "{}",
+            informe.motivo
+        );
+        assert_eq!(v.estado, Estado::Rojo);
     }
 
     #[test]
@@ -6482,7 +6490,7 @@ mod tests {
         let informe = v.informe.as_ref().expect("hay informe");
         assert_eq!(informe.decision, Decision::NoListo, "{}", informe.motivo);
         assert!(
-            informe.motivo.contains("test_contrato_fuera_de_requisitos"),
+            informe.motivo.contains("test_contrato_falla"),
             "{}",
             informe.motivo
         );
@@ -10238,7 +10246,7 @@ mod tests {
         let informe = v.informe.as_ref().expect("hay informe");
         assert_eq!(informe.decision, Decision::NoListo, "{}", informe.motivo);
         assert!(
-            informe.motivo.contains("test_oculto_fuera_de_requisitos"),
+            informe.motivo.contains("test_oculto_falla"),
             "{}",
             informe.motivo
         );
