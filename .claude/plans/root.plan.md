@@ -8458,3 +8458,75 @@ Los puntos 1 y 2 tocan `configs.rs`. El 1 solo cambia la visibilidad de una cons
 **Después de la 105 no queda trabajo de código que no dependa del usuario.** Quedan la medición de la sección 3, la de los "delete field" de la vuelta (26), y lo que el orquestador aplica después de las mezclas.
 
 **Preguntas al usuario:** ninguna nueva. P95 y P97 a P103 siguen abiertas.
+
+## Vuelta del 2026-11-14 (28): la calibración repite inyecciones, y Tarea 106
+
+**Estado.** La Tarea 105 está en `laptop/tarea-105` (3a1ed58), con 3255, 0 y 4 con podman. Las cuatro variantes de secretos dieron lo que pide el diseño. Esperan al usuario las mezclas de la 84 a la 105, P95, P97 a P103 y Colab.
+
+**Corrección a la vuelta (27).** La fila 4 suponía que "corre como root" era de Seguridad. Es de Entrega (`src/oracle/configs.rs:625`). El resultado "listo" fue el correcto, pero por otro motivo: no hay hallazgo de Seguridad. El test `previos_dockerfile_corre_como_root_igual_en_bootstrap_no_es_secreto` de la 105 prueba un camino que Seguridad no usa. Es inofensivo, y se queda.
+
+**La regla de la vuelta (24) funciona.** Con el oculto ampliado, t3 Funciona pasó de 0 de 1 a 1 de 1, y a 3 de 3 con la semilla 43. Lo mató `left_trimming_still_drops_leading_spaces`, el test que antes quedaba afuera.
+
+## 1. Por qué se repiten las inyecciones
+
+**Lo que leí** en `src/oracle/calibra.rs`, cerca de la línea 928:
+- Cada caso con defecto toma su propia semilla: `semilla + i`.
+- El inyector arma la lista de candidatos del defecto y elige uno al azar con esa semilla (`rng.elegir`, en cada función de `src/oracle/calibra/inyectar.rs`).
+- Ningún caso sabe qué eligieron los otros. Los casos corren en hilos.
+- Con uno o dos candidatos dentro del cambio, repetir es lo esperable, no un accidente.
+
+**Consecuencia.** Los totales cuentan casos, no inyecciones distintas. El mutante equivalente de t1 contó como 3 escapes, y un acierto de t2 contó como 3 aciertos. Una cota de Wilson sobre esos números miente.
+
+## 2. Decisión: muestreo sin reposición
+
+1. **La identidad de una inyección** es el defecto, el archivo, la línea y la edición: el operador de la 98 o el tipo de cuerpo vaciado.
+2. **El contexto del inyector suma `excluidos`:** las identidades que ya usó esta calibración. Cada función del inyector quita esos candidatos antes de elegir.
+3. **La elección se hace en serie.** Inyectar es editar texto, y es barato. Evaluar es lo caro, y sigue en paralelo. Antes de evaluar, `calibra.rs` elige la inyección de cada caso, en orden, sumando cada una a `excluidos`.
+4. **Un reemplazo** también elige con `excluidos`, que guarda las usadas y las inválidas. Como los reemplazos pasan durante la evaluación en hilos, `excluidos` vive detrás de un cerrojo.
+5. **Si los candidatos distintos no alcanzan para `n`,** los casos que faltan quedan "no aplica: candidatos distintos agotados". Nunca se repite una inyección para llenar `n`.
+6. **La fila suma `inyecciones_distintas`.** La sensibilidad se calcula sobre inyecciones distintas. Con el punto 3, cada caso con defecto ya es distinto.
+7. **"Muestra suficiente"** cuenta defectos distintos. Con P102 sin respuesta, el mínimo sigue siendo el de hoy.
+
+## 3. Filas viejas con casos repetidos
+
+**No se reescriben.** Casi todas ya dejaron de valer por otros motivos: la versión de sondas de la 102, el `tarea_hash` de las capas y del comando nuevo de nextest, y la huella del juez de la 81.
+
+**Lo que sí cambia:**
+- Una fila sin `inyecciones_distintas` se lee como hoy.
+- La línea de `calibrar` y el informe de calibración la marcan: "fila anterior a la Tarea 106: puede contar inyecciones repetidas".
+- **Los números de este plan con repeticiones se leen así.** t1 Funciona s43, 0 de 3, es 0 de 1. t2 Funciona, t2 Completitud y t3 Completitud s43, 3 de 3, son 1 de 1 cada uno. Seguridad n = 10 son 4 inyecciones distintas por tarea, no 5.
+
+## 4. El mutante equivalente conocido
+
+**Root no puede probar la equivalencia.** Pero una persona sí puede leerla en el código, con evidencia. En `composite_pattern.rs:113`, el brazo `(And, None) => true` está en la función de atajo. Con `false`, el operador recibe `(And, None, _)` y también da `None`. El comentario del código dice "normally not called due to short-circuit".
+
+**Decisión: una lista curada en la tarea, con su motivo.**
+1. `tarea.toml` suma una sección opcional `[calibracion]`, con `equivalentes`: una lista de archivo, línea, edición y motivo.
+2. La escribe el orquestador, nunca Root. Solo después de leer el código y dejar la evidencia en el motivo.
+3. El inyector excluye esas identidades, igual que `excluidos`.
+4. **La fila informa cuántas excluyó.** Así se ve que la calibración tiene una curación humana, y cuánta.
+5. Para s2-t1, el orquestador agrega `composite_pattern.rs:113`, `true` a `false`, con el motivo de arriba. Lo hace después de la mezcla de la 106, junto con lo demás.
+
+**Por qué no adivinarlo.** Un mutante que sobrevive a todos los tests no prueba nada: también sobrevive si los tests son débiles. Esa es justo la señal que la calibración debe medir.
+
+## 5. Los 13 "delete field": falta el dato
+
+La medición 105 dice que Root no guarda el tiempo de cada mutante. La evaluación entera de t1 tarda 3 minutos y 8 segundos. Para decidir si esos 13 pesan más de un cuarto, hace falta su tiempo.
+
+**Decisión:** el estado por mutante de la 97 suma la duración de cada mutante, leída del `outcomes.json`. La fase `duration` ya se lee para la base (`src/oracle/mutacion.rs:251`). Va a la 106.
+
+## 6. Tarea 106
+
+Brief: `docs/builds/brief-local-106.md`, con base 3a1ed58 y rama `laptop/tarea-106`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | `excluidos` en el contexto del inyector, y elección en serie sin reposición | `src/oracle/calibra/inyectar.rs`, `src/oracle/calibra.rs` |
+| 2 | `inyecciones_distintas` en la fila, y la marca de las filas viejas | `src/oracle/calibra.rs`, `src/lib.rs`, `docs/interfaces.md` |
+| 3 | `[calibracion] equivalentes` en `tarea.toml` | `src/oracle/tarea.rs`, `src/oracle/calibra/inyectar.rs` |
+| 4 | Duración por mutante | `src/oracle/mutacion.rs` |
+
+- Los puntos 1, 2 y 3 comparten archivos. Van en serie: 1, 2 y 3.
+- El punto 4 corre en paralelo.
+
+**Preguntas al usuario:** ninguna nueva. P95 y P97 a P103 siguen abiertas.
