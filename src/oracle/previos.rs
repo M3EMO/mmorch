@@ -1,7 +1,7 @@
 //! Línea base de Seguridad (Tarea 103). Un hallazgo de `bootstrap/` es previo: ya estaba en el estado
 //! inicial de la tarea. Solo bloquea lo que el cambio introduce.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -223,6 +223,32 @@ fn en_cambio(h: &Hallazgo, cambios: Option<&BTreeMap<String, Vec<(u32, u32)>>>) 
         })
 }
 
+/// Rangos que usa la marca de previo. Igual que `rangos_cambiados`, pero un archivo que no se puede
+/// leer cuenta entero como cambiado.
+pub(crate) fn cambios_para_marca(
+    inicial: &Path,
+    repo: &Path,
+    hallazgos: &[Hallazgo],
+) -> BTreeMap<String, Vec<(u32, u32)>> {
+    let mut cambios = crate::oracle::cambios::rangos_cambiados(inicial, repo);
+    let archivos: BTreeSet<&str> = hallazgos.iter().map(|h| h.archivo.as_str()).collect();
+    for archivo in archivos {
+        if cambios.contains_key(archivo) {
+            continue;
+        }
+        if es_ilegible(&repo.join(archivo)) || es_ilegible(&inicial.join(archivo)) {
+            cambios.insert(archivo.to_string(), vec![(1, u32::MAX)]);
+        }
+    }
+    cambios
+}
+
+/// Verdadero si `ruta` es un archivo regular (no enlace) que `fs::read_to_string` no puede leer.
+fn es_ilegible(ruta: &Path) -> bool {
+    fs::symlink_metadata(ruta).is_ok_and(|m| m.file_type().is_file())
+        && fs::read_to_string(ruta).is_err()
+}
+
 /// Copia de las sondas de Seguridad sin sus hallazgos previos, salvo los de gitleaks. Un secreto que
 /// ya estaba cuenta en el puntaje. El valor de cada sonda que lo tenga sale de sus hallazgos que quedan.
 pub fn quitar_previos(sondas: &[ResultadoSonda], reqs: &[Requisito]) -> Vec<ResultadoSonda> {
@@ -422,6 +448,35 @@ mod tests {
         let mut fuera = [nativo_de("src/x.rs", 3, "pub unsafe fn f() {}")];
         marcar(&mut fuera, &base, Some(&cambios));
         assert!(fuera[0].previo, "la línea 3 está fuera del cambio");
+    }
+
+    #[test]
+    fn previos_hallazgo_nativo_en_archivo_sin_rango_legible_sale_nuevo() {
+        let inicial = tempfile::tempdir().expect("temp dir inicial");
+        let repo = tempfile::tempdir().expect("temp dir repo");
+        // Bytes que no son UTF-8, iguales en ambos lados: el archivo no tiene rango legible.
+        for dir in [inicial.path(), repo.path()] {
+            fs::create_dir_all(dir.join("src")).expect("crea src");
+            fs::write(dir.join("src/x.rs"), [0xff, 0xfe, b'\n']).expect("escribe x.rs");
+        }
+        let base = base_de(&[nativo_de("src/x.rs", 1, "cita")]);
+        let mut repo_hallazgos = [nativo_de("src/x.rs", 1, "cita")];
+        let cambios = cambios_para_marca(inicial.path(), repo.path(), &repo_hallazgos);
+        marcar(&mut repo_hallazgos, &base, Some(&cambios));
+        assert!(
+            !repo_hallazgos[0].previo,
+            "el archivo no se pudo leer: cuenta entero como cambiado"
+        );
+
+        // Control: un archivo UTF-8 igual en ambos lados sigue dando previo.
+        for dir in [inicial.path(), repo.path()] {
+            fs::write(dir.join("src/y.rs"), "fn f() {}\n").expect("escribe y.rs");
+        }
+        let base = base_de(&[nativo_de("src/y.rs", 1, "otra")]);
+        let mut repo_hallazgos = [nativo_de("src/y.rs", 1, "otra")];
+        let cambios = cambios_para_marca(inicial.path(), repo.path(), &repo_hallazgos);
+        marcar(&mut repo_hallazgos, &base, Some(&cambios));
+        assert!(repo_hallazgos[0].previo, "el archivo igual sigue previo");
     }
 
     #[test]

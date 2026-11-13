@@ -1094,7 +1094,11 @@ fn medir(
                 .iter_mut()
                 .filter(|s| s.dimension == Dimension::Seguridad)
             {
-                previos::marcar(&mut sonda.hallazgos, &base.nativas, cambios.as_ref());
+                // Un archivo que no se puede leer cuenta entero como cambiado: sus hallazgos salen nuevos.
+                let marca = bootstrap
+                    .is_dir()
+                    .then(|| previos::cambios_para_marca(&bootstrap, repo, &sonda.hallazgos));
+                previos::marcar(&mut sonda.hallazgos, &base.nativas, marca.as_ref());
             }
         }
         sondas.extend(nativas);
