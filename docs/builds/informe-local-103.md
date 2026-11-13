@@ -78,3 +78,26 @@ R1 y R2 se construyeron en worktrees aparte y entraron con `git cherry-pick`.
 8. **Línea base incompleta.** No se guarda si una sonda dio sin veredicto. Así un fallo de infraestructura no queda fijo. El costo: sin RustSec se recalcula cada vez.
 9. **Atribución.** Los commits de A y B llevan "Claude Haiku 5.5", porque Haiku los construyó. Los de R1 y R2 llevan "Claude Sonnet 5.5", como pedía el prompt del subagente. ¿Querés uniformarlos?
 10. **Línea de `cambios`.** `rangos_cambiados` corre siempre que existe `bootstrap/`, aunque no haya mutación ni sondas nativas. El costo es menor.
+
+## Tarea 103b
+
+La Tarea 103b arregla lo que halló la revisión de seguridad de la 103. Cada punto va en un commit.
+
+| Punto | Commit | Qué cambia |
+|---|---|---|
+| 1 (HIGH) | 3d1c2fb | La línea base compara por id, severidad y, en cargo audit, el id del aviso. |
+| 6 | 62f1a12 | Los dos tests de Colab miran solo los avisos de Colab. |
+| 2 | c33b1b1 | La clave de la línea base incluye una huella del contenido de RustSec. |
+| 3 | 8a27ea9 | Un archivo ilegible o no UTF-8 cuenta como cambiado entero en la marca de previo. |
+| 4 | 680b2b2 | La clave de la línea base incluye el lenguaje de la tarea. |
+| 5 | 9974545 | La línea base se escribe con archivo temporal y `rename`. |
+
+Notas:
+
+- El punto 5 no tiene test en rojo. Desde afuera, `fs::write` y temporal más `rename` dan el mismo resultado. El test queda como regresión.
+- Los puntos 1 y 6 salieron del índice que dejó la corrida cortada. Los revisé y los usé.
+- El punto 3 cambia también `src/oracle/mod.rs`: la marca de las nativas usa `previos::cambios_para_marca`. `cambios.rs` no cambia.
+- El punto 2 suma `huella_rustsec` al trait `EjecutorHerramienta`, a `EjecutorContenedor` y a `memo.rs`.
+
+Suite: `tools/test-seguro.sh` con `ROOT_SIN_PODMAN=1`. Son 39 binarios, 3238 tests pasan, 0 fallan y 4 se ignoran.
+Los dos tests de Colab del punto 6 corrieron con podman y pasan.
