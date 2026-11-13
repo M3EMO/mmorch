@@ -33,7 +33,7 @@ pub(crate) const PIDS_LIMITE: u32 = 512;
 /// Memoria máxima del contenedor. Sube si una suite legítima llega al tope (ver el informe de medición).
 pub(crate) const MEMORIA: &str = "2g";
 /// Plazo de `podman rm -f` al limpiar un contenedor. Si podman no responde, la limpieza no bloquea a Root.
-const PLAZO_LIMPIEZA: Duration = Duration::from_secs(30);
+pub(crate) const PLAZO_LIMPIEZA: Duration = Duration::from_secs(30);
 /// Códigos de salida que indican fallo del entorno, no del comando evaluado. 125: error propio de podman
 /// (imagen inexistente, opción inválida). 126: comando no ejecutable. 127: comando no encontrado.
 /// 137: proceso muerto por SIGKILL, por ejemplo por falta de memoria (OOM).
@@ -203,6 +203,7 @@ fn montaje(args: &mut Vec<String>, origen: &Path, destino: &str, opciones: &str)
 pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
     validar_rutas(e)?;
     let _turno = turno_de_contenedor();
+    crate::limpieza::barrer_al_arrancar("podman");
     let nombre = nombre_unico();
     let inicio = Instant::now();
     let mut hijo = lanzar(e, &nombre)?;
@@ -279,7 +280,7 @@ pub(crate) fn correr_programa(
 
 /// Corre `comando` con salida capturada y espera hasta `plazo`. Si vence o falla la espera, mata el proceso.
 /// No toma el turno: `terminar` la llama dentro de `ejecutar`, que ya lo tiene, y el `Mutex` no es reentrante.
-fn correr_comando(
+pub(crate) fn correr_comando(
     mut comando: Command,
     etiqueta: &str,
     plazo: Duration,

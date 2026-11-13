@@ -21,6 +21,7 @@ use crate::oracle::configs::{self, Instruccion, instrucciones, palabra_clave};
 use crate::oracle::contenedor::{
     Ejecucion, HijoPodman, MEMORIA, PIDS_LIMITE, PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman,
     correr_podman as correr_podman_crudo, correr_programa, lanzar_hijo, texto_de_linea_step,
+    turno_de_contenedor,
 };
 use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
 use crate::oracle::perfiles::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
@@ -283,12 +284,14 @@ impl FabricaEscenarios for FabricaReal {
         imagen: &str,
         escenarios: Option<&Path>,
     ) -> Result<Box<dyn CorredorDeEscenario + '_>, String> {
+        barrer_antes_de_arrancar();
         Sesion::de_imagen(&EXEC_REAL, imagen, escenarios)
             .map(|s| Box::new(s) as Box<dyn CorredorDeEscenario + '_>)
     }
 
     fn iniciar_evaluacion(&self, ejecucion: &Ejecucion) -> Result<Sesion<'_>, String> {
         crate::oracle::contenedor::validar_rutas(ejecucion).map_err(|e| e.to_string())?;
+        barrer_antes_de_arrancar();
         let nombre = format!(
             "root-entrega-eval-{}-{}",
             std::process::id(),
@@ -1602,6 +1605,12 @@ fn motivo_de_run(salida: &Result<SalidaPodman, ErrorOraculo>) -> String {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("sin salida");
     linea.trim().chars().take(300).collect()
+}
+
+/// Quita los contenedores de procesos muertos antes de arrancar uno. Toma el turno de podman mientras corre.
+fn barrer_antes_de_arrancar() {
+    let _turno = turno_de_contenedor();
+    crate::limpieza::barrer_al_arrancar("podman");
 }
 
 /// Borra un contenedor por nombre, sin esperar la parada. Un fallo no importa: ya hay un resultado.

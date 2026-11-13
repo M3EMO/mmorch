@@ -19,6 +19,8 @@ pub mod route;
 pub mod tipos;
 pub mod track;
 
+mod limpieza;
+
 pub use cli::Cli;
 pub use error::Error;
 
@@ -42,7 +44,7 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
     match &cli.comando {
         Comando::Oraculo {
             accion: OraculoAccion::Evaluar { tarea, repo },
-        } => oraculo_evaluar(cli.json, tarea, repo),
+        } => limpieza::con_vigia(|| oraculo_evaluar(cli.json, tarea, repo)),
         Comando::Oraculo {
             accion: OraculoAccion::Informe { tarea, repo, md },
         } => oraculo_informe(tarea, repo, *md),
@@ -59,15 +61,17 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                     repo,
                     tope_usd,
                 },
-        } => oraculo_calibrar(
-            cli.json,
-            tarea,
-            dimension,
-            *n,
-            *semilla,
-            repo.as_deref(),
-            *tope_usd,
-        ),
+        } => limpieza::con_vigia(|| {
+            oraculo_calibrar(
+                cli.json,
+                tarea,
+                dimension,
+                *n,
+                *semilla,
+                repo.as_deref(),
+                *tope_usd,
+            )
+        }),
         Comando::Oraculo {
             accion:
                 OraculoAccion::Validar {
@@ -106,7 +110,7 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                 por_archivo: *por_archivo,
                 solo_medir: solo_medir.clone(),
             };
-            oraculo_auditar(cli.json, &opciones)
+            limpieza::con_vigia(|| oraculo_auditar(cli.json, &opciones))
         }
         Comando::Ficha { accion } => ficha_accion(cli.json, accion),
         Comando::Route {
