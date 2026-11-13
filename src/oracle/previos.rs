@@ -147,12 +147,20 @@ fn leer(ruta: &Path) -> Option<LineaBase> {
     serde_json::from_str(&texto).ok()
 }
 
+/// Guarda la línea base en `ruta` de forma atómica. Escribe un temporal en la misma carpeta y luego
+/// lo renombra al destino. Así un lector nunca ve un archivo a medio escribir. Si la escritura o el
+/// rename fallan, borra el temporal y devuelve el error.
 fn guardar(ruta: &Path, base: &LineaBase) -> std::io::Result<()> {
-    if let Some(carpeta) = ruta.parent() {
-        fs::create_dir_all(carpeta)?;
-    }
+    let carpeta = ruta.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(carpeta)?;
     let texto = serde_json::to_string(base).map_err(std::io::Error::other)?;
-    fs::write(ruta, texto)
+    let nombre = ruta.file_name().unwrap_or_default().to_string_lossy();
+    let temporal = carpeta.join(format!("{nombre}.tmp-{}", std::process::id()));
+    let escrito = fs::write(&temporal, texto).and_then(|()| fs::rename(&temporal, ruta));
+    if escrito.is_err() {
+        let _ = fs::remove_file(&temporal);
+    }
+    escrito
 }
 
 /// Marca `previo` en cada hallazgo que estaba en la base. Una clave (`clave_base`) cuenta tantas veces como aparece en la base.
@@ -666,5 +674,58 @@ mod tests {
         };
         let limpia = quitar_previos(std::slice::from_ref(&sonda), &[]);
         assert_eq!(limpia, vec![sonda], "un secreto previo sigue en el puntaje");
+    }
+
+    /// Nombres de los archivos de `carpeta`, ordenados.
+    fn nombres_en(carpeta: &Path) -> Vec<String> {
+        let mut nombres: Vec<String> = fs::read_dir(carpeta)
+            .expect("lee la carpeta")
+            .map(|e| {
+                e.expect("entrada")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        nombres.sort();
+        nombres
+    }
+
+    #[test]
+    fn previos_guardar_es_atomico_y_no_deja_temporales() {
+        let base = LineaBase {
+            cargo_audit: BTreeMap::from([("RUSTSEC-2020-0072|3".to_string(), vec![16])]),
+            ..LineaBase::default()
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        // Caso 1: carpeta nueva, que `guardar` crea. Solo queda el archivo final.
+        let carpeta = dir.path().join("nueva");
+        let ruta = carpeta.join("clave.json");
+        guardar(&ruta, &base).expect("guarda en carpeta nueva");
+        assert_eq!(leer(&ruta), Some(base.clone()), "devuelve la misma base");
+        assert_eq!(nombres_en(&carpeta), vec!["clave.json"], "sin temporales");
+
+        // Caso 2: reemplaza un archivo viejo. No queda rastro del contenido viejo.
+        let carpeta = dir.path().join("vieja");
+        fs::create_dir_all(&carpeta).expect("crea la carpeta");
+        let ruta = carpeta.join("clave.json");
+        fs::write(&ruta, "viejo").expect("escribe el archivo viejo");
+        guardar(&ruta, &base).expect("reemplaza el archivo viejo");
+        assert_eq!(leer(&ruta), Some(base.clone()), "reemplaza el viejo");
+        assert_eq!(nombres_en(&carpeta), vec!["clave.json"], "sin temporales");
+
+        // Caso 3: `ruta` es una carpeta no vacía. El rename falla: Err, la carpeta intacta y sin temporal.
+        let carpeta = dir.path().join("tres");
+        let ruta = carpeta.join("clave.json");
+        fs::create_dir_all(&ruta).expect("crea ruta como carpeta");
+        fs::write(ruta.join("dentro.txt"), "intacto").expect("escribe dentro");
+        assert!(guardar(&ruta, &base).is_err(), "no reemplaza una carpeta");
+        assert_eq!(nombres_en(&carpeta), vec!["clave.json"], "sin temporales");
+        assert_eq!(
+            fs::read_to_string(ruta.join("dentro.txt")).expect("lee dentro"),
+            "intacto",
+            "el contenido de la carpeta queda intacto"
+        );
     }
 }
