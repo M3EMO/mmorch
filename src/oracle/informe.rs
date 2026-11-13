@@ -1767,6 +1767,18 @@ modulos = ["config"]
     }
 
     #[test]
+    fn informe_hallazgo_previo_de_dockerfile_no_secreto_no_bloquea() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-dockerfile", "dockerfile", true));
+        let i = informe_de(&v);
+        assert_ne!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert!(i.bloqueantes.is_empty(), "{:?}", i.bloqueantes);
+        assert_eq!(i.avisos_previos.len(), 1, "{:?}", i.avisos_previos);
+        assert_eq!(i.avisos_previos[0].fuente, "dockerfile");
+    }
+
+    #[test]
     fn informe_aviso_previo_mas_uno_nuevo_bloquea_y_cita_el_nuevo() {
         let mut v = ecc();
         v.hallazgos
