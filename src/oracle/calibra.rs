@@ -9763,19 +9763,6 @@ mod tests {
         assert_eq!(fila.equivalentes_excluidos, 1);
     }
 
-    /// Dos entradas iguales (mismo archivo, línea y edición) cuentan una vez.
-    #[test]
-    fn fila_cuenta_una_vez_los_equivalentes_repetidos() {
-        let dir = tempfile::tempdir().expect("temporal");
-        let repetida = format!(
-            "{EQUIVALENTE_DE_PRUEBA}{}",
-            EQUIVALENTE_DE_PRUEBA.trim_start_matches("\n[calibracion]\n")
-        );
-        let tarea = tarea_en(dir.path(), &repetida);
-        let fila = fila_de(&tarea, Dimension::Funciona, 42, &[], &[], 0, false);
-        assert_eq!(fila.equivalentes_excluidos, 1);
-    }
-
     /// La fila de una dimensión no aplicable también cuenta sus equivalentes.
     #[test]
     fn fila_no_aplica_cuenta_los_equivalentes_declarados() {

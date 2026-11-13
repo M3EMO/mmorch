@@ -250,15 +250,28 @@ impl Tarea {
     }
 
     /// Cada equivalente declarado tiene un motivo con texto. El error dice el archivo y la línea.
+    /// Dos entradas con el mismo archivo, línea y edición son un error: la segunda sobra.
     fn validar_equivalentes(&self) -> Result<(), String> {
         let Some(calibracion) = &self.calibracion else {
             return Ok(());
         };
+        let mut vistos = std::collections::BTreeSet::new();
         for equivalente in &calibracion.equivalentes {
             if equivalente.motivo.trim().is_empty() {
                 return Err(format!(
                     "un equivalente necesita su motivo ({}:{})",
                     equivalente.archivo, equivalente.linea
+                ));
+            }
+            let clave = (
+                equivalente.archivo.as_str(),
+                equivalente.linea,
+                equivalente.edicion.trim(),
+            );
+            if !vistos.insert(clave) {
+                return Err(format!(
+                    "equivalente repetido: {}:{} ({})",
+                    equivalente.archivo, equivalente.linea, equivalente.edicion
                 ));
             }
         }
@@ -887,6 +900,27 @@ cmd = "exit 0"
                 "{error}"
             );
         }
+    }
+
+    /// Dos entradas iguales dan error de carga. El mensaje dice el archivo, la línea y la edición.
+    #[test]
+    fn equivalente_repetido_es_error_de_carga_con_archivo_linea_y_edicion() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // La segunda entrada repite la primera sin volver a abrir `[calibracion]`.
+        let repetida = EQUIVALENTE_CON_MOTIVO.trim_start_matches("\n[calibracion]\n");
+        escribir(
+            dir.path(),
+            &format!("{MINIMO}{EQUIVALENTE_CON_MOTIVO}{repetida}"),
+        );
+        let error =
+            Tarea::cargar_de(dir.path()).expect_err("debe rechazar el equivalente repetido");
+        assert!(
+            matches!(&error, ErrorOraculo::Tarea(msg)
+                if msg.contains("equivalente repetido")
+                    && msg.contains("src/composite_pattern.rs:113")
+                    && msg.contains("true -> false")),
+            "{error}"
+        );
     }
 
     #[test]
