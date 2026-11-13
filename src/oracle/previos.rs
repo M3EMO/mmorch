@@ -121,7 +121,7 @@ fn calcular(tarea: &Tarea, bootstrap: &Path, ej: &dyn EjecutorHerramienta) -> (L
     for sonda in &herramientas {
         for h in &sonda.hallazgos {
             let mapa = match &h.fuente {
-                Fuente::Sonda(nombre) if nombre == "gitleaks" => &mut base.gitleaks,
+                Fuente::Sonda(nombre) if nombre == juez::SONDA_GITLEAKS => &mut base.gitleaks,
                 Fuente::Sonda(nombre) if nombre == "cargo-audit" => &mut base.cargo_audit,
                 _ => continue,
             };
@@ -232,7 +232,7 @@ pub fn marcar_herramientas(sondas: &mut [ResultadoSonda], base: &LineaBase) {
     let mut gitleaks = Vec::new();
     let mut cargo = Vec::new();
     for h in sondas.iter_mut().flat_map(|s| s.hallazgos.iter_mut()) {
-        if es_sonda(&h.fuente, "gitleaks") {
+        if es_sonda(&h.fuente, juez::SONDA_GITLEAKS) {
             gitleaks.push(h);
         } else if es_sonda(&h.fuente, "cargo-audit") {
             cargo.push(h);
@@ -780,7 +780,7 @@ mod tests {
         sondas
             .iter()
             .flat_map(|s| s.hallazgos.iter())
-            .filter(|h| es_sonda(&h.fuente, "configs-secretos"))
+            .filter(|h| es_sonda(&h.fuente, configs::SONDA_SECRETOS))
             .cloned()
             .collect()
     }
@@ -917,6 +917,98 @@ mod tests {
             "{}",
             i.resumen
         );
+    }
+
+    /// Hallazgo previo de Seguridad, severidad 3, de la fuente `sonda`.
+    fn secreto_previo_de(sonda: &str) -> Hallazgo {
+        let mut h = crear_hallazgo(
+            Dimension::Seguridad,
+            3,
+            "src/lib.rs",
+            1,
+            "clave",
+            "clave en el código",
+            sonda,
+            &[],
+        );
+        h.previo = true;
+        h
+    }
+
+    /// Afirma que `informar_con` bloquea cuando `hallazgo` es el único hallazgo.
+    fn afirma_bloqueo(hallazgo: Hallazgo) {
+        let (_tarea_dir, tarea) = tarea_rust();
+        let mut v = Veredicto::default();
+        v.hallazgos.push(hallazgo);
+        let i = informar_con(
+            &v,
+            &tarea,
+            &ReglasDecision::default(),
+            &[],
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+    }
+
+    #[test]
+    fn previos_secreto_previo_de_gitleaks_bloquea() {
+        afirma_bloqueo(secreto_previo_de(juez::SONDA_GITLEAKS));
+    }
+
+    #[test]
+    fn previos_secreto_previo_de_configs_bloquea() {
+        afirma_bloqueo(secreto_previo_de(configs::SONDA_SECRETOS));
+    }
+
+    #[test]
+    fn previos_secreto_previo_de_la_descarga_bloquea() {
+        afirma_bloqueo(secreto_previo_de(descarga::SONDA_DESCARGA));
+    }
+
+    #[test]
+    fn previos_secreto_previo_de_env_de_dockerfile_bloquea() {
+        let hallazgo = secreto_de_dockerfile_previo();
+        assert_eq!(
+            hallazgo.fuente,
+            Fuente::Sonda(configs::SONDA_SECRETOS.into())
+        );
+        afirma_bloqueo(hallazgo);
+    }
+
+    /// Emisores de secretos cubiertos, con el test que los cubre. Una fuente de
+    /// `FUENTES_DE_SECRETOS` sin fila aquí hace fallar `previos_cada_fuente_de_secretos_tiene_su_test`.
+    const EMISORES_DE_SECRETOS: [(&str, &str); 4] = [
+        (
+            juez::SONDA_GITLEAKS,
+            "previos_secreto_previo_de_gitleaks_bloquea",
+        ),
+        (
+            configs::SONDA_SECRETOS,
+            "previos_secreto_previo_de_configs_bloquea",
+        ),
+        (
+            descarga::SONDA_DESCARGA,
+            "previos_secreto_previo_de_la_descarga_bloquea",
+        ),
+        (
+            configs::SONDA_SECRETOS,
+            "previos_secreto_previo_de_env_de_dockerfile_bloquea",
+        ),
+    ];
+
+    #[test]
+    fn previos_cada_fuente_de_secretos_tiene_su_test() {
+        for fuente in FUENTES_DE_SECRETOS {
+            assert!(
+                EMISORES_DE_SECRETOS.iter().any(|(f, _)| *f == fuente),
+                "la fuente de secretos `{fuente}` no tiene test: agrégala a EMISORES_DE_SECRETOS con su test"
+            );
+        }
+        for (fuente, _nombre) in EMISORES_DE_SECRETOS {
+            afirma_bloqueo(secreto_previo_de(fuente));
+        }
     }
 
     #[test]
