@@ -8530,3 +8530,70 @@ Brief: `docs/builds/brief-local-106.md`, con base 3a1ed58 y rama `laptop/tarea-1
 - El punto 4 corre en paralelo.
 
 **Preguntas al usuario:** ninguna nueva. P95 y P97 a P103 siguen abiertas.
+
+## Vuelta del 2026-11-14 (29): un mutante que cuelga, contenedores huérfanos, y Tarea 107
+
+**Estado.** La Tarea 106 está en `laptop/tarea-106` (88169de), con 3286, 0 y 4 con podman. La medición 109 confirma que ninguna fila repite una inyección. Esperan al usuario las mezclas de la 84 a la 106, P95, P97 a P103 y Colab.
+
+## 1. Un caso con defecto que no termina
+
+**Lo que pasó.** En t3 Funciona, una inyección dejó en bucle infinito a `empty_match_at_end_of_line_doesnt_panic`. El contenedor del oculto corrió 59 minutos sin corte.
+
+**Por qué no se cortó.**
+- El plazo de una suite es fijo: 3600 s (`OpcionesOraculo::default`, `src/oracle/mod.rs:185`).
+- El perfil `ci` de nextest (`imagenes/oraculo-rust/Containerfile:117`) no tiene `slow-timeout`. Ningún test se corta solo.
+- En cambio, la sonda de mutación ya usa un plazo por múltiplo de la base (Tarea 97). Las suites no.
+
+**Decisión, en dos capas.**
+1. **Cada test tiene su plazo, dentro de nextest.** El perfil `ci` suma `slow-timeout = { period = "60s", terminate-after = 5 }`. Un test que pasa 5 minutos se corta. nextest lo informa en el junit como fallo por plazo, y sale con 100.
+2. **Cada suite de un caso de calibración tiene un plazo desde la base.** El plazo es 10 veces lo que tardó esa suite en la base, con un mínimo de 600 s. Es la red si nextest mismo se cuelga.
+
+**Cómo cuenta cada caso.**
+- **Un test cortado por nextest es un fallo.** El junit lo trae, el código es 100, y Funciona baja. En la calibración, el caso queda detectado. En una evaluación, el producto queda en rojo. Un producto que cuelga sus tests no está listo.
+- **Una suite cortada por el plazo de Root, sin junit,** es otra cosa: no se sabe qué pasó adentro. En la calibración, el caso es una inyección inválida y va a reemplazo. En una evaluación, queda sin veredicto, como hoy. No da verde.
+- **¿Un rojo puede volverse verde? No.** El plazo de nextest solo agrega fallos. El plazo de Root solo agrega "sin veredicto" o reemplazos.
+
+**Por qué no contar como detectado todo plazo vencido.** En cargo-mutants, un plazo vencido cuenta como mutante muerto. Pero un plazo de Root también vence por el host, por ejemplo con mucha carga. Contarlo como detección daría aciertos falsos.
+
+**La imagen cambia de etiqueta.** El perfil vive en la imagen. La imagen nueva es `root-oraculo-rust:4`, y la `:3` no cambia. Así un `tarea.toml` que nombra `:3` sigue midiendo igual. Después de la mezcla, el orquestador pasa s2-t1 a s2-t3 a `:4`, junto con lo demás.
+
+## 2. Contenedores huérfanos al morir por señal
+
+**Lo que pasó.** El `timeout` del orquestador mató a r00t, y el contenedor del oculto quedó corriendo. Un Ctrl-C del usuario deja lo mismo.
+
+**Decisión: sí, r00t los borra.** Es lo mismo que ya hace `r00t corre` desde la Tarea 84, ahora en `evaluar`, `calibrar` y `auditar`.
+1. Al recibir SIGINT o SIGTERM, r00t quita los contenedores que llevan su pid en el nombre: `root-oraculo-<pid>-`, `root-entrega-esc-<pid>-` y `root-entrega-eval-<pid>-` (`src/oracle/contenedor.rs:423` y `src/oracle/entrega.rs`). Usa un plazo, y sale con 130 o 143.
+2. **Barrido al arrancar.** Antes de lanzar un contenedor, r00t quita los contenedores `root-oraculo-*` y `root-entrega-*` cuyo pid ya no es un r00t vivo. Usa la misma regla de `/proc` del barrido de `corre` (Tarea 85), con su margen de 300 s.
+3. SIGKILL no se puede atrapar. Ese caso lo cubre el barrido.
+
+## 3. Las preguntas 1, 6 y 10 de la Tarea 106
+
+1. **Los casos agotados bajan el mínimo:** acepto. Subir `n` no crea candidatos en un repo chico. Lo que crea casos son más tareas, que espera P97. Con P102 a, a una dimensión de oráculo le alcanza un defecto detectado por versión.
+6. **Las entradas duplicadas: dan error de carga.** La lista de equivalentes es una curación humana con motivo. Una entrada repetida es un descuido, y conviene verlo. El mensaje dice "equivalente repetido" con su archivo y su línea.
+10. **El orden de los reemplazos no es determinista: se corrige.** Con una semilla fija, la misma calibración debe dar los mismos casos. La primera elección ya lo es. Los reemplazos dependen de qué hilo llega primero al cerrojo.
+   - **Decisión: reservas por caso, elegidas en la fase en serie.** Cada caso con defecto recibe su inyección y hasta `MAX_REEMPLAZOS` reservas, todas distintas entre todos los casos.
+   - Primero se reparten las inyecciones principales, y después las reservas, por turno entre los casos.
+   - Un reemplazo usa la próxima reserva de su caso. No hay cerrojo, y el resultado no depende del orden de los hilos.
+   - Si un caso se queda sin reservas, queda "candidatos distintos agotados".
+
+## 4. t1 Funciona sin candidatos
+
+**Se acepta, y se informa.** Sin el equivalente, el commit de t1 no deja otra inyección de comportamiento que compile. Ningún `n` lo arregla. La fila queda "sin calibrar: ningún caso aplicable", con la regla de la vuelta (20). Es un dato verdadero sobre esa tarea. Más casos de Funciona salen de más tareas, que espera P97.
+
+## 5. Tarea 107
+
+Brief: `docs/builds/brief-local-107.md`, con base 88169de y rama `laptop/tarea-107`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | `slow-timeout` en el perfil `ci`, en la imagen `:4` | `imagenes/oraculo-rust/Containerfile`, `scripts/construir-imagen-oraculo.sh`, `scripts/probar-imagen-oraculo.sh` |
+| 2 | Plazo de suite desde la base en los casos, y suite vencida como inválida | `src/oracle/calibra.rs`, `src/oracle/mod.rs` |
+| 3 | Reservas deterministas por caso | `src/oracle/calibra.rs` |
+| 4 | Señales y barrido de contenedores del oráculo | `src/oracle/contenedor.rs`, `src/oracle/entrega.rs`, `src/lib.rs` |
+| 5 | Equivalente repetido da error de carga | `src/oracle/tarea.rs` |
+
+- Los puntos 2 y 3 comparten `calibra.rs`. Van en serie: primero el 3.
+- Los puntos 1, 4 y 5 corren en paralelo.
+- El orquestador construye la imagen `:4` con podman después de mezclar. El builder no corre podman.
+
+**Preguntas al usuario:** ninguna nueva. P95 y P97 a P103 siguen abiertas.
