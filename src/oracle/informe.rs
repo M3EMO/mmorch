@@ -11,6 +11,7 @@ use super::ErrorOraculo;
 use super::evidencia::oraciones_con_id;
 use super::juez::desenvuelto;
 use super::perfiles::tiene_perfil;
+use super::previos::es_fuente_de_secretos;
 use super::requisitos::PREFIJO_CONTRATO;
 use super::rubrica::Rubrica;
 use super::tarea::Tarea;
@@ -407,12 +408,9 @@ fn bloquea_la_dimension(dimension: Dimension, rubricas: &[Rubrica]) -> bool {
         .any(|i| i.bloquea)
 }
 
-/// Sonda que encuentra secretos. Sus hallazgos son secretos.
-const SONDA_SECRETOS: &str = "gitleaks";
-
-/// Verdadero si el hallazgo es un secreto: lo encontró gitleaks.
+/// Verdadero si el hallazgo es un secreto: lo encontró una sonda de secretos (ver `es_fuente_de_secretos`).
 fn es_secreto(h: &Hallazgo) -> bool {
-    matches!(&h.fuente, Fuente::Sonda(sonda) if sonda == SONDA_SECRETOS)
+    es_fuente_de_secretos(&h.fuente)
 }
 
 /// Reglas que bloquean: un requisito de peso 3 en nivel 0, un hallazgo de seguridad de severidad 3 que el
@@ -1795,6 +1793,29 @@ modulos = ["config"]
             "{}",
             i.resumen
         );
+    }
+
+    #[test]
+    fn informe_secreto_previo_de_configs_bloquea() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto-configs", "configs-secretos", true));
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert!(
+            i.bloqueantes.contains(&"h-secreto-configs".to_string()),
+            "{:?}",
+            i.bloqueantes
+        );
+    }
+
+    #[test]
+    fn informe_secreto_previo_de_configs_no_sale_en_avisos() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto-configs", "configs-secretos", true));
+        let i = informe_de(&v);
+        assert!(i.avisos_previos.is_empty(), "{:?}", i.avisos_previos);
     }
 
     #[test]

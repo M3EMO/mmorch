@@ -266,6 +266,16 @@ fn marcar_refs(
     }
 }
 
+/// Sondas que encuentran secretos. Sus hallazgos son secretos.
+pub const FUENTES_DE_SECRETOS: [&str; 2] = ["gitleaks", "configs-secretos"];
+
+/// Verdadero si `fuente` es una sonda de secretos: gitleaks o configs-secretos.
+pub fn es_fuente_de_secretos(fuente: &Fuente) -> bool {
+    FUENTES_DE_SECRETOS
+        .iter()
+        .any(|nombre| es_sonda(fuente, nombre))
+}
+
 fn es_sonda(fuente: &Fuente, nombre: &str) -> bool {
     matches!(fuente, Fuente::Sonda(n) if n == nombre)
 }
@@ -307,18 +317,16 @@ fn es_ilegible(ruta: &Path) -> bool {
         && fs::read_to_string(ruta).is_err()
 }
 
-/// Copia de las sondas de Seguridad sin sus hallazgos previos, salvo los secretos de gitleaks y de configs.
+/// Copia de las sondas de Seguridad sin sus hallazgos previos, salvo los secretos (ver `es_fuente_de_secretos`).
 /// Un secreto que ya estaba cuenta en el puntaje. El valor de cada sonda que lo tenga sale de sus hallazgos que quedan.
 pub fn quitar_previos(sondas: &[ResultadoSonda], reqs: &[Requisito]) -> Vec<ResultadoSonda> {
     sondas
         .iter()
         .map(|sonda| {
             let mut copia = sonda.clone();
-            copia.hallazgos.retain(|h| {
-                !h.previo
-                    || es_sonda(&h.fuente, "gitleaks")
-                    || es_sonda(&h.fuente, "configs-secretos")
-            });
+            copia
+                .hallazgos
+                .retain(|h| !h.previo || es_fuente_de_secretos(&h.fuente));
             if copia.valor.is_some() {
                 copia.valor = Some(puntuar_hallazgos(&copia.hallazgos, reqs));
             }
