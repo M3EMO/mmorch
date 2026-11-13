@@ -18,6 +18,7 @@ const LINEAS_NEXTEST_TOML: &[&str] = &[
     "dir = \"/salida/target/nextest\"",
     "[profile.ci]",
     "fail-fast = false",
+    "slow-timeout = { period = \"60s\", terminate-after = 5 }",
     "[profile.ci.junit]",
     "path = \"junit.xml\"",
 ];
@@ -127,20 +128,20 @@ fn b_nextest_va_despues_de_hadolint_y_al_final() {
 }
 
 #[test]
-fn c_construir_tiene_default_3() {
+fn c_construir_tiene_default_4() {
     let texto = leer(CONSTRUIR);
     assert!(
-        texto.contains("IMAGEN=${IMAGEN:-root-oraculo-rust:3}"),
-        "construir-imagen-oraculo.sh debe tener por defecto root-oraculo-rust:3"
+        texto.contains("IMAGEN=${IMAGEN:-root-oraculo-rust:4}"),
+        "construir-imagen-oraculo.sh debe tener por defecto root-oraculo-rust:4"
     );
 }
 
 #[test]
-fn d_probar_tiene_default_3_y_chequeo_nextest() {
+fn d_probar_tiene_default_4_y_chequeo_nextest() {
     let texto = leer(PROBAR);
     assert!(
-        texto.contains("IMAGEN=${IMAGEN:-localhost/root-oraculo-rust:3}"),
-        "probar-imagen-oraculo.sh debe tener por defecto localhost/root-oraculo-rust:3"
+        texto.contains("IMAGEN=${IMAGEN:-localhost/root-oraculo-rust:4}"),
+        "probar-imagen-oraculo.sh debe tener por defecto localhost/root-oraculo-rust:4"
     );
     let hay_chequeo = texto.lines().any(|l| {
         let t = l.trim();
@@ -191,4 +192,20 @@ fn f_nextest_toml_va_despues_de_nextest_con_el_contenido() {
             "nextest.toml no trae la línea {entre_comillas} en el RUN: {linea_toml:?}"
         );
     }
+}
+
+#[test]
+fn g_probar_chequea_slow_timeout_en_perfil_ci() {
+    let texto = leer(PROBAR);
+    let hay_chequeo = texto.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with("chequeo ")
+            && t.contains("slow-timeout")
+            && t.contains("correr \"$IMAGEN\"")
+            && t.contains(RUTA_NEXTEST_TOML)
+    });
+    assert!(
+        hay_chequeo,
+        "falta un chequeo que corre en la imagen y lee slow-timeout de {RUTA_NEXTEST_TOML}"
+    );
 }

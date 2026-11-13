@@ -97,7 +97,8 @@ impl Acumulador {
         Ok(())
     }
 
-    /// Cierra el stream. Con `stop_reason` = `max_tokens` el tope cortó la respuesta: es truncada.
+    /// Cierra el stream. Con `stop_reason` = `max_tokens` el tope cortó la respuesta. Con `refusal`
+    /// el modelo rechazó responder: las dos son truncadas.
     /// Sin el `usage` del `message_delta`, el costo no se midió: la llamada cuenta como cortada.
     pub(crate) fn cerrar(self) -> Result<Crudo, ErrorProveedor> {
         let Some(out_tokens) = self.out_tokens else {
@@ -112,7 +113,7 @@ impl Acumulador {
             texto: self.texto,
             in_tokens,
             out_tokens,
-            truncada: self.stop.as_deref() == Some("max_tokens"),
+            truncada: matches!(self.stop.as_deref(), Some("max_tokens" | "refusal")),
         })
     }
 }
@@ -265,6 +266,16 @@ mod tests {
         let crudo = acumula(&eventos).expect("truncada no es error");
         assert!(crudo.truncada);
         assert_eq!(crudo.texto, "ho");
+    }
+
+    #[test]
+    fn proveedores_anthropic_stream_refusal_es_truncada() {
+        let mut eventos = vec![inicio()];
+        eventos.extend(bloque_de_texto(1, "no"));
+        eventos.push(fin("refusal", 5));
+        let crudo = acumula(&eventos).expect("rechazada no es error");
+        assert!(crudo.truncada);
+        assert_eq!(crudo.texto, "no");
     }
 
     #[test]

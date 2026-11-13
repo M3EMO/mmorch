@@ -249,10 +249,8 @@ fn root_registrar(a: &Args) -> Result<Value, Fallo> {
     let detalle = texto_opt(a, "detalle")?;
     // `registrar_manual` no recibe `extra`: se arma el evento igual y se marca aquí.
     let mut ev = observe::evento_manual(&corrida, tipo, detalle.as_deref());
-    if tipo == TipoEvento::PlanAprobado {
-        // Sin esta marca, el evento parece una aprobación tecleada por una persona.
-        ev.extra.insert("origen".into(), json!("mcp"));
-    }
+    // Todo evento de MCP lleva la marca. Sin ella, parece tecleado por una persona.
+    ev.extra.insert("origen".into(), json!("mcp"));
     observe::registrar(&ev).map_err(|e| herramienta(observe::ErrorObserve::from(e)))?;
     Ok(json!({"registrado": true, "corrida": corrida, "tipo": tipo_texto}))
 }
@@ -506,5 +504,25 @@ mod tests {
         let ev = ultimo_evento_de(&corrida);
         assert_eq!(ev["tipo"], "plan_aprobado");
         assert_eq!(ev["extra"]["origen"], "mcp");
+    }
+
+    #[test]
+    fn mcp_unit_humano_por_mcp_lleva_origen_mcp() {
+        // Escribe en ROOT_HOME: el test exige que lo fije tools/test-seguro.sh.
+        assert!(
+            std::env::var_os("ROOT_HOME").is_some(),
+            "corre con tools/test-seguro.sh: sin ROOT_HOME fijado no se escribe eventos"
+        );
+        let corrida = format!("mcp-humano-{}", std::process::id());
+        let a: Args = Map::from_iter([
+            ("corrida".to_string(), json!(corrida)),
+            ("tipo".to_string(), json!("humano")),
+            ("detalle".to_string(), json!("ajusta")),
+        ]);
+        assert!(root_registrar(&a).is_ok(), "root_registrar debe registrar");
+        let ev = ultimo_evento_de(&corrida);
+        assert_eq!(ev["tipo"], "humano");
+        assert_eq!(ev["extra"]["origen"], "mcp");
+        assert_eq!(ev["extra"]["detalle"], "ajusta");
     }
 }

@@ -1576,6 +1576,7 @@ anclas = [
 
     fn informe(decision: Decision) -> Informe {
         Informe {
+            avisos_previos: Vec::new(),
             decision,
             motivo: String::new(),
             requisitos: Vec::new(),
@@ -1642,6 +1643,7 @@ anclas = [
             fuente: Fuente::Sonda("fixture".into()),
             id: String::new(),
             impacto: Vec::new(),
+            previo: false,
         }
     }
 

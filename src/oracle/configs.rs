@@ -15,7 +15,7 @@ use crate::oracle::tarea::{Requisito, Tarea};
 use crate::tipos::{Dimension, Hallazgo};
 
 const SONDA_ESTRUCTURA: &str = "configs";
-const SONDA_SECRETOS: &str = "configs-secretos";
+pub(crate) const SONDA_SECRETOS: &str = "configs-secretos";
 const SONDA_DOCKERFILE: &str = "dockerfile";
 const SONDA_HADOLINT: &str = "hadolint";
 /// Detalle de la regla (b): el último stage corre como root. La sonda de entrega lo reusa.
@@ -655,7 +655,7 @@ fn reglas_dockerfile(archivo: &str, texto: &str, requisitos: &[Requisito]) -> Ve
                             inst.linea,
                             &clave,
                             "secreto literal en ENV o ARG: va a la imagen",
-                            SONDA_DOCKERFILE,
+                            SONDA_SECRETOS,
                             requisitos,
                         ));
                     }

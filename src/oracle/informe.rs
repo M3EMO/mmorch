@@ -11,14 +11,15 @@ use super::ErrorOraculo;
 use super::evidencia::oraciones_con_id;
 use super::juez::desenvuelto;
 use super::perfiles::tiene_perfil;
+use super::previos::es_fuente_de_secretos;
 use super::requisitos::PREFIJO_CONTRATO;
 use super::rubrica::Rubrica;
 use super::tarea::Tarea;
 use crate::config::ReglasDecision;
 use crate::proveedores::{self, Prompt, causa_tope_alcanzado};
 use crate::tipos::{
-    Accion, Confianza, Cumplimiento, Decision, Dimension, Eleccion, Estado, EstadoRequisito,
-    Informe, ParteSinVeredicto, Veredicto,
+    Accion, AvisoPrevio, Confianza, Cumplimiento, Decision, Dimension, Eleccion, Estado,
+    EstadoRequisito, Fuente, Hallazgo, Informe, ParteSinVeredicto, Veredicto,
 };
 
 /// Máximo de riesgos y de próximos pasos.
@@ -183,6 +184,7 @@ pub fn informar_con(
         Vec::new()
     };
     let mut informe = Informe {
+        avisos_previos: avisos_previos(v),
         decision: decidido.decision,
         motivo,
         requisitos: v.requisitos.clone(),
@@ -204,7 +206,68 @@ pub fn informar_con(
             )),
         }
     }
+    // Después de la redacción: el redactor no reescribe esta línea, que no cita ids.
+    if let Some(linea) = linea_avisos_previos(&informe.avisos_previos) {
+        informe.resumen = format!("{} {linea}", informe.resumen);
+    }
     Ok(informe)
+}
+
+/// Sonda de cargo-audit. Su `cita` es el crate y la versión.
+const SONDA_CARGO_AUDIT: &str = "cargo-audit";
+
+/// Avisos de Seguridad previos que no son secretos, en orden del veredicto. Un secreto va con los bloqueos.
+fn avisos_previos(v: &Veredicto) -> Vec<AvisoPrevio> {
+    v.hallazgos
+        .iter()
+        .filter(|h| h.dimension == Dimension::Seguridad && h.previo && !es_secreto(h))
+        .map(|h| {
+            let objeto = match &h.fuente {
+                Fuente::Sonda(nombre) if nombre == SONDA_CARGO_AUDIT => h.cita.clone(),
+                _ => h.archivo.clone(),
+            };
+            AvisoPrevio {
+                fuente: nombre_fuente(&h.fuente),
+                aviso: aviso_de(&h.detalle),
+                objeto,
+                severidad: h.severidad,
+            }
+        })
+        .collect()
+}
+
+/// Nombre de quien produjo el hallazgo: la sonda, o el juez con su modelo.
+fn nombre_fuente(fuente: &Fuente) -> String {
+    match fuente {
+        Fuente::Sonda(nombre) => nombre.clone(),
+        Fuente::Juez { modelo } => format!("juez {modelo}"),
+    }
+}
+
+/// El aviso de un detalle: el id RUSTSEC si lo trae. Si no, la primera frase.
+fn aviso_de(detalle: &str) -> String {
+    let rustsec = detalle
+        .split_whitespace()
+        .map(|t| t.trim_end_matches(':'))
+        .find(|t| t.starts_with("RUSTSEC-"));
+    match rustsec {
+        Some(id) => id.to_string(),
+        None => detalle
+            .split(". ")
+            .next()
+            .unwrap_or(detalle)
+            .trim_end_matches('.')
+            .to_string(),
+    }
+}
+
+/// Frase del resumen con los avisos previos. `None` si no hay ninguno.
+fn linea_avisos_previos(avisos: &[AvisoPrevio]) -> Option<String> {
+    match avisos.len() {
+        0 => None,
+        1 => Some("1 aviso previo de Seguridad, no bloquea.".into()),
+        n => Some(format!("{n} avisos previos de Seguridad, no bloquean.")),
+    }
 }
 
 /// Un disparo de regla: el texto del motivo, la frase del resumen y, si bloquea por un hallazgo, su id.
@@ -345,8 +408,13 @@ fn bloquea_la_dimension(dimension: Dimension, rubricas: &[Rubrica]) -> bool {
         .any(|i| i.bloquea)
 }
 
-/// Reglas que bloquean: un requisito de peso 3 en nivel 0, un hallazgo de seguridad de severidad 3, y un
-/// ítem de rúbrica con `bloquea = true` en nivel 0.
+/// Verdadero si el hallazgo es un secreto: lo encontró una sonda de secretos (ver `es_fuente_de_secretos`).
+fn es_secreto(h: &Hallazgo) -> bool {
+    es_fuente_de_secretos(&h.fuente)
+}
+
+/// Reglas que bloquean: un requisito de peso 3 en nivel 0, un hallazgo de seguridad de severidad 3 que el
+/// cambio introduce (un secreto bloquea aunque sea previo), y un ítem de rúbrica con `bloquea = true` en nivel 0.
 fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     let mut salida = Vec::new();
     for e in v
@@ -366,20 +434,29 @@ fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
             hallazgo: None,
         });
     }
-    for h in v
-        .hallazgos
-        .iter()
-        .filter(|h| h.dimension == Dimension::Seguridad && h.severidad == SEVERIDAD_BLOQUEANTE)
-    {
+    // Un aviso previo no bloquea. Un secreto bloquea siempre, sea previo o no.
+    for h in v.hallazgos.iter().filter(|h| {
+        h.dimension == Dimension::Seguridad
+            && h.severidad == SEVERIDAD_BLOQUEANTE
+            && (!h.previo || es_secreto(h))
+    }) {
+        let frase = if h.previo {
+            format!(
+                "{} es un hallazgo de seguridad con severidad {SEVERIDAD_BLOQUEANTE}; estaba en el estado inicial; los secretos bloquean siempre.",
+                h.id
+            )
+        } else {
+            format!(
+                "{} es un hallazgo de seguridad con severidad {SEVERIDAD_BLOQUEANTE}.",
+                h.id
+            )
+        };
         salida.push(Disparo {
             regla: format!(
                 "bloqueo_seguridad: hallazgo {} de seguridad con severidad {SEVERIDAD_BLOQUEANTE}",
                 h.id
             ),
-            frase: format!(
-                "{} es un hallazgo de seguridad con severidad {SEVERIDAD_BLOQUEANTE}.",
-                h.id
-            ),
+            frase,
             hallazgo: Some(h.id.clone()),
         });
     }
@@ -407,11 +484,18 @@ fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     salida
 }
 
-/// Reglas de no listo: un test oculto o del contrato que falla y ningún requisito prueba, la completitud con
-/// veredicto bajo su mínimo, y una dimensión calibrada bajo su mínimo de `[decision.minimo]`. Una completitud
-/// sin veredicto no dispara aquí: `sin_decision` la cubre si no hay evidencia.
+/// Reglas de no listo: un producto o sus tests que no compilan, un test oculto o del contrato que falla y
+/// ningún requisito prueba, la completitud con veredicto bajo su mínimo, y una dimensión calibrada bajo su mínimo de
+/// `[decision.minimo]`. Una completitud sin veredicto no dispara aquí: `sin_decision` la cubre si no hay evidencia.
 fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Disparo> {
     let mut salida = Vec::new();
+    if v.no_compila {
+        salida.push(Disparo {
+            regla: "no_compila: el producto o sus tests no compilan".into(),
+            frase: "El producto o sus tests no compilan, así que no está listo.".into(),
+            hallazgo: None,
+        });
+    }
     for id in tests_fuera_de_requisitos(v, tarea) {
         salida.push(Disparo {
             regla: format!("test_oculto_fuera_de_requisitos: {id}"),
@@ -755,20 +839,45 @@ fn aplicar_redaccion(
     if let Some(texto) = conservadas(&redaccion.resumen, ids) {
         informe.resumen = texto;
     }
-    for (&pos, texto) in visibles.riesgos.iter().zip(&redaccion.riesgos) {
-        if let Some(nuevo) = conservadas(texto, ids) {
-            informe.riesgos[pos].texto = nuevo;
+    if let Some(textos) = alineados(
+        &redaccion.riesgos,
+        visibles.riesgos.len(),
+        &mut informe.confianza.avisos,
+    ) {
+        for (&pos, texto) in visibles.riesgos.iter().zip(textos) {
+            if let Some(nuevo) = conservadas(texto, ids) {
+                informe.riesgos[pos].texto = nuevo;
+            }
         }
     }
-    for (&pos, texto) in visibles
-        .proximos_pasos
-        .iter()
-        .zip(&redaccion.proximos_pasos)
-    {
-        if let Some(nuevo) = conservadas(texto, ids) {
-            informe.proximos_pasos[pos].texto = nuevo;
+    if let Some(textos) = alineados(
+        &redaccion.proximos_pasos,
+        visibles.proximos_pasos.len(),
+        &mut informe.confianza.avisos,
+    ) {
+        for (&pos, texto) in visibles.proximos_pasos.iter().zip(textos) {
+            if let Some(nuevo) = conservadas(texto, ids) {
+                informe.proximos_pasos[pos].texto = nuevo;
+            }
         }
     }
+}
+
+/// La lista del redactor, si tiene una entrada por cada acción visible. Si no, `None` y un aviso: el
+/// texto `k` no sabe a qué acción va, así que no se aplica ninguno.
+fn alineados<'a>(
+    textos: &'a [String],
+    visibles: usize,
+    avisos: &mut Vec<String>,
+) -> Option<&'a [String]> {
+    if textos.len() == visibles {
+        return Some(textos);
+    }
+    avisos.push(format!(
+        "el redactor devolvió {} textos para {visibles} acciones; se conservan los originales",
+        textos.len()
+    ));
+    None
 }
 
 /// Las oraciones de `texto` que citan un id de `ids`, unidas. `None` si no queda ninguna.
@@ -998,6 +1107,21 @@ pub fn markdown(tarea: &str, informe: &Informe) -> String {
         .map(|a| format!("- {}", a.texto))
         .collect();
     lista(&mut md, &riesgos, "Sin riesgos registrados.");
+    if !informe.avisos_previos.is_empty() {
+        md.push_str("\n## Avisos previos\n\n");
+        let avisos: Vec<String> = informe
+            .avisos_previos
+            .iter()
+            .map(|a| {
+                format!(
+                    "- {}: {} en {} (severidad {})",
+                    a.fuente, a.aviso, a.objeto, a.severidad
+                )
+            })
+            .collect();
+        lista(&mut md, &avisos, "Sin avisos previos.");
+        md.push_str("\nEstaban en el estado inicial; no bloquean.\n");
+    }
     md.push_str("\n## Confianza\n\n");
     md.push_str(&format!(
         "- Repeticiones del oculto: {}.\n",
@@ -1172,8 +1296,8 @@ mod tests {
     use crate::oracle::rubrica::{ItemRubrica, Mide, Rubrica};
     use crate::oracle::tarea::Tarea;
     use crate::tipos::{
-        Cumplimiento, Decision, Dimension, Estado, EstadoRequisito, Fuente, Hallazgo, Informe,
-        ItemFaltante, NivelItem, Pendiente, Puntaje, TasaTest, Veredicto,
+        AvisoPrevio, Cumplimiento, Decision, Dimension, Estado, EstadoRequisito, Fuente, Hallazgo,
+        Informe, ItemFaltante, NivelItem, Pendiente, Puntaje, TasaTest, Veredicto,
     };
     use std::cell::RefCell;
     use std::fs;
@@ -1278,6 +1402,7 @@ modulos = ["config"]
             fuente: Fuente::Sonda("estructura".into()),
             id: id.into(),
             impacto: impacto.iter().map(|s| s.to_string()).collect(),
+            previo: false,
         }
     }
 
@@ -1622,6 +1747,110 @@ modulos = ["config"]
         assert_eq!(i.proximos_pasos[0].refs, vec!["h-seguridad-3".to_string()]);
     }
 
+    /// Hallazgo de Seguridad de severidad 3 de la sonda `sonda`, previo o no.
+    fn seguridad_de(id: &str, sonda: &str, previo: bool) -> Hallazgo {
+        Hallazgo {
+            fuente: Fuente::Sonda(sonda.into()),
+            previo,
+            ..hallazgo(id, Dimension::Seguridad, 3, &[])
+        }
+    }
+
+    #[test]
+    fn informe_siete_avisos_previos_de_cargo_audit_no_bloquean() {
+        let mut v = ecc();
+        v.hallazgos
+            .extend((1..=7).map(|n| seguridad_de(&format!("h-audit-{n}"), "cargo-audit", true)));
+        let i = informe_de(&v);
+        assert_ne!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert!(i.bloqueantes.is_empty(), "{:?}", i.bloqueantes);
+    }
+
+    #[test]
+    fn informe_hallazgo_previo_de_dockerfile_no_secreto_no_bloquea() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-dockerfile", "dockerfile", true));
+        let i = informe_de(&v);
+        assert_ne!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert!(i.bloqueantes.is_empty(), "{:?}", i.bloqueantes);
+        assert_eq!(i.avisos_previos.len(), 1, "{:?}", i.avisos_previos);
+        assert_eq!(i.avisos_previos[0].fuente, "dockerfile");
+    }
+
+    #[test]
+    fn informe_aviso_previo_mas_uno_nuevo_bloquea_y_cita_el_nuevo() {
+        let mut v = ecc();
+        v.hallazgos
+            .extend((1..=7).map(|n| seguridad_de(&format!("h-audit-{n}"), "cargo-audit", true)));
+        v.hallazgos
+            .push(seguridad_de("h-audit-nuevo", "cargo-audit", false));
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert_eq!(i.bloqueantes, vec!["h-audit-nuevo".to_string()]);
+        assert!(i.motivo.contains("h-audit-nuevo"), "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_secreto_previo_bloquea_y_la_frase_lo_dice() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto", "gitleaks", true));
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert_eq!(i.bloqueantes, vec!["h-secreto".to_string()]);
+        assert!(
+            i.resumen
+                .contains("estaba en el estado inicial; los secretos bloquean siempre"),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_secreto_previo_de_configs_bloquea() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto-configs", "configs-secretos", true));
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert!(
+            i.bloqueantes.contains(&"h-secreto-configs".to_string()),
+            "{:?}",
+            i.bloqueantes
+        );
+    }
+
+    #[test]
+    fn informe_secreto_previo_de_configs_no_sale_en_avisos() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto-configs", "configs-secretos", true));
+        let i = informe_de(&v);
+        assert!(i.avisos_previos.is_empty(), "{:?}", i.avisos_previos);
+    }
+
+    #[test]
+    fn informe_veredicto_viejo_sin_previo_lee_false_y_sigue_bloqueado() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-audit-viejo", "cargo-audit", false));
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        for h in json["hallazgos"]
+            .as_array_mut()
+            .expect("lista de hallazgos")
+        {
+            h.as_object_mut()
+                .expect("objeto")
+                .remove("previo")
+                .expect("el campo existe al serializar");
+        }
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee un veredicto viejo");
+        assert!(viejo.hallazgos.iter().all(|h| !h.previo));
+        let i = informe_de(&viejo);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+    }
+
     #[test]
     fn informe_requisito_de_peso_3_en_nivel_0_bloquea() {
         let v = veredicto(
@@ -1914,6 +2143,63 @@ modulos = ["config"]
             "{}",
             i.motivo
         );
+    }
+
+    #[test]
+    fn informe_no_compila_sin_bloqueos_da_no_listo_con_su_disparo() {
+        let mut v = ecc();
+        v.no_compila = true;
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        // La regla lleva su clave, como las demás de no listo.
+        assert_eq!(
+            i.motivo, "no_compila: el producto o sus tests no compilan",
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
+    fn informe_no_compila_con_secreto_da_bloqueado() {
+        let mut v = ecc();
+        v.no_compila = true;
+        v.puntajes[1].items.push(NivelItem {
+            item: "seguridad.secretos".into(),
+            nivel: 0,
+            evidencia: Vec::new(),
+            fuente: Fuente::Sonda("rubrica".into()),
+        });
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_veredicto_viejo_sin_no_compila_lee_false_y_no_cambia_la_decision() {
+        let base = ecc();
+        let mut json = serde_json::to_value(&base).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("no_compila")
+            .expect("el campo existe al serializar");
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee un veredicto viejo");
+        assert!(!viejo.no_compila);
+        let decision_base = informe_de(&base).decision;
+        let decision_viejo = informe_de(&viejo).decision;
+        assert_eq!(decision_viejo, decision_base);
     }
 
     #[test]
@@ -2243,9 +2529,14 @@ modulos = ["config"]
     #[test]
     fn informe_redaccion_con_ids_reemplaza_el_texto_de_la_accion() {
         let v = sdlc();
+        // Una entrada por acción visible (R3, R2 y R4), en el mismo orden.
         let redactor = RedactorFalso {
             redaccion: Redaccion {
-                proximos_pasos: vec!["Persistencia (R3) falta: armar el almacén.".into()],
+                proximos_pasos: vec![
+                    "Persistencia (R3) falta: armar el almacén.".into(),
+                    "Comandos (R2) queda parcial: completar el módulo.".into(),
+                    "Replicación (R4) falta: armar la réplica.".into(),
+                ],
                 ..Redaccion::default()
             },
         };
@@ -2262,6 +2553,125 @@ modulos = ["config"]
             "Persistencia (R3) falta: armar el almacén."
         );
         assert_eq!(con.proximos_pasos[0].refs, vec!["R3".to_string()]);
+    }
+
+    /// Tres hallazgos de severidad 2: tres riesgos visibles. Cada id sale en el texto del redactor.
+    fn tres_riesgos() -> Veredicto {
+        veredicto(
+            Vec::new(),
+            Some(1.0),
+            vec![
+                hallazgo("h-1", Dimension::Estructura, 2, &[]),
+                hallazgo("h-2", Dimension::Estructura, 2, &[]),
+                hallazgo("h-3", Dimension::Estructura, 2, &[]),
+            ],
+        )
+    }
+
+    #[test]
+    fn informe_redactor_con_menos_textos_que_visibles_conserva_los_originales_y_avisa() {
+        let v = tres_riesgos();
+        let sin = informe_de(&v);
+        assert_eq!(sin.riesgos.len(), 3, "{:?}", sin.riesgos);
+        // Dos textos para tres acciones: ninguno se aplica, ni siquiera el primero.
+        let redactor = RedactorFalso {
+            redaccion: Redaccion {
+                riesgos: vec![
+                    "El riesgo h-1 pide revisar el comando.".into(),
+                    "El riesgo h-2 pide revisar el comando.".into(),
+                ],
+                ..Redaccion::default()
+            },
+        };
+        let con = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            Some(&redactor),
+        )
+        .expect("informa");
+        assert_eq!(con.riesgos, sin.riesgos);
+        let aviso = "el redactor devolvió 2 textos para 3 acciones; se conservan los originales";
+        assert!(
+            con.confianza.avisos.iter().any(|a| a == aviso),
+            "{:?}",
+            con.confianza.avisos
+        );
+    }
+
+    #[test]
+    fn informe_redactor_con_menos_proximos_pasos_que_visibles_conserva_los_originales_y_avisa() {
+        let v = sdlc();
+        let sin = informe_de(&v);
+        let visibles = sin.proximos_pasos.len();
+        assert!(visibles > 1, "{:?}", sin.proximos_pasos);
+        let redactor = RedactorFalso {
+            redaccion: Redaccion {
+                proximos_pasos: vec!["Persistencia (R3) falta: armar el almacén.".into()],
+                ..Redaccion::default()
+            },
+        };
+        let con = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            Some(&redactor),
+        )
+        .expect("informa");
+        assert_eq!(con.proximos_pasos, sin.proximos_pasos);
+        let aviso = format!(
+            "el redactor devolvió 1 textos para {visibles} acciones; se conservan los originales"
+        );
+        assert!(
+            con.confianza.avisos.iter().any(|a| a == &aviso),
+            "{:?}",
+            con.confianza.avisos
+        );
+    }
+
+    #[test]
+    fn informe_redactor_con_la_misma_cantidad_aplica_sus_textos_y_no_avisa() {
+        let v = tres_riesgos();
+        let sin = informe_de(&v);
+        let textos = vec![
+            "El riesgo h-1 pide revisar el comando.".to_string(),
+            "El riesgo h-2 pide revisar el comando.".to_string(),
+            "El riesgo h-3 pide revisar el comando.".to_string(),
+        ];
+        let redactor = RedactorFalso {
+            redaccion: Redaccion {
+                riesgos: textos.clone(),
+                ..Redaccion::default()
+            },
+        };
+        let con = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            Some(&redactor),
+        )
+        .expect("informa");
+        // Mismo orden que el informe sin redactor: cada texto cae en su acción.
+        assert_eq!(con.riesgos.len(), sin.riesgos.len());
+        for (accion, original) in con.riesgos.iter().zip(&sin.riesgos) {
+            let id = original.refs[0].as_str();
+            let esperado = textos
+                .iter()
+                .find(|t| t.contains(id))
+                .expect("texto del id");
+            assert_eq!(&accion.texto, esperado);
+        }
+        assert!(
+            !con.confianza
+                .avisos
+                .iter()
+                .any(|a| a.contains("el redactor devolvió")),
+            "{:?}",
+            con.confianza.avisos
+        );
     }
 
     #[test]
@@ -2452,6 +2862,90 @@ modulos = ["config"]
         json.as_object_mut().expect("objeto").remove("confianza");
         let i: Informe = serde_json::from_value(json).expect("lee");
         assert_eq!(i.confianza, Confianza::default());
+    }
+
+    /// Aviso previo de cargo-audit sobre `time 0.1.43`, con el id `RUSTSEC-2024-000<n>`.
+    fn aviso_previo_de(n: u32) -> Hallazgo {
+        Hallazgo {
+            archivo: "Cargo.lock".into(),
+            cita: "time 0.1.43".into(),
+            detalle: format!("RUSTSEC-2024-000{n}: time vulnerable"),
+            ..seguridad_de(&format!("h-audit-{n}"), "cargo-audit", true)
+        }
+    }
+
+    #[test]
+    fn informe_avisos_previos_llena_la_lista_el_markdown_y_el_resumen() {
+        let mut v = ecc();
+        v.hallazgos.push(aviso_previo_de(1));
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+        assert_eq!(
+            i.avisos_previos,
+            vec![AvisoPrevio {
+                fuente: "cargo-audit".into(),
+                aviso: "RUSTSEC-2024-0001".into(),
+                objeto: "time 0.1.43".into(),
+                severidad: 3,
+            }]
+        );
+        let md = markdown("memora", &i);
+        assert!(md.contains("## Avisos previos"), "{md}");
+        assert!(md.contains("RUSTSEC-2024-0001"), "{md}");
+        assert!(
+            md.contains("Estaban en el estado inicial; no bloquean."),
+            "{md}"
+        );
+        assert!(
+            i.resumen
+                .ends_with("1 aviso previo de Seguridad, no bloquea."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_resumen_con_siete_avisos_previos_va_en_plural() {
+        let mut v = ecc();
+        v.hallazgos.extend((1..=7u32).map(aviso_previo_de));
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .ends_with("7 avisos previos de Seguridad, no bloquean."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_sin_previos_no_tiene_seccion_ni_linea() {
+        let i = informe_de(&ecc());
+        assert!(i.avisos_previos.is_empty());
+        let md = markdown("memora", &i);
+        assert!(!md.contains("Avisos previos"), "{md}");
+        assert!(!i.resumen.contains("previo"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_secreto_previo_no_aparece_en_avisos_previos() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto", "gitleaks", true));
+        let i = informe_de(&v);
+        assert!(i.avisos_previos.is_empty(), "{:?}", i.avisos_previos);
+        let md = markdown("memora", &i);
+        assert!(!md.contains("Avisos previos"), "{md}");
+    }
+
+    #[test]
+    fn informe_viejo_sin_avisos_previos_lee_vacio() {
+        let mut json = serde_json::to_value(informe_de(&ecc())).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("avisos_previos")
+            .expect("el campo existe al serializar");
+        let i: Informe = serde_json::from_value(json).expect("lee");
+        assert!(i.avisos_previos.is_empty());
     }
 
     /// Informe de `ecc()` con la tarea `t` y sin redactor.

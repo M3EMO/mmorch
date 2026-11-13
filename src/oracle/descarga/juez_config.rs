@@ -310,6 +310,7 @@ pub fn hallazgos_de_juicio(r: &ResultadoJuicio, entradas: &[EntradaConfig]) -> V
                     modelo: MODELO_JUEZ_CONFIG.into(),
                 },
                 impacto: Vec::new(),
+                previo: false,
             })
         })
         .collect()

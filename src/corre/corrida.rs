@@ -1,11 +1,16 @@
 //! Corrida completa de `r00t corre` (Tarea 16, parte 2): GOAL, ruteo previo de todos los roles, armado,
 //! lanzamiento por rol, sesiones, lecturas del oráculo, evaluación y la fila de `runs.jsonl`.
 
+use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
+use signal_hook::consts::{SIGINT, SIGTERM};
+use signal_hook::iterator::{Handle, Signals};
 
 use crate::borrado;
 use crate::config::Config;
@@ -16,6 +21,7 @@ use crate::corre::costo_cortado::{
     costo_de_uso, evento_de_corte, evento_sesion_de_corte, precio_de_rol, turnos_de_transcript,
     uso_de_transcript,
 };
+use crate::corre::ejecutor;
 use crate::corre::git_seguro;
 use crate::corre::redacta::{redactar, token_de_copia};
 use crate::corre::{
@@ -87,6 +93,14 @@ struct Lanzado {
     linea: String,
 }
 
+/// Cómo termina un rol: con su código de salida, con sus vueltas cortadas agotadas, o porque el cupo
+/// ya no alcanza antes de una vuelta.
+enum Fin {
+    Codigo(i32),
+    VueltasAgotadas,
+    SinCupo,
+}
+
 /// Corre la tarea con la configuración y devuelve la fila que se agregó a `runs.jsonl`.
 ///
 /// Cada rol registra su sesión al terminar, antes de lanzar el siguiente.
@@ -100,6 +114,8 @@ struct Lanzado {
 /// Si la última vuelta también se corta, el rol se agota y no corren más roles.
 /// La corrida igual llega a las lecturas del oráculo, a la evaluación y a la fila.
 ///
+/// Antes de cada lanzamiento, rol y vuelta, el rol vuelve a rutear. Si ya no va por cupo, no se lanza:
+/// la corrida para ahí con un `Gate` de "cupo agotado antes del rol X, vuelta N", y sigue como un corte.
 /// Un código distinto de 0 de un rol corta la corrida: los roles siguientes no corren,
 /// pero la evaluación sí, y el informe dice lo que falta.
 /// Un fallo al lanzar que no es un corte aborta sin evaluar: sin builder no hay nada que evaluar,
@@ -185,6 +201,11 @@ fn correr_interno(
         corrida: &corrida,
         hecho: false,
     };
+    // Desde acá, una señal quita la copia y sale. El vigía vive hasta el fin de `correr`.
+    let _vigia = VigilaSenales::iniciar(&corrida).map_err(|fuente| ErrorCorre::Io {
+        contexto: "registrar las señales SIGINT y SIGTERM".into(),
+        fuente,
+    })?;
     let id = corrida.id.clone();
     // Sin líneas distintivas, el oráculo solo se ve por rutas y nombres: se anota en el log.
     if !huellas.tiene_lineas() {
@@ -211,9 +232,10 @@ fn correr_interno(
     let mut reanudando = reanuda.is_some();
     // Desde el primer lanzamiento de esta invocación, la vigencia se espera antes de cada lanzamiento.
     let mut ya_lanzo = false;
-    for (rol, eleccion) in &elecciones {
+    // Modelo del último lanzamiento de cada rol. Lo toma la fila: el ruteo de cada vuelta puede cambiarlo.
+    let mut modelos_lanzados: BTreeMap<Rol, String> = BTreeMap::new();
+    for (rol, _) in &elecciones {
         let prompt_rol = config_cargada.prompt.get(rol).cloned().unwrap_or_default();
-        let modelo = eleccion.modelo.clone().unwrap_or_default();
         let mut sesion: Option<String> = None;
         // Hay transcripts parciales de este rol: la primera vuelta sigue con la instrucción de continuar.
         let mut retoma = false;
@@ -233,12 +255,24 @@ fn correr_interno(
             reanudando = false;
         }
         let mut vuelta: u32 = 0;
-        // `Some(código)` si el rol terminó. `None` si agotó sus vueltas cortadas.
-        let codigo = loop {
+        let fin = loop {
             // Desde el primer lanzamiento de esta invocación, cada uno vuelve a leer la credencial: se revisa su vigencia antes.
             if ya_lanzo {
                 esperar_vigencia_del_rol(deps.ejecutor, &ruta_eventos, &id, *rol)?;
             }
+            // Antes de cada lanzamiento el rol vuelve a rutear. Si ya no va por cupo, la corrida para acá.
+            let modelo = match rutear_por_cupo(deps.home, *rol, tarea) {
+                Ok(modelo) => modelo,
+                Err(causa) => {
+                    let motivo = format!(
+                        "cupo agotado antes del rol {}, vuelta {}: {causa}",
+                        nombre_rol(*rol),
+                        vuelta + 1
+                    );
+                    gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
+                    break Fin::SinCupo;
+                }
+            };
             vuelta += 1;
             lanzamientos += 1;
             ya_lanzo = true;
@@ -263,6 +297,7 @@ fn correr_interno(
                 plugin: config_cargada.claude.plugin_de(*rol).map(Path::to_path_buf),
                 plazo,
             };
+            modelos_lanzados.insert(*rol, modelo.clone());
             let inicio = Instant::now();
             let resultado = deps.ejecutor.lanzar(&lanzamiento);
             let duracion = inicio.elapsed();
@@ -292,7 +327,7 @@ fn correr_interno(
                     // La sesión se registra al terminar el rol: si un rol siguiente aborta, su costo ya queda.
                     registrar_sesion(deps.home, &id, &lanzado, &lanzado.linea, &ruta_eventos)?;
                     lanzados.push(lanzado);
-                    break Some(codigo);
+                    break Fin::Codigo(codigo);
                 }
                 Err(ErrorCorre::Cortado { mensaje, stdout }) => {
                     // Un corte no aborta: deja su transcript parcial, su costo y la sesión para la siguiente vuelta.
@@ -313,7 +348,7 @@ fn correr_interno(
                         sesion = Some(id_sesion);
                     }
                     if vuelta == MAX_VUELTAS {
-                        break None;
+                        break Fin::VueltasAgotadas;
                     }
                 }
                 Err(error) => {
@@ -323,8 +358,8 @@ fn correr_interno(
                 }
             }
         };
-        match codigo {
-            None => {
+        match fin {
+            Fin::VueltasAgotadas => {
                 let motivo = format!(
                     "rol {} agotó {MAX_VUELTAS} vueltas cortadas por plazo",
                     nombre_rol(*rol)
@@ -332,12 +367,14 @@ fn correr_interno(
                 gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
                 break;
             }
-            Some(codigo) if codigo != 0 => {
+            // El `Gate` de cupo ya quedó dentro del bucle. La corrida sigue como en un corte.
+            Fin::SinCupo => break,
+            Fin::Codigo(codigo) if codigo != 0 => {
                 let motivo = format!("rol {} salió con {codigo}", nombre_rol(*rol));
                 gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
                 break;
             }
-            Some(_) => {}
+            Fin::Codigo(_) => {}
         }
     }
 
@@ -394,10 +431,13 @@ fn correr_interno(
     // j) La fila. El resumen sale de los eventos de esta corrida.
     let resumen =
         observe::resumir_en(&ruta_eventos, &id).map_err(|e| de_observe("resumir la corrida", e))?;
-    let modelos = elecciones
+    // Base: el modelo del ruteo inicial. Lo pisa el último lanzamiento de cada rol. Un rol reanudado
+    // como `Terminado` no se lanza y conserva el inicial.
+    let mut modelos: BTreeMap<Rol, String> = elecciones
         .iter()
         .filter_map(|(rol, eleccion)| eleccion.modelo.clone().map(|m| (*rol, m)))
         .collect();
+    modelos.extend(modelos_lanzados);
     let fila = Fila {
         id,
         ts: observe::ahora().0,
@@ -638,19 +678,34 @@ fn sesion_de_transcript(stdout: &[u8]) -> Option<String> {
     })
 }
 
+/// Un rol va por cupo con modelo, o `r00t corre` no lo lanza. Devuelve el modelo.
+fn modelo_por_cupo(rol: Rol, eleccion: &Eleccion) -> Result<String, String> {
+    let nombre = nombre_rol(rol);
+    let motivo = &eleccion.motivo;
+    match (eleccion.via, &eleccion.modelo) {
+        (Via::Cupo, Some(modelo)) => Ok(modelo.clone()),
+        (Via::Cupo, None) => Err(format!(
+            "el rol {nombre} va por cupo sin modelo: r00t corre solo lanza claude -p por cupo; motivo del ruteo: {motivo}"
+        )),
+        (via, _) => Err(format!(
+            "el rol {nombre} va por {}: r00t corre solo lanza claude -p por cupo; motivo del ruteo: {motivo}",
+            etiqueta_via(via)
+        )),
+    }
+}
+
 /// Un rol va por cupo con modelo, o `r00t corre` no lo lanza.
 fn exigir_cupo(rol: Rol, eleccion: &Eleccion) -> Result<(), ErrorCorre> {
-    let nombre = nombre_rol(rol);
-    match (eleccion.via, &eleccion.modelo) {
-        (Via::Cupo, Some(_)) => Ok(()),
-        (Via::Cupo, None) => Err(ErrorCorre::Uso(format!(
-            "el rol {nombre} va por cupo sin modelo: r00t corre solo lanza claude -p por cupo"
-        ))),
-        (via, _) => Err(ErrorCorre::Uso(format!(
-            "el rol {nombre} va por {}: r00t corre solo lanza claude -p por cupo",
-            etiqueta_via(via)
-        ))),
-    }
+    modelo_por_cupo(rol, eleccion)
+        .map(|_| ())
+        .map_err(ErrorCorre::Uso)
+}
+
+/// Rutea el rol otra vez y devuelve su modelo si sigue yendo por cupo. Si no, o si el ruteo falla, da el
+/// motivo para no lanzar. No registra nada: el `Gate` lo pone quien llama.
+fn rutear_por_cupo(home: &Path, rol: Rol, tarea: &str) -> Result<String, String> {
+    let eleccion = rutear_en(home, rol, tarea, false, TOKENS_RUTEO).map_err(|e| e.to_string())?;
+    modelo_por_cupo(rol, &eleccion)
 }
 
 /// Textos de `result` que dicen que el login venció o no es válido. Se comparan en minúsculas.
@@ -735,6 +790,122 @@ fn registrar_sesion(
         return gate(ruta_eventos, id, FASE_SESION, motivo, Some(lanzado.rol));
     }
     Ok(())
+}
+
+/// Programa de podman que quita los contenedores del builder al recibir una señal.
+const PODMAN: &str = "podman";
+/// Plazo total para quitar los contenedores del builder al recibir una señal.
+const PLAZO_AL_SENAL: Duration = Duration::from_secs(10);
+
+/// Vigila SIGINT y SIGTERM mientras la copia de la credencial existe.
+/// Un hilo espera las señales. Así el borrado nunca corre dentro del manejador.
+/// Al soltarla, el hilo termina y se quitan los registros de señal.
+struct VigilaSenales {
+    manejador: Handle,
+    hilo: Option<JoinHandle<()>>,
+}
+
+impl VigilaSenales {
+    /// Registra SIGINT y SIGTERM y arranca el hilo que espera las señales.
+    fn iniciar(corrida: &Corrida) -> io::Result<VigilaSenales> {
+        let mut senales = Signals::new([SIGINT, SIGTERM])?;
+        let manejador = senales.handle();
+        let corrida = corrida.clone();
+        let hilo = thread::spawn(move || {
+            for senal in senales.forever() {
+                al_recibir_senal(&corrida, senal, PODMAN, |codigo| {
+                    std::process::exit(codigo);
+                });
+            }
+        });
+        Ok(VigilaSenales {
+            manejador,
+            hilo: Some(hilo),
+        })
+    }
+}
+
+impl Drop for VigilaSenales {
+    fn drop(&mut self) {
+        // Cerrar el manejador termina el `forever` del hilo. El hilo libera las señales al terminar.
+        self.manejador.close();
+        if let Some(hilo) = self.hilo.take() {
+            let _ = hilo.join();
+        }
+    }
+}
+
+/// Qué hace `r00t corre` al recibir `senal`. Primero termina el `podman run` en curso y quita los
+/// contenedores del builder. Después borra la copia de la credencial, aunque lo anterior falle.
+/// Luego llama a `salir` con el código de la señal.
+/// Si la copia ya no existe, no es error: la carrera con `GuardiaCredencial::cerrar` es normal.
+fn al_recibir_senal(corrida: &Corrida, senal: i32, programa: &str, salir: impl Fn(i32)) {
+    // Todo va bajo el cerrojo del ejecutor: ningún lanzamiento nuevo entra mientras se limpia.
+    ejecutor::terminar_por_senal(|resultado_de_matar| {
+        // Un pánico en la limpieza no debe matar este hilo sin salir. Se atrapa aquí.
+        let limpieza = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            limpiar_por_senal(corrida, resultado_de_matar, programa);
+        }));
+        if let Err(payload) = limpieza {
+            eprintln!(
+                "r00t corre: pánico al limpiar tras la señal {senal}: {}",
+                texto_del_panico(payload.as_ref())
+            );
+            // Último intento de borrar la copia. Si también falla, sale igual con el código de la señal.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                quitar_credencial(corrida)
+            }));
+        }
+        salir(codigo_de_senal(senal));
+    });
+}
+
+/// Limpieza de `al_recibir_senal`, con el cerrojo del ejecutor tomado. Primero el contenedor: la copia
+/// va montada en el builder vivo, y borrarla no la quita de ahí. Después borra la copia de la credencial.
+fn limpiar_por_senal(
+    corrida: &Corrida,
+    resultado_de_matar: Result<(), ErrorCorre>,
+    programa: &str,
+) {
+    if let Err(error) = resultado_de_matar {
+        eprintln!(
+            "r00t corre: al recibir una señal no se pudo terminar el builder en curso: {error}"
+        );
+    }
+    if let Err(error) = ejecutor::quitar_builders_de_este_proceso(programa, PLAZO_AL_SENAL) {
+        eprintln!(
+            "r00t corre: al recibir una señal no se pudieron quitar los contenedores del builder: {error}"
+        );
+    }
+    #[cfg(test)]
+    if PANICO_DE_PRUEBA.load(std::sync::atomic::Ordering::Relaxed) {
+        panic!("pánico de prueba en la limpieza");
+    }
+    if let Err(error) = quitar_credencial(corrida) {
+        eprintln!(
+            "r00t corre: al recibir una señal no se pudo borrar la copia de la credencial: {error}"
+        );
+    }
+}
+
+/// Texto de un pánico, para el mensaje. Sin texto si el payload no es `&str` ni `String`.
+fn texto_del_panico(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(texto) = payload.downcast_ref::<&str>() {
+        texto
+    } else if let Some(texto) = payload.downcast_ref::<String>() {
+        texto.as_str()
+    } else {
+        "sin texto"
+    }
+}
+
+/// Si vale `true`, la limpieza de `al_recibir_senal` entra en pánico. Solo en tests.
+#[cfg(test)]
+static PANICO_DE_PRUEBA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Código de salida de una señal que mata el proceso: 128 más su número. SIGINT da 130 y SIGTERM, 143.
+fn codigo_de_senal(senal: i32) -> i32 {
+    128 + senal
 }
 
 /// Guardia de la copia de la credencial de una corrida. La copia es de Root y se borra siempre al
@@ -1108,6 +1279,7 @@ mod tests {
 
     fn informe() -> Informe {
         Informe {
+            avisos_previos: Vec::new(),
             decision: Decision::Listo,
             motivo: "prueba".into(),
             requisitos: Vec::new(),
@@ -2478,6 +2650,175 @@ mod tests {
         assert_eq!(costos_estimados(&e, &fila.id), 2, "dos Llamadas de corte");
     }
 
+    /// Ejecutor que, después de cada lanzamiento, llena el cupo del bloque de `home`. Así el ruteo del
+    /// próximo lanzamiento de un rol que va por cupo ya no lo deja pasar.
+    struct AgotaCupoTras<'a> {
+        interno: &'a dyn EjecutorBuilder,
+        home: &'a Path,
+    }
+
+    impl EjecutorBuilder for AgotaCupoTras<'_> {
+        fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+            let resultado = self.interno.lanzar(l);
+            llenar_cupo(self.home);
+            resultado
+        }
+
+        fn verificar_antes(&self, plazo: Duration) -> Result<(), ErrorCorre> {
+            self.interno.verificar_antes(plazo)
+        }
+
+        fn espera_vigencia(&self) -> EsperaVigencia {
+            self.interno.espera_vigencia()
+        }
+
+        fn vida_restante(&self) -> Result<Option<Duration>, ErrorCorre> {
+            self.interno.vida_restante()
+        }
+    }
+
+    /// Un evento de cupo de otra corrida, con un costo por encima de cualquier tope del bloque.
+    fn llenar_cupo(home: &Path) {
+        let mut ev = observe::evento_manual("otra-corrida", TipoEvento::Llamada, None);
+        ev.via = Some(Via::Cupo);
+        ev.modelo = Some("opus".into());
+        ev.cost_usd = 1000.0;
+        observe::registrar_en(&observe::ruta_eventos_en(home), &ev).expect("llenar el cupo");
+    }
+
+    /// Ejecutor que, tras cada lanzamiento, cambia el modelo de construye en `root.toml`. El ruteo del
+    /// próximo lanzamiento ya da otro modelo que el inicial.
+    struct CambiaModeloTras<'a> {
+        interno: &'a dyn EjecutorBuilder,
+        home: &'a Path,
+        modelo: &'static str,
+    }
+
+    impl EjecutorBuilder for CambiaModeloTras<'_> {
+        fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+            let resultado = self.interno.lanzar(l);
+            let toml = format!(
+                "[modelos]\nplanifica = \"opus\"\norganiza = \"sonnet\"\nconstruye = \"{}\"\n",
+                self.modelo
+            );
+            fs::write(self.home.join("root.toml"), toml).expect("root.toml");
+            resultado
+        }
+
+        fn verificar_antes(&self, plazo: Duration) -> Result<(), ErrorCorre> {
+            self.interno.verificar_antes(plazo)
+        }
+
+        fn espera_vigencia(&self) -> EsperaVigencia {
+            self.interno.espera_vigencia()
+        }
+
+        fn vida_restante(&self) -> Result<Option<Duration>, ErrorCorre> {
+            self.interno.vida_restante()
+        }
+    }
+
+    /// Planifica va por cupo. Tras su lanzamiento, el cupo se llena: construye ya no va por cupo y no se lanza.
+    #[test]
+    fn corre_rol_que_deja_de_ir_por_cupo_no_se_lanza_y_la_corrida_para() {
+        let e = entorno();
+        let builder = Builder::default();
+        let agota = AgotaCupoTras {
+            interno: &builder,
+            home: &e.home,
+        };
+        let fila = correr_con(&e, &agota, &[], CONFIG).expect("la corrida para y llega a la fila");
+        {
+            let lanzados = builder.lanzados.borrow();
+            assert_eq!(lanzados.len(), 1, "solo planifica se lanza");
+            assert_eq!(lanzados[0].rol, Rol::Planifica);
+        }
+        assert_eq!(
+            gates(&e, FASE_ROL),
+            vec![
+                "cupo agotado antes del rol construye, vuelta 1: el rol construye va por api: r00t corre solo lanza claude -p por cupo; motivo del ruteo: cupo del bloque agotado: pasa a la API".to_string()
+            ]
+        );
+        let guardadas =
+            track::filas_de(&e.home.join("runs.jsonl"), &Filtro::default()).expect("runs");
+        assert_eq!(guardadas.len(), 1, "la fila se escribe");
+        assert_eq!(guardadas[0].id, fila.id);
+    }
+
+    /// La primera vuelta de construye se corta. Tras ella el cupo se llena: la segunda vuelta no se lanza.
+    #[test]
+    fn corre_vuelta_que_deja_de_ir_por_cupo_no_se_lanza_y_la_corrida_para() {
+        let e = entorno();
+        let programado = Programado::con(vec![cortado(), Paso::Bien]);
+        let agota = AgotaCupoTras {
+            interno: &programado,
+            home: &e.home,
+        };
+        let fila = correr_con(&e, &agota, &[], CONFIG_CONSTRUYE)
+            .expect("la corrida para y llega a la fila");
+        assert_eq!(
+            programado.lanzados.borrow().len(),
+            1,
+            "solo la primera vuelta se lanza"
+        );
+        assert_eq!(
+            gates(&e, FASE_ROL),
+            vec![
+                "cupo agotado antes del rol construye, vuelta 2: el rol construye va por api: r00t corre solo lanza claude -p por cupo; motivo del ruteo: cupo del bloque agotado: pasa a la API".to_string()
+            ]
+        );
+        let guardadas =
+            track::filas_de(&e.home.join("runs.jsonl"), &Filtro::default()).expect("runs");
+        assert_eq!(guardadas.len(), 1, "la fila se escribe");
+        assert_eq!(guardadas[0].id, fila.id);
+    }
+
+    /// El rol cambia de modelo entre su primera y su segunda vuelta. La fila guarda el último modelo lanzado.
+    #[test]
+    fn corre_fila_guarda_el_modelo_del_ultimo_lanzamiento_del_rol() {
+        let e = entorno();
+        let programado = Programado::con(vec![cortado(), Paso::Bien]);
+        let cambia = CambiaModeloTras {
+            interno: &programado,
+            home: &e.home,
+            modelo: "sonnet",
+        };
+        let fila =
+            correr_con(&e, &cambia, &[], CONFIG_CONSTRUYE).expect("la corrida llega a la fila");
+        assert_eq!(programado.lanzados.borrow().len(), 2, "dos vueltas");
+        assert_eq!(
+            fila.modelos.get(&Rol::Construye).map(String::as_str),
+            Some("sonnet"),
+            "el modelo de la segunda vuelta: {:?}",
+            fila.modelos
+        );
+    }
+
+    /// Un rol que pasa a API sin `SinPresupuesto` para el `Gate`: nombra la vía y el motivo del ruteo.
+    #[test]
+    fn gate_de_cupo_que_pasa_a_api_nombra_la_via_y_el_motivo() {
+        let e = entorno();
+        let programado = Programado::con(vec![cortado(), Paso::Bien]);
+        let agota = AgotaCupoTras {
+            interno: &programado,
+            home: &e.home,
+        };
+        correr_con(&e, &agota, &[], CONFIG_CONSTRUYE).expect("la corrida para y llega a la fila");
+        let motivos = gates(&e, FASE_ROL);
+        assert_eq!(motivos.len(), 1, "{motivos:?}");
+        let motivo = &motivos[0];
+        assert!(
+            motivo.starts_with("cupo agotado antes del rol construye, vuelta 2: "),
+            "{motivo}"
+        );
+        assert!(
+            motivo
+                .contains("el rol construye va por api: r00t corre solo lanza claude -p por cupo"),
+            "{motivo}"
+        );
+        assert!(motivo.contains("motivo del ruteo: "), "{motivo}");
+    }
+
     #[test]
     fn corre_cuatro_cortes_evaluan_el_repo_parcial_y_escriben_la_fila() {
         let e = entorno();
@@ -3066,5 +3407,283 @@ mod tests {
         let fila = correr_con(&e, &Builder::default(), &[], CONFIG).expect("corre");
         assert!(!fila.reanudada);
         assert_eq!(fila.vueltas, 2, "planifica y construye");
+    }
+
+    /// Copia de prueba de una corrida bajo `base`: `<base>/corre-memo-ecc-test-1-2-0/` con su copia.
+    fn corrida_de_prueba(base: &Path) -> Corrida {
+        let id = "corre-memo-ecc-test-1-2-0".to_string();
+        let dir = base.join(&id);
+        let repo = dir.join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        let estado = dir.join("claude-estado");
+        fs::create_dir_all(&estado).expect("estado");
+        fs::write(estado.join(".credentials.json"), "TOKEN_FALSO_SENAL").expect("copia");
+        Corrida {
+            id,
+            dir,
+            repo,
+            tarea: "memo".into(),
+            config: "ecc-test".into(),
+            commit: String::new(),
+        }
+    }
+
+    fn copia_de_prueba(corrida: &Corrida) -> PathBuf {
+        corrida.dir.join("claude-estado").join(".credentials.json")
+    }
+
+    /// Programa falso de podman: `ps` imprime `nombres`, y cada llamada se anota en el log de `base`.
+    fn podman_falso(base: &Path, nombres: &[String]) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = base.join("podman.log");
+        let ps: String = nombres.iter().map(|n| format!("echo {n}\n")).collect();
+        let cuerpo = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\n{ps}fi\n",
+            log.display()
+        );
+        let ruta = base.join("podman-falso");
+        fs::write(&ruta, cuerpo).expect("script");
+        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+        (ruta, log)
+    }
+
+    #[test]
+    fn senal_sigterm_quita_la_copia_y_sale_con_143() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        let codigo = Cell::new(None);
+        al_recibir_senal(&corrida, SIGTERM, podman.to_str().expect("ruta"), |c| {
+            codigo.set(Some(c));
+        });
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "la copia se borra al recibir SIGTERM"
+        );
+        assert_eq!(codigo.get(), Some(143));
+    }
+
+    #[test]
+    fn senal_sigint_quita_la_copia_y_sale_con_130() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        let codigo = Cell::new(None);
+        al_recibir_senal(&corrida, SIGINT, podman.to_str().expect("ruta"), |c| {
+            codigo.set(Some(c));
+        });
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "la copia se borra al recibir SIGINT"
+        );
+        assert_eq!(codigo.get(), Some(130));
+    }
+
+    #[test]
+    fn senal_con_la_copia_ya_borrada_no_falla_y_sale() {
+        let _serie = ejecutor::serie_de_pruebas();
+        // Carrera: `cerrar` ya borró la copia cuando llega la señal. Debe salir igual, sin error.
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        fs::remove_file(copia_de_prueba(&corrida)).expect("quita la copia");
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        let codigo = Cell::new(None);
+        al_recibir_senal(&corrida, SIGINT, podman.to_str().expect("ruta"), |c| {
+            codigo.set(Some(c));
+        });
+        assert_eq!(codigo.get(), Some(130));
+    }
+
+    #[test]
+    fn senal_quita_los_contenedores_de_este_proceso_por_nombre() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let pid = std::process::id();
+        let nombres = [
+            format!("root-builder-{pid}-0"),
+            format!("root-builder-{pid}-1"),
+            "root-builder-1-0".to_string(),
+        ];
+        let (podman, log) = podman_falso(tmp.path(), &nombres);
+        al_recibir_senal(&corrida, SIGTERM, podman.to_str().expect("ruta"), |_| {});
+        let anotado = fs::read_to_string(&log).expect("log");
+        assert!(
+            anotado.contains(&format!(
+                "rm -f -t 0 root-builder-{pid}-0 root-builder-{pid}-1"
+            )),
+            "{anotado}"
+        );
+        assert!(!anotado.contains("root-builder-1-0"), "{anotado}");
+    }
+
+    /// Hijo en curso falso, como `podman run`: un `sh` que anota su pid en `pidfile` y se reemplaza por `sleep`.
+    /// Corre en otro hilo. Espera a que quede registrado antes de devolver.
+    fn hijo_en_curso(base: &Path) -> (std::thread::JoinHandle<bool>, PathBuf) {
+        let pidfile = base.join("hijo.pid");
+        let args = vec![
+            "-c".to_string(),
+            format!("echo $$ > '{}'; exec sleep 30", pidfile.display()),
+        ];
+        let hilo = std::thread::spawn(move || {
+            ejecutor::correr_proceso("sh", &args, Duration::from_secs(10)).is_err()
+        });
+        let limite = Instant::now() + Duration::from_secs(5);
+        while ejecutor::pid_en_curso().is_none() || !pidfile.exists() {
+            assert!(
+                Instant::now() < limite,
+                "el hijo en curso no quedó registrado"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        (hilo, pidfile)
+    }
+
+    /// `podman` falso del orden. `ps` anota si el hijo en curso vive y da el nombre `nombre`.
+    /// `rm` anota si la copia de la credencial existe. Cada llamada va al log, en orden.
+    fn podman_del_orden(
+        base: &Path,
+        pidfile: &Path,
+        copia: &Path,
+        nombre: &str,
+    ) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = base.join("podman.log");
+        let cuerpo = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = ps ]; then\n\
+             p=$(cat '{pid}' 2>/dev/null)\n\
+             st=$(awk '{{print $3}}' /proc/$p/stat 2>/dev/null)\n\
+             if [ -n \"$st\" ] && [ \"$st\" != Z ]; then echo 'ps hijo=vivo' >> '{log}'; else echo 'ps hijo=muerto' >> '{log}'; fi\n\
+             echo {nombre}\n\
+             fi\n\
+             if [ \"$1\" = rm ]; then\n\
+             if [ -e '{copia}' ]; then echo 'rm copia=si' >> '{log}'; else echo 'rm copia=no' >> '{log}'; fi\n\
+             fi\n",
+            pid = pidfile.display(),
+            log = log.display(),
+            copia = copia.display(),
+        );
+        let ruta = base.join("podman-del-orden");
+        fs::write(&ruta, cuerpo).expect("script");
+        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+        (ruta, log)
+    }
+
+    /// `podman` falso con `cuerpo` como script, después de `#!/bin/sh`. Devuelve su ruta.
+    fn podman_con_cuerpo(base: &Path, cuerpo: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let ruta = base.join("podman-con-cuerpo");
+        fs::write(&ruta, format!("#!/bin/sh\n{cuerpo}\n")).expect("script");
+        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+        ruta
+    }
+
+    #[test]
+    fn senal_termina_el_hijo_quita_contenedores_y_borra_la_copia_en_ese_orden() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let (hilo, pidfile) = hijo_en_curso(tmp.path());
+        let nombre = format!("root-builder-{}-0", std::process::id());
+        let (podman, log) =
+            podman_del_orden(tmp.path(), &pidfile, &copia_de_prueba(&corrida), &nombre);
+        al_recibir_senal(&corrida, SIGTERM, podman.to_str().expect("ruta"), |_| {});
+        let anotado = fs::read_to_string(&log).expect("log");
+        assert_eq!(
+            anotado, "ps hijo=muerto\nrm copia=si\n",
+            "primero se mata el hijo, luego se quitan los contenedores con la copia aún puesta"
+        );
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "la copia se borra al final"
+        );
+        assert!(
+            hilo.join().expect("hilo del hijo"),
+            "el hijo murió con error"
+        );
+    }
+
+    #[test]
+    fn senal_con_rm_fallido_borra_la_copia_igual() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let nombre = format!("root-builder-{}-0", std::process::id());
+        let cuerpo = format!("if [ \"$1\" = ps ]; then echo {nombre}; exit 0; fi\nexit 1");
+        let podman = podman_con_cuerpo(tmp.path(), &cuerpo);
+        let codigo = Cell::new(None);
+        al_recibir_senal(&corrida, SIGTERM, podman.to_str().expect("ruta"), |c| {
+            codigo.set(Some(c));
+        });
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "la copia se borra aunque rm falle"
+        );
+        assert_eq!(codigo.get(), Some(143));
+    }
+
+    #[test]
+    fn senal_con_programa_inexistente_borra_la_copia_igual() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let codigo = Cell::new(None);
+        al_recibir_senal(&corrida, SIGINT, "/no/existe/podman", |c| {
+            codigo.set(Some(c));
+        });
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "la copia se borra aunque no haya podman"
+        );
+        assert_eq!(codigo.get(), Some(130));
+    }
+
+    #[test]
+    fn panico_en_la_limpieza_igual_sale_una_vez_con_130() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        let salidas = RefCell::new(Vec::new());
+        PANICO_DE_PRUEBA.store(true, std::sync::atomic::Ordering::Relaxed);
+        let resultado = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            al_recibir_senal(&corrida, SIGINT, podman.to_str().expect("ruta"), |c| {
+                salidas.borrow_mut().push(c);
+            });
+        }));
+        PANICO_DE_PRUEBA.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            resultado.is_ok(),
+            "el pánico de la limpieza no debe salir de al_recibir_senal"
+        );
+        assert_eq!(*salidas.borrow(), vec![130], "sale una vez, con 130");
+    }
+
+    #[test]
+    fn panico_en_la_limpieza_quita_la_copia_de_la_credencial() {
+        let _serie = ejecutor::serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        PANICO_DE_PRUEBA.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            al_recibir_senal(&corrida, SIGTERM, podman.to_str().expect("ruta"), |_| {});
+        }));
+        PANICO_DE_PRUEBA.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            fs::symlink_metadata(copia_de_prueba(&corrida)).is_err(),
+            "tras el pánico la copia de la credencial se borra igual"
+        );
+    }
+
+    #[test]
+    fn vigia_de_senales_se_suelta_al_salir_sin_colgarse() {
+        let tmp = TempDir::new().expect("tmp");
+        let corrida = corrida_de_prueba(tmp.path());
+        let vigia = VigilaSenales::iniciar(&corrida).expect("registra");
+        drop(vigia);
     }
 }

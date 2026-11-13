@@ -9,25 +9,29 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use serde_json::{Map, json};
 
-use super::juez::{ExtractoGuardado, MAX_ENTRADA_JUEZ_BYTES, huella_del_prompt};
+use super::juez::{ExtractoGuardado, huella_del_prompt};
 use super::memo::{Alcance, MemoSondas, ReusoSondas};
-use super::mutacion::MutanteMuerto;
+use super::mutacion::{EstadoMutante, MutanteEstado, MutanteMuerto};
 use super::rubrica::{Mide, Rubrica, cargar_embebidas};
-use super::tarea::Tarea;
-use super::{AVISO_TARGET_FRIO, ErrorOraculo, OpcionesOraculo, Partes, Target, partes_de};
+use super::tarea::{Equivalente, Tarea};
+use super::{
+    AVISO_TARGET_FRIO, CARPETA_TEMPORALES, DuracionesSuites, ErrorOraculo, MOTIVO_SUITE_PLAZO,
+    OpcionesOraculo, Partes, PlazosSuites, Target, con_plazos_suites, partes_de, temporal,
+    tomar_duraciones_suites,
+};
 use crate::borrado;
 use crate::config::Config;
 use crate::goal::calcular_hash;
 use crate::observe;
 use crate::proveedores::{LimiteCalibracion, con_caso, con_limite, rechazo_en_este_hilo};
-use crate::tipos::{Dimension, Eleccion, Evento, Hallazgo, Puntaje, Veredicto};
+use crate::tipos::{Dimension, Eleccion, Evento, Fuente, Hallazgo, Puntaje, Veredicto};
 
 /// Nombre del archivo de calibración dentro de `ROOT_HOME`.
 pub const ARCHIVO: &str = "calibracion.json";
@@ -41,6 +45,27 @@ const MIN_DEFECTOS_APLICABLES: u32 = 5;
 const MIN_LIMPIOS: u32 = 5;
 /// Porcentaje máximo de casos limpios sin veredicto para calibrar una dimensión. Más que esto, la medida no calibra.
 const MAX_LIMPIOS_SIN_VEREDICTO_PCT: u32 = 20;
+/// Multiplicador del plazo de cada suite en una calibración, sobre su duración en la base (Tarea 107).
+const MULTIPLICADOR_PLAZO_SUITE: u64 = 10;
+/// Plazo mínimo de cada suite en una calibración, en segundos (Tarea 107).
+const MINIMO_PLAZO_SUITE_SEGUNDOS: u64 = 600;
+
+/// Plazo de una suite en una calibración: `MULTIPLICADOR_PLAZO_SUITE` veces su duración en la base, con piso
+/// `MINIMO_PLAZO_SUITE_SEGUNDOS`. Sin duración, vale el piso.
+fn plazo_de_suite(duracion_base: Option<u64>) -> Duration {
+    let calculado = duracion_base
+        .unwrap_or(0)
+        .saturating_mul(MULTIPLICADOR_PLAZO_SUITE);
+    Duration::from_secs(calculado.max(MINIMO_PLAZO_SUITE_SEGUNDOS))
+}
+
+/// Plazos de los casos, de las duraciones de las suites en la base. Redondea cada duración hacia arriba.
+fn plazos_de_base(duraciones: DuracionesSuites) -> PlazosSuites {
+    PlazosSuites {
+        contrato: plazo_de_suite(duraciones.contrato.map(|s| s.ceil() as u64)),
+        oculto: plazo_de_suite(duraciones.oculto.map(|s| s.ceil() as u64)),
+    }
+}
 
 /// Una medición de una dimensión de una tarea, con su muestra.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -62,6 +87,12 @@ pub struct Fila {
     /// Casos que no se pudieron aplicar al repo, por ejemplo sin Dockerfile. No entran a las métricas.
     #[serde(default)]
     pub no_aplicable: u32,
+    /// Defectos cuyo ítem ya estaba en piso en la base. Una fila sin el campo vale 0.
+    #[serde(default)]
+    pub defectos_en_piso: u32,
+    /// Omisiones de todos los casos: ítems estables de la base que el juez no puntuó. Sin el campo vale 0.
+    #[serde(default)]
+    pub omisiones: u32,
     /// Semilla de la muestra: con la misma semilla, la medición se repite igual.
     pub semilla: u64,
     /// Epoch en segundos de la medición. Gana la fila más reciente.
@@ -79,14 +110,21 @@ pub struct Fila {
     /// hallazgos no detectan (Tarea 63). Una fila sin el campo vale vacía.
     #[serde(default)]
     pub ruidosos: Vec<String>,
+    /// Casos medidos con `mutantes_cambiados` no vacío. Siguen contando para las métricas. Sin el campo vale 0.
+    #[serde(default)]
+    pub casos_ruidosos: u32,
     /// `true` si el tope de gasto detuvo la calibración antes de medir todos sus casos (decisión 48). Una
     /// fila incompleta no calibra la dimensión, aunque su exactitud llegue a `UMBRAL`.
     #[serde(default)]
     pub incompleta: bool,
     /// Motivo por el que la dimensión no se midió: la tarea no la aplica. Una fila así no tiene casos ni
-    /// métricas, y no calibra la dimensión. `None` en una medición real.
+    /// métricas, y no calibra la dimensión. `None` en una medición real. Una dimensión inestable va a `inestable`.
     #[serde(default)]
     pub no_aplica: Option<String>,
+    /// Motivo por el que la dimensión es inestable en la tarea: sus ítems del juez variaron entre juicios.
+    /// Una fila sin el campo vale `None`.
+    #[serde(default)]
+    pub inestable: Option<String>,
     /// Inyecciones inválidas reemplazadas en la calibración, incluidas las del caso agotado.
     #[serde(default)]
     pub reemplazos: u32,
@@ -94,6 +132,10 @@ pub struct Fila {
     /// Una fila sin el campo vale `None`. Con ítems del juez, `None` cuenta como vieja y no calibra.
     #[serde(default)]
     pub huella: Option<String>,
+    /// Hash del `tarea.toml` con que se midió la fila. Otro `tarea.toml` deja la fila sin valor.
+    /// Una fila sin el campo vale `None`, y sigue valiendo.
+    #[serde(default)]
+    pub tarea_hash: Option<String>,
     /// Ítems del juez que variaron entre los tres juicios de la base, en orden. No entran a la medición de la
     /// dimensión. Una fila sin el campo vale vacía.
     #[serde(default)]
@@ -102,6 +144,29 @@ pub struct Fila {
     /// la base. Una fila sin el campo vale vacía.
     #[serde(default)]
     pub extractos_base: Vec<Vec<ExtractoGuardado>>,
+    /// Plazo fijo en segundos que usaron los casos de mutación. Sale de la duración de la base.
+    /// `None` si la base no trajo duración. Una fila sin el campo vale `None`.
+    #[serde(default)]
+    pub plazo_mutantes: Option<u64>,
+    /// Carpeta de la que salió el repo bueno de Pruebas: `con_tests` si usó `<tarea>/con_tests/`. `None` si
+    /// salió de `--repo` o de `[calibracion] repo`, y en las dimensiones que no son Pruebas.
+    #[serde(default)]
+    pub repo_origen: Option<String>,
+    /// Identidades de inyección distintas entre los defectos medidos. Una fila sin el campo vale `None`:
+    /// es anterior a la Tarea 106 y puede contar inyecciones repetidas. `Some(0)` si no midió defectos.
+    #[serde(default)]
+    pub inyecciones_distintas: Option<u32>,
+    /// Entradas de `[calibracion].equivalentes` que la corrida aplicó: el largo de la lista declarada, sin
+    /// entradas repetidas (mismo archivo, línea y edición). Una fila sin el campo vale 0.
+    #[serde(default)]
+    pub equivalentes_excluidos: u32,
+    /// Segundos que tardó la suite del contrato en la base: su corrida más lenta. Sale el plazo de los casos
+    /// (`plazo_de_suite`). `None` si la base no corrió la suite o la fila es anterior a la Tarea 107.
+    #[serde(default)]
+    pub duracion_contrato: Option<f64>,
+    /// Segundos que tardó la suite oculta en la base: su corrida más lenta. Igual que `duracion_contrato`.
+    #[serde(default)]
+    pub duracion_oculto: Option<f64>,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -133,7 +198,7 @@ impl Calibraciones {
                 return Err(ErrorOraculo::Infra(format!("leer {}: {e}", ruta.display())));
             }
         };
-        let calibracion: Calibraciones = serde_json::from_str(&texto).map_err(|e| {
+        let mut calibracion: Calibraciones = serde_json::from_str(&texto).map_err(|e| {
             ErrorOraculo::Infra(format!("calibración inválida en {}: {e}", ruta.display()))
         })?;
         if calibracion.v != VERSION {
@@ -142,6 +207,9 @@ impl Calibraciones {
                 calibracion.v,
                 ruta.display()
             )));
+        }
+        for fila in &mut calibracion.filas {
+            fila.normalizar_inestable();
         }
         Ok(calibracion)
     }
@@ -156,8 +224,9 @@ impl Calibraciones {
     }
 
     /// Marca cada puntaje con su calibración: `calibrada` si la exactitud balanceada llega a `UMBRAL`.
-    /// Sin fila, o con muestra insuficiente, el puntaje queda sin calibrar.
-    pub fn aplicar(&self, tarea: &str, puntajes: &mut [Puntaje]) {
+    /// Sin fila, o con muestra insuficiente, el puntaje queda sin calibrar. `tarea_hash` es el hash actual
+    /// del `tarea.toml` de `tarea` (`hash_de_tarea`).
+    pub fn aplicar(&self, tarea: &str, tarea_hash: &str, puntajes: &mut [Puntaje]) {
         for puntaje in puntajes {
             // Una fila con muestra corta cuenta como si no existiera.
             let fila = self
@@ -169,6 +238,7 @@ impl Calibraciones {
             let calibrable = fila.is_some_and(|f| {
                 !f.incompleta
                     && f.limpios_sin_veredicto * 100 <= f.limpios * MAX_LIMPIOS_SIN_VEREDICTO_PCT
+                    && tarea_vigente(f, tarea_hash)
                     && huella_vigente(f, puntaje.dimension)
             });
             puntaje.calibrada =
@@ -176,24 +246,57 @@ impl Calibraciones {
         }
     }
 
-    /// Ítems inestables de la fila más reciente de `dimension`. Vacía si la tarea no tiene fila.
-    pub fn inestables_de(&self, tarea: &str, dimension: Dimension) -> &[String] {
-        self.de(tarea, dimension)
+    /// Ítems inestables de la fila más reciente de `dimension` que sirve para la tarea. Sirve una fila con
+    /// huella actual y con el `tarea_hash` actual, o sin `tarea_hash`. Las demás filas no cuentan. Vacía si
+    /// ninguna sirve: sus ítems salen de otro juez o de otro `tarea.toml` (Tarea 83, punto 2).
+    pub fn inestables_de(&self, tarea: &str, tarea_hash: &str, dimension: Dimension) -> &[String] {
+        self.filas
+            .iter()
+            .filter(|f| f.tarea == tarea && f.dimension == dimension)
+            .filter(|f| huella_vigente(f, dimension) && tarea_vigente(f, tarea_hash))
+            .max_by(|a, b| a.ts.total_cmp(&b.ts))
             .map_or(&[], |fila| fila.inestables.as_slice())
     }
 
-    /// Motivo por el que la fila más reciente de `dimension` no calibra por su huella: es de otro juez.
-    /// `None` si no hay fila con muestra suficiente, o si su huella es la actual.
-    pub fn motivo_sin_calibrar(&self, tarea: &str, dimension: Dimension) -> Option<&'static str> {
+    /// Motivo por el que la fila más reciente de `dimension` no calibra: es de otro `tarea.toml` o de otro juez.
+    /// Con las dos causas, gana la del `tarea.toml`. Da `None` si no hay fila con muestra suficiente, o si la fila vale.
+    pub fn motivo_sin_calibrar(
+        &self,
+        tarea: &str,
+        tarea_hash: &str,
+        dimension: Dimension,
+    ) -> Option<&'static str> {
         let fila = self
             .de(tarea, dimension)
             .filter(|f| muestra_suficiente(f))?;
+        if !tarea_vigente(fila, tarea_hash) {
+            return Some(MOTIVO_OTRA_TAREA);
+        }
         (!huella_vigente(fila, dimension)).then_some(MOTIVO_OTRO_JUEZ)
     }
 }
 
+/// Motivo de un puntaje cuya fila es de otro `tarea.toml`: la calibración sale de otra versión de la tarea.
+const MOTIVO_OTRA_TAREA: &str = "calibración con otro tarea.toml";
+
 /// Motivo de un puntaje cuya fila tiene otra huella: la calibración sale de otro juez.
 const MOTIVO_OTRO_JUEZ: &str = "calibración de otro juez";
+
+/// Prefijo del motivo de una dimensión inestable. Las filas viejas lo guardaban en `no_aplica`.
+const PREFIJO_INESTABLE: &str = "inestable en esta tarea";
+
+impl Fila {
+    /// Pasa el motivo de inestable de una fila vieja de `no_aplica` a `inestable`. Una fila nueva no cambia.
+    fn normalizar_inestable(&mut self) {
+        let es_viejo = self
+            .no_aplica
+            .as_deref()
+            .is_some_and(|motivo| motivo.starts_with(PREFIJO_INESTABLE));
+        if es_viejo && self.inestable.is_none() {
+            self.inestable = self.no_aplica.take();
+        }
+    }
+}
 
 /// `true` si los ítems `inestables` de `dimension` dejan menos de la mitad de su peso estable (Tarea 83, punto 2).
 pub fn dimension_inestable(
@@ -225,22 +328,68 @@ pub fn global_de(puntajes: &[Puntaje]) -> Option<f32> {
     (!valores.is_empty()).then(|| valores.iter().sum::<f32>() / valores.len() as f32)
 }
 
-/// Huella de la calibración de `dimension`. Con ítems del juez, cuenta el prompt del juez y las rúbricas.
-/// Sin ellos, cuentan solo las rúbricas. Cambiar lo que cuenta cambia la huella.
-/// Las filas con otra huella no calibran si la dimensión tiene ítems del juez.
-pub fn huella_de(dimension: Dimension) -> String {
-    huella_con_prompt(dimension, &huella_del_prompt())
+/// Calcula el hash del `tarea.toml` de `tarea`. Una fila lo guarda y solo vale para esa versión.
+pub fn hash_de_tarea(tarea: &Tarea) -> Result<String, ErrorOraculo> {
+    compartidos::hash_del_tarea_toml(&tarea.dir)
 }
 
-/// Huella de `dimension` con `huella_prompt` como huella del juez. Sin ítems del juez, ignora `huella_prompt`.
-fn huella_con_prompt(dimension: Dimension, huella_prompt: &str) -> String {
+/// Huella de la calibración de `dimension`. Con ítems del juez, cuenta el prompt del juez y las rúbricas.
+/// Sin ellos, cuentan solo las rúbricas. Cuenta también la versión de sus sondas (`version_de_sondas`).
+/// Las filas con otra huella no calibran.
+pub fn huella_de(dimension: Dimension) -> String {
+    huella_con_version(
+        dimension,
+        &huella_del_prompt(),
+        version_de_sondas(dimension),
+    )
+}
+
+/// Versión base de las sondas. Una dimensión en esta versión conserva su huella de antes de existir la versión.
+const VERSION_SONDAS_BASE: u32 = 1;
+
+/// Versión de las sondas de `dimension`. Subirla cambia la huella de la dimensión: sus filas viejas no calibran.
+fn version_de_sondas(dimension: Dimension) -> u32 {
+    match dimension {
+        // Arquitectura sube a 3: sus aristas y capas leen `limpia`, que ahora deja en blanco los comentarios de
+        // bloque y las cadenas de varias líneas. Antes subió a 2 por los imports agrupados.
+        Dimension::Arquitectura => 3,
+        // Seguridad sube a 2: `unsafe` y `unwrap()` se buscan en `limpia`. Un comentario de bloque ya no da hallazgo.
+        Dimension::Seguridad => 2,
+        // Estructura sube a 2: el largo de las funciones se cuenta sobre `limpia` (llaves en blanco fuera de código).
+        Dimension::Estructura => 2,
+        // Diseno sube a 2: el juez de diseño lee el mapa (API pública y aristas), que se arma sobre `limpia`.
+        Dimension::Diseno => 2,
+        // Sin sondas que lean `limpia` en el perfil rust: su versión no cambia.
+        Dimension::Funciona
+        | Dimension::Eficiencia
+        | Dimension::Completitud
+        | Dimension::Entrega
+        | Dimension::Pruebas => VERSION_SONDAS_BASE,
+    }
+}
+
+/// Calcula la huella de `dimension` con `huella_prompt` y con la versión `version` de sus sondas.
+/// Sin ítems del juez, ignora `huella_prompt`. La versión base no entra al texto: su huella no cambia.
+fn huella_con_version(dimension: Dimension, huella_prompt: &str, version: u32) -> String {
     let juntas: String = rubricas_de(dimension).iter().map(Rubrica::hash).collect();
     let texto = if tiene_items_de_juez(dimension) {
         format!("{huella_prompt}\n{juntas}")
     } else {
         juntas
     };
+    let texto = if version == VERSION_SONDAS_BASE {
+        texto
+    } else {
+        format!("{texto}\nsondas v{version}")
+    };
     calcular_hash(texto.as_bytes())
+}
+
+/// La fila sirve para la tarea según su `tarea_hash`. Sin hash, la fila es vieja y sirve. Con hash, debe ser el actual.
+fn tarea_vigente(fila: &Fila, tarea_hash: &str) -> bool {
+    fila.tarea_hash
+        .as_deref()
+        .is_none_or(|hash| hash == tarea_hash)
 }
 
 /// Rúbricas embebidas de `dimension`. Su id es la clave de la dimensión.
@@ -260,6 +409,16 @@ fn tiene_items_de_juez(dimension: Dimension) -> bool {
         .any(|i| i.mide != Mide::Sonda)
 }
 
+/// `true` si `veredicto` trae ítems del juez en `dimension`. Sin modelo de juez, el juez no corre y no los trae.
+fn trae_juicio_del_juez(veredicto: &Veredicto, dimension: Dimension) -> bool {
+    veredicto
+        .puntajes
+        .iter()
+        .filter(|p| p.dimension == dimension)
+        .flat_map(|p| p.items.iter())
+        .any(|i| matches!(i.fuente, Fuente::Juez { .. }))
+}
+
 /// La fila sirve para `dimension` según su huella. Con huella, debe ser la actual. Sin huella, sirve solo si la
 /// dimensión no tiene ítems del juez.
 fn huella_vigente(fila: &Fila, dimension: Dimension) -> bool {
@@ -271,7 +430,7 @@ fn huella_vigente(fila: &Fila, dimension: Dimension) -> bool {
 
 pub mod inyectar;
 
-use inyectar::{Defecto, Inyeccion};
+use inyectar::{Defecto, Excluidos, Inyeccion, identidades_de_equivalentes};
 
 mod compartidos;
 mod estables;
@@ -306,6 +465,7 @@ pub fn calibrar_con(
     // Sin home no hay corrida de mutación grabada: no hay muertos que dirigir `AssertBorrado`.
     // Sin memo ni reuso, el tipo de caso no cambia nada: el evaluador de la API de tests lo ignora.
     let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| evaluador(ruta);
+    // Sin `home` la carpeta temporal va al directorio temporal del sistema (`tempfile::tempdir()`).
     calibrar_medida(
         tarea,
         dimension,
@@ -316,6 +476,7 @@ pub fn calibrar_con(
         None,
         &Vec::new,
         &|| None,
+        None,
         None,
     )?
     .fila
@@ -371,6 +532,12 @@ pub struct CasoGuardado {
     /// Nivel de cada ítem de la dimensión calibrada en este caso. Vacío si no hay puntaje.
     #[serde(default)]
     pub niveles: BTreeMap<String, u8>,
+    /// `true`: el ítem del defecto ya estaba en piso en la base. Un caso limpio o sin nivel base vale `false`.
+    #[serde(default)]
+    pub piso: bool,
+    /// Ítems estables de la base que el juez no puntuó en este caso. Vacío sin veredicto de la dimensión.
+    #[serde(default)]
+    pub omitidos: Vec<String>,
     /// Valor de la dimensión calibrada en la base. `None` si la base no tiene puntaje de la dimensión.
     #[serde(default)]
     pub valor_base: Option<f32>,
@@ -386,9 +553,35 @@ pub struct CasoGuardado {
     /// Nombre del mutante muerto que eligió `AssertBorrado`. `None` en los demás defectos.
     #[serde(default)]
     pub mutante: Option<String>,
+    /// Estado de cada mutante de la muestra del caso, en orden. Vacío si el caso no midió mutación.
+    #[serde(default)]
+    pub mutantes: Vec<MutanteEstado>,
+    /// Mutantes de la muestra cuyo estado cambió frente a la base y no lo explica el defecto: es ruido. Sin el
+    /// mutante elegido. Vacío si no cambió ninguno.
+    #[serde(default)]
+    pub mutantes_cambiados: Vec<String>,
+    /// Cambios de muerto a vivo que explican los tests que el defecto apagó. No son ruido. Vacío si no hubo.
+    /// Una fila o un caso viejo lo lee vacío.
+    #[serde(default)]
+    pub mutantes_explicados: Vec<String>,
+    /// `true` si `mutantes_cambiados` no está vacío: el caso movió mutantes que no son su defecto.
+    #[serde(default)]
+    pub ruidoso: bool,
+    /// `-F` de cargo-mutants que midió el caso. Vacío si el caso no midió mutación.
+    #[serde(default)]
+    pub filtro: String,
     /// Nombres completos de los tests que `AssertBorrado` apagó. Vacío en los demás defectos.
     #[serde(default)]
     pub tests_apagados: Vec<String>,
+    /// `true` si el defecto cayó dentro del cambio de `bootstrap/`.
+    /// En `ComportamientoRoto`, la línea invertida es una línea tocada.
+    /// En `ModuloBorrado`, el módulo borrado es un archivo tocado.
+    /// Un archivo tocado tiene al menos una línea del cambio. Los casos limpios y sin cambio valen `false`.
+    #[serde(default)]
+    pub en_cambio: bool,
+    /// Operador que cambió `ComportamientoRoto` con estado inicial (p. ej. `"> -> >="`). `None` en los demás casos.
+    #[serde(default)]
+    pub operador: Option<String>,
 }
 
 /// Resultado de `calibrar_tarea_con`: la fila y la ruta de los casos guardados, si hubo casos medidos.
@@ -396,6 +589,8 @@ pub struct CasoGuardado {
 pub struct Calibrada {
     pub fila: Fila,
     pub casos: Option<PathBuf>,
+    /// Avisos de la calibración que la salida debe mostrar. Vacío si no hay ninguno.
+    pub avisos: Vec<String>,
 }
 
 /// Resultado de una medición: la fila (completa, o la de los casos hechos si el tope la detuvo) y, si el
@@ -534,6 +729,7 @@ fn calibrar_medida(
     muertos_de_la_base: &dyn Fn() -> Vec<MutanteMuerto>,
     leer_digest: &(dyn Fn() -> Option<String> + Sync),
     compartidos: Option<&Compartidos>,
+    home: Option<&Path>,
 ) -> Result<Medida, ErrorOraculo> {
     calibrar_medida_con_hilos(
         tarea,
@@ -547,6 +743,7 @@ fn calibrar_medida(
         leer_digest,
         CASOS_EN_PARALELO,
         compartidos,
+        home,
     )
 }
 
@@ -561,6 +758,10 @@ struct Ronda<'a> {
     capas: &'a [Vec<String>],
     camino: &'a [String],
     muertos: &'a [MutanteMuerto],
+    /// Rangos del cambio de `bootstrap/`. `None`: la tarea no trae `bootstrap/`.
+    cambios: Option<&'a BTreeMap<String, Vec<(u32, u32)>>>,
+    /// Carpeta de `bootstrap/` (estado inicial). `None`: la tarea no trae `bootstrap/`.
+    inicial: Option<&'a Path>,
     base: &'a Veredicto,
     evaluador: &'a (dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
     /// Tope de la medición. Cada reemplazo lo revisa antes de correr.
@@ -575,6 +776,19 @@ struct Ronda<'a> {
     prefijo: String,
     /// Veredictos de los limpios compartidos con las otras dimensiones con juez. `None` si la dimensión no comparte.
     compartidos: Option<&'a Compartidos>,
+    /// Muestra de mutación de la base. Cada caso la compara para ver qué mutantes cambiaron.
+    mutantes_base: &'a [MutanteEstado],
+    /// Plazo fijo por mutante de los casos, de la duración de la base. `None`: la base no trajo duración.
+    plazo_mutantes: Option<u64>,
+    /// Plazo de cada suite en los casos, de la duración de la base (Tarea 107).
+    plazos_suites: PlazosSuites,
+    /// Principal y reservas de cada caso, por índice, en orden de intento. Vacía si el caso no tiene principal.
+    /// Ver `preelegir`.
+    candidatos: Vec<Vec<Candidato>>,
+    /// Casos sin candidatos distintos (ver `preelegir`). Se miden como no aplicables, sin copiar.
+    agotado: Vec<bool>,
+    /// Equivalentes declarados en `tarea.toml`. Ningún caso los elige: se excluyen en cada elección.
+    curadas: Excluidos,
 }
 
 impl Ronda<'_> {
@@ -606,15 +820,25 @@ impl Medido {
     }
 }
 
+/// Lo que devuelve evaluar una copia: el veredicto, si reusó el `target`, la muestra de mutación que midió y
+/// si una suite pasó su plazo (`vencio`).
+struct Evaluada {
+    veredicto: Veredicto,
+    reusado: bool,
+    mutantes: Vec<MutanteEstado>,
+    filtro: String,
+    vencio: bool,
+}
+
 /// Evalúa la copia `copia` del caso `i` como `tipo`. Reusa el `target` de la base si `puede_reusar` lo permite.
-/// Devuelve el veredicto y si el caso reusó: un aviso de `target` frío cuenta como compilación en frío.
-/// La llamada corre con el id del caso fijado, para que sus reservas lo lleven.
+/// Devuelve el veredicto, si el caso reusó y la muestra de mutación: un aviso de `target` frío cuenta como
+/// compilación en frío. La llamada corre con el id del caso fijado, para que sus reservas lo lleven.
 fn evaluar_copia(
     r: &Ronda,
     copia: &Path,
     tipo: TipoCaso,
     i: usize,
-) -> Result<(Veredicto, bool), ErrorOraculo> {
+) -> Result<Evaluada, ErrorOraculo> {
     let digest_ahora = (r.leer_digest)();
     let reusa = target::puede_reusar(
         r.repo_bueno,
@@ -628,14 +852,242 @@ fn evaluar_copia(
         _ => Target::Ninguno,
     };
     let id = r.id_de(i);
-    let veredicto = con_caso(&id, || {
-        en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
-    })?;
-    let frio = veredicto
-        .avisos
+    // Vacía la muestra de una evaluación anterior: lo que quede en el hilo es de esta evaluación.
+    let _ = super::mutacion::tomar_muestra();
+    let _ = super::mutacion::tomar_filtro();
+    // Los casos corren con el plazo de la base: un plazo automático cambiaría con los tests que se apagan.
+    let resultado = con_caso(&id, || {
+        super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
+            con_plazos_suites(Some(r.plazos_suites), || {
+                en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+            })
+        })
+    });
+    let mutantes = super::mutacion::tomar_muestra();
+    let filtro = super::mutacion::tomar_filtro();
+    match resultado {
+        Ok(veredicto) => {
+            let frio = veredicto
+                .avisos
+                .iter()
+                .any(|aviso| aviso.starts_with(AVISO_TARGET_FRIO));
+            let vencio = veredicto
+                .avisos
+                .iter()
+                .any(|aviso| aviso.ends_with(MOTIVO_SUITE_PLAZO));
+            let veredicto = if vencio {
+                sin_veredicto_por_plazo(r.base, r.dimension)
+            } else {
+                veredicto
+            };
+            Ok(Evaluada {
+                veredicto,
+                reusado: reusa && !frio,
+                mutantes,
+                filtro,
+                vencio,
+            })
+        }
+        // Con junit presente, el plazo llega como error. Es un resultado de la copia, no un fallo de la calibración.
+        Err(ErrorOraculo::PlazoVencido { .. }) => Ok(Evaluada {
+            veredicto: sin_veredicto_por_plazo(r.base, r.dimension),
+            reusado: false,
+            mutantes: Vec::new(),
+            filtro: String::new(),
+            vencio: true,
+        }),
+        Err(otro) => Err(otro),
+    }
+}
+
+/// `base` con la dimensión sin veredicto por el plazo de una suite. La copia que pasó su plazo no mide nada.
+fn sin_veredicto_por_plazo(base: &Veredicto, dimension: Dimension) -> Veredicto {
+    let mut veredicto = base.clone();
+    if let Some(puntaje) = veredicto
+        .puntajes
+        .iter_mut()
+        .find(|p| p.dimension == dimension)
+    {
+        puntaje.sin_veredicto = Some(format!("suite sin veredicto: {MOTIVO_SUITE_PLAZO}"));
+    }
+    veredicto
+}
+
+/// Separa los mutantes que cambiaron frente a la base en ruido y explicados, en orden de `caso`. Sin `elegido`,
+/// el mutante del defecto no entra. Un cambio de muerto a vivo se explica si todos sus asesinos de la base
+/// están en `apagados`. Cualquier otro cambio es ruido, también uno de vivo a muerto.
+fn separar_cambios(
+    base: &[MutanteEstado],
+    caso: &[MutanteEstado],
+    elegido: Option<&str>,
+    muertos: &[MutanteMuerto],
+    apagados: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut ruido = Vec::new();
+    let mut explicados = Vec::new();
+    for nombre in super::mutacion::mutantes_cambiados(base, caso, elegido) {
+        if explicado_por_apagados(base, caso, &nombre, muertos, apagados) {
+            explicados.push(nombre);
+        } else {
+            ruido.push(nombre);
+        }
+    }
+    (ruido, explicados)
+}
+
+/// Si `nombre` pasa de muerto a vivo y todos los tests que lo mataban en la base están en `apagados`.
+/// Sin asesinos conocidos en `muertos`, no se explica: no hay prueba de que el defecto lo causó.
+fn explicado_por_apagados(
+    base: &[MutanteEstado],
+    caso: &[MutanteEstado],
+    nombre: &str,
+    muertos: &[MutanteMuerto],
+    apagados: &[String],
+) -> bool {
+    let estado_en =
+        |lista: &[MutanteEstado]| lista.iter().find(|m| m.nombre == nombre).map(|m| m.estado);
+    if estado_en(base) != Some(EstadoMutante::Muerto)
+        || estado_en(caso) != Some(EstadoMutante::Vivo)
+    {
+        return false;
+    }
+    let Some(muerto) = muertos.iter().find(|m| m.nombre == nombre) else {
+        return false;
+    };
+    !muerto.tests.is_empty() && muerto.tests.iter().all(|t| apagados.contains(t))
+}
+
+/// Una inyección elegida antes de medir. Al medir se aplica con su misma semilla y sus mismas exclusiones.
+struct Candidato {
+    semilla: u64,
+    excluidos: Excluidos,
+}
+
+/// Lo que `preelegir` decide antes de medir: los candidatos de cada caso y cuáles se agotaron.
+struct Preelegidas {
+    /// Principal y reservas del caso `i`, en orden de intento. Vacía si el caso no tiene principal.
+    candidatos: Vec<Vec<Candidato>>,
+    /// `true` si el caso `i` no tiene principal y el defecto aplica con solo las curadas excluidas.
+    agotado: Vec<bool>,
+}
+
+/// Aplica el defecto de `r` con `excluidos` sobre la copia `copia`. No evalúa nada: la copia se usa y se borra
+/// en el mismo lugar que los casos. Sin sonda, `limites` son los de la sonda de estructura.
+fn inyectar_en(
+    r: &Ronda,
+    defecto: Defecto,
+    copia: &Path,
+    excluidos: &Excluidos,
+    limites: &crate::oracle::perfiles::rust::LimitesEstructura,
+    semilla: u64,
+) -> Result<Option<Inyeccion>, ErrorOraculo> {
+    let contexto = inyectar::Contexto {
+        capas: r.capas,
+        camino_caliente: r.camino,
+        limites,
+        muertos: r.muertos,
+        cambios: r.cambios,
+        inicial: r.inicial,
+        excluidos,
+    };
+    inyectar::inyectar_con(defecto, copia, &contexto, semilla)
+        .map_err(|e| super::infra("inyectar un defecto", e))
+}
+
+/// Elige en serie los candidatos de cada caso con defecto (los pares), antes de medir. Primero, la principal de
+/// cada caso en orden de índice. Después, por turno (round-robin), la reserva `k` de cada caso con principal, hasta
+/// `MAX_REEMPLAZOS`. Cada elección excluye las curadas y todo lo elegido antes: ningún caso repite una inyección.
+/// Un caso sin principal no tiene reservas. Si el defecto aplica con solo las curadas excluidas, el caso se agota.
+fn preelegir(r: &Ronda, n: usize) -> Result<Preelegidas, ErrorOraculo> {
+    let mut pre = Preelegidas {
+        candidatos: (0..n).map(|_| Vec::new()).collect(),
+        agotado: vec![false; n],
+    };
+    let mut usadas = r.curadas.clone();
+    let mut con_principal = Vec::new();
+    for i in (0..n).step_by(2) {
+        let defecto = defecto_de(r, i);
+        let semilla = semilla_de(r, i, 0);
+        let copia = r.tmp.join(format!("pre-{i}"));
+        let previo = usadas.clone();
+        match elegir(r, defecto, &copia, &previo, semilla)? {
+            Some(inyeccion) => {
+                usadas.insert(inyeccion.identidad());
+                pre.candidatos[i].push(Candidato {
+                    semilla,
+                    excluidos: previo,
+                });
+                con_principal.push(i);
+            }
+            None => {
+                pre.agotado[i] = elegir(r, defecto, &copia, &r.curadas, semilla)?.is_some();
+            }
+        }
+    }
+    let mut vivos = con_principal;
+    for k in 1..=MAX_REEMPLAZOS {
+        let mut siguen = Vec::new();
+        for i in vivos {
+            let defecto = defecto_de(r, i);
+            let semilla = semilla_de(r, i, k);
+            let copia = r.tmp.join(format!("pre-{i}"));
+            let previo = usadas.clone();
+            if let Some(inyeccion) = elegir(r, defecto, &copia, &previo, semilla)? {
+                usadas.insert(inyeccion.identidad());
+                pre.candidatos[i].push(Candidato {
+                    semilla,
+                    excluidos: previo,
+                });
+                siguen.push(i);
+            }
+        }
+        vivos = siguen;
+    }
+    Ok(pre)
+}
+
+/// Defecto del caso `i`: el de `defectos[(i / 2) % len]`, la misma rotación de los casos en serie.
+fn defecto_de(r: &Ronda, i: usize) -> Defecto {
+    r.defectos[(i / 2) % r.defectos.len()]
+}
+
+/// Semilla del candidato `k` del caso `i`. `k` 0 es la principal. Cada reserva cambia la semilla.
+fn semilla_de(r: &Ronda, i: usize, k: u32) -> u64 {
+    r.semilla
+        .wrapping_add(i as u64)
+        .wrapping_add(u64::from(k) * 1_000_003)
+}
+
+/// Elige una inyección de `defecto` con `excluidos` en la copia `copia`, y borra la copia. No evalúa nada.
+fn elegir(
+    r: &Ronda,
+    defecto: Defecto,
+    copia: &Path,
+    excluidos: &Excluidos,
+    semilla: u64,
+) -> Result<Option<Inyeccion>, ErrorOraculo> {
+    super::copiar_repo(r.repo_bueno, copia).map_err(|e| super::infra("copia del repo", e))?;
+    let limites = crate::oracle::perfiles::rust::LimitesEstructura::default();
+    let elegida = inyectar_en(r, defecto, copia, excluidos, &limites, semilla)?;
+    borrado::borrar_dir_dentro(r.tmp, copia).map_err(|e| super::infra("borrar una copia", e))?;
+    Ok(elegida)
+}
+
+/// Lista declarada de `[calibracion].equivalentes`. Vacía sin `[calibracion]`.
+fn equivalentes_de(tarea: &Tarea) -> &[Equivalente] {
+    tarea
+        .calibracion
+        .as_ref()
+        .map_or(&[], |c| c.equivalentes.as_slice())
+}
+
+/// Entradas distintas de `equivalentes_de`: dos con el mismo archivo, línea y edición cuentan una.
+fn cuantos_equivalentes(tarea: &Tarea) -> u32 {
+    equivalentes_de(tarea)
         .iter()
-        .any(|aviso| aviso.starts_with(AVISO_TARGET_FRIO));
-    Ok((veredicto, reusa && !frio))
+        .map(|e| (e.archivo.as_str(), e.linea, e.edicion.trim()))
+        .collect::<BTreeSet<_>>()
+        .len() as u32
 }
 
 /// Mide el caso `i`. Los pares llevan un defecto: el de `defectos[(i / 2) % len]`, la misma rotación de los
@@ -659,18 +1111,33 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         }
         let copia = r.tmp.join(format!("caso-{i}"));
         super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
-        let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Limpio, i)?;
+        let Evaluada {
+            veredicto,
+            reusado,
+            mutantes,
+            filtro,
+            vencio,
+        } = evaluar_copia(r, &copia, TipoCaso::Limpio, i)?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
         // Un juez rechazado por el límite no mide: su veredicto no se guarda ni cuenta.
         if let Some(detencion) = juez_rechazado(r.tope) {
             return Ok(Medido::detenido(0, detencion));
         }
-        if let Some(c) = compartido {
+        // Un limpio no tiene inyección que reemplazar. Si su suite pasó el plazo, queda sin veredicto: no lo
+        // comparte con otras dimensiones, y el caso sigue.
+        if let Some(c) = compartido.filter(|_| !vencio) {
             c.guardar(i as u32, &veredicto)?;
         }
+        // Un limpio no tiene mutante elegido ni tests apagados: cualquier mutante que cambió es ruido.
+        let (mutantes_cambiados, mutantes_explicados) =
+            separar_cambios(r.mutantes_base, &mutantes, None, r.muertos, &[]);
         let caso = Caso {
             target_reusado: reusado,
+            mutantes,
+            mutantes_cambiados,
+            mutantes_explicados,
+            filtro,
             ..Caso::nuevo(i as u32, None, veredicto)
         };
         return Ok(Medido {
@@ -680,49 +1147,67 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             no_aplicable: None,
         });
     }
-    let defecto = r.defectos[(i / 2) % r.defectos.len()];
-    let semilla_caso = r.semilla.wrapping_add(i as u64);
+    let defecto = defecto_de(r, i);
+    // Un caso agotado: todos sus candidatos distintos ya los inyectan otros casos. No copia ni evalúa.
+    if r.agotado[i] {
+        return Ok(Medido {
+            reemplazos: 0,
+            caso: None,
+            detencion: None,
+            no_aplicable: Some(NoAplicable {
+                indice: i as u32,
+                defecto,
+                motivo: MOTIVO_DISTINTOS_AGOTADOS.to_string(),
+            }),
+        });
+    }
     // La tarea no declara límites de estructura: se usan los de la sonda (`sondas_nativas`).
     let limites = crate::oracle::perfiles::rust::LimitesEstructura::default();
-    let contexto = inyectar::Contexto {
-        capas: r.capas,
-        camino_caliente: r.camino,
-        limites: &limites,
-        muertos: r.muertos,
-    };
-    // Un defecto que rompe la construcción, o que la suite no ejecuta, se reemplaza por el siguiente
-    // candidato, hasta `MAX_REEMPLAZOS` veces. Cada intento inválido suma a `invalidos`, también el del caso agotado.
+    // Cada candidato ya está elegido: la principal y sus reservas, en orden. Un candidato que no compila, o que
+    // la suite no ejecuta, se descarta y sigue el próximo. Cada descarte inválido suma a `invalidos`.
     let mut invalidos = 0u32;
+    // Si el último descarte fue por plazo de una suite. Decide el motivo al agotar los candidatos.
+    let mut ultimo_plazo = false;
     let mut medido = None;
-    // Si el bucle termina sin medido, el motivo es el del último descarte: sin candidato, agotadas o sin ejecutar.
-    let mut motivo_sin_caso = MOTIVO_AGOTADAS;
-    let mut ultimo_descarte_sonda = false;
-    for k in 0..=MAX_REEMPLAZOS {
+    // Sin candidatos, el defecto no tiene lugar. Con candidatos, si ninguno sirve, se agotan las reservas.
+    let motivo_sin_caso = if r.candidatos[i].is_empty() {
+        motivo_sin_inyeccion(defecto, r.muertos.is_empty(), r.cambios.is_some())
+    } else {
+        MOTIVO_DISTINTOS_AGOTADOS
+    };
+    for (t, candidato) in r.candidatos[i].iter().enumerate() {
         // Antes de cada reemplazo (no antes de la primera inyección) se mira el límite. Si un juez ya lo
         // rechazó, no se gasta más.
-        if k > 0
+        if t > 0
             && let Some(detencion) = detencion_de_rechazo(r.tope)
         {
             return Ok(Medido::detenido(invalidos, detencion));
         }
-        let semilla_k = semilla_caso.wrapping_add(u64::from(k) * 1_000_003);
         let copia = r.tmp.join(format!("caso-{i}"));
         super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
-        let aplicado = inyectar::inyectar_con(defecto, &copia, &contexto, semilla_k)
-            .map_err(|e| super::infra("inyectar un defecto", e))?;
-        let Some(inyeccion) = aplicado else {
-            borrado::borrar_dir_dentro(r.tmp, &copia)
-                .map_err(|e| super::infra("borrar una copia", e))?;
-            motivo_sin_caso = if ultimo_descarte_sonda {
-                MOTIVO_SIN_EJECUTAR
-            } else {
-                motivo_sin_inyeccion(defecto, r.muertos.is_empty())
-            };
-            break;
+        // Aplicar el candidato con su semilla y sus exclusiones da la misma inyección que al elegirlo.
+        let Some(inyeccion) = inyectar_en(
+            r,
+            defecto,
+            &copia,
+            &candidato.excluidos,
+            &limites,
+            candidato.semilla,
+        )?
+        else {
+            return Err(ErrorOraculo::Infra(format!(
+                "la inyección elegida para el caso {i} no se volvió a aplicar"
+            )));
         };
         // `AssertBorrado` acota la mutación al archivo de su mutante: solo ese archivo se vuelve a medir.
         let acotado = inyeccion.mutante_archivo.as_deref();
-        let (veredicto, reusado) = super::mutacion::con_archivo_acotado(acotado, || {
+        let Evaluada {
+            veredicto,
+            reusado,
+            mutantes,
+            filtro,
+            vencio,
+        } = super::mutacion::con_archivo_acotado(acotado, || {
             evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)
         })?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
@@ -730,10 +1215,15 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         if let Some(detencion) = juez_rechazado(r.tope) {
             return Ok(Medido::detenido(invalidos, detencion));
         }
+        // La suite pasó su plazo sin junit: la inyección es inválida, como una que no compila.
+        if vencio {
+            invalidos += 1;
+            ultimo_plazo = true;
+            continue;
+        }
         if rompe_la_compilacion(r.base, &veredicto, r.dimension) {
             invalidos += 1;
-            motivo_sin_caso = MOTIVO_AGOTADAS;
-            ultimo_descarte_sonda = false;
+            ultimo_plazo = false;
             continue;
         }
         // Un comportamiento roto que no cambia nada frente a la base puede caer fuera de lo que la suite ejecuta.
@@ -744,17 +1234,23 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             if let Some(detencion) = juez_rechazado(r.tope) {
                 return Ok(Medido::detenido(invalidos, detencion));
             }
-            if sin_efecto {
+            // `None`: la sonda pasó el plazo. Sin efecto o con plazo, la inyección se descarta.
+            if sin_efecto != Some(false) {
                 invalidos += 1;
-                motivo_sin_caso = MOTIVO_SIN_EJECUTAR;
-                ultimo_descarte_sonda = true;
+                ultimo_plazo = sin_efecto.is_none();
                 continue;
             }
         }
-        medido = Some((inyeccion, veredicto, reusado));
+        medido = Some((inyeccion, veredicto, reusado, mutantes, filtro));
         break;
     }
-    let Some((inyeccion, veredicto, reusado)) = medido else {
+    let Some((inyeccion, veredicto, reusado, mutantes, filtro)) = medido else {
+        // Si el último candidato descartado pasó su plazo, el motivo lo dice.
+        let motivo = if ultimo_plazo {
+            MOTIVO_SUITE_PLAZO
+        } else {
+            motivo_sin_caso
+        };
         return Ok(Medido {
             reemplazos: invalidos,
             caso: None,
@@ -762,13 +1258,25 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             no_aplicable: Some(NoAplicable {
                 indice: i as u32,
                 defecto,
-                motivo: motivo_sin_caso.to_string(),
+                motivo: motivo.to_string(),
             }),
         });
     };
+    // El mutante elegido por `AssertBorrado` no cuenta: es el defecto. Los tests que apagó explican sus muertos.
+    let (mutantes_cambiados, mutantes_explicados) = separar_cambios(
+        r.mutantes_base,
+        &mutantes,
+        inyeccion.mutante.as_deref(),
+        r.muertos,
+        &inyeccion.tests_apagados,
+    );
     let caso = Caso {
         reemplazos: invalidos,
         target_reusado: reusado,
+        mutantes,
+        mutantes_cambiados,
+        mutantes_explicados,
+        filtro,
         ..Caso::nuevo(i as u32, Some(inyeccion), veredicto)
     };
     Ok(Medido {
@@ -780,13 +1288,14 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
 }
 
 /// Si la suite no ejecuta la línea de `inyeccion` (Tarea 66, punto 4). Copia el repo bueno, inserta la sonda al
-/// inicio de la fn que contiene la línea y evalúa esa copia. `true` si la sonda no cambia nada frente a la base.
-/// `false` si la línea no está en una fn (no se puede probar) o si la sonda sí cambia el veredicto.
+/// inicio de la fn que contiene la línea y evalúa esa copia. `Some(true)` si la sonda no cambia nada frente a la
+/// base. `Some(false)` si la línea no está en una fn (no se puede probar) o si la sonda sí cambia el veredicto.
+/// `None` si una suite de la sonda pasó su plazo (Tarea 107).
 fn la_suite_no_la_ejecuta(
     r: &Ronda,
     i: usize,
     inyeccion: &Inyeccion,
-) -> Result<bool, ErrorOraculo> {
+) -> Result<Option<bool>, ErrorOraculo> {
     let copia = r.tmp.join(format!("caso-{i}-sonda"));
     super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
     let ruta = copia.join(&inyeccion.archivo);
@@ -794,12 +1303,19 @@ fn la_suite_no_la_ejecuta(
     let Some(sondada) = sonda::con_panic_en_funcion(&fuente, inyeccion.linea as usize) else {
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
-        return Ok(false);
+        return Ok(Some(false));
     };
     fs::write(&ruta, sondada).map_err(|e| super::infra("escribir la sonda", e))?;
-    let (veredicto, _) = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)?;
+    let Evaluada {
+        veredicto, vencio, ..
+    } = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)?;
     borrado::borrar_dir_dentro(r.tmp, &copia).map_err(|e| super::infra("borrar una copia", e))?;
-    Ok(motivo_de_deteccion(r.base, &veredicto, r.dimension, &BTreeSet::new()).is_none())
+    if vencio {
+        return Ok(None);
+    }
+    Ok(Some(
+        motivo_de_deteccion(r.base, &veredicto, r.dimension, &BTreeSet::new()).is_none(),
+    ))
 }
 
 /// Como `calibrar_medida`, con `hilos` casos a la vez (1 corre en serie). Un coordinador lanza los casos en
@@ -820,7 +1336,9 @@ fn calibrar_medida_con_hilos(
     leer_digest: &(dyn Fn() -> Option<String> + Sync),
     hilos: usize,
     compartidos: Option<&Compartidos>,
+    home: Option<&Path>,
 ) -> Result<Medida, ErrorOraculo> {
+    let tarea_hash = hash_de_tarea(tarea)?;
     let defectos = inyectar::de_dimension(dimension);
     if defectos.is_empty() {
         return Err(ErrorOraculo::Uso(format!(
@@ -833,9 +1351,23 @@ fn calibrar_medida_con_hilos(
             "oraculo calibrar necesita n de 1 o más".into(),
         ));
     }
-    // La carpeta temporal va antes de la base: la base deja ahí su `target` (Tarea 59).
-    let tmp = tempfile::tempdir().map_err(|e| super::infra("carpeta temporal", e))?;
+    // La carpeta temporal va antes de la base: la base deja ahí su `target` (Tarea 59). Con `home` cae en
+    // `home/tmp`, no en el `/tmp` del sistema (RAM en Fedora). Se borra al salir, también con error.
+    let tmp = match home {
+        Some(home) => {
+            let raiz = home.join(CARPETA_TEMPORALES);
+            fs::create_dir_all(&raiz)
+                .map_err(|e| super::infra("directorio temporal de ROOT_HOME", e))?;
+            temporal(&raiz).map_err(|e| super::infra("carpeta temporal", e))?
+        }
+        None => tempfile::tempdir().map_err(|e| super::infra("carpeta temporal", e))?,
+    };
     let destino_target = tmp.path().join(NOMBRE_TARGET_BASE);
+    // Vacía la muestra de mutación del hilo: lo que quede después es de la base.
+    let _ = super::mutacion::tomar_muestra();
+    let _ = super::mutacion::tomar_base_segundos();
+    // Vacía las duraciones de las suites del hilo: lo que quede después es de la base (Tarea 107).
+    let _ = tomar_duraciones_suites();
     // La base corre con el límite activo: su juez también cuenta. Una base rechazada no mide nada.
     let base = en_limite(tope, || {
         evaluador(
@@ -844,6 +1376,12 @@ fn calibrar_medida_con_hilos(
             Target::Guardar(destino_target.clone()),
         )
     });
+    // Los casos comparan su muestra con la de la base. Las bases repetidas no la pisan.
+    let mutantes_base = super::mutacion::tomar_muestra();
+    // Plazo de los casos: el de la base, sin tocar. La base y las repetidas corren con el automático.
+    let plazo_mutantes = super::mutacion::tomar_base_segundos().map(super::mutacion::plazo_de_base);
+    // Duración de cada suite en la base: fija el plazo de sus casos y queda en la fila.
+    let duraciones_base = tomar_duraciones_suites();
     let base = match (base, detencion_de_rechazo(tope)) {
         (_, Some(detencion)) => return Ok(medida_detenida(detencion)),
         (Err(error), None) => return Err(error),
@@ -861,10 +1399,12 @@ fn calibrar_medida_con_hilos(
         )));
     }
     // Base repetida (Tarea 83, punto 2): las dimensiones con ítems del juez juzgan la base dos veces más. Las
-    // sondas no se repiten: `BaseRepetida` reusa las deterministas de la base.
+    // sondas no se repiten: `BaseRepetida` reusa las deterministas de la base. Sin juez (sin modelo), la base
+    // no trae ítems del juez y no hay juicios que repetir.
     let pesos = inestables::pesos_de(&rubricas_de(dimension));
+    let juez_corre = tiene_items_de_juez(dimension) && trae_juicio_del_juez(&base, dimension);
     let mut juicios = vec![base];
-    if tiene_items_de_juez(dimension) {
+    if juez_corre {
         for _ in 0..inestables::JUICIOS_EXTRA {
             let repetida = en_limite(tope, || {
                 evaluador(repo_bueno, TipoCaso::BaseRepetida, Target::Ninguno)
@@ -882,10 +1422,13 @@ fn calibrar_medida_con_hilos(
     let inestables = inestables::inestables_de(&refs, dimension, &pesos.del_juez);
     // Una dimensión cuyos ítems estables pesan menos de la mitad no mide casos: ahorra el gasto del juez.
     if inestables::dimension_inestable(&pesos, &inestables) {
+        let motivo = inestables::motivo(&inestables);
         let fila = Fila {
+            inestable: Some(motivo.clone()),
+            no_aplica: None,
             inestables: inestables.iter().cloned().collect(),
             extractos_base,
-            ..fila_no_aplica(tarea, dimension, semilla, &inestables::motivo(&inestables))
+            ..fila_no_aplica(tarea, &tarea_hash, dimension, semilla, &motivo)
         };
         return Ok(Medida {
             fila: Some(fila),
@@ -917,7 +1460,12 @@ fn calibrar_medida_con_hilos(
         .calibracion
         .as_ref()
         .map_or(&[], |c| c.camino_caliente.as_slice());
-    let ronda = Ronda {
+    // Con `bootstrap/`, los defectos de línea y de módulo solo caen en lo que cambió el repo. Se calcula una vez.
+    let bootstrap = tarea.dir.join("bootstrap");
+    let cambios = bootstrap
+        .is_dir()
+        .then(|| crate::oracle::cambios::rangos_cambiados(&bootstrap, repo_bueno));
+    let mut ronda = Ronda {
         semilla,
         dimension,
         defectos: &defectos,
@@ -926,6 +1474,8 @@ fn calibrar_medida_con_hilos(
         capas,
         camino,
         muertos: &muertos,
+        cambios: cambios.as_ref(),
+        inicial: cambios.as_ref().map(|_| bootstrap.as_path()),
         base: &base,
         evaluador,
         tope,
@@ -938,7 +1488,17 @@ fn calibrar_medida_con_hilos(
             (ahora() * 1000.0) as u64
         ),
         compartidos,
+        mutantes_base: &mutantes_base,
+        plazo_mutantes,
+        plazos_suites: plazos_de_base(duraciones_base),
+        candidatos: Vec::new(),
+        agotado: Vec::new(),
+        curadas: identidades_de_equivalentes(equivalentes_de(tarea)),
     };
+    // Las elecciones de los casos se hacen antes de lanzar los hilos: así cada caso ya tiene su lista fija.
+    let pre = preelegir(&ronda, n)?;
+    ronda.candidatos = pre.candidatos;
+    ronda.agotado = pre.agotado;
     let hilos = hilos.max(1);
     let (tx, rx) = mpsc::channel::<(usize, Result<Medido, ErrorOraculo>)>();
     // El coordinador suelta su envío cuando ya no lanza: si un hilo muere sin enviar, `recv` falla en vez de
@@ -1035,9 +1595,13 @@ fn calibrar_medida_con_hilos(
     } else {
         Some(Fila {
             reemplazos,
+            plazo_mutantes,
+            duracion_contrato: duraciones_base.contrato,
+            duracion_oculto: duraciones_base.oculto,
             ruidosos: ruidosos.into_iter().collect(),
             inestables: inestables.iter().cloned().collect(),
             extractos_base,
+            tarea_hash: Some(tarea_hash.clone()),
             ..fila_de(
                 tarea,
                 dimension,
@@ -1057,7 +1621,23 @@ fn calibrar_medida_con_hilos(
     })
 }
 
+/// Defectos medidos con identidad de inyección distinta. De cada identidad sale el caso de menor `indice`.
+/// Un defecto sin inyección no tiene identidad que repetir: cuenta solo.
+fn defectos_distintos(casos: &[Caso]) -> Vec<&Caso> {
+    let mut defectos: Vec<&Caso> = casos.iter().filter(|c| c.es_defecto).collect();
+    defectos.sort_by_key(|c| c.indice);
+    let mut vistas = BTreeSet::new();
+    defectos
+        .into_iter()
+        .filter(|c| match c.inyeccion.as_ref().map(Inyeccion::identidad) {
+            Some(identidad) => vistas.insert(identidad),
+            None => true,
+        })
+        .collect()
+}
+
 /// La fila de los casos medidos: sensibilidad, especificidad y exactitud por dimensión y por ítem.
+/// Deja `tarea_hash` en `None`: quien la llama lo pone con el hash del `tarea.toml`.
 fn fila_de(
     tarea: &Tarea,
     dimension: Dimension,
@@ -1077,9 +1657,14 @@ fn fila_de(
     let limpios_con_veredicto = casos
         .iter()
         .filter(|c| !c.es_defecto && c.sin_veredicto.is_none());
+    let defectos_en_piso = casos.iter().filter(|c| c.es_defecto && c.piso).count() as u32;
+    let omisiones: u32 = casos.iter().map(|c| c.omitidos.len() as u32).sum();
+    // La sensibilidad cuenta inyecciones distintas: un defecto repetido no suma dos veces.
+    let defectos_unicos = defectos_distintos(casos);
+    let inyecciones_distintas = defectos_unicos.len() as u32;
     let sensibilidad = proporcion(
-        casos.iter().filter(|c| c.es_defecto && c.detectado).count() as u32,
-        defectos_medidos,
+        defectos_unicos.iter().filter(|c| c.detectado).count() as u32,
+        inyecciones_distintas,
     );
     let especificidad = proporcion(
         limpios_con_veredicto
@@ -1090,9 +1675,9 @@ fn fila_de(
     );
     let mut items_medidos = BTreeMap::new();
     for item in items {
-        let positivos: Vec<bool> = casos
+        let positivos: Vec<bool> = defectos_unicos
             .iter()
-            .filter(|c| c.es_defecto && c.item_defecto == Some(*item))
+            .filter(|c| c.item_defecto == Some(*item))
             .filter_map(|c| c.detecta_en(item))
             .collect();
         let negativos: Vec<bool> = casos
@@ -1113,6 +1698,7 @@ fn fila_de(
         }
     }
     Fila {
+        tarea_hash: None,
         tarea: tarea.nombre.clone(),
         dimension,
         n: casos.len() as u32,
@@ -1120,6 +1706,8 @@ fn fila_de(
         limpios,
         limpios_sin_veredicto,
         no_aplicable: no_aplicables,
+        defectos_en_piso,
+        omisiones,
         semilla,
         ts: ahora(),
         sensibilidad,
@@ -1128,11 +1716,22 @@ fn fila_de(
         items: items_medidos,
         incompleta,
         no_aplica: None,
+        inestable: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
+        casos_ruidosos: casos
+            .iter()
+            .filter(|c| !c.mutantes_cambiados.is_empty())
+            .count() as u32,
         inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
+        plazo_mutantes: None,
+        duracion_contrato: None,
+        duracion_oculto: None,
+        repo_origen: None,
+        inyecciones_distintas: Some(inyecciones_distintas),
+        equivalentes_excluidos: cuantos_equivalentes(tarea),
     }
 }
 
@@ -1155,12 +1754,9 @@ pub fn calibrar_tarea(
 
 /// Tope de gasto de una calibración (decisión 48). Cada intento de juez se reserva con su cota: si el gasto
 /// desde el inicio más la cota pasa `usd`, el intento no se envía y la calibración se detiene.
-pub struct Presupuesto<'a> {
+pub struct Presupuesto {
     /// Tope en USD. Debe ser finito y mayor que 0.
     pub usd: f64,
-    /// Gasto de API desde un instante (epoch en segundos): llamadas y reservas abiertas. Es `Sync`. El límite
-    /// cuenta su propio gasto en `reservar`, así que `calibrar_tarea_con` no lee este campo.
-    pub gasto_desde: &'a (dyn Fn(f64) -> Result<f64, ErrorOraculo> + Sync),
 }
 
 /// Elecciones de los jueces que un caso puede llamar. `None`: el juez no se arma y no llama.
@@ -1171,10 +1767,6 @@ pub struct JuecesCaso<'a> {
     /// Juez de la configuración de Cargo (decisión 30): llama si las partes lo piden.
     pub config: Option<&'a Eleccion>,
 }
-
-/// Entrada de cada llamada de juez, en bytes UTF-8. Desde el desempate 24 es un límite real: un prompt más
-/// grande no se envía. Se conserva el nombre: es el mismo valor que `juez::MAX_ENTRADA_JUEZ_BYTES`.
-pub const ENTRADA_JUEZ_BYTES: u64 = MAX_ENTRADA_JUEZ_BYTES;
 
 /// Gasto de la calibración con tope: el `Gate` que registra su detención.
 const CORRIDA_CALIBRACION: &str = "oraculo-calibracion";
@@ -1275,14 +1867,34 @@ pub fn calibrar_tarea_con(
     let dim = Dimension::desde_clave(dimension)
         .ok_or_else(|| ErrorOraculo::Uso(format!("dimensión desconocida: {dimension}")))?;
     let tarea = super::tarea::cargar_en(home, nombre)?;
+    let tarea_hash = hash_de_tarea(&tarea)?;
     // Eficiencia sin `[eficiencia]`: la tarea no la aplica. Ni la base ni los casos corren, y la fila lleva
     // solo el motivo. Es el mismo criterio que la sonda usa para no medir.
     if dim == Dimension::Eficiencia && tarea.eficiencia.is_none() {
-        let fila = fila_no_aplica(&tarea, dim, semilla, MOTIVO_NO_APLICA_EFICIENCIA);
+        let fila = fila_no_aplica(
+            &tarea,
+            &tarea_hash,
+            dim,
+            semilla,
+            MOTIVO_NO_APLICA_EFICIENCIA,
+        );
         agregar(home, &fila)?;
-        return Ok(Calibrada { fila, casos: None });
+        return Ok(Calibrada {
+            fila,
+            casos: None,
+            avisos: Vec::new(),
+        });
     }
-    let repo = repo_de(&tarea, repo_cli)?;
+    // Pruebas con `con_tests/` en la tarea usa esa carpeta, aunque venga `--repo`. La fila guarda el origen.
+    let (repo, repo_origen) = match carpeta_con_tests(&tarea, dim) {
+        Some(carpeta) => (carpeta, Some(CON_TESTS.to_string())),
+        None => (repo_de(&tarea, repo_cli)?, None),
+    };
+    // Con `--repo` y `con_tests/`, el repo de `--repo` no se usa: la salida avisa.
+    let mut avisos = Vec::new();
+    if repo_cli.is_some() && repo_origen.is_some() {
+        avisos.push(AVISO_CON_TESTS_EN_VEZ_DE_REPO.to_string());
+    }
     // Entrega sin `[entrega]` y sin Dockerfile que elegir: no hay nada que instalar ni levantar. Mismo
     // `containerfile` que usa la evaluación real.
     let sin_entrega = dim == Dimension::Entrega && tarea.entrega.is_none();
@@ -1292,9 +1904,13 @@ pub fn calibrar_tarea_con(
             super::entrega::Eleccion::SinDockerfile
         )
     {
-        let fila = fila_no_aplica(&tarea, dim, semilla, MOTIVO_NO_APLICA_ENTREGA);
+        let fila = fila_no_aplica(&tarea, &tarea_hash, dim, semilla, MOTIVO_NO_APLICA_ENTREGA);
         agregar(home, &fila)?;
-        return Ok(Calibrada { fila, casos: None });
+        return Ok(Calibrada {
+            fila,
+            casos: None,
+            avisos: Vec::new(),
+        });
     }
     // La base y cada caso corren las mismas partes: solo la dimensión calibrada se mide.
     let rubricas = super::rubrica::cargar_embebidas()
@@ -1343,7 +1959,7 @@ pub fn calibrar_tarea_con(
             Compartidos::nuevo(home, &tarea, &repo, &modelo, semilla)
         })
         .transpose()?;
-    let medida = calibrar_medida(
+    let mut medida = calibrar_medida(
         &tarea,
         dim,
         n as usize,
@@ -1354,7 +1970,11 @@ pub fn calibrar_tarea_con(
         &|| memo.mutantes_muertos(&tarea),
         &|| target::digest_de_imagen(&tarea.imagen),
         compartidos.as_ref(),
+        Some(home),
     )?;
+    if let Some(fila) = medida.fila.as_mut() {
+        fila.repo_origen = repo_origen;
+    }
     // Los casos se escriben antes de `agregar`, también si el tope detuvo la calibración.
     let casos = match &medida.fila {
         Some(fila) => escribir_casos(
@@ -1391,7 +2011,11 @@ pub fn calibrar_tarea_con(
         .fila
         .ok_or_else(|| ErrorOraculo::Infra("la calibración no dejó ninguna fila".into()))?;
     agregar(home, &fila)?;
-    Ok(Calibrada { fila, casos })
+    Ok(Calibrada {
+        fila,
+        casos,
+        avisos,
+    })
 }
 
 /// Motivo de la fila de Eficiencia en una tarea sin `[eficiencia]`.
@@ -1402,8 +2026,15 @@ const MOTIVO_NO_APLICA_ENTREGA: &str =
     "no aplica: la tarea no define [entrega] y el repo no tiene Dockerfile";
 
 /// Fila de una dimensión que la tarea no aplica: sin casos ni métricas, con `motivo` en `no_aplica`.
-fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64, motivo: &str) -> Fila {
+fn fila_no_aplica(
+    tarea: &Tarea,
+    tarea_hash: &str,
+    dimension: Dimension,
+    semilla: u64,
+    motivo: &str,
+) -> Fila {
     Fila {
+        tarea_hash: Some(tarea_hash.into()),
         tarea: tarea.nombre.clone(),
         dimension,
         n: 0,
@@ -1411,6 +2042,8 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64, motivo: &st
         limpios: 0,
         limpios_sin_veredicto: 0,
         no_aplicable: 0,
+        defectos_en_piso: 0,
+        omisiones: 0,
         semilla,
         ts: ahora(),
         sensibilidad: None,
@@ -1419,11 +2052,19 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64, motivo: &st
         items: BTreeMap::new(),
         incompleta: false,
         no_aplica: Some(motivo.into()),
+        inestable: None,
         reemplazos: 0,
         ruidosos: Vec::new(),
+        casos_ruidosos: 0,
         inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
+        plazo_mutantes: None,
+        duracion_contrato: None,
+        duracion_oculto: None,
+        repo_origen: None,
+        inyecciones_distintas: Some(0),
+        equivalentes_excluidos: cuantos_equivalentes(tarea),
     }
 }
 
@@ -1439,6 +2080,22 @@ fn gate_de_tope(tarea: &str, dimension: Dimension, detencion: &Detencion) -> Eve
     ]);
     observe::evento_gate(CORRIDA_CALIBRACION, FASE_TOPE_CALIBRACION, extra)
 }
+
+/// Carpeta del repo bueno de Pruebas: `con_tests/` dentro de la carpeta de la tarea. Solo si existe.
+/// Gana a `--repo` y a `[calibracion] repo`. Las demás dimensiones no la miran.
+fn carpeta_con_tests(tarea: &Tarea, dimension: Dimension) -> Option<PathBuf> {
+    if dimension != Dimension::Pruebas {
+        return None;
+    }
+    let carpeta = tarea.dir.join(CON_TESTS);
+    carpeta.is_dir().then_some(carpeta)
+}
+
+/// Nombre de la carpeta con tests de Pruebas. Es también el origen que guarda la fila.
+const CON_TESTS: &str = "con_tests";
+
+/// Aviso cuando `con_tests/` gana a `--repo` en una calibración de Pruebas.
+const AVISO_CON_TESTS_EN_VEZ_DE_REPO: &str = "se usó con_tests/ en vez de --repo";
 
 /// El repo bueno: `--repo`, o `[calibracion] repo` de la tarea (relativo a su carpeta). Debe existir.
 fn repo_de(tarea: &Tarea, repo_cli: Option<&Path>) -> Result<PathBuf, ErrorOraculo> {
@@ -1536,12 +2193,24 @@ struct Caso {
     niveles_base: BTreeMap<String, u8>,
     /// Nivel de cada ítem de la dimensión calibrada en este caso.
     niveles: BTreeMap<String, u8>,
+    /// El ítem del defecto ya estaba en piso en la base. Ver `en_piso`.
+    piso: bool,
+    /// Ítems estables de la base que el juez dejó sin nivel en este caso. Ver `omitidos_de`.
+    omitidos: Vec<String>,
     /// Valor de la dimensión calibrada en la base. `None` si la base no tiene puntaje de la dimensión.
     valor_base: Option<f32>,
     /// Valor de la dimensión calibrada en este caso. `None` si el caso no tiene puntaje de la dimensión.
     valor: Option<f32>,
     /// Extractos que leyó el juez en este caso. Vacío mientras el veredicto no los lleve.
     extractos: Vec<ExtractoGuardado>,
+    /// Estado de cada mutante de la muestra de este caso. Vacío si el caso no midió mutación.
+    mutantes: Vec<MutanteEstado>,
+    /// Mutantes cuyo estado cambió frente a la base y no lo explica el defecto, sin el mutante elegido. Vacío en un caso reusado.
+    mutantes_cambiados: Vec<String>,
+    /// Cambios de muerto a vivo explicados por los tests que el defecto apagó. Vacío en un caso reusado.
+    mutantes_explicados: Vec<String>,
+    /// `-F` de cargo-mutants que midió el caso. Vacío si el caso no midió mutación.
+    filtro: String,
 }
 
 impl Caso {
@@ -1567,6 +2236,12 @@ impl Caso {
             reemplazos: 0,
             target_reusado: false,
             limpio_reusado: false,
+            piso: false,
+            omitidos: Vec::new(),
+            mutantes: Vec::new(),
+            mutantes_cambiados: Vec::new(),
+            mutantes_explicados: Vec::new(),
+            filtro: String::new(),
         }
     }
 
@@ -1598,12 +2273,21 @@ impl CasoGuardado {
             valor: caso.valor,
             extractos: caso.extractos.clone(),
             no_aplicable: None,
+            piso: caso.piso,
+            omitidos: caso.omitidos.clone(),
             mutante: caso.inyeccion.as_ref().and_then(|i| i.mutante.clone()),
             tests_apagados: caso
                 .inyeccion
                 .as_ref()
                 .map(|i| i.tests_apagados.clone())
                 .unwrap_or_default(),
+            en_cambio: caso.inyeccion.as_ref().is_some_and(|i| i.en_cambio),
+            operador: caso.inyeccion.as_ref().and_then(|i| i.operador.clone()),
+            mutantes: caso.mutantes.clone(),
+            mutantes_cambiados: caso.mutantes_cambiados.clone(),
+            mutantes_explicados: caso.mutantes_explicados.clone(),
+            ruidoso: !caso.mutantes_cambiados.is_empty(),
+            filtro: caso.filtro.clone(),
         }
     }
 
@@ -1629,8 +2313,17 @@ impl CasoGuardado {
             valor: None,
             extractos: Vec::new(),
             no_aplicable: Some(no.motivo.clone()),
+            piso: false,
+            omitidos: Vec::new(),
             mutante: None,
             tests_apagados: Vec::new(),
+            en_cambio: false,
+            operador: None,
+            mutantes: Vec::new(),
+            mutantes_cambiados: Vec::new(),
+            mutantes_explicados: Vec::new(),
+            ruidoso: false,
+            filtro: String::new(),
         }
     }
 }
@@ -1666,6 +2359,13 @@ pub const MAX_REEMPLAZOS: u32 = 5;
 /// Motivo de un caso no aplicable: la inyección no dio ningún candidato.
 const MOTIVO_SIN_CANDIDATO: &str = "sin candidato para inyectar";
 
+/// Motivo de un defecto de línea o de módulo sin lugar dentro del cambio de `bootstrap/`.
+const MOTIVO_FUERA_DEL_CAMBIO: &str = "ningún lugar del cambio admite este defecto";
+
+/// Motivo de un `ModuloBorrado` con estado inicial: borrar un módulo rompe el build y da una detección segura.
+const MOTIVO_MODULO_CON_INICIAL: &str =
+    "con estado inicial, borrar un módulo rompe el build y da una detección segura";
+
 /// Motivo de un `AssertBorrado` no aplicable: la base no dejó mutantes muertos.
 const MOTIVO_SIN_MUERTOS: &str = "la base no dio mutantes muertos";
 
@@ -1673,31 +2373,34 @@ const MOTIVO_SIN_MUERTOS: &str = "la base no dio mutantes muertos";
 const MOTIVO_SIN_TEST_DE_MUERTO: &str = "ningún mutante muerto tiene tests fallidos ubicables";
 
 /// Motivo de un caso sin inyección. `AssertBorrado` separa si la base no dio muertos de si ninguno tiene test.
-/// Los demás defectos usan el motivo común.
-fn motivo_sin_inyeccion(defecto: Defecto, sin_muertos: bool) -> &'static str {
+/// Con `con_rangos`, `ModuloBorrado` dice que con estado inicial no aplica. `ComportamientoRoto` y `CuerpoVaciado`
+/// dicen que ningún lugar del cambio los admite. Los demás defectos usan el motivo común.
+fn motivo_sin_inyeccion(defecto: Defecto, sin_muertos: bool, con_rangos: bool) -> &'static str {
     match (defecto, sin_muertos) {
         (Defecto::AssertBorrado, true) => MOTIVO_SIN_MUERTOS,
         (Defecto::AssertBorrado, false) => MOTIVO_SIN_TEST_DE_MUERTO,
+        (Defecto::ModuloBorrado, _) if con_rangos => MOTIVO_MODULO_CON_INICIAL,
+        (Defecto::ComportamientoRoto | Defecto::CuerpoVaciado, _) if con_rangos => {
+            MOTIVO_FUERA_DEL_CAMBIO
+        }
         _ => MOTIVO_SIN_CANDIDATO,
     }
 }
 
-/// Motivo de un caso no aplicable: todos los reemplazos rompieron la construcción.
-const MOTIVO_AGOTADAS: &str = "inyecciones inválidas agotadas";
-
-/// Motivo de un caso no aplicable: la sonda vio que ningún candidato cae en una función que la suite ejecuta.
-const MOTIVO_SIN_EJECUTAR: &str =
-    "ninguna línea candidata está en una función que la suite ejecute";
+/// Motivo de un caso no aplicable: no quedan candidatos distintos. Ni la principal ni las reservas sirven.
+const MOTIVO_DISTINTOS_AGOTADOS: &str = "no aplica: candidatos distintos agotados";
 
 /// Marcadores de construcción fallida. Un veredicto con uno de ellos no mide su dimensión: el
 /// texto es el de `perfiles/herramientas.rs` (sonda de clippy) y `mutacion.rs` (sonda de mutación).
 const MOTIVOS_DE_CONSTRUCCION: [&str; 2] = ["no compila", "fallan sin mutaciones"];
 
 /// Si el defecto rompe la construcción: `dimension` queda sin veredicto, o con ítems faltantes, por un
-/// motivo de construcción fallida que la base no tiene. Completitud y Funciona nunca cuentan.
+/// motivo de construcción fallida que la base no tiene. En Completitud y Funciona también cuenta un
+/// `no_compila` que la base no tiene: un build roto da 0 con veredicto y no trae marcador en el puntaje.
 fn rompe_la_compilacion(base: &Veredicto, veredicto: &Veredicto, dimension: Dimension) -> bool {
-    if matches!(dimension, Dimension::Completitud | Dimension::Funciona) {
-        return false;
+    let sin_build = veredicto.no_compila && !base.no_compila;
+    if matches!(dimension, Dimension::Completitud | Dimension::Funciona) && sin_build {
+        return true;
     }
     let en_base = motivos_de_construccion(base, dimension);
     motivos_de_construccion(veredicto, dimension)
@@ -1845,6 +2548,8 @@ fn finalizar_casos(
         caso.niveles = niveles_de(puntaje_de(&caso.veredicto, dimension));
         caso.valor_base = puntaje_de(base, dimension).map(|p| p.valor);
         caso.valor = puntaje_de(&caso.veredicto, dimension).map(|p| p.valor);
+        caso.piso = en_piso(&caso.niveles_base, caso.item_defecto, dimension);
+        caso.omitidos = omitidos_de(caso);
         caso.items = items
             .iter()
             .map(|item| {
@@ -1996,6 +2701,30 @@ fn detecta_item(
     })
 }
 
+/// Si el nivel base del ítem es menor que la baja que pide la dimensión.
+/// Con juez la baja es `BAJA_ITEM_CON_JUEZ`; sin juez, 1. Sin nivel base del ítem, no está en piso.
+fn en_piso(niveles_base: &BTreeMap<String, u8>, item: Option<&str>, dimension: Dimension) -> bool {
+    let baja = if regla::es_con_juez(dimension) {
+        BAJA_ITEM_CON_JUEZ
+    } else {
+        1
+    };
+    item.and_then(|i| niveles_base.get(i))
+        .is_some_and(|nivel| *nivel < baja)
+}
+
+/// Ítems estables de la base que el caso no puntuó. Vacío si el caso no tiene veredicto de la dimensión.
+fn omitidos_de(caso: &Caso) -> Vec<String> {
+    if caso.sin_veredicto.is_some() {
+        return Vec::new();
+    }
+    caso.niveles_base
+        .keys()
+        .filter(|item| !caso.niveles.contains_key(*item))
+        .cloned()
+        .collect()
+}
+
 fn puntaje_de(veredicto: &Veredicto, dimension: Dimension) -> Option<&Puntaje> {
     veredicto.puntajes.iter().find(|p| p.dimension == dimension)
 }
@@ -2020,6 +2749,23 @@ pub fn texto_especificidad(fila: &Fila) -> String {
     )
 }
 
+/// Texto de las inyecciones distintas de la fila. Sin el campo, la fila es anterior a la Tarea 106.
+pub fn texto_inyecciones(fila: &Fila) -> String {
+    match fila.inyecciones_distintas {
+        Some(n) => format!("inyecciones distintas {n}"),
+        None => "fila anterior a la Tarea 106: puede contar inyecciones repetidas".to_string(),
+    }
+}
+
+/// Texto de los defectos en piso y de las omisiones de la fila.
+/// Un defecto en piso no puede bajar su ítem, así que no mide la dimensión.
+pub fn texto_piso(fila: &Fila) -> String {
+    format!(
+        "defectos en piso {}, omisiones {}",
+        fila.defectos_en_piso, fila.omisiones
+    )
+}
+
 /// `aciertos / total`. `None` sin casos: una métrica sin clase no es 0 ni 1.
 fn proporcion(aciertos: u32, total: u32) -> Option<f32> {
     (total > 0).then(|| aciertos as f32 / total as f32)
@@ -2028,7 +2774,7 @@ fn proporcion(aciertos: u32, total: u32) -> Option<f32> {
 /// Una fila calibra solo con muestra mínima de defectos y de limpios CON veredicto.
 /// Los limpios sin veredicto no cuentan para el mínimo de limpios.
 fn muestra_suficiente(fila: &Fila) -> bool {
-    fila.defectos >= MIN_DEFECTOS_APLICABLES
+    fila.inyecciones_distintas.unwrap_or(fila.defectos) >= MIN_DEFECTOS_APLICABLES
         && fila.limpios.saturating_sub(fila.limpios_sin_veredicto) >= MIN_LIMPIOS
 }
 
@@ -2067,6 +2813,13 @@ mod tests {
 
     fn fila(tarea: &str, dimension: Dimension, ts: f64, exactitud: Option<f32>) -> Fila {
         Fila {
+            tarea_hash: None,
+            plazo_mutantes: None,
+            duracion_contrato: None,
+            duracion_oculto: None,
+            repo_origen: None,
+            inyecciones_distintas: None,
+            equivalentes_excluidos: 0,
             tarea: tarea.into(),
             dimension,
             n: 20,
@@ -2074,6 +2827,8 @@ mod tests {
             limpios: 10,
             limpios_sin_veredicto: 0,
             no_aplicable: 0,
+            defectos_en_piso: 0,
+            omisiones: 0,
             semilla: 42,
             ts,
             sensibilidad: Some(1.0),
@@ -2082,8 +2837,10 @@ mod tests {
             items: BTreeMap::new(),
             incompleta: false,
             no_aplica: None,
+            inestable: None,
             reemplazos: 0,
             ruidosos: Vec::new(),
+            casos_ruidosos: 0,
             inestables: Vec::new(),
             huella: None,
             extractos_base: Vec::new(),
@@ -2131,6 +2888,7 @@ mod tests {
             fuente: Fuente::Sonda("test".into()),
             id: id.into(),
             impacto: vec![],
+            previo: false,
         }
     }
 
@@ -2200,10 +2958,7 @@ mod tests {
         assert_eq!(fila.sensibilidad, Some(1.0));
         assert_eq!(fila.especificidad, Some(1.0));
         assert_eq!(fila.exactitud_balanceada, Some(1.0));
-        assert_eq!(
-            (fila.defectos, fila.limpios, fila.no_aplicable),
-            (10, 10, 0)
-        );
+        assert_eq!((fila.defectos, fila.limpios, fila.no_aplicable), (5, 10, 5));
         assert_eq!(fila.items.get("seguridad.secretos"), Some(&1.0));
         assert_eq!(fila.items.get("seguridad.panico_en_entrada"), Some(&1.0));
     }
@@ -2367,10 +3122,10 @@ mod tests {
         assert_eq!(fila.items.get("seguridad.panico_en_entrada"), Some(&0.5));
         assert_eq!(
             fila.sensibilidad,
-            Some(0.5),
-            "5 de 10 defectos, los del secreto"
+            Some(0.8),
+            "4 de 5 defectos medidos: los 4 del secreto"
         );
-        assert_eq!(fila.exactitud_balanceada, Some(0.75));
+        assert_eq!(fila.exactitud_balanceada, Some(0.9));
     }
 
     #[test]
@@ -2578,7 +3333,7 @@ mod tests {
         let ev = falso(dir.path(), &base, |_, _, base| base.clone());
         let fila =
             calibrar_con(&tarea, Dimension::Eficiencia, 10, 42, dir.path(), &ev).expect("hay fila");
-        assert_eq!((fila.defectos, fila.no_aplicable), (5, 0));
+        assert_eq!((fila.defectos, fila.no_aplicable), (1, 4));
     }
 
     #[test]
@@ -2684,6 +3439,187 @@ mod tests {
         )
         .expect("calibra con el repo de la tarea");
         assert_eq!(vistos.lock().expect("lock")[0], repo);
+    }
+
+    /// Pruebas con `con_tests/` en la tarea: usa esa carpeta aunque venga `--repo`, y la fila lo dice.
+    #[test]
+    fn calibra_pruebas_usa_con_tests_de_la_tarea_y_la_fila_lo_dice() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        let con_tests = carpeta.join("con_tests");
+        std::fs::create_dir_all(&con_tests).expect("con_tests");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &con_tests);
+        let repo_cli = home.path().join("repo-cli");
+        std::fs::create_dir_all(&repo_cli).expect("repo cli");
+        let _ = tarea_en(&carpeta, "");
+        let vistos = Mutex::new(Vec::<PathBuf>::new());
+        let evaluador = |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| {
+            vistos.lock().expect("lock").push(ruta.to_path_buf());
+            Ok(veredicto_de_pruebas())
+        };
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            Some(repo_cli.as_path()),
+            None,
+            &evaluador,
+        )
+        .expect("calibra Pruebas con con_tests");
+        assert_eq!(vistos.lock().expect("lock")[0], con_tests);
+        assert_eq!(calibrada.fila.repo_origen.as_deref(), Some("con_tests"));
+        assert_eq!(
+            calibrada.avisos,
+            vec!["se usó con_tests/ en vez de --repo".to_string()]
+        );
+    }
+
+    /// Pruebas con `con_tests/` y sin `--repo`: no hay nada que avisar, y la fila sí dice el origen.
+    #[test]
+    fn calibra_pruebas_con_con_tests_sin_repo_cli_no_avisa() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        let con_tests = carpeta.join("con_tests");
+        std::fs::create_dir_all(&con_tests).expect("con_tests");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &con_tests);
+        let _ = tarea_en(&carpeta, "");
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| Ok(veredicto_de_pruebas());
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra Pruebas con con_tests sin --repo");
+        assert!(calibrada.avisos.is_empty(), "sin --repo no hay aviso");
+        assert_eq!(calibrada.fila.repo_origen.as_deref(), Some("con_tests"));
+    }
+
+    /// Pruebas con `--repo` y sin `con_tests/`: usa `--repo`, sin aviso y sin origen en la fila.
+    #[test]
+    fn calibra_pruebas_con_repo_cli_sin_con_tests_no_avisa() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        let repo_cli = home.path().join("repo-cli");
+        std::fs::create_dir_all(&repo_cli).expect("repo cli");
+        let vistos = Mutex::new(Vec::<PathBuf>::new());
+        let evaluador = |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| {
+            vistos.lock().expect("lock").push(ruta.to_path_buf());
+            Ok(veredicto_de_pruebas())
+        };
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            Some(repo_cli.as_path()),
+            None,
+            &evaluador,
+        )
+        .expect("calibra Pruebas con --repo sin con_tests");
+        assert_eq!(vistos.lock().expect("lock")[0], repo_cli);
+        assert!(calibrada.avisos.is_empty(), "sin con_tests no hay aviso");
+        assert_eq!(calibrada.fila.repo_origen, None);
+        let _ = carpeta;
+    }
+
+    /// Pruebas sin `con_tests/`: usa el repo de `[calibracion]` y la fila no dice de dónde salió.
+    #[test]
+    fn calibra_pruebas_sin_con_tests_la_fila_no_lo_dice() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        let repo = carpeta.join("repo-bueno");
+        let vistos = Mutex::new(Vec::<PathBuf>::new());
+        let evaluador = |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| {
+            vistos.lock().expect("lock").push(ruta.to_path_buf());
+            Ok(veredicto_de_pruebas())
+        };
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra Pruebas sin con_tests");
+        assert_eq!(vistos.lock().expect("lock")[0], repo);
+        assert_eq!(calibrada.fila.repo_origen, None);
+    }
+
+    /// La carpeta temporal de la base vive dentro de `home/tmp`, no en el `/tmp` del sistema.
+    #[test]
+    fn calibra_carpeta_temporal_queda_dentro_de_home_tmp() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let destinos = Mutex::new(Vec::<PathBuf>::new());
+        let evaluador = |_: &Tarea, _: &Path, opciones: &OpcionesOraculo| {
+            if let Target::Guardar(destino) = &opciones.target {
+                destinos.lock().expect("lock").push(destino.clone());
+            }
+            Ok(veredicto_base())
+        };
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let vistos = destinos.lock().expect("lock");
+        assert_eq!(vistos.len(), 1, "la base recibe un target: {vistos:?}");
+        assert!(
+            vistos[0].starts_with(home.path().join("tmp")),
+            "la carpeta temporal no está en home/tmp: {}",
+            vistos[0].display()
+        );
+    }
+
+    /// Al terminar la calibración, su carpeta temporal ya no existe. Pasa también si la base falla.
+    #[test]
+    fn calibra_carpeta_temporal_se_borra_al_terminar_aunque_falle() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let destinos = Mutex::new(Vec::<PathBuf>::new());
+        let evaluador =
+            |_: &Tarea, _: &Path, opciones: &OpcionesOraculo| -> Result<Veredicto, ErrorOraculo> {
+                if let Target::Guardar(destino) = &opciones.target {
+                    destinos.lock().expect("lock").push(destino.clone());
+                }
+                Err(ErrorOraculo::Infra("evaluador roto".into()))
+            };
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect_err("el evaluador falla");
+        let vistos = destinos.lock().expect("lock");
+        let destino = vistos.first().expect("la base recibe un target");
+        let carpeta = destino.parent().expect("carpeta temporal");
+        assert!(
+            !carpeta.exists(),
+            "la carpeta temporal sobrevive a la calibración: {}",
+            carpeta.display()
+        );
     }
 
     /// Entrega sin `[entrega]` y con un repo sin Dockerfile: la fila es no aplicable. Ni la base ni los casos corren.
@@ -3232,8 +4168,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         carpeta_con_repo_bueno(home.path());
         let llamadas = Mutex::new(Vec::<Llamada>::new());
-        let evaluador =
-            evaluador_con_registro(&llamadas, || veredicto_de(Dimension::Diseno, 1.0, None));
+        let evaluador = evaluador_con_registro(&llamadas, || diseno_con(&[(ITEM_MODULARIDAD, 2)]));
         let calibrada = calibrar_tarea_con(
             home.path(),
             "calibra-fixture",
@@ -3253,7 +4188,7 @@ mod tests {
             .count();
         assert_eq!(
             llamadas.len(),
-            medidos + 1 + inestables::JUICIOS_EXTRA,
+            medidos + inestables::JUICIOS_EXTRA,
             "la base (tres juicios) y cada caso llaman al evaluador"
         );
         assert!(llamadas[0].base, "la primera llamada es la base");
@@ -3362,11 +4297,8 @@ mod tests {
         )
         .expect("Dockerfile");
         let llamadas = Mutex::new(Vec::<Llamada>::new());
-        let evaluador = evaluador_con_juez_y_tests(
-            &llamadas,
-            || veredicto_de(Dimension::Diseno, 1.0, None),
-            true,
-        );
+        let evaluador =
+            evaluador_con_juez_y_tests(&llamadas, || diseno_con(&[(ITEM_MODULARIDAD, 2)]), true);
         let calibrada = calibrar_tarea_con(
             home.path(),
             "calibra-fixture",
@@ -3386,7 +4318,7 @@ mod tests {
             .count();
         assert_eq!(
             llamadas.len(),
-            medidos + 1 + inestables::JUICIOS_EXTRA,
+            medidos + inestables::JUICIOS_EXTRA,
             "la base (tres juicios) y cada caso llaman al evaluador"
         );
         assert!(
@@ -4055,9 +4987,34 @@ mod tests {
                 filas: vec![fila],
             };
             let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
-            c.aplicar("memora", &mut puntajes);
+            c.aplicar("memora", "", &mut puntajes);
             assert_eq!(puntajes[0].calibrada, calibrada);
         }
+    }
+
+    /// Fila de Seguridad con 10 limpios, `sin_veredicto` de ellos sin veredicto, exactitud 1.0 y el resto por defecto.
+    fn fila_con_limpios_sin_veredicto(sin_veredicto: u32) -> Fila {
+        Fila {
+            limpios: 10,
+            limpios_sin_veredicto: sin_veredicto,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        }
+    }
+
+    /// Guarda: 2 de 10 limpios sin veredicto es el 20%, justo en el tope. Calibra.
+    #[test]
+    fn calibra_regla_del_20_por_ciento_dos_de_diez_calibra() {
+        let fila = fila_con_limpios_sin_veredicto(2);
+        assert!(muestra_suficiente(&fila));
+        assert!(calibra_con_una_fila(fila, Dimension::Seguridad));
+    }
+
+    /// Guarda: 3 de 10 limpios sin veredicto es el 30%, sobre el tope. No calibra, aunque la muestra alcance.
+    #[test]
+    fn calibra_regla_del_20_por_ciento_tres_de_diez_no_calibra() {
+        let fila = fila_con_limpios_sin_veredicto(3);
+        assert!(muestra_suficiente(&fila));
+        assert!(!calibra_con_una_fila(fila, Dimension::Seguridad));
     }
 
     #[test]
@@ -4212,7 +5169,7 @@ mod tests {
             puntaje(Dimension::Seguridad, 0.8),
             puntaje(Dimension::Diseno, 0.8),
         ];
-        c.aplicar("memora", &mut puntajes);
+        c.aplicar("memora", "", &mut puntajes);
         assert!(puntajes[0].calibrada);
         assert_eq!(puntajes[0].exactitud_balanceada, Some(0.9));
         assert!(!puntajes[1].calibrada);
@@ -4238,7 +5195,7 @@ mod tests {
                 ..puntaje(Dimension::Funciona, 0.0)
             },
         ];
-        c.aplicar("memora", &mut puntajes);
+        c.aplicar("memora", "", &mut puntajes);
         // Diseño no está calibrada; Funciona está calibrada pero sin veredicto.
         let global = global_de(&puntajes).expect("hay una calibrada");
         assert!((global - 0.6).abs() < 1e-6, "{global}");
@@ -4247,7 +5204,7 @@ mod tests {
     #[test]
     fn calibra_global_sin_calibradas_es_none() {
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.9)];
-        Calibraciones::default().aplicar("memora", &mut puntajes);
+        Calibraciones::default().aplicar("memora", "", &mut puntajes);
         assert_eq!(global_de(&puntajes), None);
     }
 
@@ -4263,7 +5220,7 @@ mod tests {
             filas: vec![no_aplica],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.9)];
-        c.aplicar("memora", &mut puntajes);
+        c.aplicar("memora", "", &mut puntajes);
         assert!(!puntajes[0].calibrada, "una fila no aplica no calibra");
         assert_eq!(puntajes[0].exactitud_balanceada, None);
     }
@@ -4283,7 +5240,7 @@ mod tests {
             filas: vec![fila],
         };
         let mut puntajes = vec![puntaje(dimension, 0.8)];
-        c.aplicar("memora", &mut puntajes);
+        c.aplicar("memora", "", &mut puntajes);
         puntajes[0].calibrada
     }
 
@@ -4313,14 +5270,73 @@ mod tests {
         assert!(calibra_con_una_fila(sin, Dimension::Seguridad));
     }
 
+    /// Crea una fila de Seguridad con exactitud 1.0 y el `tarea_hash` dado. Sus conteos pasan la muestra mínima.
+    fn fila_con_tarea_hash(tarea_hash: Option<String>) -> Fila {
+        Fila {
+            tarea_hash,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        }
+    }
+
+    #[test]
+    fn fila_con_otro_tarea_toml_no_calibra_y_da_su_motivo() {
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![fila_con_tarea_hash(Some("tarea-vieja".into()))],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
+        c.aplicar("memora", "tarea-actual", &mut puntajes);
+        assert!(!puntajes[0].calibrada);
+        assert_eq!(
+            c.motivo_sin_calibrar("memora", "tarea-actual", Dimension::Seguridad),
+            Some("calibración con otro tarea.toml")
+        );
+    }
+
+    #[test]
+    fn fila_sin_tarea_hash_sigue_calibrando() {
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![fila_con_tarea_hash(None)],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
+        c.aplicar("memora", "tarea-actual", &mut puntajes);
+        assert!(puntajes[0].calibrada);
+        assert_eq!(
+            c.motivo_sin_calibrar("memora", "tarea-actual", Dimension::Seguridad),
+            None
+        );
+    }
+
+    #[test]
+    fn version_de_sondas_de_arquitectura_cambia_su_huella_y_no_la_de_seguridad() {
+        let prompt = huella_del_prompt();
+        assert_eq!(version_de_sondas(Dimension::Arquitectura), 3);
+        assert_ne!(
+            huella_con_version(Dimension::Arquitectura, &prompt, 1),
+            huella_con_version(Dimension::Arquitectura, &prompt, 3)
+        );
+        assert_eq!(
+            huella_de(Dimension::Arquitectura),
+            huella_con_version(Dimension::Arquitectura, &prompt, 3)
+        );
+        // Seguridad subió a 2 en su propia versión. Su huella sigue sin depender de la de Arquitectura.
+        assert_eq!(
+            huella_de(Dimension::Seguridad),
+            huella_con_version(Dimension::Seguridad, &prompt, 2)
+        );
+    }
+
     #[test]
     fn inestables_de_da_los_de_la_fila_mas_reciente() {
         let vieja = Fila {
             inestables: vec!["diseno.errores".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
             ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
         };
         let nueva = Fila {
             inestables: vec!["diseno.ciclos".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
             ..fila("memora", Dimension::Diseno, 2.0, Some(1.0))
         };
         let c = Calibraciones {
@@ -4328,10 +5344,114 @@ mod tests {
             filas: vec![nueva, vieja],
         };
         assert_eq!(
-            c.inestables_de("memora", Dimension::Diseno),
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno),
             ["diseno.ciclos".to_string()]
         );
-        assert!(c.inestables_de("otra", Dimension::Diseno).is_empty());
+        assert!(
+            c.inestables_de("otra", "tarea-actual", Dimension::Diseno)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn inestables_de_con_huella_vieja_no_los_da() {
+        let vieja = Fila {
+            inestables: vec!["diseno.errores".into()],
+            huella: Some("vieja".into()),
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![vieja],
+        };
+        assert!(
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn inestables_de_con_otro_tarea_toml_no_los_da() {
+        let otra = Fila {
+            inestables: vec!["diseno.ciclos".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
+            tarea_hash: Some("tarea-vieja".into()),
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![otra],
+        };
+        assert!(
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn inestables_de_con_mismo_tarea_toml_los_da() {
+        let misma = Fila {
+            inestables: vec!["diseno.ciclos".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
+            tarea_hash: Some("tarea-actual".into()),
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![misma],
+        };
+        assert_eq!(
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno),
+            ["diseno.ciclos".to_string()]
+        );
+    }
+
+    #[test]
+    fn inestables_de_sirve_la_fila_vigente_aunque_una_nueva_sea_de_otro_tarea_toml() {
+        let vigente = Fila {
+            inestables: vec!["diseno.ciclos".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
+            tarea_hash: Some("tarea-actual".into()),
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let otra = Fila {
+            inestables: vec!["diseno.errores".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
+            tarea_hash: Some("tarea-vieja".into()),
+            ..fila("memora", Dimension::Diseno, 2.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![otra, vigente],
+        };
+        assert_eq!(
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno),
+            ["diseno.ciclos".to_string()]
+        );
+    }
+
+    #[test]
+    fn calibra_fila_vieja_con_motivo_inestable_en_no_aplica_se_lee_como_inestable() {
+        let texto = r#"{"v":1,"filas":[
+            {"tarea":"memora","dimension":"diseno","n":0,"semilla":42,"ts":1.0,
+             "no_aplica":"inestable en esta tarea: diseno.modularidad"},
+            {"tarea":"memora","dimension":"seguridad","n":0,"semilla":42,"ts":1.0,
+             "no_aplica":"no aplica: la tarea no define [entrega]"}
+        ]}"#;
+        let home = home_con(texto);
+        let leida = Calibraciones::cargar(home.path()).expect("carga");
+        let inestable = &leida.filas[0];
+        assert_eq!(
+            inestable.inestable.as_deref(),
+            Some("inestable en esta tarea: diseno.modularidad")
+        );
+        assert_eq!(inestable.no_aplica, None);
+        let no_aplica = &leida.filas[1];
+        assert_eq!(no_aplica.inestable, None);
+        assert_eq!(
+            no_aplica.no_aplica.as_deref(),
+            Some("no aplica: la tarea no define [entrega]")
+        );
     }
 
     #[test]
@@ -4351,7 +5471,7 @@ mod tests {
             filas: vec![fila_de_diseno_con_huella(Some("vieja".into()))],
         };
         assert_eq!(
-            c.motivo_sin_calibrar("memora", Dimension::Diseno),
+            c.motivo_sin_calibrar("memora", "", Dimension::Diseno),
             Some("calibración de otro juez")
         );
         let vigente = Calibraciones {
@@ -4361,10 +5481,10 @@ mod tests {
             )))],
         };
         assert_eq!(
-            vigente.motivo_sin_calibrar("memora", Dimension::Diseno),
+            vigente.motivo_sin_calibrar("memora", "", Dimension::Diseno),
             None
         );
-        assert_eq!(c.motivo_sin_calibrar("otra", Dimension::Diseno), None);
+        assert_eq!(c.motivo_sin_calibrar("otra", "", Dimension::Diseno), None);
     }
 
     #[test]
@@ -4379,26 +5499,36 @@ mod tests {
     #[test]
     fn calibra_huella_de_seguridad_no_depende_del_prompt() {
         assert_eq!(
-            huella_con_prompt(Dimension::Seguridad, "a"),
-            huella_con_prompt(Dimension::Seguridad, "b")
+            huella_con_version(
+                Dimension::Seguridad,
+                "a",
+                version_de_sondas(Dimension::Seguridad)
+            ),
+            huella_con_version(
+                Dimension::Seguridad,
+                "b",
+                version_de_sondas(Dimension::Seguridad)
+            )
         );
     }
 
     #[test]
     fn calibra_huella_de_diseno_depende_del_prompt() {
         assert_ne!(
-            huella_con_prompt(Dimension::Diseno, "a"),
-            huella_con_prompt(Dimension::Diseno, "b")
+            huella_con_version(Dimension::Diseno, "a", version_de_sondas(Dimension::Diseno)),
+            huella_con_version(Dimension::Diseno, "b", version_de_sondas(Dimension::Diseno))
         );
     }
 
     #[test]
-    fn calibra_huella_de_diseno_no_cambia_de_valor() {
+    fn calibra_huella_de_diseno_incluye_su_version_de_sondas_2() {
+        // Diseno subió a la versión 2 al leer el mapa sobre `limpia`. Su huella ya no es la de la versión base.
         let juntas: String = rubricas_de(Dimension::Diseno)
             .iter()
             .map(Rubrica::hash)
             .collect();
-        let esperada = calcular_hash(format!("{}\n{juntas}", huella_del_prompt()).as_bytes());
+        let esperada =
+            calcular_hash(format!("{}\n{juntas}\nsondas v2", huella_del_prompt()).as_bytes());
         assert_eq!(huella_de(Dimension::Diseno), esperada);
     }
 
@@ -4419,6 +5549,26 @@ mod tests {
     }
 
     #[test]
+    fn calibrar_con_escribe_el_hash_del_tarea_toml() {
+        let base = veredicto_base();
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia { base.clone() } else { hundido(base) }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Seguridad,
+            20,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("calibra");
+        let esperado = calcular_hash(&fs::read(tarea.dir.join("tarea.toml")).expect("lee"));
+        assert_eq!(fila.tarea_hash, Some(esperado));
+    }
+
+    #[test]
     fn calibra_n_dos_con_un_defecto_y_un_limpio_acertados_no_califica() {
         let base = veredicto_base();
         let fila = calibrar(
@@ -4430,12 +5580,16 @@ mod tests {
         assert_eq!((fila.defectos, fila.limpios), (1, 1));
         assert_eq!(fila.exactitud_balanceada, Some(1.0));
         let tarea = fila.tarea.clone();
+        let hash = fila
+            .tarea_hash
+            .clone()
+            .expect("calibrar deja el hash del tarea.toml");
         let c = Calibraciones {
             v: VERSION,
             filas: vec![fila],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.0)];
-        c.aplicar(&tarea, &mut puntajes);
+        c.aplicar(&tarea, &hash, &mut puntajes);
         assert!(
             !puntajes[0].calibrada,
             "1 defecto y 1 limpio no son muestra"
@@ -4450,16 +5604,21 @@ mod tests {
             Path::new(FIXTURE),
             &base,
             |limpia, _, base| if limpia { base.clone() } else { hundido(base) },
-            10,
+            20,
         );
-        assert_eq!((fila.defectos, fila.limpios), (5, 5));
+        // Con 10 casos Seguridad da 4 defectos: el fixture tiene 4 archivos con secretos y un solo parseo. Con 20, 5.
+        assert_eq!((fila.defectos, fila.limpios), (5, 10));
         let tarea = fila.tarea.clone();
+        let hash = fila
+            .tarea_hash
+            .clone()
+            .expect("calibrar deja el hash del tarea.toml");
         let c = Calibraciones {
             v: VERSION,
             filas: vec![fila],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.0)];
-        c.aplicar(&tarea, &mut puntajes);
+        c.aplicar(&tarea, &hash, &mut puntajes);
         assert!(puntajes[0].calibrada);
         assert_eq!(puntajes[0].exactitud_balanceada, Some(1.0));
     }
@@ -4476,7 +5635,7 @@ mod tests {
                 filas: vec![f],
             };
             let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
-            c.aplicar("memora", &mut puntajes);
+            c.aplicar("memora", "", &mut puntajes);
             assert!(!puntajes[0].calibrada);
         }
     }
@@ -4560,7 +5719,7 @@ mod tests {
             filas: vec![incompleta],
         };
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
-        c.aplicar("memora", &mut puntajes);
+        c.aplicar("memora", "", &mut puntajes);
         assert!(!puntajes[0].calibrada);
         assert!(global_de(&puntajes).is_none());
     }
@@ -4676,10 +5835,35 @@ mod tests {
     }
 
     #[test]
-    fn rompe_la_compilacion_completitud_y_funciona_son_falsas() {
+    fn rompe_la_compilacion_funciona_y_completitud_con_marcador_nuevo_es_verdadero() {
         for dimension in [Dimension::Completitud, Dimension::Funciona] {
             let base = veredicto_de(dimension, 1.0, None);
             let veredicto = con_motivo(&base, NO_COMPILA);
+            assert!(rompe_la_compilacion(&base, &veredicto, dimension));
+        }
+    }
+
+    #[test]
+    fn rompe_la_compilacion_funciona_y_completitud_con_no_compila_nuevo_es_verdadero() {
+        // Un build roto da Funciona y Completitud en 0 y deja `no_compila`, sin marcador en el puntaje.
+        for dimension in [Dimension::Completitud, Dimension::Funciona] {
+            let base = veredicto_de(dimension, 1.0, None);
+            let veredicto = Veredicto {
+                no_compila: true,
+                ..bajada(&base)
+            };
+            assert!(rompe_la_compilacion(&base, &veredicto, dimension));
+        }
+    }
+
+    #[test]
+    fn rompe_la_compilacion_no_compila_que_la_base_ya_tiene_es_falso() {
+        for dimension in [Dimension::Completitud, Dimension::Funciona] {
+            let base = Veredicto {
+                no_compila: true,
+                ..veredicto_de(dimension, 1.0, None)
+            };
+            let veredicto = bajada(&base);
             assert!(!rompe_la_compilacion(&base, &veredicto, dimension));
         }
     }
@@ -4693,6 +5877,93 @@ mod tests {
             &veredicto,
             Dimension::Estructura
         ));
+    }
+
+    fn mutante_estado(nombre: &str, estado: EstadoMutante) -> MutanteEstado {
+        MutanteEstado {
+            nombre: nombre.into(),
+            estado,
+            duracion_segundos: None,
+        }
+    }
+
+    fn mutante_muerto(nombre: &str, tests: &[&str]) -> MutanteMuerto {
+        MutanteMuerto {
+            archivo: "src/lib.rs".into(),
+            linea: 1,
+            nombre: nombre.into(),
+            tests: tests.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    /// Tarea 101, A2: un mutante que pasa de muerto a vivo, con todos sus asesinos apagados, es explicado.
+    #[test]
+    fn separar_cambios_muerto_a_vivo_con_asesinos_apagados_no_es_ruido() {
+        let base = [mutante_estado("x", EstadoMutante::Muerto)];
+        let caso = [mutante_estado("x", EstadoMutante::Vivo)];
+        let muertos = [mutante_muerto("x", &["t::a", "t::b"])];
+        let apagados = ["t::a".to_string(), "t::b".to_string()];
+        let (ruido, explicados) = separar_cambios(&base, &caso, None, &muertos, &apagados);
+        assert!(ruido.is_empty(), "{ruido:?}");
+        assert_eq!(explicados, vec!["x".to_string()]);
+    }
+
+    /// Tarea 101, A2: con un asesino activo, el mismo cambio de muerto a vivo sigue siendo ruido.
+    #[test]
+    fn separar_cambios_muerto_a_vivo_con_asesino_activo_es_ruido() {
+        let base = [mutante_estado("x", EstadoMutante::Muerto)];
+        let caso = [mutante_estado("x", EstadoMutante::Vivo)];
+        let muertos = [mutante_muerto("x", &["t::a", "t::b"])];
+        let apagados = ["t::a".to_string()];
+        let (ruido, explicados) = separar_cambios(&base, &caso, None, &muertos, &apagados);
+        assert_eq!(ruido, vec!["x".to_string()]);
+        assert!(explicados.is_empty(), "{explicados:?}");
+    }
+
+    /// Tarea 101, A2: un mutante que pasa de vivo a muerto es ruido, aunque sus tests estén apagados.
+    #[test]
+    fn separar_cambios_vivo_a_muerto_es_ruido_siempre() {
+        let base = [mutante_estado("x", EstadoMutante::Vivo)];
+        let caso = [mutante_estado("x", EstadoMutante::Muerto)];
+        let muertos = [mutante_muerto("x", &["t::a"])];
+        let apagados = ["t::a".to_string()];
+        let (ruido, explicados) = separar_cambios(&base, &caso, None, &muertos, &apagados);
+        assert_eq!(ruido, vec!["x".to_string()]);
+        assert!(explicados.is_empty(), "{explicados:?}");
+    }
+
+    /// Tarea 101, A2: sin tests apagados (un caso limpio o de otro defecto), todo cambio es ruido.
+    #[test]
+    fn separar_cambios_sin_tests_apagados_todo_cambio_es_ruido() {
+        let base = [mutante_estado("x", EstadoMutante::Muerto)];
+        let caso = [mutante_estado("x", EstadoMutante::Vivo)];
+        let muertos = [mutante_muerto("x", &["t::a"])];
+        let (ruido, explicados) = separar_cambios(&base, &caso, None, &muertos, &[]);
+        assert_eq!(ruido, vec!["x".to_string()]);
+        assert!(explicados.is_empty(), "{explicados:?}");
+    }
+
+    /// Tarea 101, A2: un mutante muerto sin asesinos conocidos no se explica: no hay prueba de que el defecto lo causó.
+    #[test]
+    fn separar_cambios_sin_asesinos_conocidos_es_ruido() {
+        let base = [mutante_estado("x", EstadoMutante::Muerto)];
+        let caso = [mutante_estado("x", EstadoMutante::Vivo)];
+        let muertos = [mutante_muerto("x", &[])];
+        let apagados = ["t::a".to_string()];
+        let (ruido, explicados) = separar_cambios(&base, &caso, None, &muertos, &apagados);
+        assert_eq!(ruido, vec!["x".to_string()]);
+        assert!(explicados.is_empty(), "{explicados:?}");
+    }
+
+    /// Tarea 101, A2: el mutante elegido por el defecto no entra ni como ruido ni como explicado.
+    #[test]
+    fn separar_cambios_el_elegido_no_cuenta() {
+        let base = [mutante_estado("e", EstadoMutante::Muerto)];
+        let caso = [mutante_estado("e", EstadoMutante::Vivo)];
+        let muertos = [mutante_muerto("e", &["t::a"])];
+        let apagados = ["t::a".to_string()];
+        let (ruido, explicados) = separar_cambios(&base, &caso, Some("e"), &muertos, &apagados);
+        assert!(ruido.is_empty() && explicados.is_empty());
     }
 
     #[test]
@@ -4758,15 +6029,313 @@ mod tests {
             (1, 0, 1, 1)
         );
         assert_eq!(fila.sensibilidad, None);
-        // La inyección inicial más los MAX_REEMPLAZOS reemplazos, todos inválidos: cada intento suma 1.
-        assert_eq!(fila.reemplazos, MAX_REEMPLAZOS + 1);
+        // Tres archivos de módulo (`lib.rs` no cuenta): tres intentos inválidos. El cuarto no tiene candidato.
+        assert_eq!(fila.reemplazos, 3);
+    }
+
+    /// Veredicto de una copia cuya suite pasó su plazo sin junit: sin veredicto y con el aviso de la suite.
+    fn con_plazo(base: &Veredicto) -> Veredicto {
+        let mut v = con_motivo(
+            base,
+            "suite del contrato sin veredicto: la suite pasó su plazo",
+        );
+        v.avisos.push(format!("contrato: {MOTIVO_SUITE_PLAZO}"));
+        v
+    }
+
+    /// Mide como `calibrar_con`, pero devuelve la medida entera: su fila y sus casos no aplicables.
+    fn medida_de(
+        base_dir: &Path,
+        base: &Veredicto,
+        regla: impl Fn(bool, &BTreeMap<String, String>, &Veredicto) -> Veredicto + Sync,
+        n: usize,
+    ) -> Medida {
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(base_dir, base, regla);
+        let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| ev(ruta);
+        calibrar_medida(
+            &tarea,
+            Dimension::Estructura,
+            n,
+            42,
+            base_dir,
+            &sin_tipo,
+            None,
+            &Vec::new,
+            &|| None,
+            None,
+            None,
+        )
+        .expect("calibra")
+    }
+
+    #[test]
+    fn calibra_suite_que_pasa_su_plazo_se_reemplaza_como_inyeccion_invalida() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let primera = Mutex::new(true);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                base.clone()
+            } else if std::mem::replace(&mut *primera.lock().expect("lock"), false) {
+                con_plazo(base)
+            } else {
+                con_hallazgo_de_sonda(base, Dimension::Estructura)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("calibra");
+        assert_eq!(
+            (
+                fila.n,
+                fila.defectos,
+                fila.limpios,
+                fila.no_aplicable,
+                fila.reemplazos
+            ),
+            (2, 1, 1, 0, 1)
+        );
+        assert_eq!(fila.sensibilidad, Some(1.0));
+    }
+
+    #[test]
+    fn calibra_suite_que_pasa_su_plazo_en_todos_los_candidatos_da_su_motivo() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let medida = medida_de(
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| {
+                if limpia {
+                    base.clone()
+                } else {
+                    con_plazo(base)
+                }
+            },
+            2,
+        );
+        assert_eq!(medida.no_aplicables.len(), 1);
+        assert_eq!(medida.no_aplicables[0].motivo, MOTIVO_SUITE_PLAZO);
+        assert_eq!(medida.fila.as_ref().expect("fila").reemplazos, 3);
+    }
+
+    #[test]
+    fn calibra_limpio_que_pasa_su_plazo_queda_sin_veredicto_y_no_aborta() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                con_plazo(base)
+            } else {
+                bajada(base)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("la calibración sigue: el plazo de un limpio no la aborta");
+        assert_eq!(fila.limpios_sin_veredicto, 1);
+    }
+
+    /// Error que devuelve el oráculo cuando vence el plazo de una suite con junit presente.
+    fn plazo_vencido() -> ErrorOraculo {
+        ErrorOraculo::PlazoVencido {
+            segundos: 600.0,
+            contenedor: "x".into(),
+        }
+    }
+
+    /// Mide `n` casos de `dimension` con un evaluador que puede fallar. `ev` recibe si la copia es limpia y
+    /// el veredicto base. La base siempre responde bien: no pasa por `ev`.
+    fn medir_con_error(
+        dimension: Dimension,
+        base: &Veredicto,
+        n: usize,
+        ev: impl Fn(bool, &Veredicto) -> Result<Veredicto, ErrorOraculo> + Sync,
+    ) -> Result<Medida, ErrorOraculo> {
+        let (_t, tarea) = tarea_prueba();
+        let arbol_base = arbol(Path::new(FIXTURE));
+        let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| {
+            if ruta == Path::new(FIXTURE) {
+                return Ok(base.clone());
+            }
+            ev(arbol(ruta) == arbol_base, base)
+        };
+        calibrar_medida(
+            &tarea,
+            dimension,
+            n,
+            42,
+            Path::new(FIXTURE),
+            &sin_tipo,
+            None,
+            &Vec::new,
+            &|| None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn calibra_defecto_con_plazo_vencido_con_junit_va_a_reemplazo() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let medida = medir_con_error(Dimension::Estructura, &base, 2, |limpia, base| {
+            if limpia {
+                Ok(base.clone())
+            } else {
+                Err(plazo_vencido())
+            }
+        })
+        .expect("la calibración sigue: el plazo de un defecto no la aborta");
+        let fila = medida.fila.expect("fila");
+        assert!(fila.reemplazos >= 1, "reemplazos: {}", fila.reemplazos);
+    }
+
+    #[test]
+    fn calibra_limpio_con_plazo_vencido_con_junit_queda_sin_veredicto() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let medida = medir_con_error(Dimension::Estructura, &base, 2, |limpia, base| {
+            if limpia {
+                Err(plazo_vencido())
+            } else {
+                Ok(bajada(base))
+            }
+        })
+        .expect("la calibración sigue: el plazo de un limpio no la aborta");
+        let fila = medida.fila.expect("fila");
+        assert_eq!(fila.limpios_sin_veredicto, 1);
+        let limpio = medida
+            .casos
+            .iter()
+            .find(|c| !c.es_defecto)
+            .expect("un caso limpio");
+        assert!(
+            limpio
+                .sin_veredicto
+                .as_deref()
+                .is_some_and(|m| m.ends_with(MOTIVO_SUITE_PLAZO)),
+            "{:?}",
+            limpio.sin_veredicto
+        );
+    }
+
+    #[test]
+    fn calibra_limpio_con_plazo_vencido_en_diseno_queda_sin_veredicto_y_no_aborta() {
+        let base = veredicto_de(Dimension::Diseno, 1.0, None);
+        let medida = medir_con_error(Dimension::Diseno, &base, 2, |limpia, base| {
+            if limpia {
+                Err(plazo_vencido())
+            } else {
+                Ok(bajada(base))
+            }
+        })
+        .expect("la calibración sigue: el plazo de un limpio no la aborta");
+        let fila = medida.fila.expect("fila");
+        assert_eq!(fila.limpios_sin_veredicto, 1);
+        let limpio = medida
+            .casos
+            .iter()
+            .find(|c| !c.es_defecto)
+            .expect("un caso limpio");
+        assert!(
+            limpio
+                .sin_veredicto
+                .as_deref()
+                .is_some_and(|m| m.ends_with(MOTIVO_SUITE_PLAZO)),
+            "{:?}",
+            limpio.sin_veredicto
+        );
+    }
+
+    #[test]
+    fn calibra_dos_limpios_de_cinco_con_plazo_vencido_no_calibra() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let vencidos = std::sync::atomic::AtomicUsize::new(0);
+        let medida = medir_con_error(Dimension::Estructura, &base, 10, |limpia, base| {
+            let vence = limpia && vencidos.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2;
+            if vence {
+                Err(plazo_vencido())
+            } else {
+                Ok(if limpia { base.clone() } else { bajada(base) })
+            }
+        })
+        .expect("la calibración sigue");
+        let fila = medida.fila.expect("fila");
+        assert_eq!((fila.limpios, fila.limpios_sin_veredicto), (5, 2));
+        let calibraciones = Calibraciones {
+            v: VERSION,
+            filas: vec![fila.clone()],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Estructura, 0.8)];
+        calibraciones.aplicar(
+            &fila.tarea,
+            fila.tarea_hash.as_deref().unwrap_or(""),
+            &mut puntajes,
+        );
+        assert!(!puntajes[0].calibrada);
+    }
+
+    #[test]
+    fn calibra_base_con_plazo_vencido_sigue_abortando() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let (_t, tarea) = tarea_prueba();
+        let ev = |ruta: &Path| {
+            if ruta == Path::new(FIXTURE) {
+                Err(plazo_vencido())
+            } else {
+                Ok(base.clone())
+            }
+        };
+        let r = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        );
+        assert!(
+            matches!(&r, Err(ErrorOraculo::PlazoVencido { .. })),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn calibra_plazo_de_suite_es_10_veces_la_base_con_piso_de_600() {
+        assert_eq!(plazo_de_suite(Some(20)), Duration::from_secs(600));
+        assert_eq!(plazo_de_suite(Some(120)), Duration::from_secs(1200));
+        assert_eq!(plazo_de_suite(None), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn calibra_plazos_de_base_redondean_hacia_arriba_y_separan_las_suites() {
+        let p = plazos_de_base(DuracionesSuites {
+            contrato: Some(20.2),
+            oculto: Some(120.0),
+        });
+        assert_eq!(
+            p.contrato,
+            Duration::from_secs(600),
+            "20,2 s sube a 21: 210 s, piso 600"
+        );
+        assert_eq!(p.oculto, Duration::from_secs(1200));
     }
 
     const MUERTA: &str = "pub fn sin_uso(a: i32) -> bool {\n    a == 1\n}\n";
     /// La firma ocupa varias líneas: la sonda tiene que caer en el cuerpo (Tarea 66, punto 4).
     const VIVA: &str = "pub fn usada(\n    a: i32,\n) -> bool {\n    a == 2\n}\n";
     const FUERA_DE_FN: &str = "pub const EN_CONSTANTE: bool = 1 == 1;\n";
-    const MOTIVO_EXACTO: &str = "ninguna línea candidata está en una función que la suite ejecute";
 
     /// Copia del fixture con los archivos `archivos` en `src/`. Cada uno tiene un `==` candidato.
     fn copia_con_sondas(archivos: &[(&str, &str)]) -> TempDir {
@@ -4833,6 +6402,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("mide")
     }
@@ -4844,6 +6414,420 @@ mod tests {
             .iter()
             .find(|c| c.inyeccion.is_some())
             .expect("un caso con defecto")
+    }
+
+    /// Carpeta de una tarea con `bootstrap/` y `repo-bueno` (copias del fixture). Las dos tienen una igualdad vieja
+    /// en `comandos.rs`. `repo-bueno` tiene una igualdad nueva en `almacen.rs` solo si `con_cambio`.
+    fn tarea_con_bootstrap(con_cambio: bool) -> (TempDir, Tarea) {
+        const VIEJA: &str = "\npub fn vieja(x: u32) -> bool {\n    x == 9\n}\n";
+        const NUEVA: &str = "\npub fn nueva(x: u32) -> bool {\n    x == 8\n}\n";
+        fn anexar(ruta: &Path, extra: &str) {
+            let mut texto = fs::read_to_string(ruta).expect("lee");
+            texto.push_str(extra);
+            fs::write(ruta, texto).expect("escribe");
+        }
+        let dir = tempfile::tempdir().expect("temporal");
+        let boot = dir.path().join("bootstrap");
+        let repo = dir.path().join("repo-bueno");
+        for carpeta in [&boot, &repo] {
+            fs::create_dir_all(carpeta).expect("carpeta");
+            super::inyectar::pruebas::copiar(Path::new(FIXTURE), carpeta);
+            anexar(&carpeta.join("src/comandos.rs"), VIEJA);
+        }
+        if con_cambio {
+            anexar(&repo.join("src/almacen.rs"), NUEVA);
+        }
+        let tarea = tarea_en(dir.path(), "");
+        (dir, tarea)
+    }
+
+    /// Mide `n` casos de Funciona de `repo` con `tarea`, con el evaluador `ev`. Hilos en 1, como `medir_con_sondas`.
+    fn medir_funciona(
+        tarea: &Tarea,
+        repo: &Path,
+        n: usize,
+        semilla: u64,
+        ev: &(dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
+    ) -> Medida {
+        calibrar_medida_con_hilos(
+            tarea,
+            Dimension::Funciona,
+            n,
+            semilla,
+            repo,
+            ev,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide")
+    }
+
+    /// Evaluador de copias: la base (igual al repo) da `base`; una copia cambiada da `base` con su valor en cero.
+    fn evaluador_que_baja(
+        repo: &Path,
+        base: &Veredicto,
+    ) -> impl Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync {
+        let arbol_base = arbol(repo);
+        let base = base.clone();
+        move |ruta: &Path, _: TipoCaso, _: Target| {
+            if arbol(ruta) == arbol_base {
+                Ok(base.clone())
+            } else {
+                Ok(bajada(&base))
+            }
+        }
+    }
+
+    /// Mide `n` casos de `dimension` en `repo` con `ev`, en un hilo. Sin muertos ni `bootstrap/`.
+    fn medir_dimension(
+        tarea: &Tarea,
+        dimension: Dimension,
+        repo: &Path,
+        n: usize,
+        semilla: u64,
+        ev: &(dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
+    ) -> Medida {
+        calibrar_medida_con_hilos(
+            tarea,
+            dimension,
+            n,
+            semilla,
+            repo,
+            ev,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide")
+    }
+
+    /// Entrega con un solo candidato (el `USER` del Dockerfile): el primer caso con defecto lo usa y los
+    /// siguientes quedan como agotados, no como copias iguales.
+    #[test]
+    fn un_solo_candidato_deja_los_casos_con_defecto_repetidos_como_agotados() {
+        let dir = copia_fixture();
+        let base = veredicto_de(Dimension::Entrega, 1.0, None);
+        let tarea = tarea_en(dir.path(), "");
+        let ev = evaluador_que_baja(dir.path(), &base);
+        let medida = medir_dimension(&tarea, Dimension::Entrega, dir.path(), 6, 42, &ev);
+        let con_defecto = medida
+            .casos
+            .iter()
+            .filter(|c| c.inyeccion.is_some())
+            .count();
+        let agotados = medida
+            .no_aplicables
+            .iter()
+            .filter(|no| no.motivo == MOTIVO_DISTINTOS_AGOTADOS)
+            .count();
+        assert_eq!(
+            (con_defecto, agotados),
+            (1, 2),
+            "{:?} {:?}",
+            (con_defecto, agotados),
+            medida.no_aplicables
+        );
+    }
+
+    /// Tres casos con defecto en Seguridad, con varias semillas: cada uno inyecta una identidad distinta.
+    /// Con cuatro candidatos de secreto, dos casos pueden caer en el mismo archivo si no se excluyen.
+    #[test]
+    fn casos_con_defecto_inyectan_identidades_distintas() {
+        let dir = copia_fixture();
+        let base = veredicto_de(Dimension::Seguridad, 1.0, None);
+        let tarea = tarea_en(dir.path(), "");
+        let ev = evaluador_que_baja(dir.path(), &base);
+        for semilla in 0..20u64 {
+            let medida = medir_dimension(&tarea, Dimension::Seguridad, dir.path(), 6, semilla, &ev);
+            let inyectadas: Vec<_> = medida
+                .casos
+                .iter()
+                .filter_map(|c| c.inyeccion.as_ref())
+                .map(Inyeccion::identidad)
+                .collect();
+            assert_eq!(inyectadas.len(), 3, "semilla {semilla}: {inyectadas:?}");
+            let distintas: BTreeSet<_> = inyectadas.iter().collect();
+            assert_eq!(distintas.len(), 3, "semilla {semilla}: {inyectadas:?}");
+        }
+    }
+
+    /// Dos mediciones con la misma semilla inyectan lo mismo en cada caso.
+    #[test]
+    fn misma_semilla_inyecta_lo_mismo_en_cada_caso() {
+        let dir = copia_fixture();
+        let base = veredicto_de(Dimension::Seguridad, 1.0, None);
+        let tarea = tarea_en(dir.path(), "");
+        let ev = evaluador_que_baja(dir.path(), &base);
+        let inyectados = |m: &Medida| -> Vec<(u32, Option<Inyeccion>)> {
+            m.casos
+                .iter()
+                .map(|c| (c.indice, c.inyeccion.clone()))
+                .collect()
+        };
+        let a = medir_dimension(&tarea, Dimension::Seguridad, dir.path(), 6, 42, &ev);
+        let b = medir_dimension(&tarea, Dimension::Seguridad, dir.path(), 6, 42, &ev);
+        assert_eq!(inyectados(&a), inyectados(&b));
+    }
+
+    /// Evaluador para reemplazos: el primer intento de cada copia no compila. Un caso `retrasado` espera 40 ms
+    /// en ese intento, así su reemplazo llega después que el de los demás.
+    fn evaluador_con_primer_intento_invalido(
+        repo: &Path,
+        base: &Veredicto,
+        retrasado: &str,
+    ) -> impl Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync {
+        let arbol_base = arbol(repo);
+        let base = base.clone();
+        let intentos = Mutex::new(BTreeMap::<PathBuf, u32>::new());
+        let retrasado = retrasado.to_string();
+        move |ruta: &Path, _: TipoCaso, _: Target| {
+            if arbol(ruta) == arbol_base {
+                return Ok(base.clone());
+            }
+            let intento = {
+                let mut intentos = intentos.lock().expect("lock");
+                let cuenta = intentos.entry(ruta.to_path_buf()).or_insert(0);
+                *cuenta += 1;
+                *cuenta
+            };
+            if intento > 1 {
+                return Ok(bajada(&base));
+            }
+            if ruta.file_name().and_then(|f| f.to_str()) == Some(retrasado.as_str()) {
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            Ok(con_motivo(&base, NO_COMPILA))
+        }
+    }
+
+    /// Mide `n` casos de `dimension` con 4 hilos y reemplazos, con `retrasado` como caso lento.
+    fn medir_con_reemplazos(
+        tarea: &Tarea,
+        dimension: Dimension,
+        repo: &Path,
+        base: &Veredicto,
+        n: usize,
+        semilla: u64,
+        retrasado: &str,
+    ) -> Medida {
+        let ev = evaluador_con_primer_intento_invalido(repo, base, retrasado);
+        calibrar_medida_con_hilos(
+            tarea,
+            dimension,
+            n,
+            semilla,
+            repo,
+            &ev,
+            None,
+            &Vec::new,
+            &|| None,
+            4,
+            None,
+            None,
+        )
+        .expect("mide")
+    }
+
+    /// Con reemplazos y 4 hilos, dos corridas con la misma semilla inyectan lo mismo en cada caso. Entre corridas
+    /// cambia qué caso llega tarde, así el orden de término no decide qué reserva toma cada caso.
+    #[test]
+    fn reemplazos_con_cuatro_hilos_dan_las_mismas_inyecciones_con_la_misma_semilla() {
+        let dir = copia_fixture();
+        let base = veredicto_de(Dimension::Seguridad, 1.0, None);
+        let tarea = tarea_en(dir.path(), "");
+        let inyectados = |m: &Medida| -> Vec<(u32, Option<Inyeccion>)> {
+            m.casos
+                .iter()
+                .map(|c| (c.indice, c.inyeccion.clone()))
+                .collect()
+        };
+        for semilla in 0..4u64 {
+            let a = medir_con_reemplazos(
+                &tarea,
+                Dimension::Seguridad,
+                dir.path(),
+                &base,
+                6,
+                semilla,
+                "caso-0",
+            );
+            let b = medir_con_reemplazos(
+                &tarea,
+                Dimension::Seguridad,
+                dir.path(),
+                &base,
+                6,
+                semilla,
+                "caso-4",
+            );
+            assert_eq!(inyectados(&a), inyectados(&b), "semilla {semilla}");
+        }
+    }
+
+    /// Con una principal y una reserva por caso, ningún caso comparte una inyección. Cada principal no compila,
+    /// así que cada caso mide con su reserva. Completitud tiene cinco candidatos en el fixture: dos casos
+    /// con defecto caben con sus reservas.
+    #[test]
+    fn con_una_principal_y_una_reserva_por_caso_ningun_caso_comparte_inyeccion() {
+        let dir = copia_fixture();
+        let base = veredicto_de(Dimension::Completitud, 1.0, None);
+        let tarea = tarea_en(dir.path(), "");
+        for semilla in 0..8u64 {
+            let medida = medir_con_reemplazos(
+                &tarea,
+                Dimension::Completitud,
+                dir.path(),
+                &base,
+                4,
+                semilla,
+                "caso-2",
+            );
+            let inyectadas: Vec<_> = medida
+                .casos
+                .iter()
+                .filter_map(|c| c.inyeccion.as_ref())
+                .map(Inyeccion::identidad)
+                .collect();
+            assert_eq!(inyectadas.len(), 2, "semilla {semilla}: {inyectadas:?}");
+            let distintas: BTreeSet<_> = inyectadas.iter().collect();
+            assert_eq!(distintas.len(), 2, "semilla {semilla}: {inyectadas:?}");
+        }
+    }
+
+    /// Con una reserva sobrante, la toma el caso de menor índice por turno, sea cual sea el orden de llegada.
+    /// Los casos 0, 4 y 8 tienen el mismo defecto (secreto). Cuatro candidatos: tres principales y una reserva.
+    #[test]
+    fn la_reserva_sobrante_va_al_caso_de_menor_indice_con_cualquier_orden() {
+        let dir = copia_fixture();
+        let base = veredicto_de(Dimension::Seguridad, 1.0, None);
+        let tarea = tarea_en(dir.path(), "");
+        for retrasado in ["caso-0", "caso-8"] {
+            let medida = medir_con_reemplazos(
+                &tarea,
+                Dimension::Seguridad,
+                dir.path(),
+                &base,
+                10,
+                7,
+                retrasado,
+            );
+            let medidos: Vec<u32> = medida
+                .casos
+                .iter()
+                .filter(|c| c.inyeccion.is_some() && [0, 4, 8].contains(&c.indice))
+                .map(|c| c.indice)
+                .collect();
+            assert_eq!(medidos, vec![0], "retrasado {retrasado}");
+        }
+    }
+
+    #[test]
+    fn calibra_con_bootstrap_los_defectos_de_linea_caen_en_el_cambio() {
+        let (dir, tarea) = tarea_con_bootstrap(true);
+        let repo = dir.path().join("repo-bueno");
+        let base = veredicto_de(Dimension::Funciona, 1.0, None);
+        let sondas = AtomicUsize::new(0);
+        let ev = evaluador_de_sondas(&repo, &base, "", true, &sondas);
+        let medida = medir_funciona(&tarea, &repo, 12, 42, &ev);
+        let con_defecto: Vec<&Caso> = medida
+            .casos
+            .iter()
+            .filter(|c| c.inyeccion.is_some())
+            .collect();
+        assert!(
+            con_defecto.len() == 1,
+            "casos con defecto: {}",
+            con_defecto.len()
+        );
+        for caso in &con_defecto {
+            let inyeccion = caso.inyeccion.as_ref().expect("con defecto");
+            assert_eq!(inyeccion.archivo, "src/almacen.rs", "{inyeccion:?}");
+            assert!(inyeccion.en_cambio, "{inyeccion:?}");
+            assert!(CasoGuardado::de(caso).en_cambio);
+        }
+        assert!(
+            medida
+                .casos
+                .iter()
+                .filter(|c| c.inyeccion.is_none())
+                .all(|c| !CasoGuardado::de(c).en_cambio),
+            "los limpios no marcan en_cambio"
+        );
+    }
+
+    #[test]
+    fn calibra_con_bootstrap_sin_igualdad_en_el_cambio_dice_que_ningun_lugar_admite_el_defecto() {
+        let (dir, tarea) = tarea_con_bootstrap(false);
+        let repo = dir.path().join("repo-bueno");
+        let base = veredicto_de(Dimension::Funciona, 1.0, None);
+        let sondas = AtomicUsize::new(0);
+        let ev = evaluador_de_sondas(&repo, &base, "", true, &sondas);
+        let medida = medir_funciona(&tarea, &repo, 4, 42, &ev);
+        assert!(
+            medida.casos.iter().all(|c| c.inyeccion.is_none()),
+            "sin cambio con igualdad no hay caso con defecto"
+        );
+        assert!(!medida.no_aplicables.is_empty(), "hay casos no aplicables");
+        for no in &medida.no_aplicables {
+            assert_eq!(
+                no.motivo, "ningún lugar del cambio admite este defecto",
+                "{no:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn motivo_de_defecto_de_linea_sin_candidato_dentro_del_cambio_lo_dice() {
+        assert_eq!(
+            motivo_sin_inyeccion(Defecto::ComportamientoRoto, false, true),
+            "ningún lugar del cambio admite este defecto"
+        );
+        assert_eq!(
+            motivo_sin_inyeccion(Defecto::CuerpoVaciado, false, true),
+            "ningún lugar del cambio admite este defecto"
+        );
+        assert_eq!(
+            motivo_sin_inyeccion(Defecto::ModuloBorrado, false, true),
+            MOTIVO_MODULO_CON_INICIAL
+        );
+        assert_eq!(
+            motivo_sin_inyeccion(Defecto::ComportamientoRoto, false, false),
+            MOTIVO_SIN_CANDIDATO
+        );
+    }
+
+    #[test]
+    fn caso_guardado_de_antes_de_en_cambio_se_lee_con_false() {
+        let viejo = r#"{"caso":0,"es_defecto":true,"detectado":false,"defecto":"comportamiento_roto","linea":5}"#;
+        let caso: CasoGuardado = serde_json::from_str(viejo).expect("renglón sin en_cambio");
+        assert!(!caso.en_cambio);
+    }
+
+    /// El operador cambiado llega al renglón guardado y hace ida y vuelta. Un renglón viejo lo lee como `None`.
+    #[test]
+    fn caso_guardado_lleva_el_operador_y_los_viejos_quedan_en_none() {
+        let mut inyeccion = inyeccion_modulo();
+        inyeccion.operador = Some("> -> >=".to_string());
+        let caso = Caso::nuevo(
+            0,
+            Some(inyeccion),
+            veredicto_de(Dimension::Seguridad, 0.9, None),
+        );
+        let guardado = CasoGuardado::de(&caso);
+        assert_eq!(guardado.operador.as_deref(), Some("> -> >="));
+        let texto = serde_json::to_string(&guardado).expect("serializa");
+        let ida: CasoGuardado = serde_json::from_str(&texto).expect("lee");
+        assert_eq!(ida.operador.as_deref(), Some("> -> >="));
+        let viejo: CasoGuardado =
+            serde_json::from_str(r#"{"caso":0,"es_defecto":true,"detectado":false}"#).expect("lee");
+        assert_eq!(viejo.operador, None);
     }
 
     #[test]
@@ -4932,10 +6916,10 @@ mod tests {
             .as_ref()
             .expect("hay fila: queda el caso limpio");
         assert_eq!(fila.no_aplicable, 1);
-        assert_eq!(fila.reemplazos, MAX_REEMPLAZOS + 1);
-        assert_eq!(sondas.load(Ordering::SeqCst), (MAX_REEMPLAZOS + 1) as usize);
+        assert_eq!(fila.reemplazos, 1);
+        assert_eq!(sondas.load(Ordering::SeqCst), 1);
         assert_eq!(medida.no_aplicables.len(), 1);
-        assert_eq!(medida.no_aplicables[0].motivo, MOTIVO_EXACTO);
+        assert_eq!(medida.no_aplicables[0].motivo, MOTIVO_DISTINTOS_AGOTADOS);
     }
 
     /// Mide `n` casos de `dimension` con el evaluador falso `regla` (la base es `base_dir`, como en `falso`).
@@ -4961,6 +6945,7 @@ mod tests {
             &Vec::new,
             &|| None,
             1,
+            None,
             None,
         )
         .expect("mide")
@@ -5061,6 +7046,7 @@ mod tests {
             },
             id: id.into(),
             impacto: vec![],
+            previo: false,
         }
     }
 
@@ -5363,6 +7349,290 @@ mod tests {
         assert_eq!(casos[0].detecta_en("seguridad.secretos"), Some(true));
     }
 
+    /// Caso con defecto en `item`. Sin inyección: solo sirve a `finalizar_casos` y a `fila_de`.
+    fn caso_defecto_en(item: &'static str, veredicto: Veredicto) -> Caso {
+        Caso {
+            es_defecto: true,
+            item_defecto: Some(item),
+            ..Caso::nuevo(1, None, veredicto)
+        }
+    }
+
+    #[test]
+    fn piso_defecto_en_diseno_con_nivel_base_0_guarda_true() {
+        // Diseño usa juez: el ítem en 0 no puede bajar 2 niveles. Está en piso.
+        let base = diseno_con(&[(ITEM_MODULARIDAD, 0), (ITEM_ROBUSTEZ, 3)]);
+        let mut casos = vec![caso_defecto_en(ITEM_MODULARIDAD, base.clone())];
+        finalizar_casos(
+            &base,
+            Dimension::Diseno,
+            &[ITEM_MODULARIDAD, ITEM_ROBUSTEZ],
+            &[],
+            &mut casos,
+        );
+        assert!(CasoGuardado::de(&casos[0]).piso);
+    }
+
+    #[test]
+    fn piso_defecto_en_diseno_con_nivel_base_3_guarda_false() {
+        // Con nivel 3, un defecto puede bajarlo 2 niveles. No está en piso.
+        let base = diseno_con(&[(ITEM_MODULARIDAD, 3), (ITEM_ROBUSTEZ, 3)]);
+        let mut casos = vec![caso_defecto_en(ITEM_MODULARIDAD, base.clone())];
+        finalizar_casos(
+            &base,
+            Dimension::Diseno,
+            &[ITEM_MODULARIDAD, ITEM_ROBUSTEZ],
+            &[],
+            &mut casos,
+        );
+        assert!(!CasoGuardado::de(&casos[0]).piso);
+    }
+
+    #[test]
+    fn piso_sin_juez_usa_la_baja_de_un_nivel() {
+        // Seguridad no usa juez: la baja es de 1 nivel. Con nivel base 0 está en piso; con nivel base 1, no.
+        let piso_de_base = |nivel: u8| -> bool {
+            let mut base = veredicto_base();
+            base.puntajes[0].items[0].nivel = nivel;
+            let mut casos = vec![caso_defecto_en("seguridad.secretos", base.clone())];
+            finalizar_casos(
+                &base,
+                Dimension::Seguridad,
+                &["seguridad.secretos"],
+                &[],
+                &mut casos,
+            );
+            CasoGuardado::de(&casos[0]).piso
+        };
+        assert!(piso_de_base(0), "nivel base 0");
+        assert!(!piso_de_base(1), "nivel base 1");
+    }
+
+    #[test]
+    fn piso_sin_nivel_base_del_item_guarda_false() {
+        // El ítem del defecto no está en la base: su nivel base no se conoce.
+        let base = veredicto_base();
+        let mut casos = vec![caso_defecto_en("seguridad.inexistente", base.clone())];
+        finalizar_casos(
+            &base,
+            Dimension::Seguridad,
+            &["seguridad.inexistente"],
+            &[],
+            &mut casos,
+        );
+        assert!(!CasoGuardado::de(&casos[0]).piso);
+    }
+
+    #[test]
+    fn omitidos_lista_el_item_estable_que_el_juez_dejo_sin_nivel() {
+        // El juez no dio nivel a `secretos` en el caso 1. En el caso 2 sí lo dio: no hay omisión.
+        let base = veredicto_base();
+        let mut sin_secretos = base.clone();
+        sin_secretos.puntajes[0]
+            .items
+            .retain(|i| i.item != "seguridad.secretos");
+        let mut casos = vec![
+            Caso::nuevo(1, None, sin_secretos),
+            Caso::nuevo(2, None, base.clone()),
+        ];
+        finalizar_casos(
+            &base,
+            Dimension::Seguridad,
+            &["seguridad.secretos", "seguridad.panico_en_entrada"],
+            &[],
+            &mut casos,
+        );
+        assert_eq!(
+            CasoGuardado::de(&casos[0]).omitidos,
+            vec!["seguridad.secretos".to_string()]
+        );
+        assert!(CasoGuardado::de(&casos[1]).omitidos.is_empty());
+    }
+
+    #[test]
+    fn fila_cuenta_defectos_en_piso_y_omisiones_y_el_texto_los_muestra() {
+        let (_t, tarea) = tarea_prueba();
+        let mut en_piso = Caso::nuevo(1, None, Veredicto::default());
+        en_piso.es_defecto = true;
+        en_piso.piso = true;
+        en_piso.omitidos = vec!["a".into(), "b".into()];
+        let mut fuera_de_piso = Caso::nuevo(2, None, Veredicto::default());
+        fuera_de_piso.es_defecto = true;
+        let mut limpio = Caso::nuevo(3, None, Veredicto::default());
+        limpio.omitidos = vec!["a".into()];
+        let fila = fila_de(
+            &tarea,
+            Dimension::Seguridad,
+            1,
+            &[en_piso, fuera_de_piso, limpio],
+            &[],
+            0,
+            false,
+        );
+        assert_eq!((fila.defectos_en_piso, fila.omisiones), (1, 3));
+        let texto = texto_piso(&fila);
+        assert!(texto.contains("defectos en piso 1"), "texto: {texto}");
+        assert!(texto.contains("omisiones 3"), "texto: {texto}");
+    }
+
+    #[test]
+    fn piso_no_cambia_la_sensibilidad_de_un_defecto_detectado_por_cita() {
+        // Guarda: un defecto en piso que el juez cita cuenta como detectado. La sensibilidad no cambia.
+        let (_t, tarea) = tarea_prueba();
+        let mut defecto = Caso::nuevo(1, None, Veredicto::default());
+        defecto.es_defecto = true;
+        defecto.piso = true;
+        defecto.detectado = true;
+        defecto.motivo = Some("cita_juez".into());
+        let limpio = Caso::nuevo(2, None, Veredicto::default());
+        let fila = fila_de(
+            &tarea,
+            Dimension::Seguridad,
+            1,
+            &[defecto, limpio],
+            &[],
+            0,
+            false,
+        );
+        assert_eq!(fila.sensibilidad, Some(1.0));
+        assert_eq!(fila.especificidad, Some(1.0));
+    }
+
+    #[test]
+    fn caso_viejo_sin_piso_ni_omitidos_se_lee_con_cero() {
+        // Guarda: un renglón sin los campos nuevos se lee con piso false y omitidos vacío.
+        let base = diseno_con(&[(ITEM_MODULARIDAD, 0), (ITEM_ROBUSTEZ, 3)]);
+        let mut casos = vec![caso_defecto_en(ITEM_MODULARIDAD, base.clone())];
+        finalizar_casos(
+            &base,
+            Dimension::Diseno,
+            &[ITEM_MODULARIDAD, ITEM_ROBUSTEZ],
+            &[],
+            &mut casos,
+        );
+        let guardado = CasoGuardado::de(&casos[0]);
+        assert!(guardado.piso, "antes de quitar el campo, piso es true");
+        let mut vieja = serde_json::to_value(&guardado).expect("serializa");
+        let objeto = vieja.as_object_mut().expect("objeto");
+        objeto.remove("piso");
+        objeto.remove("omitidos");
+        let leido: CasoGuardado = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert!(!leido.piso);
+        assert!(leido.omitidos.is_empty());
+    }
+
+    #[test]
+    fn fila_vieja_sin_conteos_de_piso_se_lee_con_cero() {
+        let fila = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        let objeto = vieja.as_object_mut().expect("objeto");
+        objeto.remove("defectos_en_piso");
+        objeto.remove("omisiones");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!((leida.defectos_en_piso, leida.omisiones), (0, 0));
+    }
+
+    /// Caso con defecto de `inyeccion`. `detectado` dice si la dimensión lo cazó.
+    fn caso_defecto_identidad(indice: u32, inyeccion: Inyeccion, detectado: bool) -> Caso {
+        let mut caso = Caso::nuevo(indice, Some(inyeccion), Veredicto::default());
+        caso.detectado = detectado;
+        caso
+    }
+
+    #[test]
+    fn fila_nueva_cuenta_inyecciones_distintas_igual_a_sus_defectos() {
+        let base = veredicto_base();
+        let fila = calibrar(
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| if limpia { base.clone() } else { hundido(base) },
+            20,
+        );
+        assert!(fila.defectos > 0, "hay defectos medidos");
+        assert_eq!(fila.inyecciones_distintas, Some(fila.defectos));
+    }
+
+    #[test]
+    fn identidad_repetida_cuenta_una_vez_en_sensibilidad_y_en_distintas() {
+        let (_t, tarea) = tarea_prueba();
+        let x = inyeccion_modulo();
+        let mut y = inyeccion_modulo();
+        y.archivo = "src/otro.rs".into();
+        // Dos casos con la identidad de `x`. El de menor índice no detecta: va primero en el vector.
+        let casos = vec![
+            caso_defecto_identidad(2, x.clone(), true),
+            caso_defecto_identidad(1, x.clone(), false),
+            caso_defecto_identidad(3, y, true),
+            Caso::nuevo(4, None, Veredicto::default()),
+        ];
+        let fila = fila_de(&tarea, Dimension::Seguridad, 1, &casos, &[], 0, false);
+        assert_eq!(fila.defectos, 3, "el conteo crudo cuenta los tres defectos");
+        assert_eq!(fila.inyecciones_distintas, Some(2));
+        // Sobre identidades: `x` (índice 1, no detecta) e `y` (detecta). Uno de dos.
+        assert_eq!(fila.sensibilidad, Some(0.5));
+    }
+
+    #[test]
+    fn muestra_suficiente_cuenta_inyecciones_distintas_no_defectos() {
+        let repetidos = Fila {
+            defectos: 6,
+            inyecciones_distintas: Some(4),
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        };
+        assert!(!muestra_suficiente(&repetidos));
+        let distintos = Fila {
+            inyecciones_distintas: Some(5),
+            ..repetidos.clone()
+        };
+        assert!(muestra_suficiente(&distintos));
+    }
+
+    #[test]
+    fn texto_inyecciones_de_fila_vieja_avisa_que_puede_repetir() {
+        let vieja = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let texto = texto_inyecciones(&vieja);
+        assert!(
+            texto.contains("fila anterior a la Tarea 106: puede contar inyecciones repetidas"),
+            "texto: {texto}"
+        );
+    }
+
+    #[test]
+    fn texto_inyecciones_de_fila_nueva_da_el_numero() {
+        let nueva = Fila {
+            inyecciones_distintas: Some(4),
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(0.95))
+        };
+        let texto = texto_inyecciones(&nueva);
+        assert!(texto.contains("inyecciones distintas 4"), "texto: {texto}");
+    }
+
+    #[test]
+    fn fila_vieja_sin_inyecciones_distintas_se_lee_none_y_calibra_como_hoy() {
+        let fila = Fila {
+            defectos: 5,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(0.95))
+        };
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        vieja
+            .as_object_mut()
+            .expect("objeto")
+            .remove("inyecciones_distintas");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!(leida.inyecciones_distintas, None);
+        assert!(
+            muestra_suficiente(&leida),
+            "cinco defectos bastan sin el campo"
+        );
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![leida],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
+        c.aplicar("memora", "", &mut puntajes);
+        assert!(puntajes[0].calibrada, "la fila vieja calibra como hoy");
+    }
+
     #[test]
     fn calibra_limpio_tras_defecto_no_aplicable_usa_el_item_sin_lugar() {
         // Punto 3: el defecto 0 no está en `casos` (no era aplicable). El limpio 1 toma su ítem y no tiene lugar:
@@ -5417,6 +7687,8 @@ mod tests {
             mutante_archivo: None,
             mutante: None,
             tests_apagados: vec![],
+            en_cambio: false,
+            operador: None,
         };
         let mut casos = vec![
             Caso::nuevo(0, Some(inyeccion), base.clone()),
@@ -5450,6 +7722,8 @@ mod tests {
             mutante_archivo: None,
             mutante: None,
             tests_apagados: vec![],
+            en_cambio: false,
+            operador: None,
         }
     }
 
@@ -5560,6 +7834,8 @@ mod tests {
             mutante_archivo: None,
             mutante: None,
             tests_apagados: vec![],
+            en_cambio: false,
+            operador: None,
         };
         let mut casos = vec![
             Caso::nuevo(0, Some(inyeccion), defecto),
@@ -5594,6 +7870,7 @@ mod tests {
             fuente: Fuente::Sonda("mutacion".into()),
             id: format!("vivo-{archivo}-{nombre}"),
             impacto: vec![],
+            previo: false,
         }
     }
 
@@ -5615,6 +7892,8 @@ mod tests {
             mutante_archivo: Some("src/lib.rs".into()),
             mutante: None,
             tests_apagados: vec![],
+            en_cambio: false,
+            operador: None,
         };
         Caso::nuevo(indice, Some(inyeccion), veredicto)
     }
@@ -5757,10 +8036,7 @@ mod tests {
         );
         assert_eq!(medida.no_aplicables.len(), 1);
         assert_eq!(medida.no_aplicables[0].indice, 0);
-        assert_eq!(
-            medida.no_aplicables[0].motivo,
-            "inyecciones inválidas agotadas"
-        );
+        assert_eq!(medida.no_aplicables[0].motivo, MOTIVO_DISTINTOS_AGOTADOS);
     }
 
     #[test]
@@ -5806,6 +8082,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("calibra");
         assert!(
@@ -5821,8 +8098,9 @@ mod tests {
         assert!(medida.fila.is_none(), "sin casos no hay fila");
     }
 
+    /// Tarea 101, A1: una copia que no compila en Completitud es inválida. Reemplaza hasta agotar y no mide.
     #[test]
-    fn calibra_completitud_con_no_compila_mide_y_no_reemplaza() {
+    fn calibra_completitud_con_no_compila_reemplaza_y_no_mide() {
         let base = veredicto_de(Dimension::Completitud, 1.0, None);
         let (_t, tarea) = tarea_prueba();
         let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
@@ -5841,11 +8119,15 @@ mod tests {
             &ev,
         )
         .expect("calibra");
-        assert_eq!((fila.defectos, fila.limpios, fila.reemplazos), (1, 1, 0));
         assert_eq!(
-            fila.sensibilidad,
-            Some(0.0),
-            "sin veredicto cuenta como falso negativo"
+            (
+                fila.defectos,
+                fila.limpios,
+                fila.no_aplicable,
+                fila.reemplazos
+            ),
+            (0, 1, 1, 5),
+            "el defecto agota sus reemplazos y no cuenta como medido"
         );
     }
 
@@ -6002,6 +8284,7 @@ mod tests {
             &|| None,
             CASOS_EN_PARALELO,
             None,
+            None,
         )
         .expect("calibra");
         assert!(medida.detencion.is_some(), "el límite detiene la medida");
@@ -6049,6 +8332,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("calibra");
         assert_eq!(copias.load(Ordering::SeqCst), 1, "un solo caso corre");
@@ -6066,11 +8350,7 @@ mod tests {
         fs::create_dir_all(&repo).expect("repo");
         super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
         let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
-        let gasto = |_: f64| -> Result<f64, ErrorOraculo> { Ok(0.0) };
-        let presupuesto = Presupuesto {
-            usd: 0.05,
-            gasto_desde: &gasto,
-        };
+        let presupuesto = Presupuesto { usd: 0.05 };
         let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
             let _ = pedir_juicio_limitado(home.path());
             Ok(veredicto_base())
@@ -6115,6 +8395,7 @@ mod tests {
                 &Vec::new,
                 &|| None,
                 hilos,
+                None,
                 None,
             )
             .expect("calibra")
@@ -6192,6 +8473,7 @@ mod tests {
             &|| None,
             CASOS_EN_PARALELO,
             None,
+            None,
         )
         .err()
         .expect("el error de un caso corta la calibración");
@@ -6228,6 +8510,7 @@ mod tests {
             &Vec::new,
             leer_digest,
             1,
+            None,
             None,
         )
         .expect("calibra")
@@ -6369,6 +8652,7 @@ mod tests {
             &Vec::new,
             &leer,
             1,
+            None,
             None,
         )
         .expect("calibra");
@@ -6513,6 +8797,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("calibra");
         let caso = medida
@@ -6536,6 +8821,14 @@ mod tests {
     #[test]
     fn base_con_juez_guarda_una_lista_de_extractos_por_juicio() {
         let mut base = veredicto_de(Dimension::Estructura, 1.0, None);
+        base.puntajes[0].items = vec![NivelItem {
+            item: "estructura.legibilidad".into(),
+            nivel: 2,
+            evidencia: vec![],
+            fuente: Fuente::Juez {
+                modelo: "deepseek-reasoner".into(),
+            },
+        }];
         base.extractos = vec![ExtractoGuardado {
             archivo: "src/lib.rs".into(),
             desde: 1,
@@ -6555,6 +8848,7 @@ mod tests {
             &Vec::new,
             &|| None,
             1,
+            None,
             None,
         )
         .expect("calibra");
@@ -6840,7 +9134,11 @@ mod tests {
         )
         .expect("calibra diseño");
         let renglones = renglones_guardados(&segunda);
-        let con_defecto = renglones.iter().filter(|c| c.es_defecto).count();
+        // Un renglón agotado es de defecto, pero no tiene archivo ni se evalúa: no cuenta.
+        let con_defecto = renglones
+            .iter()
+            .filter(|c| c.es_defecto && c.archivo.is_some())
+            .count();
         assert!(
             renglones.iter().any(|c| !c.es_defecto),
             "hay limpios de Diseño"
@@ -7316,6 +9614,7 @@ mod tests {
             fuente: Fuente::Sonda("test".into()),
             id: id.into(),
             impacto: vec![],
+            previo: false,
         }
     }
 
@@ -7390,6 +9689,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("mide");
         let fila = medida.fila.expect("hay fila");
@@ -7429,6 +9729,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("mide");
         // Tres juicios de la base y ningún caso: los ítems inestables pesan 8 de 13.
@@ -7444,10 +9745,86 @@ mod tests {
                 ITEM_ROBUSTEZ.to_string()
             ]
         );
-        let motivo = fila.no_aplica.clone().expect("motivo");
+        let motivo = fila.inestable.clone().expect("motivo");
+        assert_eq!(fila.no_aplica, None, "una inestable no va a no_aplica");
         assert!(motivo.starts_with("inestable en esta tarea"), "{motivo}");
         assert!(motivo.contains(ITEM_MODULARIDAD), "{motivo}");
         assert!(!muestra_suficiente(&fila), "no califica");
+    }
+
+    #[test]
+    fn calibra_dimension_inestable_va_a_inestable_y_no_a_no_aplica() {
+        let (_t, tarea) = tarea_prueba();
+        let llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let k = llamadas.fetch_add(1, Ordering::SeqCst);
+            let nivel = alterno(k, 0, 2);
+            Ok(diseno_con(&[
+                (ITEM_MODULARIDAD, nivel),
+                (ITEM_ROBUSTEZ, nivel),
+                (ITEM_ERRORES, nivel),
+            ]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            6,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let fila = medida.fila.expect("hay fila");
+        let motivo = fila.inestable.as_deref().expect("la fila es inestable");
+        assert!(motivo.contains(ITEM_MODULARIDAD), "{motivo}");
+        assert_eq!(fila.no_aplica, None, "{fila:?}");
+    }
+
+    #[test]
+    fn calibra_base_sin_items_del_juez_se_juzga_una_sola_vez() {
+        // Sin modelo de juez, la base no trae ítems del juez: no hay juicios que repetir.
+        let (_t, tarea) = tarea_prueba();
+        let bases = AtomicUsize::new(0);
+        let repetidas = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            match tipo {
+                TipoCaso::Base => {
+                    bases.fetch_add(1, Ordering::SeqCst);
+                }
+                TipoCaso::BaseRepetida => {
+                    repetidas.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+            Ok(veredicto_de(Dimension::Diseno, 1.0, None))
+        };
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        assert_eq!(bases.load(Ordering::SeqCst), 1, "la base se juzga una vez");
+        assert_eq!(
+            repetidas.load(Ordering::SeqCst),
+            0,
+            "sin juez no hay repeticiones"
+        );
     }
 
     #[test]
@@ -7474,6 +9851,7 @@ mod tests {
             &Vec::new,
             &|| None,
             1,
+            None,
             None,
         )
         .expect("mide");
@@ -7511,6 +9889,7 @@ mod tests {
             &|| None,
             1,
             None,
+            None,
         )
         .expect("mide");
         assert_eq!(base_llamadas.load(Ordering::SeqCst), 1);
@@ -7522,5 +9901,360 @@ mod tests {
         json.as_object_mut().expect("objeto").remove("inestables");
         let fila: Fila = serde_json::from_value(json).expect("lee");
         assert!(fila.inestables.is_empty());
+    }
+
+    /// Listado de dos mutantes de `src/a.rs`, como lo deja `cargo mutants --list --json`.
+    const LISTADO_DOS: &str = r#"[{"name":"src/a.rs:1:1: replace x -> u8 with 0"},{"name":"src/a.rs:2:1: replace y -> u8 with 1"}]"#;
+    /// Base: `x` lo caza y `y` se escapa.
+    const MUTANTES_BASE: &str = r#"{"total_mutants":2,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/a.rs:1:1: replace x -> u8 with 0","file":"src/a.rs","span":{"start":{"line":1}}}},"summary":"CaughtMutant"},{"scenario":{"Mutant":{"name":"src/a.rs:2:1: replace y -> u8 with 1","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"MissedMutant"}]}"#;
+    /// Defecto: `x` ya no lo caza. Es un mutante que cambió y no es el elegido.
+    const MUTANTES_DEFECTO: &str = r#"{"total_mutants":2,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/a.rs:1:1: replace x -> u8 with 0","file":"src/a.rs","span":{"start":{"line":1}}}},"summary":"MissedMutant"},{"scenario":{"Mutant":{"name":"src/a.rs:2:1: replace y -> u8 with 1","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"MissedMutant"}]}"#;
+
+    /// Ejecutor de cargo-mutants que responde el listado y `outcomes` como reporte de la corrida.
+    struct MutacionFalsa {
+        outcomes: &'static str,
+    }
+
+    impl EjecutorHerramienta for MutacionFalsa {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            let mut salida = SalidaHerramienta::default();
+            if cmd.contains("--list") {
+                salida
+                    .archivos
+                    .insert("listado.json".into(), LISTADO_DOS.into());
+            } else if !cmd.starts_with("command -v") {
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), self.outcomes.into());
+            }
+            Ok(salida)
+        }
+    }
+
+    #[test]
+    fn calibra_caso_con_un_mutante_que_cambia_queda_ruidoso() {
+        let (_t, tarea) = tarea_prueba();
+        // Base y limpios miden `MUTANTES_BASE`; cada caso con defecto mide `MUTANTES_DEFECTO`.
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let outcomes = match tipo {
+                TipoCaso::Defecto(_) => MUTANTES_DEFECTO,
+                _ => MUTANTES_BASE,
+            };
+            let _ = crate::oracle::mutacion::sonda_mutacion(&MutacionFalsa { outcomes }, &tarea);
+            Ok(diseno_con(&[(ITEM_MODULARIDAD, 3), (ITEM_ROBUSTEZ, 3)]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            4,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let con_defecto = medida
+            .casos
+            .iter()
+            .find(|c| c.es_defecto)
+            .expect("hay un caso con defecto");
+        let guardado = CasoGuardado::de(con_defecto);
+        let esperado = vec!["src/a.rs:1:1: replace x -> u8 with 0".to_string()];
+        assert_eq!(guardado.mutantes_cambiados, esperado);
+        assert!(guardado.ruidoso, "{guardado:?}");
+        assert_eq!(guardado.mutantes.len(), 2, "{:?}", guardado.mutantes);
+        let limpio = medida
+            .casos
+            .iter()
+            .find(|c| !c.es_defecto)
+            .expect("hay un caso limpio");
+        assert!(
+            limpio.mutantes_cambiados.is_empty(),
+            "{:?}",
+            limpio.mutantes_cambiados
+        );
+    }
+
+    #[test]
+    fn calibra_caso_guarda_el_filtro_de_su_mutacion() {
+        let (_t, tarea) = tarea_prueba();
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let outcomes = match tipo {
+                TipoCaso::Defecto(_) => MUTANTES_DEFECTO,
+                _ => MUTANTES_BASE,
+            };
+            let _ = crate::oracle::mutacion::sonda_mutacion(&MutacionFalsa { outcomes }, &tarea);
+            Ok(diseno_con(&[(ITEM_MODULARIDAD, 3), (ITEM_ROBUSTEZ, 3)]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            4,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let con_defecto = medida
+            .casos
+            .iter()
+            .find(|c| c.es_defecto)
+            .expect("hay un caso con defecto");
+        let guardado = CasoGuardado::de(con_defecto);
+        assert!(
+            guardado.filtro.starts_with(" -F '^(?:"),
+            "el filtro del caso: {:?}",
+            guardado.filtro
+        );
+        assert!(
+            guardado.filtro.contains("replace x -> u8 with 0"),
+            "el filtro nombra el mutante medido: {:?}",
+            guardado.filtro
+        );
+    }
+
+    #[test]
+    fn calibra_caso_viejo_sin_filtro_lee_vacio() {
+        let caso = Caso::nuevo(0, None, Veredicto::default());
+        let mut vieja = serde_json::to_value(CasoGuardado::de(&caso)).expect("serializa");
+        vieja.as_object_mut().expect("objeto").remove("filtro");
+        let leido: CasoGuardado = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert!(leido.filtro.is_empty(), "{:?}", leido.filtro);
+    }
+
+    #[test]
+    fn calibra_fila_cuenta_los_casos_ruidosos_sin_mover_las_metricas() {
+        let (_t, tarea) = tarea_prueba();
+        let limpio = Caso::nuevo(1, None, Veredicto::default());
+        let mut ruidoso = Caso::nuevo(3, None, Veredicto::default());
+        ruidoso.mutantes_cambiados = vec!["src/a.rs:1:1: replace x -> u8 with 0".into()];
+        let fila = fila_de(
+            &tarea,
+            Dimension::Diseno,
+            42,
+            &[limpio, ruidoso],
+            &[],
+            0,
+            false,
+        );
+        assert_eq!(fila.casos_ruidosos, 1);
+        assert_eq!(
+            (fila.n, fila.limpios),
+            (2, 2),
+            "el caso ruidoso sigue contando"
+        );
+        assert_eq!(fila.especificidad, Some(1.0));
+    }
+
+    #[test]
+    fn calibra_caso_guardado_viejo_carga_sin_los_campos_de_mutacion() {
+        let caso = Caso::nuevo(0, None, Veredicto::default());
+        let mut vieja = serde_json::to_value(CasoGuardado::de(&caso)).expect("serializa");
+        let objeto = vieja.as_object_mut().expect("objeto");
+        for clave in [
+            "mutantes",
+            "mutantes_cambiados",
+            "mutantes_explicados",
+            "ruidoso",
+        ] {
+            objeto.remove(clave);
+        }
+        let leido: CasoGuardado = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert!(leido.mutantes.is_empty());
+        assert!(leido.mutantes_cambiados.is_empty());
+        assert!(leido.mutantes_explicados.is_empty());
+        assert!(!leido.ruidoso);
+    }
+
+    #[test]
+    fn calibra_fila_vieja_sin_casos_ruidosos_lee_cero() {
+        let fila = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        vieja
+            .as_object_mut()
+            .expect("objeto")
+            .remove("casos_ruidosos");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!(leida.casos_ruidosos, 0);
+    }
+
+    /// Base con fase Test de 10 segundos: su plazo de mutantes sale de aquí (5 por 10 da 50).
+    const BASE_CON_DURACION: &str = r#"{"total_mutants":2,"outcomes":[{"scenario":"Baseline","summary":"Success","phase_results":[{"phase":"Build","duration":3.0,"summary":"Success"},{"phase":"Test","duration":10.0,"summary":"Success"}]},{"scenario":{"Mutant":{"name":"src/a.rs:1:1: replace x -> u8 with 0","file":"src/a.rs","span":{"start":{"line":1}}}},"summary":"CaughtMutant"},{"scenario":{"Mutant":{"name":"src/a.rs:2:1: replace y -> u8 with 1","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"MissedMutant"}]}"#;
+
+    /// Ejecutor de cargo-mutants que anota cada corrida de mutación con la etiqueta de su caso.
+    struct MutacionAnotada<'a> {
+        outcomes: &'static str,
+        etiqueta: String,
+        cmds: &'a Mutex<Vec<(String, String)>>,
+    }
+
+    impl EjecutorHerramienta for MutacionAnotada<'_> {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            let mut salida = SalidaHerramienta::default();
+            if cmd.contains("--list") {
+                salida
+                    .archivos
+                    .insert("listado.json".into(), LISTADO_DOS.into());
+            } else if !cmd.starts_with("command -v") {
+                if crate::oracle::mutacion::es_comando_de_mutacion(cmd) {
+                    self.cmds
+                        .lock()
+                        .expect("lock")
+                        .push((self.etiqueta.clone(), cmd.to_string()));
+                }
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), self.outcomes.into());
+            }
+            Ok(salida)
+        }
+    }
+
+    #[test]
+    fn calibra_casos_corren_con_plazo_fijo_y_la_base_sin_el() {
+        let (_t, tarea) = tarea_prueba();
+        let cmds: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let outcomes = match tipo {
+                TipoCaso::Base | TipoCaso::BaseRepetida => BASE_CON_DURACION,
+                _ => MUTANTES_DEFECTO,
+            };
+            let ej = MutacionAnotada {
+                outcomes,
+                etiqueta: format!("{tipo:?}"),
+                cmds: &cmds,
+            };
+            let _ = crate::oracle::mutacion::sonda_mutacion(&ej, &tarea);
+            Ok(diseno_con(&[(ITEM_MODULARIDAD, 3), (ITEM_ROBUSTEZ, 3)]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            4,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(fila.plazo_mutantes, Some(50));
+        let cmds = cmds.into_inner().expect("sin envenenar");
+        let base: Vec<&String> = cmds
+            .iter()
+            .filter(|(e, _)| e == "Base" || e == "BaseRepetida")
+            .map(|(_, c)| c)
+            .collect();
+        assert!(!base.is_empty(), "la base corrió su sonda");
+        for cmd in base {
+            assert!(!cmd.contains("--timeout"), "la base sin plazo: {cmd}");
+        }
+        let casos: Vec<&String> = cmds
+            .iter()
+            .filter(|(e, _)| e.starts_with("Limpio") || e.starts_with("Defecto"))
+            .map(|(_, c)| c)
+            .collect();
+        assert!(!casos.is_empty(), "los casos corrieron su sonda");
+        for cmd in casos {
+            assert!(cmd.contains(" --timeout 50 "), "caso con plazo 50: {cmd}");
+        }
+    }
+
+    #[test]
+    fn calibra_fila_vieja_sin_plazo_mutantes_lee_none() {
+        let fila = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        vieja
+            .as_object_mut()
+            .expect("objeto")
+            .remove("plazo_mutantes");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!(leida.plazo_mutantes, None);
+    }
+
+    #[test]
+    fn calibra_fila_vieja_sin_duraciones_de_suite_lee_none() {
+        let fila = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        let objeto = vieja.as_object_mut().expect("objeto");
+        objeto.remove("duracion_contrato");
+        objeto.remove("duracion_oculto");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!(
+            (leida.duracion_contrato, leida.duracion_oculto),
+            (None, None)
+        );
+    }
+
+    const EQUIVALENTE_DE_PRUEBA: &str = "\n[calibracion]\n\n[[calibracion.equivalentes]]\n\
+        archivo = \"src/lib.rs\"\nlinea = 2\nedicion = \"true -> false\"\nmotivo = \"x\"\n";
+
+    /// La fila cuenta las entradas de `[calibracion].equivalentes`: una entrada da 1.
+    #[test]
+    fn fila_cuenta_los_equivalentes_declarados() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let tarea = tarea_en(dir.path(), EQUIVALENTE_DE_PRUEBA);
+        let fila = fila_de(&tarea, Dimension::Funciona, 42, &[], &[], 0, false);
+        assert_eq!(fila.equivalentes_excluidos, 1);
+    }
+
+    /// La fila de una dimensión no aplicable también cuenta sus equivalentes.
+    #[test]
+    fn fila_no_aplica_cuenta_los_equivalentes_declarados() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let tarea = tarea_en(dir.path(), EQUIVALENTE_DE_PRUEBA);
+        let fila = fila_no_aplica(&tarea, "hash", Dimension::Funciona, 42, "motivo");
+        assert_eq!(fila.equivalentes_excluidos, 1);
+    }
+
+    /// Dos funciones con cuerpo en `Completitud`: `uno` (línea 1) es un equivalente declarado. Cada caso con
+    /// defecto cae en `dos` (línea 5). El caso sobrante queda agotado y nunca elige `uno`, con cualquier semilla.
+    #[test]
+    fn equivalente_declarado_nunca_se_inyecta_y_el_sobrante_queda_agotado() {
+        let repo = tempfile::tempdir().expect("temporal");
+        std::fs::create_dir_all(repo.path().join("src")).expect("carpeta src");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn uno(x: u32) -> u32 {\n    x + 1\n}\n\npub fn dos(x: u32) -> u32 {\n    x * 2\n}\n",
+        )
+        .expect("escribe lib.rs");
+        let base = veredicto_de(Dimension::Completitud, 1.0, None);
+        let extra = "\n[calibracion]\n\n[[calibracion.equivalentes]]\n\
+            archivo = \"src/lib.rs\"\nlinea = 1\nedicion = \"cuerpo vaciado\"\nmotivo = \"x\"\n";
+        let dir_tarea = tempfile::tempdir().expect("temporal");
+        let tarea = tarea_en(dir_tarea.path(), extra);
+        let ev = evaluador_que_baja(repo.path(), &base);
+        for semilla in 0..10u64 {
+            let medida =
+                medir_dimension(&tarea, Dimension::Completitud, repo.path(), 6, semilla, &ev);
+            let lineas: Vec<u32> = medida
+                .casos
+                .iter()
+                .filter_map(|c| c.inyeccion.as_ref().map(|i| i.linea))
+                .collect();
+            assert_eq!(lineas, vec![5], "semilla {semilla}: solo `dos` se inyecta");
+            let agotados = medida
+                .no_aplicables
+                .iter()
+                .filter(|no| no.motivo == MOTIVO_DISTINTOS_AGOTADOS)
+                .count();
+            assert_eq!(agotados, 2, "semilla {semilla}");
+        }
     }
 }

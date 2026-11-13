@@ -37,7 +37,7 @@ Con `--json`, cada subcomando construido imprime un solo objeto JSON en stdout.
 | Código | Significado | Dónde sale hoy |
 |---|---|---|
 | `0` | ok o verde | `route`, `llama`, `observa`, `track`, `aprende`, `goal`, `importar-mmorch`, `ficha tarea`, `ficha revisar` sin hallazgos y con el juez en `ok` (con `--juez-proveedor` y `--juez-modelo`), o sin hallazgos con `--solo-deterministas`. `oraculo evaluar` e `oraculo informe` con decisión `Listo` (ver abajo). |
-| `1` | rojo | `oraculo evaluar` e `oraculo informe` con decisión `NoListo` o `Bloqueado`. `ficha revisar` con hallazgos o ambigüedades, aunque el juez haya fallado. |
+| `1` | rojo | `oraculo evaluar` e `oraculo informe` con decisión `NoListo` o `Bloqueado`. `oraculo capas --tarea` con fallas. `ficha revisar` con hallazgos o ambigüedades, aunque el juez haya fallado. |
 | `2` | error de uso | Argumentos inválidos (clap). `root.toml` con un valor fuera de rango. Un spec sin `## Ficha` o con una ficha inválida. Un tipo desconocido en `esquema`. |
 | `3` | error de infraestructura, o sin veredicto | Un tope que impide la elección o la llamada (`route`, `llama`). Un error de proveedor, de Observe o de Track. `oraculo evaluar` sin veredicto (descarga o suite sin veredicto). `ficha revisar` sin hallazgos y sin veredicto del juez: sin `--juez-*` el juez queda `sin_veredicto: juez no corrido` y el código es 3, nunca 0. Los subcomandos **pendientes** salen con `3` porque aún no tienen lógica. |
 
@@ -64,6 +64,8 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t oraculo auditar --repo <dir> --salida <archivo.json> --tope-usd <n> --gitleaks <reporte.json> [--incluir <ruta>]... [--defectos <toml>] [--por-archivo]` | Pasada de búsqueda de defectos. Un modelo propone candidatos sobre el código de producción de `src/`. Un candidato entra a `hallazgos` solo si el gate de cita confirma su cita; los demás van a `descartados` con su motivo. Un candidato con «cita no confirmada en el archivo» va a `descartados` sin `cita` ni `detalle`, y con `cita_hash`, la huella de la cita. No puntúa y no toca a `oraculo evaluar`. `--gitleaks` es obligatorio siempre, también con `--solo-medir`. `--tope-usd` es obligatorio sin `--solo-medir`. Sin los obligatorios, o con un tope no finito o menor o igual a 0, sale con `2`. Antes de cada llamada compara el gasto de API más el peor caso con el tope. Si no entra la primera llamada, sale con `2`, dice la cifra que necesita y no escribe `--salida`. Si no entra una posterior, para y deja `incompleta`. Con `--por-archivo`, cada archivo va en su propia llamada, con el mismo prompt. Con `--defectos`, un defecto cuenta como encontrado si un hallazgo cae en su archivo a 3 líneas o menos. Solo se miden los defectos de archivos leídos: los demás quedan con `medido = false`. Sin ningún archivo leído, `medicion` es `null` y `avisos` suma «ningún archivo leído: no hay medición». Cada defecto acepta `clase` y `origen` (`real` o `sembrado`), opcionales. Escribe `--salida` de forma atómica. Sale con `0` si termina y con `3` si queda `incompleta`; en ese caso escribe `--salida` igual. | JSON con `hash_prompt`, `modelo`, `archivos`, `llamadas`, `costo_usd`, `hallazgos`, `descartados`, `incompleta`, `sin_leer`, `avisos`, `medicion`, `lineas_leidas` y `candidatos_por_1000_lineas`. `medicion` trae `encontrados`, `casos`, `casos_leidos`, `por_clase`, `por_origen` y `detalle`. | construido (Tarea 74, ampliado en la Tarea 75). |
 | `r00t oraculo auditar --repo <dir> --salida <archivo.json> --solo-medir <candidatos.json> --gitleaks <reporte.json> [--incluir <ruta>]... [--defectos <toml>]` | Mide candidatos de otro modelo con la forma `{"defectos":[...]}`. No llama a ningún modelo y no pide `--tope-usd` ni clave. Aplica el gate de cita y la medición. `--gitleaks` es obligatorio: sin él, sale con `2`. Omite las líneas de secretos al confirmar citas. Un candidato cuya cita cae en una línea del reporte va a `descartados` con `cita` y `detalle` vacíos. No acepta `--tope-usd` ni `--por-archivo`. Sale con `0`. | El mismo JSON que `auditar`, con `modelo = "externo"`, `llamadas = 0` y `costo_usd = 0`. | construido (Tarea 75). |
 | `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto: decisión, regla que la disparó, requisitos, bloqueantes, riesgos, próximos pasos y confianza. Sin `--md`, imprime JSON; con `--md`, markdown legible. | `Informe` | construido (Tarea 13b). |
+| `r00t oraculo capas --repo <dir> [--json]` | Propone las capas del repo con el grafo de módulos de la sonda de arquitectura. Una capa por altura; los ciclos van juntos. Sin `--json`, imprime `capas = [...]`. Con `--json`, da los módulos, las aristas y los ciclos. | `{capas, modulos, aristas, ciclos}` | construido. |
+| `r00t oraculo capas --repo <dir> --tarea <t> [--json]` | Verifica las capas de `tarea.toml` contra el repo. Falla si hay menos de 2 capas, si falta una capa, si un módulo usa una capa anterior o si `CicloEntreCapas` no aplica sobre una copia. Los ciclos de una misma capa no fallan aquí. Sale con `0` si pasa y con `1` si no pasa. La copia va a `$ROOT_HOME/tmp` y se borra. | `{fallas}` | construido. |
 | `r00t oraculo validar --casos <dir>` | Mide si el juicio de Root coincide con resultados conocidos. | `Validez` | pendiente (Tarea 12b). No está en `--help`. |
 | `r00t observa claude --archivo <salida-de-claude-p> --corrida <id> [--via cupo\|nube]` | Registra la salida JSON de `claude -p`. Con `--via nube`, registra una sesión en la nube. | `{registrados, via}` | construido |
 | `r00t observa evento --corrida <id> --tipo <humano\|plan-aprobado\|gate> [--detalle txt]` | Registra un evento manual de la corrida. | evento registrado | construido |
@@ -161,6 +163,8 @@ Las cuatro herramientas:
 }
 ```
 
+Cada evento que crea `root_registrar` lleva `extra.origen = "mcp"`. `resumir_eventos` no cuenta esos eventos como humanos ni como planes aprobados. `contar_declarados_mcp` los cuenta aparte. Un evento sin `origen` cuenta como antes.
+
 ## Archivos de ROOT_HOME
 
 `ROOT_HOME` vale `~/.local/share/root/` por defecto. Si la variable `ROOT_HOME` existe y no está vacía, Root usa esa ruta.
@@ -204,6 +208,7 @@ El `<hash>` sale del contenido de la copia del repo y de las carpetas `oculto/` 
 Las corridas del historial suman muestras a los tests inestables. No cuentan como ausencia. `Veredicto.corridas_acumuladas` y `Confianza.corridas_acumuladas` dan esas muestras. Una línea ilegible se ignora y deja un aviso en `Veredicto.avisos`.
 La calibración no lee ni escribe el historial.
 Las subcarpetas `contrato/`, `oculto/` y `bootstrap/` son convención. Cada suite del contenedor monta solo su carpeta (`contrato/` o `oculto/`), y los escenarios montan solo `escenarios/`. El Oracle lee solo `tarea.toml` y los comandos que ese archivo declara.
+La línea base de Seguridad sale de `bootstrap/`. Un hallazgo de Seguridad que ya estaba ahí tiene `previo: true`. Un hallazgo previo no baja el puntaje de Seguridad, salvo un secreto de gitleaks. Sin `bootstrap/`, el veredicto avisa y ningún hallazgo es previo. La línea base se guarda en `ROOT_HOME/previos/<tarea>/`.
 La suite oculta de pytest corre desde una copia en `/salida/.oculto`. Root no monta `oculto/` en `/oraculo`. Un plugin de pytest borra los `*.py` y `*.pyc` de la copia después de la colección, antes del primer test. Los datos de la copia quedan. El junit lleva un nombre aleatorio por corrida: `oculto-<16 hex>.xml`. Un test oculto que lee datos con la ruta literal `/oraculo/oculto` ya no los encuentra. **Límites que quedan:** un producto que corre dentro del proceso de pytest puede reescribir el junit y leer los datos. Un código del producto que lee archivos al importarse, durante la colección, todavía ve los `*.py` de la copia. Ninguna tarea del hito 1 tiene un producto que corra dentro del proceso de pytest.
 El paquete `pendientes/` guarda cada suite en su carpeta: `tests/oculto/` y `tests/contrato/`. Cada carpeta lleva su `conftest.py`, si la tarea lo tiene y la suite tiene tests en el paquete. `tests/` no lleva `conftest.py`.
 
@@ -229,7 +234,7 @@ Ruta: `$ROOT_HOME/oraculos/<tarea>/tarea.toml`. Lo lee `Tarea::cargar_de` (`src/
 | `[[entorno]]` `test`, `motivo` | texto | no | | Test que depende del entorno. El motivo no puede estar vacío. Un test aparece una sola vez. Un id con `contrato:` excluye un test del contrato. Un id sin prefijo excluye solo el test oculto. |
 | `[[oraculo_dudoso]]` `test`, `motivo` | texto | no | | Test que depende de una frase ambigua de la spec. Mismas reglas que `[[entorno]]`: un id con `contrato:` excluye un test del contrato; un id sin prefijo excluye solo el test oculto. |
 | `[[requisito]]` `id`, `titulo`, `seccion`, `peso`, `pruebas`, `bordes`, `escenarios`, `criterios`, `modulos` | varios | no | `seccion` = ""; `peso` = 1 | `peso` debe estar entre 1 y 3. `id` no puede repetirse. `modulos` liga el requisito a los módulos del código. Un id de `pruebas` o `bordes` con el prefijo `contrato:` apunta a la suite del contrato. Sin prefijo, apunta a la suite oculta. |
-| `[[escenario]]` `id`, `cmd` | texto | no | | Flujo real de usuario. `cmd` sale con 0 si el flujo funciona. `id` solo usa `A-Za-z0-9._-` y no puede repetirse. |
+| `[[escenario]]` `id`, `cmd`, `red` | texto; booleano | no | `red` = false | Flujo real de usuario. `cmd` sale con 0 si el flujo funciona. `id` solo usa `A-Za-z0-9._-` y no puede repetirse. Con `red = true` el escenario pide red. Root no lo corre y lo deja pendiente con el motivo `el escenario pide red`. |
 | `[entrega]` `instalar`, `correr` | texto | no | | Instalación y arranque del producto en un contenedor limpio. Ambos son obligatorios si la tabla existe. |
 | `[entrega]` `archivos` | lista de texto | no | [] | Archivos que el repo debe traer. |
 | `[entrega]` `espera_segundos` | entero | no | 5 | Segundos antes de revisar que `correr` sigue vivo. |
@@ -475,7 +480,7 @@ Funciones que usa el código:
 | `observe::resumir(corrida)` | construido | Devuelve `Resumen`. |
 | `oracle::evaluar(repo, tarea, opciones)` | construido | `oracle::evaluar_por_nombre(nombre, repo)` lee la tarea desde `ROOT_HOME`. |
 | `oracle::calibra::calibrar_tarea(home, nombre, dimension, n, semilla, repo, evaluador)` | construido (Tarea 12) | Calibra y agrega la fila a `calibracion.json`. `calibrar_con` recibe la tarea y el repo ya resueltos. |
-| `oracle::calibra::calibrar_tarea_con(home, nombre, dimension, n, semilla, repo, presupuesto, evaluador)` | construido (decisión 48) | Como `calibrar_tarea`, con el tope opcional `Presupuesto`: gasto desde el inicio, peor caso de un caso y tope en USD. Cada caso en vuelo con reserva abierta cuenta una vez: su reserva ya está en el gasto. Las reservas llevan `extra.caso`. Si el tope detiene la calibración, escribe las filas hechas como `incompleta` y sale con `3`. |
+| `oracle::calibra::calibrar_tarea_con(home, nombre, dimension, n, semilla, repo, presupuesto, evaluador)` | construido (decisión 48) | Como `calibrar_tarea`, con el tope opcional `Presupuesto`, que es el tope en USD. El límite cuenta el gasto desde el inicio y el peor caso de cada intento. Cada caso en vuelo con reserva abierta cuenta una vez: su reserva ya está en el gasto. Las reservas llevan `extra.caso`. Si el tope detiene la calibración, escribe las filas hechas como `incompleta` y sale con `3`. |
 | `oracle::informe::informar(veredicto, tarea, reglas, redactor)` | construido (Tarea 13b) | El redactor es opcional. `informar_con` recibe además las rúbricas. |
 | `oracle::validez::validar(casos)` | construido (Tarea 12b) | `validar_con` recibe el evaluador. `preparar_ciego(casos, fuentes, semilla, home)` arma los paquetes a ciegas. Escribe las listas de rastros y `home/validez/rastros.json` en `home/validez/`. |
 | `track::agregar(fila)` | construido | |
@@ -623,6 +628,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "Una medición de una dimensión de una tarea, con su muestra.",
       "type": "object",
       "properties": {
+        "casos_ruidosos": {
+          "description": "Casos medidos con `mutantes_cambiados` no vacío. Siguen contando para las métricas. Sin el campo vale 0.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "defectos": {
           "description": "Defectos aplicados y medidos. La sensibilidad sale de ellos.",
           "type": "integer",
@@ -630,8 +642,40 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 0,
           "minimum": 0
         },
+        "defectos_en_piso": {
+          "description": "Defectos cuyo ítem ya estaba en piso en la base. Una fila sin el campo vale 0.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "dimension": {
           "$ref": "#/$defs/Dimension"
+        },
+        "duracion_contrato": {
+          "description": "Segundos que tardó la suite del contrato en la base: su corrida más lenta. Sale el plazo de los casos\n(`plazo_de_suite`). `None` si la base no corrió la suite o la fila es anterior a la Tarea 107.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "duracion_oculto": {
+          "description": "Segundos que tardó la suite oculta en la base: su corrida más lenta. Igual que `duracion_contrato`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "equivalentes_excluidos": {
+          "description": "Entradas de `[calibracion].equivalentes` que la corrida aplicó: el largo de la lista declarada, sin\nentradas repetidas (mismo archivo, línea y edición). Una fila sin el campo vale 0.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
         },
         "especificidad": {
           "type": [
@@ -673,6 +717,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "boolean",
           "default": false
         },
+        "inestable": {
+          "description": "Motivo por el que la dimensión es inestable en la tarea: sus ítems del juez variaron entre juicios.\nUna fila sin el campo vale `None`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "inestables": {
           "description": "Ítems del juez que variaron entre los tres juicios de la base, en orden. No entran a la medición de la\ndimensión. Una fila sin el campo vale vacía.",
           "type": "array",
@@ -680,6 +732,16 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "items": {
             "type": "string"
           }
+        },
+        "inyecciones_distintas": {
+          "description": "Identidades de inyección distintas entre los defectos medidos. Una fila sin el campo vale `None`:\nes anterior a la Tarea 106 y puede contar inyecciones repetidas. `Some(0)` si no midió defectos.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
         },
         "items": {
           "description": "Exactitud balanceada de cada ítem de rúbrica, por ejemplo `seguridad.secretos`.",
@@ -711,7 +773,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "minimum": 0
         },
         "no_aplica": {
-          "description": "Motivo por el que la dimensión no se midió: la tarea no la aplica. Una fila así no tiene casos ni\nmétricas, y no calibra la dimensión. `None` en una medición real.",
+          "description": "Motivo por el que la dimensión no se midió: la tarea no la aplica. Una fila así no tiene casos ni\nmétricas, y no calibra la dimensión. `None` en una medición real. Una dimensión inestable va a `inestable`.",
           "type": [
             "string",
             "null"
@@ -725,12 +787,37 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 0,
           "minimum": 0
         },
+        "omisiones": {
+          "description": "Omisiones de todos los casos: ítems estables de la base que el juez no puntuó. Sin el campo vale 0.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "plazo_mutantes": {
+          "description": "Plazo fijo en segundos que usaron los casos de mutación. Sale de la duración de la base.\n`None` si la base no trajo duración. Una fila sin el campo vale `None`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
         "reemplazos": {
           "description": "Inyecciones inválidas reemplazadas en la calibración, incluidas las del caso agotado.",
           "type": "integer",
           "format": "uint32",
           "default": 0,
           "minimum": 0
+        },
+        "repo_origen": {
+          "description": "Carpeta de la que salió el repo bueno de Pruebas: `con_tests` si usó `<tarea>/con_tests/`. `None` si\nsalió de `--repo` o de `[calibracion] repo`, y en las dimensiones que no son Pruebas.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "ruidosos": {
           "description": "Tests ruidosos de la calibración, en orden: los que cambiaron de estado entre la base y los limpios. Sus\nhallazgos no detectan (Tarea 63). Una fila sin el campo vale vacía.",
@@ -756,6 +843,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "tarea": {
           "type": "string"
+        },
+        "tarea_hash": {
+          "description": "Hash del `tarea.toml` con que se midió la fila. Otro `tarea.toml` deja la fila sin valor.\nUna fila sin el campo vale `None`, y sigue valiendo.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "ts": {
           "description": "Epoch en segundos de la medición. Gana la fila más reciente.",
@@ -810,6 +905,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "Si la dimensión calibrada bajó frente a la base en este caso.",
       "type": "boolean"
     },
+    "en_cambio": {
+      "description": "`true` si el defecto cayó dentro del cambio de `bootstrap/`.\nEn `ComportamientoRoto`, la línea invertida es una línea tocada.\nEn `ModuloBorrado`, el módulo borrado es un archivo tocado.\nUn archivo tocado tiene al menos una línea del cambio. Los casos limpios y sin cambio valen `false`.",
+      "type": "boolean",
+      "default": false
+    },
     "es_defecto": {
       "type": "boolean"
     },
@@ -820,6 +920,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "items": {
         "$ref": "#/$defs/ExtractoGuardado"
       }
+    },
+    "filtro": {
+      "description": "`-F` de cargo-mutants que midió el caso. Vacío si el caso no midió mutación.",
+      "type": "string",
+      "default": ""
     },
     "item": {
       "description": "Ítem de rúbrica que el defecto debe hacer caer. `None` en un caso limpio.",
@@ -860,6 +965,30 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "default": null
     },
+    "mutantes": {
+      "description": "Estado de cada mutante de la muestra del caso, en orden. Vacío si el caso no midió mutación.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MutanteEstado"
+      }
+    },
+    "mutantes_cambiados": {
+      "description": "Mutantes de la muestra cuyo estado cambió frente a la base y no lo explica el defecto: es ruido. Sin el\nmutante elegido. Vacío si no cambió ninguno.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "mutantes_explicados": {
+      "description": "Cambios de muerto a vivo que explican los tests que el defecto apagó. No son ruido. Vacío si no hubo.\nUna fila o un caso viejo lo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
     "niveles": {
       "description": "Nivel de cada ítem de la dimensión calibrada en este caso. Vacío si no hay puntaje.",
       "type": "object",
@@ -890,6 +1019,27 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "default": null
     },
+    "omitidos": {
+      "description": "Ítems estables de la base que el juez no puntuó en este caso. Vacío sin veredicto de la dimensión.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "operador": {
+      "description": "Operador que cambió `ComportamientoRoto` con estado inicial (p. ej. `\"> -> >=\"`). `None` en los demás casos.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "piso": {
+      "description": "`true`: el ítem del defecto ya estaba en piso en la base. Un caso limpio o sin nivel base vale `false`.",
+      "type": "boolean",
+      "default": false
+    },
     "reemplazos": {
       "description": "Inyecciones inválidas reemplazadas antes de este caso. `0` si no hubo ninguna.",
       "type": "integer",
@@ -899,6 +1049,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     },
     "repetido_por_entorno": {
       "description": "Si el entorno repitió este caso. Hoy ningún mecanismo repite casos: siempre `false`.",
+      "type": "boolean",
+      "default": false
+    },
+    "ruidoso": {
+      "description": "`true` si `mutantes_cambiados` no está vacío: el caso movió mutantes que no son su defecto.",
       "type": "boolean",
       "default": false
     },
@@ -951,6 +1106,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "detectado"
   ],
   "$defs": {
+    "EstadoMutante": {
+      "description": "Estado de un mutante de la muestra. `Vencido` es un `Timeout`: cuenta como muerto en el puntaje.",
+      "type": "string",
+      "enum": [
+        "muerto",
+        "vivo",
+        "vencido"
+      ]
+    },
     "ExtractoGuardado": {
       "description": "Una ventana del prompt del juez, sin su texto. `motivo` es `cambio`, `grande` o `sonda`.",
       "type": "object",
@@ -977,6 +1141,30 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "desde",
         "hasta",
         "motivo"
+      ]
+    },
+    "MutanteEstado": {
+      "description": "Un mutante de la muestra y su estado. `nombre` es el `name` del reporte de cargo-mutants.\n`duracion_segundos` es la suma de sus fases (`Build`, `Test`). `None` si el reporte no la trae.",
+      "type": "object",
+      "properties": {
+        "duracion_segundos": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "estado": {
+          "$ref": "#/$defs/EstadoMutante"
+        },
+        "nombre": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nombre",
+        "estado"
       ]
     }
   }
@@ -1912,6 +2100,37 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "refs"
       ]
     },
+    "AvisoPrevio": {
+      "description": "Aviso de Seguridad que ya estaba en el estado inicial de la tarea. No bloquea.",
+      "type": "object",
+      "properties": {
+        "aviso": {
+          "description": "El id del aviso, como `RUSTSEC-2024-0001`, o la regla.",
+          "type": "string"
+        },
+        "fuente": {
+          "description": "Nombre de la sonda, como `cargo-audit`.",
+          "type": "string"
+        },
+        "objeto": {
+          "description": "El crate y su versión, o el archivo.",
+          "type": "string"
+        },
+        "severidad": {
+          "description": "Severidad del hallazgo original, de 1 a 3.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "fuente",
+        "aviso",
+        "objeto",
+        "severidad"
+      ]
+    },
     "Confianza": {
       "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del\n`Veredicto`, salvo `evidencia_visible`, que también lee la tarea.",
       "type": "object",
@@ -2342,6 +2561,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "format": "uint32",
           "minimum": 0
         },
+        "previo": {
+          "description": "Estaba en el estado inicial de la tarea. Un veredicto viejo lee false.",
+          "type": "boolean",
+          "default": false
+        },
         "severidad": {
           "type": "integer",
           "format": "uint8",
@@ -2393,6 +2617,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "`riesgos` y `proximos_pasos` tienen como máximo 5 entradas.",
       "type": "object",
       "properties": {
+        "avisos_previos": {
+          "description": "Avisos de Seguridad que ya estaban en el estado inicial. No bloquean. Un informe viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AvisoPrevio"
+          }
+        },
         "bloqueantes": {
           "description": "Ids de hallazgos.",
           "type": "array",
@@ -2804,6 +3036,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           ],
           "default": null
         },
+        "no_compila": {
+          "description": "El producto no compila: la suite del contrato salió con 101 bajo nextest. Un veredicto viejo lee false.",
+          "type": "boolean",
+          "default": false
+        },
         "oculto": {
           "$ref": "#/$defs/Conteo"
         },
@@ -2939,6 +3176,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "format": "uint32",
       "minimum": 0
     },
+    "previo": {
+      "description": "Estaba en el estado inicial de la tarea. Un veredicto viejo lee false.",
+      "type": "boolean",
+      "default": false
+    },
     "severidad": {
       "type": "integer",
       "format": "uint8",
@@ -3020,6 +3262,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
   "description": "`riesgos` y `proximos_pasos` tienen como máximo 5 entradas.",
   "type": "object",
   "properties": {
+    "avisos_previos": {
+      "description": "Avisos de Seguridad que ya estaban en el estado inicial. No bloquean. Un informe viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AvisoPrevio"
+      }
+    },
     "bloqueantes": {
       "description": "Ids de hallazgos.",
       "type": "array",
@@ -3109,6 +3359,37 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "prioridad",
         "texto",
         "refs"
+      ]
+    },
+    "AvisoPrevio": {
+      "description": "Aviso de Seguridad que ya estaba en el estado inicial de la tarea. No bloquea.",
+      "type": "object",
+      "properties": {
+        "aviso": {
+          "description": "El id del aviso, como `RUSTSEC-2024-0001`, o la regla.",
+          "type": "string"
+        },
+        "fuente": {
+          "description": "Nombre de la sonda, como `cargo-audit`.",
+          "type": "string"
+        },
+        "objeto": {
+          "description": "El crate y su versión, o el archivo.",
+          "type": "string"
+        },
+        "severidad": {
+          "description": "Severidad del hallazgo original, de 1 a 3.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "fuente",
+        "aviso",
+        "objeto",
+        "severidad"
       ]
     },
     "Confianza": {
@@ -5351,6 +5632,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "default": null
     },
+    "no_compila": {
+      "description": "El producto no compila: la suite del contrato salió con 101 bajo nextest. Un veredicto viejo lee false.",
+      "type": "boolean",
+      "default": false
+    },
     "oculto": {
       "$ref": "#/$defs/Conteo"
     },
@@ -5464,6 +5750,37 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "prioridad",
         "texto",
         "refs"
+      ]
+    },
+    "AvisoPrevio": {
+      "description": "Aviso de Seguridad que ya estaba en el estado inicial de la tarea. No bloquea.",
+      "type": "object",
+      "properties": {
+        "aviso": {
+          "description": "El id del aviso, como `RUSTSEC-2024-0001`, o la regla.",
+          "type": "string"
+        },
+        "fuente": {
+          "description": "Nombre de la sonda, como `cargo-audit`.",
+          "type": "string"
+        },
+        "objeto": {
+          "description": "El crate y su versión, o el archivo.",
+          "type": "string"
+        },
+        "severidad": {
+          "description": "Severidad del hallazgo original, de 1 a 3.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "fuente",
+        "aviso",
+        "objeto",
+        "severidad"
       ]
     },
     "Confianza": {
@@ -5873,6 +6190,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "format": "uint32",
           "minimum": 0
         },
+        "previo": {
+          "description": "Estaba en el estado inicial de la tarea. Un veredicto viejo lee false.",
+          "type": "boolean",
+          "default": false
+        },
         "severidad": {
           "type": "integer",
           "format": "uint8",
@@ -5924,6 +6246,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "`riesgos` y `proximos_pasos` tienen como máximo 5 entradas.",
       "type": "object",
       "properties": {
+        "avisos_previos": {
+          "description": "Avisos de Seguridad que ya estaban en el estado inicial. No bloquean. Un informe viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AvisoPrevio"
+          }
+        },
         "bloqueantes": {
           "description": "Ids de hallazgos.",
           "type": "array",

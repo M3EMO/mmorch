@@ -43,7 +43,7 @@ impl MemoSondas {
     /// Mutantes muertos de la muestra de la corrida de mutación de `tarea`, si está grabada.
     /// La corrida lleva su muestra en el comando, así que la salida se busca por predicado.
     pub fn mutantes_muertos(&self, tarea: &Tarea) -> Vec<MutanteMuerto> {
-        let Some(salida) = self.salida_de_mutacion() else {
+        let Some((cmd, salida)) = self.salida_de_mutacion() else {
             return Vec::new();
         };
         let Some(json) = salida.archivos.get(mutacion::ARCHIVO_OUTCOMES) else {
@@ -53,17 +53,20 @@ impl MemoSondas {
             .archivos
             .get(mutacion::ARCHIVO_TESTS_FALLIDOS)
             .map_or("", String::as_str);
-        mutacion::mutantes_muertos(json, mutacion::mutantes_max(tarea), tests)
+        // La muestra pedida es la del `-F` del comando. Sin `-F` la corrida pidió todo el reporte.
+        let pedidos = mutacion::pedidos_del_comando(&cmd)
+            .unwrap_or_else(|| mutacion::nombres_del_reporte(json));
+        mutacion::mutantes_muertos(json, &pedidos, mutacion::mutantes_max(tarea), tests)
     }
 
-    /// Salida grabada de la primera corrida de mutación, si hay una.
-    fn salida_de_mutacion(&self) -> Option<SalidaHerramienta> {
+    /// Comando y salida grabados de la primera corrida de mutación, si hay una.
+    fn salida_de_mutacion(&self) -> Option<(String, SalidaHerramienta)> {
         self.salidas
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .find(|(cmd, _)| mutacion::es_comando_de_mutacion(cmd))
-            .map(|(_, salida)| salida.clone())
+            .map(|(cmd, salida)| (cmd.clone(), salida.clone()))
     }
 }
 
@@ -94,6 +97,10 @@ impl EjecutorHerramienta for EjecutorGrabador<'_> {
 
     fn tiene_rustsec(&self) -> bool {
         self.real.tiene_rustsec()
+    }
+
+    fn huella_rustsec(&self) -> Option<String> {
+        self.real.huella_rustsec()
     }
 }
 
@@ -149,6 +156,10 @@ impl EjecutorHerramienta for EjecutorReusador<'_> {
 
     fn tiene_rustsec(&self) -> bool {
         self.real.tiene_rustsec()
+    }
+
+    fn huella_rustsec(&self) -> Option<String> {
+        self.real.huella_rustsec()
     }
 }
 
@@ -287,6 +298,25 @@ mod tests {
         memo.anotar(&crate::oracle::mutacion::construir_comando(&tarea), &salida);
         let muertos = memo.mutantes_muertos(&tarea);
         assert_eq!(muertos[0].tests, vec!["ok::uno", "ok::dos"]);
+    }
+
+    #[test]
+    fn memo_mutantes_muertos_pide_solo_la_muestra_del_filtro_grabado() {
+        // El reporte trae dos muertos, pero la corrida grabada pidió solo `uno` con su `-F`.
+        const OUTCOMES: &str = r#"{"total_mutants":2,"outcomes":[
+            {"scenario":"Baseline","summary":"Success"},
+            {"scenario":{"Mutant":{"name":"uno","file":"src/a.rs","span":{"start":{"line":3}}}},"summary":"CaughtMutant"},
+            {"scenario":{"Mutant":{"name":"dos","file":"src/a.rs","span":{"start":{"line":7}}}},"summary":"CaughtMutant"}]}"#;
+        let tarea = tarea_rust();
+        let memo = MemoSondas::nuevo();
+        let cmd = "cargo mutants --no-shuffle --jobs 1 --output /salida/mutants -F '^(?:uno)$' -- --offline";
+        memo.anotar(cmd, &con_outcomes(OUTCOMES));
+        let nombres: Vec<String> = memo
+            .mutantes_muertos(&tarea)
+            .into_iter()
+            .map(|m| m.nombre)
+            .collect();
+        assert_eq!(nombres, vec!["uno".to_string()]);
     }
 
     #[test]

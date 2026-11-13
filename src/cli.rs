@@ -275,6 +275,15 @@ pub enum OraculoAccion {
         #[arg(long)]
         solo_medir: Option<PathBuf>,
     },
+    /// Propone las capas del repo. Con `--tarea`, verifica las capas de la tarea y sale con 1 si no pasan.
+    Capas {
+        /// Repo a leer.
+        #[arg(long)]
+        repo: PathBuf,
+        /// Tarea cuyas capas se verifican. Sin ella, se propone una línea `capas = [...]`.
+        #[arg(long)]
+        tarea: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -386,6 +395,7 @@ impl Comando {
                 OraculoAccion::Calibrar { .. } => "oraculo calibrar",
                 OraculoAccion::Validar { .. } => "oraculo validar",
                 OraculoAccion::Auditar { .. } => "oraculo auditar",
+                OraculoAccion::Capas { .. } => "oraculo capas",
             },
             Comando::Observa { accion } => match accion {
                 ObservaAccion::Claude { .. } => "observa claude",
@@ -559,5 +569,38 @@ mod tests {
             .collect();
         let error = Cli::try_parse_from(args).expect_err("falta --gitleaks");
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn oraculo_capas_parsea_solo_repo_y_propone() {
+        let cli = Cli::try_parse_from(["r00t", "oraculo", "capas", "--repo", "/repo"])
+            .expect("oraculo capas con --repo parsea");
+        assert_eq!(cli.comando.ruta(), "oraculo capas");
+        match cli.comando {
+            Comando::Oraculo {
+                accion: OraculoAccion::Capas { repo, tarea },
+            } => {
+                assert_eq!(repo, PathBuf::from("/repo"));
+                assert_eq!(tarea, None);
+            }
+            otro => panic!("se esperaba oraculo capas, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn oraculo_capas_con_tarea_parsea_el_nombre() {
+        let cli = Cli::try_parse_from([
+            "r00t", "oraculo", "capas", "--repo", "/repo", "--tarea", "mi-tarea",
+        ])
+        .expect("oraculo capas con --tarea parsea");
+        match cli.comando {
+            Comando::Oraculo {
+                accion: OraculoAccion::Capas { repo, tarea },
+            } => {
+                assert_eq!(repo, PathBuf::from("/repo"));
+                assert_eq!(tarea.as_deref(), Some("mi-tarea"));
+            }
+            otro => panic!("se esperaba oraculo capas, llegó {otro:?}"),
+        }
     }
 }

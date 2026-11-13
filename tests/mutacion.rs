@@ -36,6 +36,18 @@ fn asegurar_imagen(imagen: &str) {
     assert!(existe, "falta la imagen {imagen} en podman");
 }
 
+/// Nombres de los mutantes del reporte, en orden (`outcomes[].scenario.Mutant.name`).
+fn nombres_del_reporte(json: &str) -> Vec<String> {
+    let valor: serde_json::Value = serde_json::from_str(json).expect("reporte JSON");
+    valor["outcomes"]
+        .as_array()
+        .expect("lista outcomes")
+        .iter()
+        .filter_map(|o| o["scenario"]["Mutant"]["name"].as_str())
+        .map(String::from)
+        .collect()
+}
+
 /// Tarea de Rust mínima, con su `tarea.toml` en una carpeta temporal.
 fn tarea_rust(dir: &Path) -> Tarea {
     fs::write(
@@ -49,8 +61,20 @@ fn tarea_rust(dir: &Path) -> Tarea {
 
 #[test]
 fn mutacion_fixture_sin_asserts_puntaje_menor_que_con_asserts() {
-    let con = parsear_outcomes(&fixture("outcomes-con-asserts.json"), 60, &[]).expect("parsea");
-    let sin = parsear_outcomes(&fixture("outcomes-sin-asserts.json"), 60, &[]).expect("parsea");
+    let con = parsear_outcomes(
+        &fixture("outcomes-con-asserts.json"),
+        60,
+        &[],
+        &nombres_del_reporte(&fixture("outcomes-con-asserts.json")),
+    )
+    .expect("parsea");
+    let sin = parsear_outcomes(
+        &fixture("outcomes-sin-asserts.json"),
+        60,
+        &[],
+        &nombres_del_reporte(&fixture("outcomes-sin-asserts.json")),
+    )
+    .expect("parsea");
     let valor_con = con.sonda.valor.expect("valor con asserts");
     let valor_sin = sin.sonda.valor.expect("valor sin asserts");
     assert_eq!(valor_con, 1.0);
@@ -269,7 +293,8 @@ fn mutacion_real_muestra_igual_que_el_comando_completo_viejo() {
     );
     let salida = ej.ejecutar(&viejo).expect("corre el comando viejo");
     let json = salida.archivos.get("outcomes.json").expect("reporte viejo");
-    let antes = parsear_outcomes(json, 60, &[]).expect("parsea el reporte viejo");
+    let antes = parsear_outcomes(json, 60, &[], &nombres_del_reporte(json))
+        .expect("parsea el reporte viejo");
     let despues = sonda_mutacion(&ej, &tarea);
     assert!(despues.muestra > 0, "{:?}", despues.sonda);
     assert_eq!(despues.sonda.valor, antes.sonda.valor);

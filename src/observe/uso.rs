@@ -104,27 +104,6 @@ pub fn gasto_api_desde_en(ruta: &Path, inicio: f64) -> Result<f64, ErrorObserve>
     Ok(gasto_api_desde(&eventos, inicio))
 }
 
-/// Casos (`extra.caso`) de las reservas de API abiertas con `ts >= inicio`. Una reserva sin `caso` no entra.
-pub fn casos_con_reserva_abierta(eventos: &[Evento], inicio: f64) -> HashSet<String> {
-    let todos: Vec<&Evento> = eventos.iter().collect();
-    let cerradas = reservas_cerradas(&todos);
-    eventos
-        .iter()
-        .filter(|ev| ev.tipo == TipoEvento::Reserva && ev.via == Some(Via::Api) && ev.ts >= inicio)
-        .filter(|ev| reserva_abierta(ev, &cerradas))
-        .filter_map(|ev| ev.extra.get("caso")?.as_str().map(str::to_string))
-        .collect()
-}
-
-/// `casos_con_reserva_abierta` sobre el archivo indicado y sus rotados. Un archivo inexistente da un conjunto vacío.
-pub fn casos_con_reserva_abierta_en(
-    ruta: &Path,
-    inicio: f64,
-) -> Result<HashSet<String>, ErrorObserve> {
-    let eventos = leer_eventos(ruta)?;
-    Ok(casos_con_reserva_abierta(&eventos, inicio))
-}
-
 /// Ids de las reservas que algún evento cierra: los que listan en `extra.reservas`.
 fn reservas_cerradas<'a>(eventos: &[&'a Evento]) -> HashSet<&'a str> {
     eventos
@@ -879,51 +858,6 @@ mod tests {
         ];
         let gasto = gasto_api_desde(&eventos, 10.0);
         assert!((gasto - 0.9).abs() < 1e-9, "{gasto}");
-    }
-
-    /// Reserva de API de `cost_usd` 0,1 con el id `id`. Lleva `extra.caso` si `caso` es `Some`.
-    fn reserva_de_caso(id: &str, caso: Option<&str>, ts: f64) -> Evento {
-        let mut extra = serde_json::Map::from_iter([("reserva".to_string(), json!(id))]);
-        if let Some(caso) = caso {
-            extra.insert("caso".to_string(), json!(caso));
-        }
-        Evento {
-            ts,
-            via: Some(Via::Api),
-            cost_usd: 0.1,
-            tipo: TipoEvento::Reserva,
-            corrida: "c1".into(),
-            extra,
-            ..Evento::default()
-        }
-    }
-
-    #[test]
-    fn uso_casos_con_reserva_abierta_devuelve_el_caso_de_la_reserva_abierta() {
-        let eventos = [reserva_de_caso("r1", Some("caso-a"), AHORA - HORA)];
-        let casos = casos_con_reserva_abierta(&eventos, 0.0);
-        assert_eq!(casos, HashSet::from(["caso-a".to_string()]));
-    }
-
-    #[test]
-    fn uso_casos_con_reserva_cerrada_por_su_llamada_no_sale() {
-        let eventos = [
-            reserva_de_caso("r1", Some("caso-a"), AHORA - 2.0 * HORA),
-            cierre(AHORA - HORA, 0.4, &["r1"]),
-        ];
-        assert!(casos_con_reserva_abierta(&eventos, 0.0).is_empty());
-    }
-
-    #[test]
-    fn uso_casos_con_reserva_sin_caso_se_ignora() {
-        let eventos = [reserva_de_caso("r1", None, AHORA - HORA)];
-        assert!(casos_con_reserva_abierta(&eventos, 0.0).is_empty());
-    }
-
-    #[test]
-    fn uso_casos_con_reserva_de_antes_del_inicio_no_sale() {
-        let eventos = [reserva_de_caso("r1", Some("caso-a"), AHORA - HORA)];
-        assert!(casos_con_reserva_abierta(&eventos, AHORA).is_empty());
     }
 }
 

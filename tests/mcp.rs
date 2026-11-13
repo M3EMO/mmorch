@@ -365,7 +365,8 @@ fn mcp_registrar_escribe_el_evento_y_el_resumen_lo_cuenta() {
         &["--json", "observa", "resumen", "--corrida", "c9"],
     );
     let r: Value = serde_json::from_slice(&resumen.stdout).expect("resumen JSON");
-    assert_eq!(r["intervenciones"], 1);
+    // Plan y humano vienen por MCP (origen "mcp"): ninguno cuenta como de una persona.
+    assert_eq!(r["intervenciones"], 0);
 }
 
 #[test]

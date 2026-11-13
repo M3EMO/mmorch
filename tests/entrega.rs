@@ -9,22 +9,15 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use root::oracle::ErrorOraculo;
-use root::oracle::configs::sondas_configs;
 use root::oracle::descarga::{self, Preparacion, Problema, traer_imagenes_base};
 use root::oracle::entrega::{
     LugarEscenario, ResultadoDockerfile, construir_dockerfile, entregar, sonda_entrega,
 };
-use root::oracle::junit::ResultadoTest;
 use root::oracle::perfiles::deduplicar_hallazgos;
-use root::oracle::perfiles::herramientas::{
-    EjecutorContenedor, EjecutorHerramienta, SalidaHerramienta,
-};
-use root::oracle::requisitos::{ResultadosTests, evaluar_requisitos};
 use root::oracle::tarea::Tarea;
-use root::tipos::{Cumplimiento, Dimension, Fuente, Hallazgo};
+use root::tipos::Dimension;
 
 const ALPINE: &str = "docker.io/library/alpine:3.20";
-const LIMITE: Duration = Duration::from_secs(120);
 
 /// Falla con un mensaje claro si la imagen no está. Nunca la baja: el test no tiene red.
 fn asegurar_imagen(imagen: &str) {
@@ -36,18 +29,6 @@ fn asegurar_imagen(imagen: &str) {
     assert!(existe, "falta la imagen {imagen} en podman");
 }
 
-fn ejecutor(repo: &Path) -> EjecutorContenedor {
-    EjecutorContenedor {
-        imagen: ALPINE.into(),
-        repo: repo.into(),
-        oraculo: None,
-        rustsec: None,
-        cache: None,
-        timeout: LIMITE,
-        home: base_9d2(),
-    }
-}
-
 /// Tarea de lenguaje `shell`, con `extra` al final del `tarea.toml`.
 fn tarea_con(extra: &str) -> Tarea {
     // La carpeta sobrevive al test: `entregar` exige que `tarea.dir` exista (Tarea 7i).
@@ -57,7 +38,7 @@ fn tarea_con(extra: &str) -> Tarea {
         .expect("temp dir")
         .keep();
     let texto = format!(
-        "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"i\"\nspec = \"s\"\n\
+        "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"docker.io/library/alpine:3.20\"\nspec = \"s\"\n\
          [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n{extra}"
     );
     fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
@@ -94,7 +75,7 @@ fn entrega_podman_escenarios_ok_y_falla_con_el_producto_vivo() {
     let repo = repo_con_run("sleep 60\n");
     let tarea = tarea_con(&entrega_con("echo instalado", "sh run.sh"));
     let inicio = Instant::now();
-    let r = sonda_entrega(&ejecutor(repo.path()), repo.path(), &tarea);
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
     let tardo = inicio.elapsed();
     let esperado: BTreeMap<String, bool> =
         [("ok".to_string(), true), ("falla".to_string(), false)].into();
@@ -114,7 +95,7 @@ fn entrega_podman_correr_que_termina_enseguida_da_no_arranca() {
     asegurar_imagen(ALPINE);
     let repo = repo_con_run("");
     let tarea = tarea_con(&entrega_con("echo instalado", "echo adios; exit 1"));
-    let r = sonda_entrega(&ejecutor(repo.path()), repo.path(), &tarea);
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
     let h = r
         .sonda
         .hallazgos
@@ -130,7 +111,7 @@ fn entrega_podman_instalar_que_falla_da_no_instala() {
     asegurar_imagen(ALPINE);
     let repo = repo_con_run("");
     let tarea = tarea_con(&entrega_con("echo roto; exit 2", "sleep 60"));
-    let r = sonda_entrega(&ejecutor(repo.path()), repo.path(), &tarea);
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
     let h = r
         .sonda
         .hallazgos
@@ -150,89 +131,29 @@ fn entrega_podman_sin_entrega_corre_escenarios_sobre_repo() {
         "[[escenario]]\nid = \"ve\"\ncmd = \"test -f run.sh\"\n\n\
          [[escenario]]\nid = \"no\"\ncmd = \"test -f nope\"\n",
     );
-    let r = sonda_entrega(&ejecutor(repo.path()), repo.path(), &tarea);
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
     assert_eq!(r.escenarios.get("ve"), Some(&true));
     assert_eq!(r.escenarios.get("no"), Some(&false));
     assert!(r.sonda.valor.is_some());
 }
 
-/// Ejecutor de mentira con los `.rc` dados. Sirve para la prueba pura de completitud.
-struct Falso(SalidaHerramienta);
-
-impl EjecutorHerramienta for Falso {
-    fn ejecutar(&self, _cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
-        Ok(self.0.clone())
-    }
-}
-
-/// Salida de un script que arrancó: lleva el marcador de arranque (M20) además de `archivos`.
-fn salida_con(archivos: &[(&str, &str)]) -> SalidaHerramienta {
-    let mut s = SalidaHerramienta::default();
-    s.archivos
-        .insert("entrega-arranque.ok".into(), "ok\n".into());
-    for (nombre, texto) in archivos {
-        s.archivos.insert((*nombre).into(), (*texto).into());
-    }
-    s
-}
-
 #[test]
-fn entrega_escenario_fallido_deja_requisito_en_parcial() {
-    let repo = tempfile::tempdir().expect("temp dir");
-    fs::write(repo.path().join("README.md"), "x").expect("escribe");
-    fs::write(repo.path().join("Dockerfile"), "FROM x\nUSER app\n").expect("escribe");
-    let tarea = tarea_con(
-        "[entrega]\ninstalar = \"make\"\ncorrer = \"./run\"\n\
-         archivos = [\"README.md\", \"Dockerfile\"]\n\n\
-         [[escenario]]\nid = \"set-get\"\ncmd = \"false\"\n\n\
-         [[requisito]]\nid = \"R1\"\ntitulo = \"Guardar y leer\"\npeso = 3\n\
-         pruebas = [\"tests/entrega.rs::test_a\"]\nescenarios = [\"set-get\"]\n",
-    );
-    let ej = Falso(salida_con(&[
-        ("entrega-instalar.rc", "0\n"),
-        ("entrega-correr.rc", "0\n"),
-        ("entrega-escenario-set-get.rc", "1\n"),
-    ]));
-    let r = sonda_entrega(&ej, repo.path(), &tarea);
-    assert_eq!(r.sonda.hallazgos.len(), 1, "solo el escenario falla");
-
-    let mut tests = BTreeMap::new();
-    tests.insert("tests/entrega.rs::test_a".to_string(), ResultadoTest::Pasa);
-    let resultados = ResultadosTests {
-        tests,
-        inestables: Default::default(),
-        tasas: Default::default(),
-    };
-    let estados = evaluar_requisitos(
-        &tarea.requisito,
-        &resultados,
-        &r.escenarios,
-        &[],
-        &[],
-        &BTreeMap::new(),
-    );
-    assert_eq!(estados[0].nivel, Some(2));
-    assert_eq!(estados[0].cumplimiento, Cumplimiento::Parcial);
-    assert_eq!(r.sonda.hallazgos[0].dimension, Dimension::Entrega);
-    assert_eq!(r.sonda.hallazgos[0].fuente, Fuente::Sonda("entrega".into()));
-}
-
-#[test]
-fn entrega_podman_log_de_correr_queda_en_la_cola_de_40_lineas() {
+fn entrega_podman_correr_que_muere_tras_mucha_salida_cita_su_ultima_linea() {
     root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_con_run("");
-    let tarea = tarea_con(&entrega_con("echo instalado", "seq 1 20000; sleep 60"));
-    let ej = ejecutor(repo.path());
-    let salida = ej
-        .ejecutar(&root::oracle::entrega::construir_script(&tarea))
-        .expect("corre");
-    let log = salida
-        .archivos
-        .get("entrega-correr.log")
-        .expect("hay log de correr");
-    assert_eq!(log.lines().count(), 40, "solo la cola llega a /salida");
-    assert!(log.contains("20000"));
+    let tarea = tarea_con(&entrega_con("echo instalado", "seq 1 20000; exit 1"));
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
+    let h = r
+        .sonda
+        .hallazgos
+        .iter()
+        .find(|h| h.detalle.contains("no arranca"))
+        .expect("hallazgo de no arranca");
+    assert_eq!(
+        h.cita, "20000",
+        "la cola del hijo llega con su última línea"
+    );
 }
 
 #[test]
@@ -243,56 +164,83 @@ fn entrega_podman_escenario_fallido_cita_su_ultima_linea() {
     let tarea = tarea_con(
         "[[escenario]]\nid = \"login\"\ncmd = \"echo paso 1; echo credencial rechazada; exit 1\"\n",
     );
-    let r = sonda_entrega(&ejecutor(repo.path()), repo.path(), &tarea);
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
     assert_eq!(r.escenarios.get("login"), Some(&false));
     assert_eq!(r.sonda.hallazgos[0].cita, "credencial rechazada");
 }
 
-/// Ejecutor sin hadolint: `command -v` falla y la entrega sale bien.
-struct SinHadolint;
-
-impl EjecutorHerramienta for SinHadolint {
-    fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
-        if cmd.starts_with("command -v") {
-            return Ok(SalidaHerramienta {
-                codigo: 1,
-                ..Default::default()
-            });
-        }
-        Ok(salida_con(&[
-            ("entrega-instalar.rc", "0\n"),
-            ("entrega-correr.rc", "0\n"),
-        ]))
-    }
+/// Un proceso de fondo que escribe `0` en los `.rc` de `/salida` no hace pasar un escenario que falla.
+/// Su salida va a `/dev/null`: así no retiene el pipe de `podman exec` que espera Root.
+#[test]
+fn entrega_podman_proceso_de_fondo_que_escribe_rc_no_pasa_un_escenario_que_falla() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let repo = repo_con_run("");
+    let fondo = "(while true; do for f in /salida/entrega-*.rc; do echo 0 > $f; done; \
+                  sleep 0.1; done) >/dev/null 2>&1 & echo instalado";
+    let tarea = tarea_con(&entrega_con(fondo, "sleep 60"));
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
+    assert_eq!(r.escenarios.get("falla"), Some(&false), "{r:?}");
+    assert_eq!(r.escenarios.get("ok"), Some(&true), "{r:?}");
 }
 
+/// Un `instalar` que quiere reemplazar `/bin/sh` falla por permisos: el contenedor corre como el usuario del
+/// host (`--userns=keep-id`), no como root. Sin el cambio, el `cp` escribe y el script da 0.
 #[test]
-fn entrega_dockerfile_sin_user_da_un_solo_hallazgo_entre_configs_y_entrega() {
-    let repo = tempfile::tempdir().expect("temp dir");
-    fs::write(repo.path().join("README.md"), "# x\n").expect("escribe README");
-    fs::write(
-        repo.path().join("Dockerfile"),
-        "FROM debian:bookworm-slim\n",
-    )
-    .expect("escribe Dockerfile");
-    let tarea = tarea_con(
-        "[entrega]\ninstalar = \"make\"\ncorrer = \"./run\"\n\
-         archivos = [\"README.md\", \"Dockerfile\"]\n",
+fn entrega_podman_instalar_que_reemplaza_sh_falla_por_permisos() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let repo = repo_con_run("");
+    let tarea = tarea_con(&entrega_con("cp /bin/true /bin/sh", "sleep 60"));
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
+    assert!(
+        r.sonda
+            .hallazgos
+            .iter()
+            .any(|h| h.detalle.contains("no instala")),
+        "el cp a /bin/sh debe fallar: {:?}",
+        r.sonda.hallazgos
     );
-    let ej = SinHadolint;
-    let configs: Vec<Hallazgo> = sondas_configs(repo.path(), &ej, &tarea)
-        .into_iter()
-        .flat_map(|r| r.hallazgos)
-        .collect();
-    let entrega = sonda_entrega(&ej, repo.path(), &tarea).sonda.hallazgos;
-    let todos: Vec<Hallazgo> = configs.into_iter().chain(entrega).collect();
-    // La unión ya trae el hallazgo una sola vez: solo la sonda de entrega emite la regla de USER.
-    assert_eq!(todos.len(), 1, "{todos:?}");
-    // Red de seguridad: la sonda dueña es la que nombra la tabla de rúbricas.
-    let hallazgos = deduplicar_hallazgos(todos);
-    assert_eq!(hallazgos.len(), 1, "{hallazgos:?}");
-    assert_eq!(hallazgos[0].dimension, Dimension::Entrega);
-    assert!(hallazgos[0].detalle.contains("USER"));
+    assert!(r.escenarios.values().all(|v| !v), "{:?}", r.escenarios);
+}
+
+/// Un `instalar` que intenta reemplazar `/bin/sh` y sale con 0 no hace pasar un escenario que debe fallar.
+#[test]
+fn entrega_podman_instalar_que_reemplaza_sh_no_pasa_un_escenario_que_falla() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let repo = repo_con_run("sleep 60\n");
+    let tarea = tarea_con(&entrega_con(
+        "cp /bin/true /bin/sh 2>/dev/null; echo instalado",
+        "sh run.sh",
+    ));
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
+    assert_eq!(r.escenarios.get("ok"), Some(&true), "{:?}", r.escenarios);
+    assert_eq!(
+        r.escenarios.get("falla"),
+        Some(&false),
+        "{:?}",
+        r.escenarios
+    );
+}
+
+/// Un `sh` falso en `/usr/local/bin`, en el PATH de la imagen, no tapa el `sh` de afuera de `podman exec`.
+#[test]
+fn entrega_podman_sh_falso_en_usr_local_bin_no_pasa_un_escenario_que_falla() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let repo = repo_con_run("sleep 60\n");
+    let tarea = tarea_con(&entrega_con(
+        "cp /bin/true /usr/local/bin/sh 2>/dev/null; echo instalado",
+        "sh run.sh",
+    ));
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
+    assert_eq!(
+        r.escenarios.get("falla"),
+        Some(&false),
+        "{:?}",
+        r.escenarios
+    );
 }
 
 // ---- Tarea 9d2: construir el Dockerfile sin red, y el paso con red (solo podman pull) ----
@@ -403,7 +351,7 @@ fn entrega_build_sin_user_corre_como_root_y_la_regla_no_se_duplica() {
     assert!(r.construida, "{r:?}");
     assert_eq!(r.corre_sin_root, Some(false), "{r:?}");
     // La regla de root la emite la sonda estática. La construcción no la repite.
-    let estatica = sonda_entrega(&ejecutor(repo.path()), repo.path(), &tarea)
+    let estatica = sonda_entrega(repo.path(), &tarea, &base_9d2())
         .sonda
         .hallazgos;
     assert_eq!(estatica.len(), 1, "{estatica:?}");
@@ -415,16 +363,10 @@ fn entrega_build_sin_user_corre_como_root_y_la_regla_no_se_duplica() {
     );
 }
 
-/// Un `RUN` que pide red se repite con red (Tarea 9d3). La laptop puede tener red o no: los dos
-/// desenlaces válidos son construir con red (hallazgo de severidad 1) o quedar pendiente con su línea.
-fn afirma_repeticion_con_red(r: &ResultadoDockerfile, linea: u32, pista: &str) {
-    assert!(
-        !r.hallazgos
-            .iter()
-            .any(|h| h.detalle.contains("la imagen no construye")),
-        "{:?}",
-        r.hallazgos
-    );
+/// Un `RUN` que falla sin red se repite con red (Tarea 9d3). El host decide el desenlace válido:
+/// construir con red (hallazgo de severidad 1), un `RUN` que no construye en su línea (la red del
+/// host anda), o pendiente con el motivo de la red (el host no arma la red de podman).
+fn afirma_repeticion_con_red(r: &ResultadoDockerfile, linea: u32) {
     if r.con_red {
         assert!(r.construida, "{r:?}");
         assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
@@ -435,14 +377,24 @@ fn afirma_repeticion_con_red(r: &ResultadoDockerfile, linea: u32, pista: &str) {
             .collect();
         assert_eq!(de_red.len(), 1, "{:?}", r.hallazgos);
         assert_eq!((de_red[0].severidad, de_red[0].linea), (1, linea));
+    } else if r.pendientes.is_empty() {
+        assert!(!r.construida, "{r:?}");
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        let h = &r.hallazgos[0];
+        assert_eq!((h.severidad, h.linea), (3, linea), "{h:?}");
+        assert!(
+            h.detalle
+                .contains(&format!("la imagen no construye: línea {linea}")),
+            "{}",
+            h.detalle
+        );
     } else {
         assert!(!r.construida, "{r:?}");
         assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
         assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-        let motivo = &r.pendientes[0].motivo;
-        assert!(
-            motivo.contains(&format!("línea {linea}")) && motivo.contains(pista),
-            "{motivo}"
+        assert_eq!(
+            r.pendientes[0].motivo,
+            "la red no se pudo configurar en este host"
         );
         assert_eq!(r.corre_sin_root, None);
     }
@@ -456,15 +408,15 @@ fn entrega_build_run_apk_sin_red_se_repite_con_red_o_queda_pendiente() {
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}RUN apk add --no-cache curl\n"));
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    afirma_repeticion_con_red(&r, 2, "apk");
+    afirma_repeticion_con_red(&r, 2);
     assert!(
         imagenes_temporales().is_empty(),
         "queda una imagen temporal"
     );
 }
 
-/// Un `RUN` de red que falla en la 2ª etapa queda pendiente en su línea. La 1ª etapa tiene pasos
-/// previos (`WORKDIR`, `RUN`) que antes se mapeaban por índice al paso 3/3 y daban un hallazgo.
+/// Un `RUN` de red que falla en la 2ª etapa queda en su línea: rojo, o pendiente si el host no tiene
+/// red. La 1ª etapa tiene pasos previos (`WORKDIR`, `RUN`) que antes se mapeaban por índice al paso 3/3 y daban un hallazgo.
 #[test]
 fn entrega_build_run_de_red_en_segunda_etapa_queda_pendiente_en_su_linea() {
     root::saltar_sin_podman!();
@@ -476,14 +428,7 @@ fn entrega_build_run_de_red_en_segunda_etapa_queda_pendiente_en_su_linea() {
     );
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
-    assert!(!r.construida, "{r:?}");
-    assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-    let motivo = &r.pendientes[0].motivo;
-    assert!(
-        motivo.contains("línea 6") && motivo.contains("wget"),
-        "{motivo}"
-    );
+    afirma_repeticion_con_red(&r, 6);
     assert!(
         imagenes_temporales().is_empty(),
         "queda una imagen temporal"
@@ -502,14 +447,7 @@ fn entrega_build_arg_antes_del_from_ubica_el_run_de_red() {
     );
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
-    assert!(!r.construida, "{r:?}");
-    assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-    let motivo = &r.pendientes[0].motivo;
-    assert!(
-        motivo.contains("línea 4") && motivo.contains("wget"),
-        "{motivo}"
-    );
+    afirma_repeticion_con_red(&r, 4);
     assert!(
         imagenes_temporales().is_empty(),
         "queda una imagen temporal"
@@ -562,7 +500,7 @@ fn entrega_build_wget_sin_red_se_repite_con_red_o_queda_pendiente() {
     ));
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    afirma_repeticion_con_red(&r, 2, "wget");
+    afirma_repeticion_con_red(&r, 2);
 }
 
 #[test]
@@ -744,14 +682,7 @@ fn entrega_pull_que_falla_da_sin_veredicto_de_infraestructura_y_el_resto_da_vere
     let (_, imagenes) =
         descarga::preparar_con_imagenes(repo.path(), &tarea, home.path(), LIMITE_9D2)
             .expect("prepara");
-    let r = entregar(
-        &ejecutor(repo.path()),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("la evaluación sigue");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("la evaluación sigue");
     assert_eq!(r.sin_veredicto.len(), 1, "{:?}", r.sin_veredicto);
     assert_eq!(
         r.sin_veredicto[0].causa,
@@ -917,14 +848,7 @@ fn entrega_escenario_corre_contra_la_imagen_construida() {
     let home = home_9d2();
     let tarea = tarea_con("[[escenario]]\nid = \"hola\"\ncmd = \"test -f /hola.txt\"\n");
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
-    let r = entregar(
-        &Falso(salida_con(&[])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("entrega");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     assert_eq!(r.escenarios.get("hola"), Some(&true), "{r:?}");
     assert_eq!(
         r.lugar_escenarios.get("hola"),
@@ -949,10 +873,9 @@ fn entrega_escenario_sin_construir_corre_en_contenedor_de_evaluacion() {
     let _serie = serie();
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}RUN false\n"));
     let home = home_9d2();
-    let tarea = tarea_con("[[escenario]]\nid = \"hola\"\ncmd = \"test -f /hola.txt\"\n");
+    let tarea = tarea_con("[[escenario]]\nid = \"hola\"\ncmd = \"true\"\n");
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
-    let ej = Falso(salida_con(&[("entrega-escenario-hola.rc", "0\n")]));
-    let r = entregar(&ej, repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     assert!(
         r.sonda
             .hallazgos
@@ -974,7 +897,7 @@ fn entrega_escenario_sin_construir_corre_en_contenedor_de_evaluacion() {
 }
 
 #[test]
-fn entrega_escenario_con_red_queda_pendiente_y_no_false() {
+fn entrega_escenario_que_declara_red_queda_pendiente_y_no_false() {
     root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
@@ -982,17 +905,11 @@ fn entrega_escenario_con_red_queda_pendiente_y_no_false() {
         "{FROM_ALPINE}COPY hola.txt /hola.txt\nUSER 1000\n"
     ));
     let home = home_9d2();
-    let tarea =
-        tarea_con("[[escenario]]\nid = \"descarga\"\ncmd = \"wget -q http://example.com -O /x\"\n");
+    let tarea = tarea_con(
+        "[[escenario]]\nid = \"descarga\"\ncmd = \"wget -q http://example.com -O /x\"\nred = true\n",
+    );
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
-    let r = entregar(
-        &Falso(salida_con(&[])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("entrega");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     assert_eq!(r.escenarios.get("descarga"), None, "{r:?}");
     assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
     assert!(r.pendientes[0].motivo.contains("red"), "{:?}", r.pendientes);
@@ -1012,7 +929,7 @@ fn entrega_escenario_con_red_queda_pendiente_y_no_false() {
 /// Tarea cuyo `tarea.toml` vive en `dir`, que el test conserva vivo.
 fn tarea_en(dir: &Path, extra: &str) -> Tarea {
     let texto = format!(
-        "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"i\"\nspec = \"s\"\n\
+        "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"docker.io/library/alpine:3.20\"\nspec = \"s\"\n\
          [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n{extra}"
     );
     fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
@@ -1042,14 +959,7 @@ fn entrega_escenario_de_oraculo_corre_contra_la_imagen() {
     ));
     let home = home_9d2();
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
-    let r = entregar(
-        &Falso(salida_con(&[])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("entrega");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     assert_eq!(r.escenarios.get("ok"), Some(&true), "{r:?}");
     assert_eq!(
         r.lugar_escenarios.get("ok"),
@@ -1098,14 +1008,7 @@ fn entrega_escenario_sin_timeout_en_la_imagen_no_sale_127() {
     );
     let home = home_9d2();
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
-    let r = entregar(
-        &Falso(salida_con(&[])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("entrega");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     assert_eq!(r.escenarios.get("hola"), Some(&true), "{r:?}");
     assert_eq!(
         r.lugar_escenarios.get("hola"),
@@ -1128,13 +1031,7 @@ fn entrega_escenario_sin_carpeta_de_tarea_da_infraestructura() {
     );
     drop(oraculo);
     let home = home_9d2();
-    let r = entregar(
-        &Falso(salida_con(&[])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &[],
-    );
+    let r = entregar(repo.path(), &tarea, home.path(), &[]);
     assert!(matches!(r, Err(ErrorOraculo::Infra(_))), "{r:?}");
 }
 
@@ -1149,14 +1046,7 @@ fn entrega_escenario_en_linea_sin_carpeta_de_escenarios_no_monta_nada() {
     assert!(!tarea.dir.join("escenarios").exists());
     let home = home_9d2();
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
-    let r = entregar(
-        &Falso(salida_con(&[])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("entrega sin Infra");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega sin Infra");
     assert_eq!(r.escenarios.get("ok"), Some(&true), "{r:?}");
     assert_eq!(
         r.lugar_escenarios.get("ok"),
@@ -1175,13 +1065,7 @@ fn entrega_escenario_que_usa_oraculo_sin_carpeta_da_infraestructura() {
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}USER 1000\n"));
     let tarea = tarea_con("[[escenario]]\nid = \"ok\"\ncmd = \"/oraculo/escenarios/ok.sh\"\n");
     let home = home_9d2();
-    let r = entregar(
-        &Falso(salida_con(&[])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &[],
-    );
+    let r = entregar(repo.path(), &tarea, home.path(), &[]);
     match r {
         Err(ErrorOraculo::Infra(motivo)) => {
             assert!(motivo.contains("carpeta de escenarios"), "{motivo}");
@@ -1216,14 +1100,7 @@ fn entrega_escenario_con_carpeta_monta_solo_escenarios() {
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}USER 1000\n"));
     let home = home_9d2();
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
-    let r = entregar(
-        &Falso(salida_con(&[])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("entrega");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     assert_eq!(r.escenarios.get("ok"), Some(&true), "{r:?}");
 }
 
@@ -1237,7 +1114,7 @@ fn tarea_con_containerfile(containerfile: &str, extra: &str) -> Tarea {
         .expect("temp dir")
         .keep();
     let texto = format!(
-        "containerfile = \"{containerfile}\"\nnombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"i\"\n\
+        "containerfile = \"{containerfile}\"\nnombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"docker.io/library/alpine:3.20\"\n\
          spec = \"s\"\n[contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n{extra}"
     );
     fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
@@ -1273,14 +1150,7 @@ fn entrega_dockerfile_de_la_raiz_gana_y_solo_se_construye_uno() {
         "solo se construye la raíz: {:?}",
         c.hallazgos
     );
-    let r = entregar(
-        &Falso(salida_con(&[("entrega-escenario-hola.rc", "0\n")])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("entrega");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     // El rc del escenario lo pone el ejecutor falso. Lo real: `test -f /hola.txt` corre en la imagen
     // de la raíz, y si falla deja un hallazgo "escenario falló".
     assert_eq!(
@@ -1328,14 +1198,7 @@ fn entrega_containerfile_gana_sobre_el_dockerfile_de_la_raiz() {
     let home = home_9d2();
     let tarea = tarea_con_containerfile("docker/app.Dockerfile", ESCENARIO_MARCA_RAIZ);
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
-    let r = entregar(
-        &Falso(salida_con(&[("entrega-escenario-marca.rc", "0\n")])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("entrega");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     assert!(
         r.sonda
             .hallazgos
@@ -1364,14 +1227,7 @@ fn entrega_containerfile_inexistente_avisa_y_usa_el_criterio_siguiente() {
     let home = home_9d2();
     let tarea = tarea_con_containerfile("no/existe.Dockerfile", ESCENARIO_MARCA_RAIZ);
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
-    let r = entregar(
-        &Falso(salida_con(&[("entrega-escenario-marca.rc", "0\n")])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("entrega");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     assert!(
         r.avisos
             .iter()
@@ -1403,14 +1259,7 @@ fn entrega_varios_dockerfile_sin_eleccion_no_construye_y_avisa() {
     let home = home_9d2();
     let tarea = tarea_con("[[escenario]]\nid = \"hola\"\ncmd = \"true\"\n");
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
-    let r = entregar(
-        &Falso(salida_con(&[("entrega-escenario-hola.rc", "0\n")])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("entrega");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     assert!(
         r.avisos
             .iter()
@@ -1468,16 +1317,9 @@ fn entrega_scratch_escenarios_corren_en_contenedor_de_evaluacion_con_aviso() {
     let _serie = serie();
     let repo = dockerfile_9d2("FROM scratch\nCOPY hola.txt /hola.txt\nUSER 1000\n");
     let home = home_9d2();
-    let tarea = tarea_con("[[escenario]]\nid = \"hola\"\ncmd = \"test -f /hola.txt\"\n");
+    let tarea = tarea_con("[[escenario]]\nid = \"hola\"\ncmd = \"true\"\n");
     let imagenes = descarga::traer_imagenes_base(repo.path()).expect("scratch no se baja");
-    let r = entregar(
-        &Falso(salida_con(&[("entrega-escenario-hola.rc", "0\n")])),
-        repo.path(),
-        &tarea,
-        home.path(),
-        &imagenes,
-    )
-    .expect("entrega");
+    let r = entregar(repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
     assert!(
         r.avisos
             .iter()
@@ -1633,4 +1475,20 @@ fn entrega_pide_credenciales_no_da_hallazgo_al_producto() {
         hallazgos.is_empty(),
         "un 401 no cobra al producto: {hallazgos:?}"
     );
+}
+
+/// Un `instalar` que deja un `sh` falso (sale con 0) en los dirs de Root no hace pasar un escenario que
+/// falla. Guarda con alpine y lenguaje `shell`: no hay imagen con Python local, y sin activación el
+/// PATH del sistema ya va primero. El defecto con activación lo prueba el unitario de `entrega.rs`.
+#[test]
+fn entrega_podman_sh_falso_en_el_venv_no_pasa_un_escenario_que_falla() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let repo = repo_con_run("sleep 60\n");
+    let falso = "mkdir -p /tmp/venv-eval/bin /tmp/pydeps/bin; \
+                 for d in /tmp/venv-eval/bin /tmp/pydeps/bin; do \
+                 printf '#!/bin/sh\\nexit 0\\n' > $d/sh; cp $d/sh $d/timeout; chmod +x $d/sh $d/timeout; done";
+    let tarea = tarea_con(&entrega_con(falso, "sh run.sh"));
+    let r = sonda_entrega(repo.path(), &tarea, &base_9d2());
+    assert_eq!(r.escenarios.get("falla"), Some(&false), "{r:?}");
 }

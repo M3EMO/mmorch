@@ -15,6 +15,8 @@ const SONDA_ESTRUCTURA: &str = "estructura-nativa";
 const SONDA_ARQUITECTURA: &str = "arquitectura-nativa";
 /// Texto con que la sonda de arquitectura nombra un ciclo de módulos. El juez lo usa para el tope.
 pub const REGLA_CICLO: &str = "ciclo de módulos";
+/// Inicio del texto de una capa sin módulo en el repo. `capas.rs` lo usa para reconocer esa falta.
+pub(crate) const FALTA_CAPA: &str = "falta la capa";
 
 /// Límites de la sonda de estructura. Por defecto: 500 líneas, 80 por función, 10 de bloque.
 pub struct LimitesEstructura {
@@ -39,7 +41,8 @@ pub(crate) struct Archivo {
     pub(crate) lineas: Vec<String>,
 }
 
-/// Una línea con su número, su texto crudo y su texto sin comentarios ni cadenas.
+/// Una línea con su número, su texto crudo y su texto sin comentarios ni contenido de cadenas.
+/// `limpia` tiene el mismo largo en bytes que la línea cruda sin recortar: sus partes en blanco son espacios.
 pub(crate) struct Linea {
     pub(crate) numero: u32,
     pub(crate) cruda: String,
@@ -143,11 +146,7 @@ pub fn arquitectura_nativa(
     let presentes = modulos_presentes(&archivos);
     let mut hallazgos = capas_sin_modulo(capas, &modulos, &presentes, requisitos);
     let aristas = aristas_de_capas(&archivos, &modulos);
-    // Los ciclos no cuentan las aristas hacia la raíz: usar un ítem de la raíz que declara el módulo es Rust normal.
-    let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (origen, destino) in aristas.keys().filter(|(_, d)| modulos.contains(d)) {
-        adj.entry(origen.clone()).or_default().push(destino.clone());
-    }
+    let adj = adyacencias(&aristas, &modulos);
     for modulo in &modulos {
         let Some(camino) = ciclo_de(modulo, &adj) else {
             continue;
@@ -213,7 +212,7 @@ pub(crate) fn modulos_presentes(archivos: &[Archivo]) -> BTreeSet<String> {
 }
 
 /// Los fuentes que una sonda necesita. Un error de lectura o un repo sin `.rs` no da veredicto (A9).
-fn fuentes_o_sin_veredicto(
+pub(crate) fn fuentes_o_sin_veredicto(
     repo: &Path,
     dimension: Dimension,
 ) -> Result<Vec<Archivo>, ResultadoSonda> {
@@ -260,34 +259,186 @@ fn es_archivo_de_test(ruta: &str) -> bool {
         || ruta.ends_with("_tests.rs")
 }
 
-/// Quita comentarios `//` y cambia el contenido de las cadenas por espacios, por línea.
-fn limpiar_linea(linea: &str) -> String {
-    let mut salida = String::with_capacity(linea.len());
-    let mut en_cadena = false;
-    let mut chars = linea.chars().peekable();
-    while let Some(c) = chars.next() {
-        if en_cadena {
-            match c {
-                '\\' => {
-                    chars.next();
-                    salida.push(' ');
-                }
-                '"' => {
-                    en_cadena = false;
-                    salida.push('"');
-                }
-                _ => salida.push(' '),
+/// Estado del limpiador al empezar una línea. Un comentario o una cadena pueden seguir en la línea siguiente.
+#[derive(Clone, Copy, Default)]
+enum Estado {
+    #[default]
+    Codigo,
+    /// Dentro de `/* ... */`. Cuenta los `/*` sin cerrar, porque los comentarios de bloque se anidan.
+    Bloque(u32),
+    /// Dentro de una cadena `"..."` que sigue desde una línea anterior.
+    Cadena,
+    /// Dentro de una cadena cruda `r#"..."#`. Guarda cuántas `#` cierran la cadena.
+    CadenaCruda(usize),
+}
+
+/// Limpia las líneas de un fuente en orden. Recuerda el estado entre una línea y la siguiente.
+#[derive(Default)]
+struct Limpiador {
+    estado: Estado,
+}
+
+impl Limpiador {
+    /// Cambia cada comentario y cada contenido de cadena por espacios, un espacio por byte.
+    /// El largo en bytes no cambia. Los delimitadores `"`, `r#"` y `"#` se conservan.
+    fn limpiar(&mut self, linea: &str) -> String {
+        let cs: Vec<char> = linea.chars().collect();
+        let mut salida = String::with_capacity(linea.len());
+        let mut i = 0;
+        while i < cs.len() {
+            let estado = self.estado;
+            i += match estado {
+                Estado::Codigo => self.en_codigo(&cs, i, &mut salida),
+                Estado::Bloque(n) => self.en_bloque(n, &cs, i, &mut salida),
+                Estado::Cadena => self.en_cadena(&cs, i, &mut salida),
+                Estado::CadenaCruda(n) => self.en_cadena_cruda(n, &cs, i, &mut salida),
+            };
+        }
+        salida
+    }
+
+    /// Procesa código desde `cs[i]`. Devuelve cuántos caracteres consumió.
+    fn en_codigo(&mut self, cs: &[char], i: usize, salida: &mut String) -> usize {
+        match (cs[i], cs.get(i + 1).copied()) {
+            ('/', Some('/')) => {
+                // El resto de la línea es comentario.
+                tramo_en_blanco(salida, &cs[i..]);
+                cs.len() - i
             }
-        } else if c == '/' && chars.peek() == Some(&'/') {
-            break;
-        } else if c == '"' {
-            en_cadena = true;
-            salida.push('"');
-        } else {
-            salida.push(c);
+            ('/', Some('*')) => {
+                self.estado = Estado::Bloque(1);
+                tramo_en_blanco(salida, &cs[i..i + 2]);
+                2
+            }
+            ('"', _) => {
+                self.estado = Estado::Cadena;
+                salida.push('"');
+                1
+            }
+            ('r', _) => match inicio_de_cadena_cruda(cs, i) {
+                Some(n) => {
+                    self.estado = Estado::CadenaCruda(n);
+                    salida.extend(&cs[i..i + n + 2]);
+                    n + 2
+                }
+                None => {
+                    salida.push('r');
+                    1
+                }
+            },
+            ('\'', _) => match largo_de_caracter(cs, i) {
+                // Un literal de carácter se copia tal cual: su comilla no abre cadena.
+                Some(largo) => {
+                    salida.extend(&cs[i..i + largo]);
+                    largo
+                }
+                // Sin cierre en esa forma es un lifetime: solo se copia la comilla.
+                None => {
+                    salida.push('\'');
+                    1
+                }
+            },
+            (c, _) => {
+                salida.push(c);
+                1
+            }
         }
     }
-    salida
+
+    /// Procesa un comentario de bloque desde `cs[i]`, con `n` niveles abiertos.
+    fn en_bloque(&mut self, n: u32, cs: &[char], i: usize, salida: &mut String) -> usize {
+        match (cs[i], cs.get(i + 1).copied()) {
+            ('/', Some('*')) => {
+                self.estado = Estado::Bloque(n + 1);
+                tramo_en_blanco(salida, &cs[i..i + 2]);
+                2
+            }
+            ('*', Some('/')) => {
+                self.estado = if n <= 1 {
+                    Estado::Codigo
+                } else {
+                    Estado::Bloque(n - 1)
+                };
+                tramo_en_blanco(salida, &cs[i..i + 2]);
+                2
+            }
+            (c, _) => {
+                tramo_en_blanco(salida, &[c]);
+                1
+            }
+        }
+    }
+
+    /// Procesa el contenido de una cadena `"..."` desde `cs[i]`.
+    fn en_cadena(&mut self, cs: &[char], i: usize, salida: &mut String) -> usize {
+        match cs[i] {
+            '\\' => {
+                // La barra escapa el carácter que sigue. Si es el último de la línea, la cadena sigue.
+                let largo = if i + 1 < cs.len() { 2 } else { 1 };
+                tramo_en_blanco(salida, &cs[i..i + largo]);
+                largo
+            }
+            '"' => {
+                self.estado = Estado::Codigo;
+                salida.push('"');
+                1
+            }
+            c => {
+                tramo_en_blanco(salida, &[c]);
+                1
+            }
+        }
+    }
+
+    /// Procesa el contenido de una cadena cruda desde `cs[i]`. No tiene escapes.
+    fn en_cadena_cruda(&mut self, n: usize, cs: &[char], i: usize, salida: &mut String) -> usize {
+        let cierra =
+            cs[i] == '"' && cs.len() >= i + 1 + n && cs[i + 1..i + 1 + n].iter().all(|&c| c == '#');
+        if cierra {
+            self.estado = Estado::Codigo;
+            salida.extend(&cs[i..i + 1 + n]);
+            1 + n
+        } else {
+            tramo_en_blanco(salida, &[cs[i]]);
+            1
+        }
+    }
+}
+
+/// Escribe un espacio por cada byte del carácter `c`.
+fn tramo_en_blanco(salida: &mut String, tramo: &[char]) {
+    for c in tramo {
+        for _ in 0..c.len_utf8() {
+            salida.push(' ');
+        }
+    }
+}
+
+/// Si `cs[i]` es una `r` que abre una cadena cruda (`r"`, `r#"`, `br"`), da cuántas `#` tiene.
+fn inicio_de_cadena_cruda(cs: &[char], i: usize) -> Option<usize> {
+    let previo_ok = match i {
+        0 => true,
+        _ if cs[i - 1] == 'b' => i < 2 || !es_ident(cs[i - 2]),
+        _ => !es_ident(cs[i - 1]),
+    };
+    if !previo_ok {
+        return None;
+    }
+    let n = cs[i + 1..].iter().take_while(|&&c| c == '#').count();
+    (cs.get(i + 1 + n) == Some(&'"')).then_some(n)
+}
+
+/// Largo del literal de carácter que empieza en `cs[i]`: `'x'`, `'\n'` o `'\u{..}'`. `None` si es un lifetime.
+fn largo_de_caracter(cs: &[char], i: usize) -> Option<usize> {
+    if cs.get(i + 1) == Some(&'\\') {
+        // La barra escapa el carácter que sigue, que puede ser una comilla.
+        cs.iter()
+            .skip(i + 3)
+            .position(|&c| c == '\'')
+            .map(|p| p + 4)
+    } else {
+        (cs.get(i + 2) == Some(&'\'')).then_some(3)
+    }
 }
 
 /// Marca cada línea como de test o no. Un bloque `#[cfg(test)]` cuenta con sus llaves.
@@ -295,9 +446,10 @@ pub(crate) fn analizar(texto: &[String]) -> Vec<Linea> {
     let mut profundidad: i32 = 0;
     let mut bloque_test: Option<i32> = None;
     let mut pendiente = false;
+    let mut limpiador = Limpiador::default();
     let mut salida = Vec::with_capacity(texto.len());
     for (indice, cruda) in texto.iter().enumerate() {
-        let limpia = limpiar_linea(cruda);
+        let limpia = limpiador.limpiar(cruda);
         let mut de_test = bloque_test.is_some();
         if limpia.contains("#[cfg(test)]") {
             pendiente = true;
@@ -515,7 +667,7 @@ pub(crate) fn aristas_entre_modulos(
 
 /// Aristas de la regla de capas: como `aristas_entre_modulos`, pero la raíz (`main`, `lib`) también es origen,
 /// y un `crate::X` con X que no es módulo es una arista hacia la raíz que declara el módulo de origen.
-fn aristas_de_capas(
+pub(crate) fn aristas_de_capas(
     archivos: &[Archivo],
     modulos: &BTreeSet<String>,
 ) -> BTreeMap<(String, String), Uso> {
@@ -539,27 +691,25 @@ fn aristas_de(
         };
         // Un archivo de la raíz no tiene raíz que lo declare: sus `crate::X` solo cuentan si X es módulo.
         let es_modulo = modulo_de(&archivo.ruta).is_some();
-        for linea in analizar(&archivo.lineas).iter().filter(|l| !l.de_test) {
-            for nombre in usos_de_crate(&linea.limpia) {
-                let destino = if modulos.contains(&nombre) {
-                    nombre
-                } else if con_raiz && es_modulo {
-                    match raiz_de_modulo(&origen, archivos) {
-                        Some(raiz) => raiz.to_string(),
-                        None => continue,
-                    }
-                } else {
-                    continue;
-                };
-                if destino != origen {
-                    aristas
-                        .entry((origen.clone(), destino))
-                        .or_insert_with(|| Uso {
-                            archivo: archivo.ruta.clone(),
-                            linea: linea.numero,
-                            cita: linea.cruda.clone(),
-                        });
+        for uso in usos_de_crate_en(&analizar(&archivo.lineas)) {
+            let destino = if modulos.contains(&uso.nombre) {
+                uso.nombre
+            } else if con_raiz && es_modulo {
+                match raiz_de_modulo(&origen, archivos) {
+                    Some(raiz) => raiz.to_string(),
+                    None => continue,
                 }
+            } else {
+                continue;
+            };
+            if destino != origen {
+                aristas
+                    .entry((origen.clone(), destino))
+                    .or_insert_with(|| Uso {
+                        archivo: archivo.ruta.clone(),
+                        linea: uso.linea,
+                        cita: uso.cita,
+                    });
             }
         }
     }
@@ -591,18 +741,182 @@ fn declara_modulo(archivo: &Archivo, modulo: &str) -> bool {
         .any(|l| !l.de_test && formas.iter().any(|f| l.limpia.trim() == f))
 }
 
-/// Nombres X de cada `crate::X` en la línea.
-fn usos_de_crate(limpia: &str) -> Vec<String> {
-    limpia
-        .match_indices("crate::")
-        .filter_map(|(i, _)| {
-            let nombre: String = limpia[i + "crate::".len()..]
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            (!nombre.is_empty()).then_some(nombre)
-        })
+/// Un `crate::X` de un fuente: X, la línea donde aparece X y la línea cruda como cita.
+struct UsoDeCrate {
+    nombre: String,
+    linea: u32,
+    cita: String,
+}
+
+/// Usos `crate::X` fuera de tests. Una sentencia `use` se lee entera, hasta su `;`, aunque ocupe varias
+/// líneas. El resto de líneas se lee una a una, como antes.
+fn usos_de_crate_en(lineas: &[Linea]) -> Vec<UsoDeCrate> {
+    let mut salida = Vec::new();
+    let mut i = 0;
+    while i < lineas.len() {
+        let linea = &lineas[i];
+        if linea.de_test {
+            i += 1;
+        } else if es_inicio_de_use(&linea.limpia) {
+            let fin = (i..lineas.len())
+                .find(|&k| lineas[k].limpia.contains(';'))
+                .unwrap_or(lineas.len() - 1);
+            let mut texto = String::new();
+            let mut inicios = Vec::new();
+            for (k, l) in lineas[i..=fin].iter().enumerate() {
+                inicios.push(texto.len());
+                // Solo la primera línea puede llevar `pub(in ...)`. Su camino no es destino.
+                if k == 0 {
+                    texto.push_str(&sin_visibilidad(&l.limpia));
+                } else {
+                    texto.push_str(&l.limpia);
+                }
+                texto.push('\n');
+            }
+            for (nombre, byte) in nombres_en(&texto) {
+                // La línea de X es la última que empieza antes de su byte.
+                let k = inicios.partition_point(|&s| s <= byte) - 1;
+                let l = &lineas[i + k];
+                salida.push(UsoDeCrate {
+                    nombre,
+                    linea: l.numero,
+                    cita: l.cruda.clone(),
+                });
+            }
+            i = fin + 1;
+        } else {
+            for (nombre, _) in nombres_en(&linea.limpia) {
+                salida.push(UsoDeCrate {
+                    nombre,
+                    linea: linea.numero,
+                    cita: linea.cruda.clone(),
+                });
+            }
+            i += 1;
+        }
+    }
+    salida
+}
+
+/// Verdadero si la línea empieza una sentencia `use`, con o sin `pub`, `pub(crate)` o `pub(in ...)`.
+fn es_inicio_de_use(limpia: &str) -> bool {
+    let mut resto = limpia.trim_start();
+    if let Some(tras_pub) = resto.strip_prefix("pub") {
+        let tras_pub = tras_pub.trim_start();
+        resto = match tras_pub.strip_prefix('(') {
+            Some(dentro) => match dentro.find(')') {
+                Some(fin) => dentro[fin + 1..].trim_start(),
+                None => return false,
+            },
+            None => tras_pub,
+        };
+    }
+    resto
+        .strip_prefix("use")
+        .is_some_and(|r| r.is_empty() || r.starts_with(|c: char| c.is_whitespace() || c == '{'))
+}
+
+/// Cambia el `pub(...)` del inicio de la línea por espacios, del mismo largo. Así no queda ningún `crate::`
+/// de la visibilidad, y los bytes de las demás partes no se mueven.
+fn sin_visibilidad(limpia: &str) -> String {
+    let sangria = limpia.len() - limpia.trim_start().len();
+    let Some(tras_pub) = limpia[sangria..].strip_prefix("pub") else {
+        return limpia.to_string();
+    };
+    let espacios = tras_pub.len() - tras_pub.trim_start().len();
+    let Some(dentro) = tras_pub[espacios..].strip_prefix('(') else {
+        return limpia.to_string();
+    };
+    let Some(fin) = dentro.find(')') else {
+        return limpia.to_string();
+    };
+    let largo = "pub".len() + espacios + 1 + fin + 1;
+    let mut salida = limpia.to_string();
+    salida.replace_range(sangria..sangria + largo, &" ".repeat(largo));
+    salida
+}
+
+/// Nombres X de cada `crate::X` del texto, con el byte donde empieza X. Con `crate::{...}` da el primer
+/// segmento de cada elemento de nivel superior del grupo, sin `self`.
+fn nombres_en(texto: &str) -> Vec<(String, usize)> {
+    let cs: Vec<(usize, char)> = texto.char_indices().collect();
+    let mut salida = Vec::new();
+    let mut i = 0;
+    while i < cs.len() {
+        if !empieza_crate(&cs, i) {
+            i += 1;
+            continue;
+        }
+        let j = i + "crate::".len();
+        if cs.get(j).is_some_and(|&(_, c)| c == '{') {
+            let (grupo, fin) = elementos_de_grupo(&cs, j + 1);
+            salida.extend(grupo);
+            i = fin;
+        } else {
+            let nombre = ident_desde(&cs, j);
+            if !nombre.is_empty() {
+                salida.push((nombre, cs[j].0));
+            }
+            i = j;
+        }
+    }
+    salida
+}
+
+/// Identificador que empieza en `cs[desde]`. Vacío si no hay.
+fn ident_desde(cs: &[(usize, char)], desde: usize) -> String {
+    cs.get(desde..)
+        .unwrap_or_default()
+        .iter()
+        .take_while(|(_, c)| es_ident(*c))
+        .map(|(_, c)| *c)
         .collect()
+}
+
+/// Verdadero si `cs[i..]` empieza con `crate::` como palabra: no precedido por letra, cifra o `_`.
+fn empieza_crate(cs: &[(usize, char)], i: usize) -> bool {
+    let previo_ok = i == 0 || !es_ident(cs[i - 1].1);
+    previo_ok
+        && "crate::"
+            .chars()
+            .enumerate()
+            .all(|(k, c)| cs.get(i + k).is_some_and(|&(_, x)| x == c))
+}
+
+fn es_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Elementos de un grupo `crate::{...}` que empieza en `desde`, justo después de `{`. Da cada primer nombre y
+/// el índice justo después de la `}` que cierra el grupo.
+fn elementos_de_grupo(cs: &[(usize, char)], desde: usize) -> (Vec<(String, usize)>, usize) {
+    let mut salida = Vec::new();
+    let mut inicio = desde;
+    let mut profundidad = 0usize;
+    for k in desde..cs.len() {
+        match cs[k].1 {
+            '{' => profundidad += 1,
+            '}' if profundidad > 0 => profundidad -= 1,
+            ',' if profundidad == 0 => {
+                salida.extend(primer_nombre(cs, inicio, k));
+                inicio = k + 1;
+            }
+            '}' => {
+                salida.extend(primer_nombre(cs, inicio, k));
+                return (salida, k + 1);
+            }
+            _ => {}
+        }
+    }
+    salida.extend(primer_nombre(cs, inicio, cs.len()));
+    (salida, cs.len())
+}
+
+/// Primer identificador de `cs[desde..hasta]`, con su byte. Nada si está vacío o es `self`.
+fn primer_nombre(cs: &[(usize, char)], desde: usize, hasta: usize) -> Option<(String, usize)> {
+    let p = (desde..hasta).find(|&k| !cs[k].1.is_whitespace())?;
+    let nombre = ident_desde(cs, p);
+    (!nombre.is_empty() && nombre != "self").then_some((nombre, cs[p].0))
 }
 
 /// Camino `[m, ..., m]` de un ciclo que pasa por `modulo`. Solo lo da el módulo menor de su
@@ -620,8 +934,21 @@ fn ciclo_de(modulo: &str, adj: &BTreeMap<String, Vec<String>>) -> Option<Vec<Str
     camino_de_vuelta(modulo, adj, &miembros)
 }
 
+/// Grafo de módulos: `origen -> destinos`, solo con destinos que son módulos. Las aristas hacia la raíz no
+/// entran: usar un ítem de la raíz que declara el módulo es Rust normal.
+pub(crate) fn adyacencias(
+    aristas: &BTreeMap<(String, String), Uso>,
+    modulos: &BTreeSet<String>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (origen, destino) in aristas.keys().filter(|(_, d)| modulos.contains(d)) {
+        adj.entry(origen.clone()).or_default().push(destino.clone());
+    }
+    adj
+}
+
 /// Módulos que se alcanzan desde `desde` siguiendo al menos una arista.
-fn alcanzables(desde: &str, adj: &BTreeMap<String, Vec<String>>) -> BTreeSet<String> {
+pub(crate) fn alcanzables(desde: &str, adj: &BTreeMap<String, Vec<String>>) -> BTreeSet<String> {
     let mut visto = BTreeSet::new();
     let mut cola = VecDeque::from([desde.to_string()]);
     while let Some(x) = cola.pop_front() {
@@ -696,8 +1023,8 @@ fn capas_sin_modulo(
             continue;
         }
         let nombres = capa.join(", ");
-        let cita = format!("módulos: {mapa}; falta la capa [{nombres}]");
-        let detalle = format!("falta la capa [{nombres}]: ninguno de sus módulos está en el repo");
+        let cita = format!("módulos: {mapa}; {FALTA_CAPA} [{nombres}]");
+        let detalle = format!("{FALTA_CAPA} [{nombres}]: ninguno de sus módulos está en el repo");
         hallazgos.push(crear_hallazgo(
             Dimension::Arquitectura,
             3,
@@ -815,6 +1142,88 @@ mod tests {
         );
         let r = seguridad_nativa(dir.path(), &[]);
         assert!(r.hallazgos.is_empty());
+    }
+
+    #[test]
+    fn limpia_bloque_de_comentario_de_tres_lineas_queda_en_blanco() {
+        let texto = ["    /*", "    unsafe a > b", "    */"].map(String::from);
+        let lineas = analizar(&texto);
+        for (i, linea) in lineas.iter().enumerate() {
+            assert!(
+                linea.limpia.trim().is_empty(),
+                "línea {i}: {:?}",
+                linea.limpia
+            );
+            assert_eq!(linea.limpia.len(), texto[i].len(), "línea {i}");
+        }
+    }
+
+    #[test]
+    fn limpia_cadena_cruda_de_varias_lineas_deja_el_medio_en_blanco() {
+        let texto = ["let s = r#\"", "a > b", "\"#;"].map(String::from);
+        let lineas = analizar(&texto);
+        assert!(lineas[1].limpia.trim().is_empty(), "{:?}", lineas[1].limpia);
+        assert_eq!(lineas[1].limpia.len(), texto[1].len());
+    }
+
+    #[test]
+    fn limpia_bloque_anidado_se_cierra_en_el_segundo_cierre() {
+        let una = analizar(&["/* /* */ */ x".to_string()]);
+        assert_eq!(una[0].limpia.trim(), "x");
+        let varias = ["/* a /*", "b */", "c */ x"].map(String::from);
+        let lineas = analizar(&varias);
+        assert!(lineas[1].limpia.trim().is_empty(), "{:?}", lineas[1].limpia);
+        assert_eq!(lineas[2].limpia.trim(), "x");
+    }
+
+    #[test]
+    fn sonda_unsafe_dentro_de_comentario_de_bloque_no_cuenta() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "src/protocolo/mod.rs",
+            "/*\nunsafe fn f() {}\n*/\npub fn g() -> u8 { 1 }\n",
+        );
+        let r = seguridad_nativa(dir.path(), &[]);
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+    }
+
+    #[test]
+    fn aristas_use_dentro_de_comentario_de_bloque_no_cuenta() {
+        let texto = "/*\nuse crate::app::run;\n*/\npub fn f() {}\n";
+        let archivos = [archivo_de("src/x.rs", texto)];
+        let mods = modulos_de(&["x", "app"]);
+        assert!(aristas_entre_modulos(&archivos, &mods).is_empty());
+    }
+
+    #[test]
+    fn limpia_cadena_comun_multilinea_deja_el_medio_en_blanco() {
+        let texto = ["let s = \"a", "unsafe", "b\";"].map(String::from);
+        let lineas = analizar(&texto);
+        assert!(lineas[1].limpia.trim().is_empty(), "{:?}", lineas[1].limpia);
+        assert_eq!(lineas[1].limpia.len(), texto[1].len());
+    }
+
+    #[test]
+    fn limpia_conserva_el_largo_en_bytes_con_caracteres_multibyte() {
+        let texto = ["let s = \"ñu\"; // año"].map(String::from);
+        let lineas = analizar(&texto);
+        assert_eq!(lineas[0].limpia.len(), texto[0].len());
+    }
+
+    #[test]
+    fn limpia_comilla_de_caracter_no_abre_cadena() {
+        // Guarda: la comilla de un literal de carácter no abre cadena. Los lifetimes tampoco.
+        let texto = [
+            "let c = '\"'; unsafe { f() }",
+            "let d = '\\''; unsafe { g() }",
+            "fn h<'a>(x: &'a u8) -> &'a u8 { unsafe { x } }",
+        ]
+        .map(String::from);
+        let lineas = analizar(&texto);
+        for linea in &lineas {
+            assert!(tiene_token(&linea.limpia, "unsafe"), "{:?}", linea.limpia);
+        }
     }
 
     #[test]
@@ -1327,5 +1736,188 @@ mod tests {
         assert_eq!(r.valor, None, "{:?}", r.hallazgos);
         assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
         assert_eq!(r.motivo.as_deref(), Some(MOTIVO_SIN_MODULOS));
+    }
+
+    fn archivo_de(ruta: &str, texto: &str) -> Archivo {
+        Archivo {
+            ruta: ruta.into(),
+            lineas: texto.lines().map(String::from).collect(),
+        }
+    }
+
+    fn modulos_de(nombres: &[&str]) -> BTreeSet<String> {
+        nombres.iter().map(|m| m.to_string()).collect()
+    }
+
+    #[test]
+    fn aristas_bloque_agrupado_llega_a_app_y_display() {
+        let texto = "use {\n    crate::{\n        app::*,\n        display::Screen,\n    },\n    std::io,\n};\n";
+        let archivos = [archivo_de("src/x.rs", texto)];
+        let mods = modulos_de(&["x", "app", "display"]);
+        let aristas = aristas_entre_modulos(&archivos, &mods);
+        let claves: Vec<String> = aristas.keys().map(|(o, d)| format!("{o}->{d}")).collect();
+        assert_eq!(claves, ["x->app", "x->display"]);
+        let uso = &aristas[&("x".to_string(), "display".to_string())];
+        assert_eq!((uso.linea, uso.cita.as_str()), (4, "display::Screen,"));
+    }
+
+    #[test]
+    fn aristas_grupo_en_una_linea_da_el_primer_segmento_de_cada_camino() {
+        let archivos = [archivo_de("src/x.rs", "use crate::{a::X, b::{c, d}};\n")];
+        let mods = modulos_de(&["x", "a", "b", "c", "d"]);
+        let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+            .keys()
+            .map(|(o, d)| format!("{o}->{d}"))
+            .collect();
+        assert_eq!(claves, ["x->a", "x->b"]);
+    }
+
+    #[test]
+    fn aristas_pub_crate_use_agrupado_en_varias_lineas() {
+        let archivos = [archivo_de(
+            "src/x.rs",
+            "pub(crate) use crate::{\n    a,\n};\n",
+        )];
+        let mods = modulos_de(&["x", "a"]);
+        let aristas = aristas_entre_modulos(&archivos, &mods);
+        let claves: Vec<String> = aristas.keys().map(|(o, d)| format!("{o}->{d}")).collect();
+        assert_eq!(claves, ["x->a"]);
+        let uso = &aristas[&("x".to_string(), "a".to_string())];
+        assert_eq!((uso.linea, uso.cita.as_str()), (2, "a,"));
+    }
+
+    #[test]
+    fn aristas_ignoran_self_en_grupos() {
+        let texto = "use crate::{self};\nuse crate::a::{self, b};\n";
+        let archivos = [archivo_de("src/x.rs", texto)];
+        let mods = modulos_de(&["x", "a", "b"]);
+        let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+            .keys()
+            .map(|(o, d)| format!("{o}->{d}"))
+            .collect();
+        assert_eq!(claves, ["x->a"]);
+    }
+
+    #[test]
+    fn aristas_agrupado_dentro_de_test_no_cuenta() {
+        let texto = "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    use crate::{\n        app::X,\n    };\n}\n";
+        let archivos = [archivo_de("src/x.rs", texto)];
+        let mods = modulos_de(&["x", "app"]);
+        assert!(aristas_entre_modulos(&archivos, &mods).is_empty());
+    }
+
+    #[test]
+    fn aristas_expresion_con_crate_sigue_contando() {
+        let archivos = [archivo_de("src/x.rs", "fn f() { crate::app::run(); }\n")];
+        let mods = modulos_de(&["x", "app"]);
+        let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+            .keys()
+            .map(|(o, d)| format!("{o}->{d}"))
+            .collect();
+        assert_eq!(claves, ["x->app"]);
+    }
+
+    #[test]
+    fn aristas_pub_in_no_cuenta_el_camino_de_visibilidad() {
+        // El `crate::a` de `pub(in ...)` no es destino: solo cuenta `b`.
+        let archivos = [archivo_de(
+            "src/x.rs",
+            "pub(in crate::a) use crate::b::X;\n",
+        )];
+        let mods = modulos_de(&["x", "a", "b"]);
+        let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+            .keys()
+            .map(|(o, d)| format!("{o}->{d}"))
+            .collect();
+        assert_eq!(claves, ["x->b"]);
+    }
+
+    #[test]
+    fn aristas_pub_in_agrupado_no_cuenta_la_visibilidad() {
+        let texto = "pub(in crate::a) use crate::{\n    b::X,\n};\n";
+        let archivos = [archivo_de("src/x.rs", texto)];
+        let mods = modulos_de(&["x", "a", "b"]);
+        let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+            .keys()
+            .map(|(o, d)| format!("{o}->{d}"))
+            .collect();
+        assert_eq!(claves, ["x->b"]);
+    }
+
+    #[test]
+    fn aristas_otras_visibilidades_y_use_simple_siguen_igual() {
+        // Guarda: sin `in crate::`, la visibilidad no tiene `crate::` y el destino sigue igual.
+        let mods = modulos_de(&["x", "b"]);
+        for texto in [
+            "pub(crate) use crate::b::X;\n",
+            "pub(super) use crate::b::X;\n",
+            "use crate::b::X;\n",
+        ] {
+            let archivos = [archivo_de("src/x.rs", texto)];
+            let claves: Vec<String> = aristas_entre_modulos(&archivos, &mods)
+                .keys()
+                .map(|(o, d)| format!("{o}->{d}"))
+                .collect();
+            assert_eq!(claves, ["x->b"], "texto: {texto}");
+        }
+    }
+
+    #[test]
+    fn sonda_arquitectura_pub_in_no_inventa_ciclo() {
+        // `b` usa `pub(in crate::a)`: ese `a` no es una arista b -> a. Sin la arista falsa no hay ciclo.
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "src/a.rs",
+            "use crate::b::algo;\npub fn f() {}\n",
+        );
+        escribir(
+            dir.path(),
+            "src/b.rs",
+            "pub(in crate::a) use crate::c::K;\npub fn algo() {}\n",
+        );
+        escribir(dir.path(), "src/c.rs", "pub struct K;\n");
+        let r = arquitectura_nativa(dir.path(), &[], &[]);
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.valor, Some(1.0));
+    }
+
+    #[test]
+    fn sonda_arquitectura_ciclo_escondido_en_import_agrupado_da_hallazgo() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "src/a.rs",
+            "use crate::{\n    b::algo,\n};\npub fn f() {}\n",
+        );
+        escribir(
+            dir.path(),
+            "src/b.rs",
+            "pub fn algo() {}\nuse crate::a::f;\n",
+        );
+        let r = arquitectura_nativa(dir.path(), &[], &[]);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        let h = &r.hallazgos[0];
+        assert_eq!(h.severidad, 3);
+        assert_eq!((h.archivo.as_str(), h.linea), ("src/a.rs", 2));
+        assert!(h.detalle.contains("a -> b -> a"), "{}", h.detalle);
+        assert!(h.detalle.starts_with(REGLA_CICLO), "{}", h.detalle);
+    }
+
+    #[test]
+    fn sonda_arquitectura_uso_hacia_capa_anterior_en_import_agrupado_da_hallazgo() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/protocolo/mod.rs", "pub fn p() {}\n");
+        escribir(dir.path(), "src/comandos/mod.rs", "pub fn c() {}\n");
+        escribir(
+            dir.path(),
+            "src/almacen/mod.rs",
+            "fn a() {}\nuse crate::{\n    protocolo::p,\n};\n",
+        );
+        let r = arquitectura_nativa(dir.path(), &capas(), &[]);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].archivo, "src/almacen/mod.rs");
+        assert_eq!(r.hallazgos[0].linea, 3);
+        assert_eq!(r.hallazgos[0].severidad, 3);
     }
 }

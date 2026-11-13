@@ -114,4 +114,6 @@ RUN CARGO_HOME=/tmp/cargo-install CARGO_TARGET_DIR=/tmp/cargo-install/target CAR
 # nextest escribe el junit en <repo>/target aunque exista CARGO_TARGET_DIR.
 # Este archivo (tool-config) lo manda a /salida y define el perfil ci sin tocar el repo ajeno.
 # fail-fast = false: nextest corta en el primer rojo por defecto y Root necesita el resultado de cada test.
-RUN mkdir -p /etc/root-oraculo && printf '%s\n' '[store]' 'dir = "/salida/target/nextest"' '' '[profile.ci]' 'fail-fast = false' '' '[profile.ci.junit]' 'path = "junit.xml"' > /etc/root-oraculo/nextest.toml
+# slow-timeout: un test en bucle infinito colgó una hora la calibración.
+# nextest corta el test tras 5 periodos de 60 s.
+RUN mkdir -p /etc/root-oraculo && printf '%s\n' '[store]' 'dir = "/salida/target/nextest"' '' '[profile.ci]' 'fail-fast = false' 'slow-timeout = { period = "60s", terminate-after = 5 }' '' '[profile.ci.junit]' 'path = "junit.xml"' > /etc/root-oraculo/nextest.toml

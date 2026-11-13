@@ -171,6 +171,7 @@ mod tests {
             fuente,
             id: id.into(),
             impacto: vec![],
+            previo: false,
         }
     }
 

@@ -88,6 +88,7 @@ pub fn crear_hallazgo(
         fuente: Fuente::Sonda(sonda.into()),
         id,
         impacto,
+        previo: false,
     }
 }
 

@@ -128,7 +128,7 @@ pub(super) fn modelo_del_juez_diseno(home: &Path) -> String {
 }
 
 /// Hash del `tarea.toml` de `dir`. Cambiar la tarea cambia la clave.
-fn hash_del_tarea_toml(dir: &Path) -> Result<String, ErrorOraculo> {
+pub(super) fn hash_del_tarea_toml(dir: &Path) -> Result<String, ErrorOraculo> {
     let bytes = fs::read(dir.join("tarea.toml")).map_err(|e| infra("leer tarea.toml", e))?;
     Ok(calcular_hash(&bytes))
 }

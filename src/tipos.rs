@@ -220,6 +220,9 @@ pub struct Hallazgo {
     /// Ids de los requisitos que afecta.
     #[serde(default)]
     pub impacto: Vec<String>,
+    /// Estaba en el estado inicial de la tarea. Un veredicto viejo lee false.
+    #[serde(default)]
+    pub previo: bool,
 }
 
 /// Hallazgo del juez que se descartó: no tiene requisito afectado o no pasó el gate de citas. No puntúa.
@@ -305,6 +308,22 @@ pub struct Informe {
     /// Datos para decidir. Un informe viejo lee `Confianza` vacía.
     #[serde(default)]
     pub confianza: Confianza,
+    /// Avisos de Seguridad que ya estaban en el estado inicial. No bloquean. Un informe viejo lee vacío.
+    #[serde(default)]
+    pub avisos_previos: Vec<AvisoPrevio>,
+}
+
+/// Aviso de Seguridad que ya estaba en el estado inicial de la tarea. No bloquea.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AvisoPrevio {
+    /// Nombre de la sonda, como `cargo-audit`.
+    pub fuente: String,
+    /// El id del aviso, como `RUSTSEC-2024-0001`, o la regla.
+    pub aviso: String,
+    /// El crate y su versión, o el archivo.
+    pub objeto: String,
+    /// Severidad del hallazgo original, de 1 a 3.
+    pub severidad: u8,
 }
 
 /// Tasa de aprobación de un test inestable, con la cota inferior de Wilson al 90%.
@@ -446,6 +465,9 @@ pub struct Veredicto {
     /// Ventanas que leyó el juez de diseño, sin su texto. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub extractos: Vec<ExtractoGuardado>,
+    /// El producto no compila: la suite del contrato salió con 101 bajo nextest. Un veredicto viejo lee false.
+    #[serde(default)]
+    pub no_compila: bool,
 }
 
 impl Default for Veredicto {
@@ -478,6 +500,7 @@ impl Default for Veredicto {
             contrato_fallidos: Vec::new(),
             hallazgos_descartados: Vec::new(),
             extractos: Vec::new(),
+            no_compila: false,
         }
     }
 }
@@ -677,6 +700,7 @@ mod tests {
                 fuente: Fuente::Sonda("bandit".into()),
                 id: "h-1".into(),
                 impacto: vec!["req.login".into()],
+                previo: false,
             }],
             global: Some(0.95),
             estado: Estado::Verde,
@@ -697,6 +721,7 @@ mod tests {
             contrato_fallidos: Vec::new(),
             hallazgos_descartados: Vec::new(),
             extractos: Vec::new(),
+            no_compila: false,
         }
     }
 
@@ -861,7 +886,26 @@ mod tests {
             },
             id: "h-7".into(),
             impacto: vec!["req.almacen".into()],
+            previo: false,
         });
+    }
+
+    #[test]
+    fn tipos_hallazgo_viejo_sin_previo_lee_false() {
+        // Un veredicto guardado antes de Tarea 103 no trae `previo`: se lee como nuevo.
+        let viejo = json!({
+            "dimension": "seguridad",
+            "severidad": 3,
+            "archivo": "Cargo.lock",
+            "linea": 16,
+            "cita": "time 0.1.43",
+            "detalle": "vulnerable",
+            "fuente": {"Sonda": "cargo-audit"},
+            "id": "h-9",
+            "impacto": []
+        });
+        let h: Hallazgo = serde_json::from_value(viejo).expect("deserializa");
+        assert!(!h.previo);
     }
 
     #[test]
@@ -934,6 +978,7 @@ mod tests {
 
     fn informe() -> Informe {
         Informe {
+            avisos_previos: Vec::new(),
             decision: Decision::NoListo,
             motivo: "hay un bloqueante".into(),
             requisitos: vec![EstadoRequisito {

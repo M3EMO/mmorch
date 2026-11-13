@@ -19,6 +19,8 @@ pub mod route;
 pub mod tipos;
 pub mod track;
 
+mod limpieza;
+
 pub use cli::Cli;
 pub use error::Error;
 
@@ -42,10 +44,13 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
     match &cli.comando {
         Comando::Oraculo {
             accion: OraculoAccion::Evaluar { tarea, repo },
-        } => oraculo_evaluar(cli.json, tarea, repo),
+        } => limpieza::con_vigia(|| oraculo_evaluar(cli.json, tarea, repo)),
         Comando::Oraculo {
             accion: OraculoAccion::Informe { tarea, repo, md },
         } => oraculo_informe(tarea, repo, *md),
+        Comando::Oraculo {
+            accion: OraculoAccion::Capas { repo, tarea },
+        } => oraculo_capas(cli.json, repo, tarea.as_deref()),
         Comando::Oraculo {
             accion:
                 OraculoAccion::Calibrar {
@@ -56,15 +61,17 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                     repo,
                     tope_usd,
                 },
-        } => oraculo_calibrar(
-            cli.json,
-            tarea,
-            dimension,
-            *n,
-            *semilla,
-            repo.as_deref(),
-            *tope_usd,
-        ),
+        } => limpieza::con_vigia(|| {
+            oraculo_calibrar(
+                cli.json,
+                tarea,
+                dimension,
+                *n,
+                *semilla,
+                repo.as_deref(),
+                *tope_usd,
+            )
+        }),
         Comando::Oraculo {
             accion:
                 OraculoAccion::Validar {
@@ -103,7 +110,7 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                 por_archivo: *por_archivo,
                 solo_medir: solo_medir.clone(),
             };
-            oraculo_auditar(cli.json, &opciones)
+            limpieza::con_vigia(|| oraculo_auditar(cli.json, &opciones))
         }
         Comando::Ficha { accion } => ficha_accion(cli.json, accion),
         Comando::Route {
@@ -177,15 +184,7 @@ fn oraculo_calibrar(
         )));
     }
     let home = config::root_home();
-    // El gasto sale de `home`: la calibración no mira otra carpeta (decisión 48).
-    let gasto = |inicio: f64| {
-        observe::uso::gasto_api_desde_en(&observe::ruta_eventos_en(&home), inicio)
-            .map_err(|e| oracle::ErrorOraculo::Infra(format!("leer el gasto de API: {e}")))
-    };
-    let presupuesto = tope_usd.map(|usd| oracle::calibra::Presupuesto {
-        usd,
-        gasto_desde: &gasto,
-    });
+    let presupuesto = tope_usd.map(|usd| oracle::calibra::Presupuesto { usd });
     let calibrada = oracle::calibra::calibrar_tarea_con(
         &home,
         nombre,
@@ -196,18 +195,23 @@ fn oraculo_calibrar(
         presupuesto.as_ref(),
         &|tarea, ruta, opciones| oracle::evaluar(ruta, tarea, opciones),
     )?;
+    for linea in lineas_de_avisos(&calibrada.avisos) {
+        eprintln!("{linea}");
+    }
     let fila = calibrada.fila;
     if json {
         println!("{}", serde_json::to_string_pretty(&fila)?);
-    } else if let Some(motivo) = &fila.no_aplica {
+    } else if let Some(motivo) = fila.inestable.as_ref().or(fila.no_aplica.as_ref()) {
         println!("{}/{}: {motivo}", fila.tarea, fila.dimension.clave());
     } else {
         println!(
-            "{}/{}: sensibilidad {}, {}, exactitud {}, casos {} (defectos {}, limpios {}, no aplicables {}, reemplazos {})",
+            "{}/{}: sensibilidad {}, {}, {}, {}, exactitud {}, casos {} (defectos {}, limpios {}, no aplicables {}, reemplazos {})",
             fila.tarea,
             fila.dimension.clave(),
             medida(fila.sensibilidad),
             oracle::calibra::texto_especificidad(&fila),
+            oracle::calibra::texto_piso(&fila),
+            oracle::calibra::texto_inyecciones(&fila),
             medida(fila.exactitud_balanceada),
             fila.n,
             fila.defectos,
@@ -220,6 +224,14 @@ fn oraculo_calibrar(
         }
     }
     Ok(0)
+}
+
+/// Una línea `aviso: <texto>` por aviso, en el mismo orden.
+fn lineas_de_avisos(avisos: &[String]) -> Vec<String> {
+    avisos
+        .iter()
+        .map(|aviso| format!("aviso: {aviso}"))
+        .collect()
 }
 
 /// Una métrica con dos decimales, o `sin medir` si no tiene casos de una clase.
@@ -328,6 +340,34 @@ fn oraculo_informe(nombre: &str, repo: &Path, md: bool) -> Result<u8, Error> {
         println!("{}", serde_json::to_string_pretty(informe)?);
     }
     Ok(oracle::codigo_de_estado(veredicto.estado))
+}
+
+/// `oraculo capas`: sin `--tarea`, propone las capas del repo. Con `--tarea`, verifica las capas de la tarea:
+/// sale con 1 si no pasan. Las copias de prueba van a `ROOT_HOME/tmp` y se borran al terminar.
+fn oraculo_capas(json: bool, repo: &Path, tarea: Option<&str>) -> Result<u8, Error> {
+    let Some(nombre) = tarea else {
+        let propuesta = oracle::capas::proponer_capas(repo).map_err(Error::Uso)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&propuesta)?);
+        } else {
+            println!("{}", oracle::capas::linea_toml(&propuesta.capas));
+        }
+        return Ok(0);
+    };
+    let tarea = Tarea::cargar(nombre)?;
+    let capas = tarea.arquitectura.map(|a| a.capas).unwrap_or_default();
+    let trabajo = config::root_home().join("tmp");
+    let veredicto = oracle::capas::verificar_capas(repo, &capas, &trabajo);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&veredicto)?);
+    } else if veredicto.fallas.is_empty() {
+        println!("{nombre}: las capas pasan la verificación");
+    } else {
+        for falla in &veredicto.fallas {
+            println!("falla: {falla}");
+        }
+    }
+    Ok(if veredicto.fallas.is_empty() { 0 } else { 1 })
 }
 
 /// `oraculo auditar`: valida `--tope-usd`, audita el repo y muestra un resumen. Los errores de uso salen con 2.
@@ -1168,6 +1208,20 @@ fn imprimir_registrados(json: bool, cuantos: usize) {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn lineas_de_avisos_escribe_una_linea_por_aviso_en_orden() {
+        let avisos = vec!["primero".to_string(), "segundo".to_string()];
+        assert_eq!(
+            lineas_de_avisos(&avisos),
+            vec!["aviso: primero".to_string(), "aviso: segundo".to_string()]
+        );
+    }
+
+    #[test]
+    fn lineas_de_avisos_sin_avisos_es_vacio() {
+        assert!(lineas_de_avisos(&[]).is_empty());
+    }
 
     #[test]
     fn oraculo_auditar_tope_usd_no_positivo_sale_con_uso_sin_tocar_nada() {

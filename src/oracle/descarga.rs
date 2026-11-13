@@ -121,6 +121,7 @@ pub fn cache_de_con_error(
 /// Prefijo de cada suite: deja la caché de dependencias visible para cargo, sin escribir en ella.
 pub const PRELUDIO: &str = "export CARGO_HOME=/tmp/cargo-home && mkdir -p \"$CARGO_HOME\" && cp /cache/config.toml \"$CARGO_HOME/config.toml\" && ";
 
+pub(crate) const SONDA_DESCARGA: &str = "descarga";
 const CARPETA_CACHE: &str = "cache";
 const CARPETA_RUST: &str = "rust";
 const CARPETA_PYTHON: &str = "python";
@@ -273,9 +274,10 @@ fn hallazgo_en(
         linea,
         cita: cita.into(),
         detalle,
-        fuente: Fuente::Sonda("descarga".into()),
+        fuente: Fuente::Sonda(SONDA_DESCARGA.into()),
         id,
         impacto: Vec::new(),
+        previo: false,
     }
 }
 
@@ -736,8 +738,23 @@ fn ejecutar_descarga(
     ejecucion: &Ejecucion,
     credenciales: &[Credencial],
 ) -> Result<(), Diagnostico> {
-    let resultado = match contenedor::ejecutar(ejecucion) {
+    ejecutar_descarga_con(&contenedor::ejecutar, ejecucion, credenciales)
+}
+
+/// Igual que `ejecutar_descarga`, con el ejecutor de contenedores inyectado para los tests.
+fn ejecutar_descarga_con(
+    correr: &dyn Fn(&Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
+    ejecucion: &Ejecucion,
+    credenciales: &[Credencial],
+) -> Result<(), Diagnostico> {
+    let resultado = match correr(ejecucion) {
         Err(ErrorOraculo::Infra(m)) => Err(Diagnostico::Infra(m)),
+        Err(ErrorOraculo::PlazoVencido {
+            segundos,
+            contenedor,
+        }) => Err(Diagnostico::Infra(format!(
+            "timeout tras {segundos} s; contenedor {contenedor} eliminado"
+        ))),
         Err(otro) => Err(Diagnostico::Desconocido(otro.to_string())),
         Ok(resultado) if resultado.codigo == 0 => Ok(()),
         Ok(resultado) => Err(diagnosticar(&resultado.stderr)),
@@ -1306,6 +1323,7 @@ fn correr_podman_acotado(args: &[&str], plazo: Duration) -> Result<SalidaPodman,
         return Err(ErrorOraculo::Infra("podman terminó por una señal".into()));
     };
     Ok(SalidaPodman {
+        paso: None,
         codigo,
         stdout: contenedor::recoger(salida),
         stderr: contenedor::recoger(error),
@@ -2277,5 +2295,30 @@ source = \"git+http://host/x?rev=1#abc1234\"\n";
         let txt = String::from_utf8(cola).expect("la cola es UTF-8 válido");
         assert!(txt.ends_with("fin"), "{txt:?}");
         assert!(!txt.contains('\u{FFFD}'), "{txt:?}");
+    }
+
+    #[test]
+    fn descarga_plazo_vencido_da_infra_con_el_mensaje_de_timeout() {
+        let falso = |_: &Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            Err(ErrorOraculo::PlazoVencido {
+                segundos: 600.0,
+                contenedor: "root-x".into(),
+            })
+        };
+        let diagnostico = ejecutar_descarga_con(&falso, &ejecucion(), &[])
+            .expect_err("un plazo vencido es un fallo de descarga");
+        assert_eq!(
+            diagnostico,
+            Diagnostico::Infra("timeout tras 600 s; contenedor root-x eliminado".into())
+        );
+        match error_de(diagnostico) {
+            ErrorOraculo::Infra(m) => {
+                assert_eq!(
+                    m,
+                    "infraestructura: timeout tras 600 s; contenedor root-x eliminado"
+                );
+            }
+            otro => panic!("debe ser Infra, es {otro:?}"),
+        }
     }
 }

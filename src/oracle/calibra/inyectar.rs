@@ -9,11 +9,12 @@ use std::path::Path;
 
 use crate::borrado;
 use crate::oracle::mutacion::MutanteMuerto;
-use crate::oracle::perfiles::rust::LimitesEstructura;
+use crate::oracle::perfiles::rust::{LimitesEstructura, analizar};
+use crate::oracle::tarea::Equivalente;
 use crate::tipos::Dimension;
 
 /// Defecto que se inyecta en una copia. Cada uno apunta a una dimensión y a un ítem de rúbrica.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Defecto {
     SecretoEnCodigo,
     PanicoEnEntrada,
@@ -25,10 +26,11 @@ pub enum Defecto {
     AssertBorrado,
     DockerfileRoot,
     ComportamientoRoto,
+    CuerpoVaciado,
 }
 
 /// Todos los defectos, en el orden de `Defecto`.
-pub const TODOS: [Defecto; 10] = [
+pub const TODOS: [Defecto; 11] = [
     Defecto::SecretoEnCodigo,
     Defecto::PanicoEnEntrada,
     Defecto::BucleCuadratico,
@@ -39,6 +41,7 @@ pub const TODOS: [Defecto; 10] = [
     Defecto::AssertBorrado,
     Defecto::DockerfileRoot,
     Defecto::ComportamientoRoto,
+    Defecto::CuerpoVaciado,
 ];
 
 impl Defecto {
@@ -54,6 +57,7 @@ impl Defecto {
             Defecto::AssertBorrado => Dimension::Pruebas,
             Defecto::DockerfileRoot => Dimension::Entrega,
             Defecto::ComportamientoRoto => Dimension::Funciona,
+            Defecto::CuerpoVaciado => Dimension::Completitud,
         }
     }
 
@@ -70,15 +74,17 @@ impl Defecto {
             Defecto::AssertBorrado => "pruebas.mutacion",
             Defecto::DockerfileRoot => "entrega.contenedor",
             Defecto::ComportamientoRoto => "funciona.correccion",
+            Defecto::CuerpoVaciado => "completitud.alcance",
         }
     }
 }
 
 /// Defectos que sirven para una dimensión, en el orden en que `calibrar` los rota. Vacío si no hay ninguno.
+/// `ModuloBorrado` queda fuera: borrar un módulo que se usa siempre rompe el build. Es una detección segura.
 pub fn de_dimension(dimension: Dimension) -> Vec<Defecto> {
     TODOS
         .into_iter()
-        .filter(|d| d.dimension() == dimension)
+        .filter(|d| d.dimension() == dimension && *d != Defecto::ModuloBorrado)
         .collect()
 }
 
@@ -95,6 +101,96 @@ pub struct Inyeccion {
     pub mutante: Option<String>,
     /// Nombres completos de los tests que `AssertBorrado` apagó con `#[ignore]`. Vacía en los demás defectos.
     pub tests_apagados: Vec<String>,
+    /// `true` si el defecto cayó dentro del cambio de `bootstrap/`.
+    /// En `ComportamientoRoto`, la línea invertida es una línea tocada.
+    /// En `ModuloBorrado`, el módulo borrado es un archivo tocado.
+    /// En `CuerpoVaciado`, la función vaciada cruza una línea tocada, desde su firma hasta su cierre.
+    /// Sin estado inicial, la función se elige entre todas, así que puede caer fuera del cambio: `false`.
+    /// Un archivo tocado tiene al menos una línea del cambio.
+    pub en_cambio: bool,
+    /// Operador que `ComportamientoRoto` cambió, con modo de estado inicial (p. ej. `"> -> >="`). `None` en los demás.
+    pub operador: Option<String>,
+}
+
+/// Identidad de una inyección: qué defecto, dónde y cuál edición. Dos casos con la misma identidad inyectan lo mismo.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Identidad {
+    pub defecto: Defecto,
+    pub archivo: String,
+    pub linea: u32,
+    pub edicion: String,
+}
+
+/// Identidades ya elegidas o inválidas. Un reemplazo no elige ninguna de ellas.
+pub type Excluidos = BTreeSet<Identidad>;
+
+/// Identidades que la calibración nunca elige: las de los equivalentes declarados en `tarea.toml`. Cada entrada
+/// excluye su operador de `ComportamientoRoto`. Si la edición está vacía o es `cuerpo vaciado`, excluye también
+/// el vaciado de la función en esa línea.
+pub fn identidades_de_equivalentes(equivalentes: &[Equivalente]) -> Excluidos {
+    let mut excluidos = Excluidos::new();
+    for equivalente in equivalentes {
+        let edicion = equivalente.edicion.trim();
+        excluidos.insert(identidad_de_lugar(
+            Defecto::ComportamientoRoto,
+            &equivalente.archivo,
+            equivalente.linea,
+            edicion,
+        ));
+        if edicion.is_empty() || edicion == "cuerpo vaciado" {
+            excluidos.insert(identidad_de_lugar(
+                Defecto::CuerpoVaciado,
+                &equivalente.archivo,
+                equivalente.linea,
+                "",
+            ));
+        }
+    }
+    excluidos
+}
+
+/// Identidad de un lugar de inyección. `linea` es 0 en los defectos de archivo entero.
+fn identidad_de_lugar(defecto: Defecto, archivo: &str, linea: u32, edicion: &str) -> Identidad {
+    Identidad {
+        defecto,
+        archivo: archivo.to_string(),
+        linea,
+        edicion: edicion.to_string(),
+    }
+}
+
+impl Inyeccion {
+    /// Identidad de la inyección aplicada. Regla: la línea de los defectos de archivo entero se normaliza a 0,
+    /// porque su línea no distingue dos aplicaciones. Esos son `SecretoEnCodigo`, `CicloEntreCapas`, `ArchivoDios`,
+    /// `ModuloBorrado` y `DockerfileRoot`. `ComportamientoRoto` usa su operador como edición. `AssertBorrado` usa
+    /// el archivo y el nombre de su mutante muerto, no el archivo de los tests que apagó.
+    pub fn identidad(&self) -> Identidad {
+        match self.defecto {
+            Defecto::ComportamientoRoto => identidad_de_lugar(
+                self.defecto,
+                &self.archivo,
+                self.linea,
+                self.operador.as_deref().unwrap_or(""),
+            ),
+            Defecto::AssertBorrado => identidad_de_lugar(
+                self.defecto,
+                self.mutante_archivo.as_deref().unwrap_or(""),
+                0,
+                self.mutante.as_deref().unwrap_or(""),
+            ),
+            Defecto::PanicoEnEntrada
+            | Defecto::BucleCuadratico
+            | Defecto::ErrorTragado
+            | Defecto::CuerpoVaciado => {
+                identidad_de_lugar(self.defecto, &self.archivo, self.linea, "")
+            }
+            Defecto::SecretoEnCodigo
+            | Defecto::CicloEntreCapas
+            | Defecto::ArchivoDios
+            | Defecto::ModuloBorrado
+            | Defecto::DockerfileRoot => identidad_de_lugar(self.defecto, &self.archivo, 0, ""),
+        }
+    }
 }
 
 /// Lo que `inyectar_con` necesita además de la copia y la semilla.
@@ -107,6 +203,14 @@ pub struct Contexto<'a> {
     pub limites: &'a LimitesEstructura,
     /// Mutantes muertos de la base: `AssertBorrado` elige uno y apaga con `#[ignore]` sus tests. Vacía: no aplica.
     pub muertos: &'a [MutanteMuerto],
+    /// Rangos de líneas del cambio (1-based, inclusivos) por ruta relativa. `None`: la tarea no trae `bootstrap/`.
+    pub cambios: Option<&'a Rangos>,
+    /// Carpeta del estado inicial (`bootstrap/`). `Some`: `ComportamientoRoto` cambia también operadores y condiciones,
+    /// `CuerpoVaciado` vacía solo funciones que ya existían, y `ModuloBorrado` no aplica.
+    /// `None`: `CuerpoVaciado` elige cualquier función de producción.
+    pub inicial: Option<&'a Path>,
+    /// Identidades que la elección no puede tomar: las ya usadas y las inválidas. Vacío: no excluye nada.
+    pub excluidos: &'a Excluidos,
 }
 
 /// Aplica `defecto` a la copia de repo Rust en `dir`. `capas` son las de `[arquitectura]` de la tarea.
@@ -124,6 +228,9 @@ pub fn inyectar(
         camino_caliente: &[],
         limites: &limites,
         muertos: &[],
+        cambios: None,
+        inicial: None,
+        excluidos: &BTreeSet::new(),
     };
     inyectar_con(defecto, dir, &contexto, semilla)
 }
@@ -139,21 +246,47 @@ pub fn inyectar_con(
 ) -> io::Result<Option<Inyeccion>> {
     let mut rng = Prng::nuevo(semilla);
     let mut apagado = None;
+    let mut operador: Option<String> = None;
+    let mut cuerpo_en_cambio = false;
+    let ex = contexto.excluidos;
     let lugar = match defecto {
-        Defecto::SecretoEnCodigo => secreto(dir, &mut rng)?,
-        Defecto::PanicoEnEntrada => panico(dir, &mut rng)?,
-        Defecto::BucleCuadratico => bucle(dir, contexto.camino_caliente, &mut rng)?,
-        Defecto::CicloEntreCapas => ciclo(dir, contexto.capas, &mut rng)?,
-        Defecto::ArchivoDios => dios(dir, contexto.limites, &mut rng)?,
-        Defecto::ModuloBorrado => modulo_borrado(dir, &mut rng)?,
-        Defecto::ErrorTragado => error_tragado(dir, &mut rng)?,
+        Defecto::SecretoEnCodigo => secreto(dir, &mut rng, ex)?,
+        Defecto::PanicoEnEntrada => panico(dir, &mut rng, ex)?,
+        Defecto::BucleCuadratico => bucle(dir, contexto.camino_caliente, &mut rng, ex)?,
+        Defecto::CicloEntreCapas => ciclo(dir, contexto.capas, &mut rng, ex)?,
+        Defecto::ArchivoDios => dios(dir, contexto.limites, &mut rng, ex)?,
+        Defecto::ModuloBorrado => {
+            modulo_borrado(dir, &mut rng, contexto.cambios, contexto.inicial, ex)?
+        }
+        Defecto::ErrorTragado => error_tragado(dir, &mut rng, ex)?,
         Defecto::AssertBorrado => {
-            apagado = assert_borrado(dir, contexto.muertos, &mut rng)?;
+            apagado = assert_borrado(dir, contexto.muertos, &mut rng, ex)?;
             apagado.as_ref().map(|a| (a.archivo.clone(), a.linea))
         }
-        Defecto::DockerfileRoot => dockerfile(dir)?,
-        Defecto::ComportamientoRoto => comportamiento(dir, &mut rng)?,
+        Defecto::DockerfileRoot => dockerfile(dir, ex)?,
+        Defecto::CuerpoVaciado => {
+            let (lugar, en_cambio) =
+                cuerpo_vaciado(dir, &mut rng, contexto.cambios, contexto.inicial, ex)?;
+            cuerpo_en_cambio = en_cambio;
+            lugar
+        }
+        Defecto::ComportamientoRoto => {
+            comportamiento(dir, &mut rng, contexto.cambios, contexto.inicial, ex)?.map(
+                |(archivo, linea, op)| {
+                    operador = op;
+                    (archivo, linea)
+                },
+            )
+        }
     };
+    // Con `cambios`, un defecto de línea o de módulo solo cae dentro del cambio: toda elección lo está.
+    // Un cuerpo vaciado sin estado inicial puede caer fuera: su marca sale de `cuerpo_vaciado`.
+    let en_cambio = lugar.is_some()
+        && match defecto {
+            Defecto::ComportamientoRoto | Defecto::ModuloBorrado => contexto.cambios.is_some(),
+            Defecto::CuerpoVaciado => cuerpo_en_cambio,
+            _ => false,
+        };
     Ok(lugar.map(|(archivo, linea)| match apagado {
         Some(a) => Inyeccion {
             defecto,
@@ -162,6 +295,8 @@ pub fn inyectar_con(
             mutante_archivo: Some(a.mutante_archivo),
             mutante: Some(a.mutante),
             tests_apagados: a.tests,
+            en_cambio,
+            operador,
         },
         None => Inyeccion {
             defecto,
@@ -170,12 +305,32 @@ pub fn inyectar_con(
             mutante_archivo: None,
             mutante: None,
             tests_apagados: Vec::new(),
+            en_cambio,
+            operador,
         },
     }))
 }
 
 /// Archivo y línea (1-based) donde quedó el defecto, o `None` si no se pudo aplicar.
 type Lugar = Option<(String, u32)>;
+
+/// Rangos de líneas del cambio (1-based, inclusivos) por ruta relativa con `/`. Ver `Contexto.cambios`.
+type Rangos = BTreeMap<String, Vec<(u32, u32)>>;
+
+/// `true` si la línea `linea` (1-based) de `archivo` cae en un rango del cambio. Sin cambio (`None`), siempre.
+fn en_el_cambio(cambios: Option<&Rangos>, archivo: &str, linea: u32) -> bool {
+    cambios.is_none_or(|rangos| {
+        rangos.get(archivo).is_some_and(|rs| {
+            rs.iter()
+                .any(|&(desde, hasta)| (desde..=hasta).contains(&linea))
+        })
+    })
+}
+
+/// `true` si `archivo` tiene al menos un rango del cambio. Sin cambio (`None`), siempre.
+fn archivo_tocado(cambios: Option<&Rangos>, archivo: &str) -> bool {
+    cambios.is_none_or(|rangos| rangos.get(archivo).is_some_and(|rs| !rs.is_empty()))
+}
 
 /// PRNG determinista (splitmix64). Sin crates: la misma semilla da la misma secuencia.
 struct Prng(u64);
@@ -205,6 +360,21 @@ impl Prng {
         } else {
             lista.get(self.indice(lista.len()))
         }
+    }
+
+    /// Como `elegir`, sin los candidatos cuya identidad está en `excluidos`. Sin exclusiones da lo mismo que `elegir`.
+    fn elegir_libre<T: Clone>(
+        &mut self,
+        candidatos: &[T],
+        excluidos: &Excluidos,
+        identidad: impl Fn(&T) -> Identidad,
+    ) -> Option<T> {
+        let libres: Vec<T> = candidatos
+            .iter()
+            .filter(|c| !excluidos.contains(&identidad(c)))
+            .cloned()
+            .collect();
+        self.elegir(&libres).cloned()
     }
 }
 
@@ -285,9 +455,12 @@ fn clave_sintetica(rng: &mut Prng) -> String {
 }
 
 /// Agrega una constante con una clave sintética al final de un archivo de `src/`.
-fn secreto(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+fn secreto(dir: &Path, rng: &mut Prng, excluidos: &Excluidos) -> io::Result<Lugar> {
     let archivos = rust_en(dir, "src")?;
-    let Some(archivo) = rng.elegir(&archivos).cloned() else {
+    let libre = rng.elegir_libre(&archivos, excluidos, |a| {
+        identidad_de_lugar(Defecto::SecretoEnCodigo, a, 0, "")
+    });
+    let Some(archivo) = libre else {
         return Ok(None);
     };
     let clave = clave_sintetica(rng);
@@ -314,7 +487,7 @@ fn posicion_de_parseo(linea: &str) -> Option<usize> {
 }
 
 /// Cambia el `?` de una línea que parsea entrada por `.unwrap()`. El código sigue compilando.
-fn panico(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+fn panico(dir: &Path, rng: &mut Prng, excluidos: &Excluidos) -> io::Result<Lugar> {
     let mut candidatos: Vec<(String, usize)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
@@ -325,7 +498,10 @@ fn panico(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
             }
         }
     }
-    let Some((archivo, i)) = rng.elegir(&candidatos).cloned() else {
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, i)| {
+        identidad_de_lugar(Defecto::PanicoEnEntrada, a, *i as u32 + 1, "")
+    });
+    let Some((archivo, i)) = libre else {
         return Ok(None);
     };
     let mut lineas = partir(&leer(dir, &archivo)?);
@@ -345,11 +521,23 @@ const BUCLE: &str =
     "let _ = (0..2_000u32).map(|i| (0..2_000u32).filter(|j| *j == i).count()).sum::<usize>();";
 
 /// Nombre de la función que declara `linea` (`pub fn procesar(` da `procesar`). `None` si no declara una.
+/// Acepta visibilidad (`pub`, `pub(crate)`, `pub(super)`) y los calificadores `const`, `async` y `unsafe`,
+/// en cualquier orden.
 fn nombre_de_funcion(linea: &str) -> Option<&str> {
-    let t = linea.trim_start();
-    let resto = ["pub(crate) fn ", "pub fn ", "fn "]
+    let mut t = linea.trim_start();
+    if let Some(resto) = ["pub(crate) ", "pub(super) ", "pub "]
         .iter()
-        .find_map(|p| t.strip_prefix(p))?;
+        .find_map(|v| t.strip_prefix(v))
+    {
+        t = resto;
+    }
+    while let Some(resto) = ["const ", "async ", "unsafe "]
+        .iter()
+        .find_map(|q| t.strip_prefix(q))
+    {
+        t = resto;
+    }
+    let resto = t.strip_prefix("fn ")?;
     let fin = resto
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .unwrap_or(resto.len());
@@ -363,26 +551,30 @@ fn en_camino(linea: &str, camino: &[String]) -> bool {
 }
 
 /// Inserta un bucle cuadrático al inicio de una función de producción. Con `camino`, solo de las listadas.
-fn bucle(dir: &Path, camino: &[String], rng: &mut Prng) -> io::Result<Lugar> {
+fn bucle(
+    dir: &Path,
+    camino: &[String],
+    rng: &mut Prng,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
     let mut candidatos: Vec<(String, usize)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
         let limite = limite_de_produccion(&lineas);
         for (i, linea) in lineas[..limite].iter().enumerate() {
-            let t = linea.trim_start();
-            let es_funcion = ["pub fn ", "fn ", "pub(crate) fn "]
-                .iter()
-                .any(|p| t.starts_with(p));
-            if es_funcion
+            if nombre_de_funcion(linea).is_some()
                 && linea.trim_end().ends_with('{')
-                && !t.contains("const fn")
                 && en_camino(linea, camino)
             {
                 candidatos.push((archivo.clone(), i));
             }
         }
     }
-    let Some((archivo, i)) = rng.elegir(&candidatos).cloned() else {
+    // El bucle queda una línea debajo de la firma: su línea reportada es `i + 2`.
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, i)| {
+        identidad_de_lugar(Defecto::BucleCuadratico, a, *i as u32 + 2, "")
+    });
+    let Some((archivo, i)) = libre else {
         return Ok(None);
     };
     let mut lineas = partir(&leer(dir, &archivo)?);
@@ -406,7 +598,12 @@ fn archivo_de_modulo(dir: &Path, modulo: &str) -> Option<String> {
 }
 
 /// Un `use` de una capa anterior en un módulo de una capa posterior: el ciclo entre capas.
-fn ciclo(dir: &Path, capas: &[Vec<String>], rng: &mut Prng) -> io::Result<Lugar> {
+fn ciclo(
+    dir: &Path,
+    capas: &[Vec<String>],
+    rng: &mut Prng,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
     if capas.len() < 2 {
         return Ok(None);
     }
@@ -424,7 +621,11 @@ fn ciclo(dir: &Path, capas: &[Vec<String>], rng: &mut Prng) -> io::Result<Lugar>
             }
         }
     }
-    let Some((archivo, superior)) = rng.elegir(&candidatos).cloned() else {
+    // Dos candidatos del mismo archivo tienen la misma identidad: el archivo entero es el defecto.
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, _)| {
+        identidad_de_lugar(Defecto::CicloEntreCapas, a, 0, "")
+    });
+    let Some((archivo, superior)) = libre else {
         return Ok(None);
     };
     let mut texto = leer(dir, &archivo)?;
@@ -437,7 +638,12 @@ fn ciclo(dir: &Path, capas: &[Vec<String>], rng: &mut Prng) -> io::Result<Lugar>
 /// Agrega funciones de relleno a un módulo de primer nivel de `src/`, hasta que el archivo pasa el límite de
 /// archivo y una función pasa el de función. Los demás archivos no cambian. Cada función de relleno es válida,
 /// no tiene dependencias y no tiene uso. Devuelve el archivo y la línea de su primera función.
-fn dios(dir: &Path, limites: &LimitesEstructura, rng: &mut Prng) -> io::Result<Lugar> {
+fn dios(
+    dir: &Path,
+    limites: &LimitesEstructura,
+    rng: &mut Prng,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
     let mut destinos: Vec<String> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let nombre = archivo.trim_start_matches("src/");
@@ -449,7 +655,10 @@ fn dios(dir: &Path, limites: &LimitesEstructura, rng: &mut Prng) -> io::Result<L
             destinos.push(archivo);
         }
     }
-    let Some(destino) = rng.elegir(&destinos).cloned() else {
+    let libre = rng.elegir_libre(&destinos, excluidos, |a| {
+        identidad_de_lugar(Defecto::ArchivoDios, a, 0, "")
+    });
+    let Some(destino) = libre else {
         return Ok(None);
     };
     let mut texto = leer(dir, &destino)?;
@@ -529,7 +738,18 @@ fn nombre_de_declaracion(linea: &str) -> Option<String> {
 }
 
 /// Borra un módulo declarado en `lib.rs` o `main.rs`, con su archivo y su declaración.
-fn modulo_borrado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+/// Con `cambios`, solo los módulos cuyo archivo tiene un rango del cambio.
+/// Con `inicial`, no aplica: el estado inicial ya tiene esos módulos y borrarlos rompe el build.
+fn modulo_borrado(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    inicial: Option<&Path>,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
+    if inicial.is_some() {
+        return Ok(None);
+    }
     let raices = ["src/lib.rs", "src/main.rs"];
     let mut declarados: BTreeSet<String> = BTreeSet::new();
     for raiz in raices {
@@ -541,9 +761,15 @@ fn modulo_borrado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
     }
     let candidatos: Vec<String> = declarados
         .into_iter()
-        .filter(|m| dir.join(format!("src/{m}.rs")).is_file())
+        .filter(|m| {
+            let archivo = format!("src/{m}.rs");
+            dir.join(&archivo).is_file() && archivo_tocado(cambios, &archivo)
+        })
         .collect();
-    let Some(modulo) = rng.elegir(&candidatos).cloned() else {
+    let libre = rng.elegir_libre(&candidatos, excluidos, |m| {
+        identidad_de_lugar(Defecto::ModuloBorrado, &format!("src/{m}.rs"), 0, "")
+    });
+    let Some(modulo) = libre else {
         return Ok(None);
     };
     let archivo = format!("src/{modulo}.rs");
@@ -564,6 +790,137 @@ fn modulo_borrado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
     }
     // Línea 0: el archivo entero desaparece.
     Ok(Some((archivo, 0)))
+}
+
+/// Un cuerpo de función en un archivo: la línea de la firma, la de la `{` de apertura y la de la `}` de cierre
+/// (0-based), con la posición de cada llave en su línea. Las posiciones son bytes de la línea original.
+#[derive(Debug, Clone, Copy)]
+struct Cuerpo {
+    firma: usize,
+    abre: usize,
+    abre_pos: usize,
+    cierra: usize,
+    cierra_pos: usize,
+}
+
+/// Cuerpo de la función que declara la línea `firma`. La firma puede ocupar varias líneas: el cuerpo empieza en la
+/// primera `{` fuera de paréntesis y corchetes. `None` si la firma termina en `;` (declaración), si no cierra, o si
+/// abre y cierra en la misma línea. `limpias` es el archivo entero de `limpias_de`: sin comentarios ni cadenas.
+fn cuerpo_de(limpias: &[String], firma: usize) -> Option<Cuerpo> {
+    let mut nivel = 0i32;
+    let mut apertura = None;
+    'firma: for (j, limpia) in limpias.iter().enumerate().skip(firma) {
+        for (p, c) in limpia.char_indices() {
+            match c {
+                '(' | '[' => nivel += 1,
+                ')' | ']' => nivel -= 1,
+                ';' if nivel == 0 => return None,
+                '{' if nivel == 0 => {
+                    apertura = Some((j, p));
+                    break 'firma;
+                }
+                _ => {}
+            }
+        }
+    }
+    let (abre, abre_pos) = apertura?;
+    let mut profundidad = 0i32;
+    for (k, limpia) in limpias.iter().enumerate().skip(abre) {
+        let desde = if k == abre { abre_pos } else { 0 };
+        for (p, c) in limpia.char_indices().skip_while(|(p, _)| *p < desde) {
+            match c {
+                '{' => profundidad += 1,
+                '}' => profundidad -= 1,
+                _ => {}
+            }
+            if profundidad == 0 {
+                return (k != abre).then_some(Cuerpo {
+                    firma,
+                    abre,
+                    abre_pos,
+                    cierra: k,
+                    cierra_pos: p,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// `true` si el cuerpo, sin espacios, es solo `todo!()`.
+fn cuerpo_es_todo(lineas: &[String], cuerpo: &Cuerpo) -> bool {
+    let mut texto = lineas[cuerpo.abre][cuerpo.abre_pos + 1..].to_string();
+    for linea in &lineas[cuerpo.abre + 1..cuerpo.cierra] {
+        texto.push_str(linea);
+    }
+    texto.push_str(&lineas[cuerpo.cierra][..cuerpo.cierra_pos]);
+    texto.retain(|c| !c.is_whitespace());
+    texto == "todo!()"
+}
+
+/// `true` si `texto` declara la función `nombre`: `fn nombre(` o `fn nombre<`.
+fn declara_fn(texto: &str, nombre: &str) -> bool {
+    texto
+        .lines()
+        .any(|l| l.contains(&format!("fn {nombre}(")) || l.contains(&format!("fn {nombre}<")))
+}
+
+/// Vacía el cuerpo de una función de producción. El cuerpo queda en `todo!()`, con la firma intacta.
+/// Con `inicial`, solo elige funciones que ya existían en el estado inicial y que el cambio tocó.
+/// Sin `inicial`, elige cualquier función de producción con la semilla. Devuelve el lugar y si la elegida
+/// cruza una línea del cambio. Ese `bool` es `false` sin `cambios`.
+fn cuerpo_vaciado(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    inicial: Option<&Path>,
+    excluidos: &Excluidos,
+) -> io::Result<(Lugar, bool)> {
+    // (archivo, cuerpo, cruza el cambio)
+    let mut candidatos: Vec<(String, Cuerpo, bool)> = Vec::new();
+    for archivo in rust_en(dir, "src")? {
+        let lineas = partir(&leer(dir, &archivo)?);
+        let previo = match inicial {
+            Some(inicial) if inicial.join(&archivo).is_file() => Some(leer(inicial, &archivo)?),
+            Some(_) => Some(String::new()),
+            None => None,
+        };
+        let limpias = limpias_de(&lineas);
+        let limite = limite_de_produccion(&lineas);
+        for firma in 0..limite {
+            let Some(nombre) = nombre_de_funcion(&lineas[firma]) else {
+                continue;
+            };
+            if previo.as_ref().is_some_and(|p| !declara_fn(p, nombre)) {
+                continue;
+            }
+            let Some(cuerpo) = cuerpo_de(&limpias, firma).filter(|c| c.cierra < limite) else {
+                continue;
+            };
+            let cruza =
+                (firma..=cuerpo.cierra).any(|l| en_el_cambio(cambios, &archivo, l as u32 + 1));
+            if (inicial.is_none() || cruza) && !cuerpo_es_todo(&lineas, &cuerpo) {
+                candidatos.push((archivo.clone(), cuerpo, cambios.is_some() && cruza));
+            }
+        }
+    }
+    // La línea reportada es la de la firma, 1-based.
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, c, _)| {
+        identidad_de_lugar(Defecto::CuerpoVaciado, a, c.firma as u32 + 1, "")
+    });
+    let Some((archivo, cuerpo, en_cambio)) = libre else {
+        return Ok((None, false));
+    };
+    let lineas = partir(&leer(dir, &archivo)?);
+    let sangria =
+        |linea: &str| -> String { linea.chars().take_while(|c| c.is_whitespace()).collect() };
+    let mut nuevo: Vec<String> = lineas[..cuerpo.abre].to_vec();
+    nuevo.push(lineas[cuerpo.abre][..=cuerpo.abre_pos].to_string());
+    nuevo.push(format!("{}    todo!()", sangria(&lineas[cuerpo.firma])));
+    nuevo.push(format!("{}}}", sangria(&lineas[cuerpo.cierra])));
+    nuevo.extend_from_slice(&lineas[cuerpo.cierra + 1..]);
+    escribir(dir, &archivo, &unir(&nuevo))?;
+    Ok((Some((archivo, cuerpo.firma as u32 + 1)), en_cambio))
 }
 
 /// Sentencia `expr?;` sin `let`, `return` ni asignación: el `?` pasa a `let _ = expr;`.
@@ -616,7 +973,7 @@ fn empieza_sentencia(lineas: &[String], i: usize) -> bool {
 }
 
 /// Cambia una sentencia `expr?;` por `let _ = expr;`: el error se traga.
-fn error_tragado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+fn error_tragado(dir: &Path, rng: &mut Prng, excluidos: &Excluidos) -> io::Result<Lugar> {
     let mut candidatos: Vec<(String, usize)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
@@ -627,7 +984,10 @@ fn error_tragado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
             }
         }
     }
-    let Some((archivo, i)) = rng.elegir(&candidatos).cloned() else {
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, i)| {
+        identidad_de_lugar(Defecto::ErrorTragado, a, *i as u32 + 1, "")
+    });
+    let Some((archivo, i)) = libre else {
         return Ok(None);
     };
     let mut lineas = partir(&leer(dir, &archivo)?);
@@ -653,11 +1013,12 @@ struct Apagado {
 
 /// Apaga con `#[ignore]` los tests de un mutante muerto de `muertos`. La semilla elige el mutante por su
 /// posición. Si ese mutante no sirve, prueba el siguiente, en orden. Sin muertos que sirvan, no aplica: no hay
-/// apagado al azar.
+/// apagado al azar. Salta los mutantes excluidos sin tocar la copia.
 fn assert_borrado(
     dir: &Path,
     muertos: &[MutanteMuerto],
     rng: &mut Prng,
+    excluidos: &Excluidos,
 ) -> io::Result<Option<Apagado>> {
     if muertos.is_empty() {
         return Ok(None);
@@ -665,6 +1026,11 @@ fn assert_borrado(
     let inicio = rng.indice(muertos.len());
     for k in 0..muertos.len() {
         let mutante = &muertos[(inicio + k) % muertos.len()];
+        let identidad =
+            identidad_de_lugar(Defecto::AssertBorrado, &mutante.archivo, 0, &mutante.nombre);
+        if excluidos.contains(&identidad) {
+            continue;
+        }
         if let Some(apagado) = apagar_tests(dir, mutante)? {
             return Ok(Some(apagado));
         }
@@ -795,9 +1161,17 @@ fn es_user_no_root(linea: &str) -> bool {
         .is_some_and(|usuario| !matches!(usuario.trim(), "root" | "0"))
 }
 
-/// Quita el `USER` no root del Dockerfile: la imagen corre como root.
-fn dockerfile(dir: &Path) -> io::Result<Lugar> {
-    if !dir.join("Dockerfile").is_file() {
+/// Quita el `USER` no root del Dockerfile: la imagen corre como root. Es un solo candidato: si ya está excluido,
+/// no hay nada que elegir.
+fn dockerfile(dir: &Path, excluidos: &Excluidos) -> io::Result<Lugar> {
+    if !dir.join("Dockerfile").is_file()
+        || excluidos.contains(&identidad_de_lugar(
+            Defecto::DockerfileRoot,
+            "Dockerfile",
+            0,
+            "",
+        ))
+    {
         return Ok(None);
     }
     let lineas = partir(&leer(dir, "Dockerfile")?);
@@ -845,18 +1219,29 @@ fn posicion_de_igualdad(linea: &str) -> Option<usize> {
 
 /// Cambia el primer ` == ` de una línea de producción de `src/` por ` != `: la comparación sale invertida.
 /// Usa solo las líneas de antes de `#[cfg(test)]`. `Ok(None)` si no hay ninguna comparación de ese tipo.
-fn comportamiento(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+/// Con `cambios`, solo las líneas que caen dentro de un rango del cambio.
+fn igualdad_invertida(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
     let mut candidatos: Vec<(String, usize)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
         let limite = limite_de_produccion(&lineas);
         for (i, linea) in lineas[..limite].iter().enumerate() {
-            if posicion_de_igualdad(linea).is_some() {
+            if posicion_de_igualdad(linea).is_some()
+                && en_el_cambio(cambios, &archivo, i as u32 + 1)
+            {
                 candidatos.push((archivo.clone(), i));
             }
         }
     }
-    let Some((archivo, i)) = rng.elegir(&candidatos).cloned() else {
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, i)| {
+        identidad_de_lugar(Defecto::ComportamientoRoto, a, *i as u32 + 1, "")
+    });
+    let Some((archivo, i)) = libre else {
         return Ok(None);
     };
     let mut lineas = partir(&leer(dir, &archivo)?);
@@ -866,6 +1251,257 @@ fn comportamiento(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
     lineas[i].replace_range(p..p + 4, " != ");
     escribir(dir, &archivo, &unir(&lineas))?;
     Ok(Some((archivo, i as u32 + 1)))
+}
+
+/// Pares de operadores que `ComportamientoRoto` cambia con estado inicial. Con espacios a ambos lados: no toca
+/// genéricos (`<T>`), flechas (`->`, `=>`) ni desplazamientos (`<<`, `>>`).
+const PARES_DE_OPERADOR: [(&str, &str); 8] = [
+    (" < ", " <= "),
+    (" <= ", " < "),
+    (" > ", " >= "),
+    (" >= ", " > "),
+    (" == ", " != "),
+    (" != ", " == "),
+    (" && ", " || "),
+    (" || ", " && "),
+];
+
+/// Constantes booleanas. Son palabras enteras: no van pegadas a letras, dígitos ni `_`.
+const PARES_DE_PALABRA: [(&str, &str); 2] = [("true", "false"), ("false", "true")];
+
+/// Sumas de uno. El `1` no sigue de dígito, letra, `_` ni `.`.
+const PARES_DE_SUMA: [(&str, &str); 2] = [(" + 1", " - 1"), (" - 1", " + 1")];
+
+/// Prefijos de línea que tienen una condición. `else if` y `} else if` van aparte: el prefijo es el texto exacto.
+const PREFIJOS_DE_CONDICION: [&str; 4] = ["} else if ", "else if ", "if ", "while "];
+
+/// Un cambio posible en una línea: reemplaza `inicio..fin` de la línea original por `nuevo`. `operador` lo nombra.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Edicion {
+    inicio: usize,
+    fin: usize,
+    nuevo: String,
+    operador: String,
+}
+
+impl Edicion {
+    fn aplicar(&self, linea: &str) -> String {
+        let mut nueva = linea.to_string();
+        nueva.replace_range(self.inicio..self.fin, &self.nuevo);
+        nueva
+    }
+}
+
+fn cambio(inicio: usize, fin: usize, nuevo: &str, operador: String) -> Edicion {
+    Edicion {
+        inicio,
+        fin,
+        nuevo: nuevo.to_string(),
+        operador,
+    }
+}
+
+/// Nombre legible de un par: `> -> >=`.
+fn nombre_de_par(de: &str, a: &str) -> String {
+    format!("{} -> {}", de.trim(), a.trim())
+}
+
+/// `true` si `c` puede seguir o empezar un identificador: letra, dígito o `_`.
+fn es_parte_de_palabra(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Texto limpio de cada línea del archivo, en el mismo orden.
+/// `analizar` recuerda el estado entre líneas. Un comentario o una cadena que cruza líneas queda en blanco.
+fn limpias_de(lineas: &[String]) -> Vec<String> {
+    analizar(lineas)
+        .into_iter()
+        .map(|l| sin_caracteres(&l.limpia))
+        .collect()
+}
+
+/// Pone en blanco los literales de carácter (`'{'`, `'\n'`) de una línea limpia. Mismo largo en bytes.
+/// `analizar` copia esos literales tal cual, y una llave dentro de `'{'` no abre ni cierra bloque.
+fn sin_caracteres(limpia: &str) -> String {
+    let cars: Vec<char> = limpia.chars().collect();
+    let mut oculto = vec![false; cars.len()];
+    let mut i = 0;
+    while i < cars.len() {
+        if cars[i] == '\''
+            && let Some(fin) = fin_de_caracter(&cars, i)
+        {
+            oculto[i..=fin].fill(true);
+            i = fin;
+        }
+        i += 1;
+    }
+    cars.iter()
+        .zip(&oculto)
+        .map(|(&c, &o)| {
+            if o {
+                " ".repeat(c.len_utf8())
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Índice del `'` que cierra el literal de carácter que abre en `i` (`'a'`, `'\n'`, `'\''`). `None` si es un lifetime.
+fn fin_de_caracter(cars: &[char], i: usize) -> Option<usize> {
+    match cars.get(i + 1)? {
+        '\\' => (i + 3..cars.len()).find(|&j| cars[j] == '\''),
+        _ => (cars.get(i + 2) == Some(&'\'')).then_some(i + 2),
+    }
+}
+
+/// Cambios de operador de comparación o lógico en la línea limpia.
+fn ediciones_de_operador(limpia: &str) -> Vec<Edicion> {
+    let mut salida = Vec::new();
+    for &(de, a) in &PARES_DE_OPERADOR {
+        for (p, _) in limpia.match_indices(de) {
+            salida.push(cambio(p, p + de.len(), a, nombre_de_par(de, a)));
+        }
+    }
+    salida
+}
+
+/// Cambios de `true`/`false` como palabra entera, y de `+ 1`/`- 1` donde el `1` no sigue de dígito, letra, `_` ni `.`.
+fn ediciones_de_valor(limpia: &str) -> Vec<Edicion> {
+    let mut salida = Vec::new();
+    for &(de, a) in &PARES_DE_PALABRA {
+        for (p, _) in limpia.match_indices(de) {
+            let fin = p + de.len();
+            let antes = limpia[..p].chars().next_back();
+            let despues = limpia[fin..].chars().next();
+            if !antes.is_some_and(es_parte_de_palabra) && !despues.is_some_and(es_parte_de_palabra)
+            {
+                salida.push(cambio(p, fin, a, nombre_de_par(de, a)));
+            }
+        }
+    }
+    for &(de, a) in &PARES_DE_SUMA {
+        for (p, _) in limpia.match_indices(de) {
+            let fin = p + de.len();
+            let despues = limpia[fin..].chars().next();
+            if !despues.is_some_and(|c| es_parte_de_palabra(c) || c == '.') {
+                salida.push(cambio(p, fin, a, nombre_de_par(de, a)));
+            }
+        }
+    }
+    salida
+}
+
+/// Cambios de la condición de un `if`, `while` o `else if`: quita el `!` que tiene, o la envuelve en `!( ... )`.
+/// La condición acaba en la primera `{` de la línea limpia, la que abre el bloque. Sin esa `{`, la condición
+/// sigue en otra línea y no hay envoltorio. `if let` queda fuera.
+fn ediciones_de_condicion(linea: &str, limpia: &str) -> Vec<Edicion> {
+    let inicio_codigo = limpia.len() - limpia.trim_start().len();
+    let resto = &limpia[inicio_codigo..];
+    let Some(prefijo) = PREFIJOS_DE_CONDICION
+        .into_iter()
+        .find(|p| resto.starts_with(*p))
+    else {
+        return Vec::new();
+    };
+    let c = inicio_codigo + prefijo.len();
+    let condicion = &limpia[c..];
+    if condicion.starts_with("let ") {
+        return Vec::new();
+    }
+    if condicion.starts_with('!') && !condicion.starts_with("!=") {
+        return vec![cambio(c, c + 1, "", "if: quitar !".to_string())];
+    }
+    let Some(llave) = condicion.find('{') else {
+        return Vec::new();
+    };
+    // La línea limpia y la original tienen las mismas posiciones en bytes: `limpias_de` no las mueve.
+    // El fin se mide en la original: en la limpia, un `'{'` queda en blanco y el `trim_end` lo corta.
+    let fin = c + linea[c..c + llave].trim_end().len();
+    if fin == c {
+        return Vec::new();
+    }
+    let nuevo = format!("!({})", &linea[c..fin]);
+    vec![cambio(c, fin, &nuevo, "if: agregar !".to_string())]
+}
+
+/// Todos los cambios posibles de `ComportamientoRoto` en una línea de producción. `limpia` sale de `limpias_de`.
+/// Una línea limpia en blanco, como un comentario o el interior de una cadena, no ofrece ninguno.
+fn candidatos_de_linea(linea: &str, limpia: &str) -> Vec<Edicion> {
+    if limpia.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut salida = ediciones_de_operador(limpia);
+    salida.extend(ediciones_de_valor(limpia));
+    salida.extend(ediciones_de_condicion(linea, limpia));
+    salida
+}
+
+/// Líneas del archivo en el estado inicial, sin espacios a los lados. Vacío si el archivo no existe allí.
+fn lineas_del_inicial(inicial: &Path, archivo: &str) -> io::Result<BTreeSet<String>> {
+    let ruta = inicial.join(archivo);
+    if !ruta.is_file() {
+        return Ok(BTreeSet::new());
+    }
+    Ok(partir(&fs::read_to_string(ruta)?)
+        .iter()
+        .map(|l| l.trim().to_string())
+        .collect())
+}
+
+/// Modo operadores (`inicial` dado): cambia un operador, un valor o una condición dentro del cambio de `bootstrap/`.
+/// Descarta lo que el estado inicial ya tenía, para no revertir el cambio. `Ok(None)` si no queda ningún candidato.
+fn comportamiento_con_inicial(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    inicial: &Path,
+    excluidos: &Excluidos,
+) -> io::Result<Option<(String, u32, Option<String>)>> {
+    let mut candidatos: Vec<(String, usize, Edicion)> = Vec::new();
+    for archivo in rust_en(dir, "src")? {
+        let lineas = partir(&leer(dir, &archivo)?);
+        let limpias = limpias_de(&lineas);
+        let previas = lineas_del_inicial(inicial, &archivo)?;
+        let limite = limite_de_produccion(&lineas);
+        for (i, linea) in lineas[..limite].iter().enumerate() {
+            if !en_el_cambio(cambios, &archivo, i as u32 + 1) {
+                continue;
+            }
+            for edicion in candidatos_de_linea(linea, &limpias[i]) {
+                if !previas.contains(edicion.aplicar(linea).trim()) {
+                    candidatos.push((archivo.clone(), i, edicion));
+                }
+            }
+        }
+    }
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, i, e)| {
+        identidad_de_lugar(Defecto::ComportamientoRoto, a, *i as u32 + 1, &e.operador)
+    });
+    let Some((archivo, i, edicion)) = libre else {
+        return Ok(None);
+    };
+    let mut lineas = partir(&leer(dir, &archivo)?);
+    lineas[i] = edicion.aplicar(&lineas[i]);
+    escribir(dir, &archivo, &unir(&lineas))?;
+    Ok(Some((archivo, i as u32 + 1, Some(edicion.operador))))
+}
+
+/// Cambia un defecto de comportamiento en `dir`. Sin `inicial`, cambia el primer ` == ` por ` != ` (la regla de
+/// siempre). Con `inicial`, cambia un operador, un valor o una condición (ver `comportamiento_con_inicial`).
+/// Devuelve archivo, línea (1-based) y el operador cambiado, que solo existe con `inicial`.
+fn comportamiento(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    inicial: Option<&Path>,
+    excluidos: &Excluidos,
+) -> io::Result<Option<(String, u32, Option<String>)>> {
+    match inicial {
+        Some(inicial) => comportamiento_con_inicial(dir, rng, cambios, inicial, excluidos),
+        None => Ok(igualdad_invertida(dir, rng, cambios, excluidos)?
+            .map(|(archivo, linea)| (archivo, linea, None))),
+    }
 }
 
 #[cfg(test)]
@@ -1020,6 +1656,8 @@ mod tests {
         assert_eq!(Defecto::DockerfileRoot.item(), "entrega.contenedor");
         assert_eq!(Defecto::ComportamientoRoto.dimension(), Dimension::Funciona);
         assert_eq!(Defecto::ComportamientoRoto.item(), "funciona.correccion");
+        assert_eq!(Defecto::CuerpoVaciado.dimension(), Dimension::Completitud);
+        assert_eq!(Defecto::CuerpoVaciado.item(), "completitud.alcance");
     }
 
     #[test]
@@ -1029,8 +1667,20 @@ mod tests {
             vec![Defecto::SecretoEnCodigo, Defecto::PanicoEnEntrada]
         );
         assert_eq!(
+            de_dimension(Dimension::Completitud),
+            vec![Defecto::CuerpoVaciado]
+        );
+        assert_eq!(
             de_dimension(Dimension::Funciona),
             vec![Defecto::ComportamientoRoto]
+        );
+    }
+
+    #[test]
+    fn de_dimension_completitud_no_trae_modulo_borrado() {
+        assert_eq!(
+            de_dimension(Dimension::Completitud),
+            vec![Defecto::CuerpoVaciado]
         );
     }
 
@@ -1099,6 +1749,26 @@ mod tests {
             .nth(inyeccion.linea as usize - 1)
             .expect("línea");
         assert!(linea.contains("let _ = (0..2_000u32)"), "{linea}");
+    }
+
+    /// `true` si `bucle` elige la única función de un archivo con la firma `firma`.
+    fn bucle_elige_la_funcion(firma: &str) -> bool {
+        let dir = repo_de(&[("src/lib.rs", &format!("{firma}\n    1\n}}\n"))]);
+        bucle(dir.path(), &[], &mut Prng(7), &Excluidos::new())
+            .expect("E/S")
+            .is_some()
+    }
+
+    #[test]
+    fn bucle_reconoce_pub_crate_const_fn() {
+        assert!(bucle_elige_la_funcion("pub(crate) const fn f() -> u32 {"));
+    }
+
+    #[test]
+    fn bucle_reconoce_async_y_unsafe_fn() {
+        assert!(bucle_elige_la_funcion("async fn f() -> u32 {"));
+        assert!(bucle_elige_la_funcion("pub unsafe fn f() -> u32 {"));
+        assert!(bucle_elige_la_funcion("pub(super) fn f() -> u32 {"));
     }
 
     #[test]
@@ -1299,6 +1969,9 @@ mod tests {
                 camino_caliente: &[],
                 limites: &limites,
                 muertos: &[],
+                inicial: None,
+                excluidos: &BTreeSet::new(),
+                cambios: None,
             };
             let inyeccion = inyectar_con(Defecto::ArchivoDios, dir.path(), &contexto, 42)
                 .expect("E/S")
@@ -1457,7 +2130,10 @@ mod tests {
             capas: &capas,
             camino_caliente: &[],
             limites: &limites,
+            inicial: None,
+            excluidos: &BTreeSet::new(),
             muertos,
+            cambios: None,
         };
         inyectar_con(Defecto::AssertBorrado, dir, &contexto, semilla)
     }
@@ -1518,8 +2194,11 @@ mod tests {
         let contexto = Contexto {
             capas: &capas,
             camino_caliente: &[],
+            inicial: None,
+            excluidos: &BTreeSet::new(),
             limites: &limites,
             muertos: &[muerto_de_leer_numero()],
+            cambios: None,
         };
         let inyeccion = inyectar_con(Defecto::SecretoEnCodigo, dir.path(), &contexto, 42)
             .expect("E/S")
@@ -1794,6 +2473,246 @@ mod tests {
         assert_eq!(arbol(dir.path()), antes, "no toca el repo");
     }
 
+    fn identidad_de(defecto: Defecto, archivo: &str) -> Identidad {
+        Identidad {
+            defecto,
+            archivo: archivo.into(),
+            linea: 0,
+            edicion: String::new(),
+        }
+    }
+
+    fn identidad_de_numero(n: &u32) -> Identidad {
+        Identidad {
+            defecto: Defecto::PanicoEnEntrada,
+            archivo: "src/x.rs".into(),
+            linea: *n,
+            edicion: String::new(),
+        }
+    }
+
+    /// Contexto sin capas, mutantes ni cambios: solo `inicial` y `excluidos` varían.
+    fn contexto_con<'a>(
+        capas: &'a [Vec<String>],
+        limites: &'a LimitesEstructura,
+        inicial: Option<&'a Path>,
+        excluidos: &'a Excluidos,
+    ) -> Contexto<'a> {
+        Contexto {
+            capas,
+            camino_caliente: &[],
+            limites,
+            muertos: &[],
+            cambios: None,
+            inicial,
+            excluidos,
+        }
+    }
+
+    #[test]
+    fn elegir_libre_sin_exclusiones_elige_como_elegir() {
+        let candidatos: Vec<u32> = (1..=7).collect();
+        let vacio = Excluidos::new();
+        for semilla in 0..200u64 {
+            let libre = Prng::nuevo(semilla).elegir_libre(&candidatos, &vacio, identidad_de_numero);
+            let plano = Prng::nuevo(semilla).elegir(&candidatos).copied();
+            assert_eq!(libre, plano, "semilla {semilla}");
+        }
+    }
+
+    #[test]
+    fn elegir_libre_no_elige_un_excluido_y_sin_restantes_no_elige_nada() {
+        let candidatos = vec![1u32, 2, 3];
+        let excluidos: Excluidos = [identidad_de_numero(&1), identidad_de_numero(&2)]
+            .into_iter()
+            .collect();
+        for semilla in 0..50u64 {
+            let elegido =
+                Prng::nuevo(semilla).elegir_libre(&candidatos, &excluidos, identidad_de_numero);
+            assert_eq!(elegido, Some(3), "semilla {semilla}");
+        }
+        let todos: Excluidos = candidatos.iter().map(identidad_de_numero).collect();
+        assert_eq!(
+            Prng::nuevo(0).elegir_libre(&candidatos, &todos, identidad_de_numero),
+            None
+        );
+    }
+
+    /// Con `excluidos` igual a la identidad elegida, la misma semilla no vuelve a elegirla. Si `identidad()` no
+    /// coincide con la que `elegir_libre` filtra, la misma inyección sale otra vez y la prueba falla.
+    fn no_repite_la_elegida(
+        defecto: Defecto,
+        repo: &dyn Fn() -> tempfile::TempDir,
+        semilla: u64,
+        con_inicial: bool,
+    ) {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let vacio = Excluidos::new();
+        let previo = repo();
+        let inicial = con_inicial.then(|| previo.path());
+        let primera = repo();
+        let elegida = inyectar_con(
+            defecto,
+            primera.path(),
+            &contexto_con(&capas, &limites, inicial, &vacio),
+            semilla,
+        )
+        .expect("E/S")
+        .expect("aplica");
+        let excluidos: Excluidos = [elegida.identidad()].into_iter().collect();
+        let segunda = repo();
+        let otra = inyectar_con(
+            defecto,
+            segunda.path(),
+            &contexto_con(&capas, &limites, inicial, &excluidos),
+            semilla,
+        )
+        .expect("E/S");
+        assert!(
+            otra.is_none_or(|o| o.identidad() != elegida.identidad()),
+            "{defecto:?} repite {:?}",
+            elegida.identidad()
+        );
+    }
+
+    #[test]
+    fn excluir_la_elegida_no_la_repite_en_cada_defecto_con_identidad_de_linea() {
+        let fixture: &dyn Fn() -> tempfile::TempDir = &copia_fixture;
+        no_repite_la_elegida(Defecto::PanicoEnEntrada, fixture, 3, false);
+        no_repite_la_elegida(Defecto::BucleCuadratico, fixture, 5, false);
+        no_repite_la_elegida(Defecto::ErrorTragado, fixture, 7, false);
+        no_repite_la_elegida(Defecto::CuerpoVaciado, fixture, 9, false);
+        no_repite_la_elegida(Defecto::SecretoEnCodigo, fixture, 1, false);
+        let igualdades: &dyn Fn() -> tempfile::TempDir = &|| {
+            repo_de(&[(
+                "src/lib.rs",
+                "pub fn uno(x: u32) -> bool {\n    x == 1\n}\n\npub fn dos(x: u32) -> bool {\n    x == 2\n}\n",
+            )])
+        };
+        no_repite_la_elegida(Defecto::ComportamientoRoto, igualdades, 2, false);
+        let mayores: &dyn Fn() -> tempfile::TempDir = &|| {
+            repo_de(&[(
+                "src/lib.rs",
+                "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n\npub fn dos(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+            )])
+        };
+        no_repite_la_elegida(Defecto::ComportamientoRoto, mayores, 4, true);
+    }
+
+    #[test]
+    fn reemplazo_no_elige_ni_una_identidad_usada_ni_una_invalida() {
+        let excluidos: Excluidos = [
+            identidad_de(Defecto::SecretoEnCodigo, "src/almacen.rs"),
+            identidad_de(Defecto::SecretoEnCodigo, "src/comandos.rs"),
+        ]
+        .into_iter()
+        .collect();
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        for semilla in 0..40u64 {
+            let dir = copia_fixture();
+            let inyeccion = inyectar_con(
+                Defecto::SecretoEnCodigo,
+                dir.path(),
+                &contexto_con(&capas, &limites, None, &excluidos),
+                semilla,
+            )
+            .expect("E/S")
+            .expect("aplica");
+            assert!(
+                inyeccion.archivo != "src/almacen.rs" && inyeccion.archivo != "src/comandos.rs",
+                "semilla {semilla}: {}",
+                inyeccion.archivo
+            );
+        }
+    }
+
+    #[test]
+    fn dockerfile_excluido_no_es_aplicable_y_no_toca_el_repo() {
+        let dir = copia_fixture();
+        let antes = arbol(dir.path());
+        let excluidos: Excluidos = [identidad_de(Defecto::DockerfileRoot, "Dockerfile")]
+            .into_iter()
+            .collect();
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let resultado = inyectar_con(
+            Defecto::DockerfileRoot,
+            dir.path(),
+            &contexto_con(&capas, &limites, None, &excluidos),
+            1,
+        )
+        .expect("E/S");
+        assert_eq!(resultado, None);
+        assert_eq!(arbol(dir.path()), antes);
+    }
+
+    #[test]
+    fn assert_borrado_salta_el_mutante_excluido() {
+        let dir = copia_con_test_de_leer_numero();
+        let antes = arbol(dir.path());
+        let muerto = muerto_de_leer_numero();
+        let muertos = vec![muerto.clone()];
+        let excluidos: Excluidos = [Identidad {
+            defecto: Defecto::AssertBorrado,
+            archivo: muerto.archivo.clone(),
+            linea: 0,
+            edicion: muerto.nombre.clone(),
+        }]
+        .into_iter()
+        .collect();
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            muertos: &muertos,
+            ..contexto_con(&capas, &limites, None, &excluidos)
+        };
+        let resultado =
+            inyectar_con(Defecto::AssertBorrado, dir.path(), &contexto, 1).expect("E/S");
+        assert_eq!(resultado, None);
+        assert_eq!(arbol(dir.path()), antes);
+    }
+
+    #[test]
+    fn identidad_de_los_defectos_de_archivo_entero_tiene_linea_cero() {
+        let dir = copia_fixture();
+        let inyeccion = inyectar(Defecto::SecretoEnCodigo, dir.path(), &capas_fixture(), 1)
+            .expect("E/S")
+            .expect("aplica");
+        assert!(inyeccion.linea > 0, "{inyeccion:?}");
+        assert_eq!(
+            inyeccion.identidad(),
+            identidad_de(Defecto::SecretoEnCodigo, &inyeccion.archivo)
+        );
+    }
+
+    #[test]
+    fn identidad_de_assert_borrado_es_el_mutante_elegido() {
+        let dir = copia_con_test_de_leer_numero();
+        let muerto = muerto_de_leer_numero();
+        let muertos = vec![muerto.clone()];
+        let excluidos = Excluidos::new();
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            muertos: &muertos,
+            ..contexto_con(&capas, &limites, None, &excluidos)
+        };
+        let inyeccion = inyectar_con(Defecto::AssertBorrado, dir.path(), &contexto, 1)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(
+            inyeccion.identidad(),
+            Identidad {
+                defecto: Defecto::AssertBorrado,
+                archivo: muerto.archivo,
+                linea: 0,
+                edicion: muerto.nombre,
+            }
+        );
+    }
+
     #[test]
     fn inyectar_dockerfile_quita_el_user_no_root() {
         let (inyeccion, antes, despues) = aplicar(Defecto::DockerfileRoot, 42);
@@ -1843,9 +2762,12 @@ mod tests {
         let limites = LimitesEstructura::default();
         let contexto = Contexto {
             capas: &capas,
+            inicial: None,
+            excluidos: &BTreeSet::new(),
             camino_caliente: camino,
             limites: &limites,
             muertos: &[],
+            cambios: None,
         };
         inyectar_con(defecto, dir, &contexto, semilla)
     }
@@ -2161,6 +3083,777 @@ pub fn dos(x: u32) -> bool {
         let objetivo = tempfile::tempdir().expect("temporal");
         if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
             panic!("la copia con el defecto no compila:\n{stderr}");
+        }
+    }
+
+    /// Fuente de 30 líneas en `src/lib.rs`: las líneas 3, 12, 15 y 25 tienen ` == `, las demás no.
+    fn fuente_con_igualdades() -> String {
+        (1..=30)
+            .map(|n| {
+                if [3, 12, 15, 25].contains(&n) {
+                    format!("    let c{n} = x == {n};")
+                } else {
+                    format!("    let c{n} = x;")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    /// Rangos con un solo archivo, para `Contexto.cambios`.
+    fn rangos_de(archivo: &str, rangos: &[(u32, u32)]) -> BTreeMap<String, Vec<(u32, u32)>> {
+        BTreeMap::from([(archivo.to_string(), rangos.to_vec())])
+    }
+
+    /// `inyectar_con` de `defecto` en `dir`, con `cambios` y las capas del fixture.
+    fn con_cambios(
+        defecto: Defecto,
+        dir: &Path,
+        cambios: Option<&BTreeMap<String, Vec<(u32, u32)>>>,
+        semilla: u64,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            inicial: None,
+            excluidos: &BTreeSet::new(),
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos: &[],
+            cambios,
+        };
+        inyectar_con(defecto, dir, &contexto, semilla)
+    }
+
+    #[test]
+    fn comportamiento_con_cambio_elige_solo_igualdades_dentro_del_rango() {
+        let fuente = fuente_con_igualdades();
+        let cambios = rangos_de("src/lib.rs", &[(10, 20)]);
+        let mut lineas = BTreeSet::new();
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/lib.rs", fuente.as_str())]);
+            let inyeccion = con_cambios(
+                Defecto::ComportamientoRoto,
+                dir.path(),
+                Some(&cambios),
+                semilla,
+            )
+            .expect("no falla la E/S")
+            .expect("hay igualdades dentro del cambio");
+            assert!(
+                (10..=20).contains(&inyeccion.linea),
+                "semilla {semilla}: la línea {} cae fuera del cambio",
+                inyeccion.linea
+            );
+            lineas.insert(inyeccion.linea);
+        }
+        assert_eq!(
+            lineas,
+            BTreeSet::from([12, 15]),
+            "la semilla elige entre las dos igualdades del rango"
+        );
+    }
+
+    #[test]
+    fn comportamiento_con_cambio_sin_igualdades_no_es_aplicable() {
+        let fuente = fuente_con_igualdades();
+        let cambios = rangos_de("src/lib.rs", &[(1, 2)]);
+        for semilla in 1..=5u64 {
+            let dir = repo_de(&[("src/lib.rs", fuente.as_str())]);
+            let antes = arbol(dir.path());
+            let inyeccion = con_cambios(
+                Defecto::ComportamientoRoto,
+                dir.path(),
+                Some(&cambios),
+                semilla,
+            )
+            .expect("no falla la E/S");
+            assert_eq!(
+                inyeccion, None,
+                "semilla {semilla}: las líneas 1 y 2 no tienen =="
+            );
+            assert_eq!(
+                arbol(dir.path()),
+                antes,
+                "semilla {semilla}: no toca el repo"
+            );
+        }
+    }
+
+    #[test]
+    fn modulo_borrado_con_cambio_elige_un_modulo_tocado() {
+        let cambios = rangos_de("src/a.rs", &[(1, 1)]);
+        for semilla in 1..=10u64 {
+            let dir = repo_de(&[
+                ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+                ("src/a.rs", "pub fn a() -> u32 {\n    1\n}\n"),
+                ("src/b.rs", "pub fn b() -> u32 {\n    2\n}\n"),
+            ]);
+            let inyeccion =
+                con_cambios(Defecto::ModuloBorrado, dir.path(), Some(&cambios), semilla)
+                    .expect("no falla la E/S")
+                    .expect("el módulo a está en el cambio");
+            assert_eq!(inyeccion.archivo, "src/a.rs", "semilla {semilla}");
+        }
+    }
+
+    #[test]
+    fn sin_cambio_los_dos_defectos_de_linea_eligen_como_la_api_sin_contexto() {
+        let fuente = fuente_con_igualdades();
+        for defecto in [Defecto::ComportamientoRoto, Defecto::ModuloBorrado] {
+            for semilla in 1..=10u64 {
+                let repo = repo_de(&[
+                    ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+                    ("src/a.rs", fuente.as_str()),
+                    ("src/b.rs", "pub fn b(x: u32) -> bool {\n    x == 2\n}\n"),
+                ]);
+                let a = tempfile::tempdir().expect("temporal");
+                let b = tempfile::tempdir().expect("temporal");
+                copiar(repo.path(), a.path());
+                copiar(repo.path(), b.path());
+                let ia = inyectar(defecto, a.path(), &capas_fixture(), semilla).expect("E/S");
+                let ib = con_cambios(defecto, b.path(), None, semilla).expect("E/S");
+                assert_eq!(ia, ib, "{defecto:?} semilla {semilla}");
+                assert_eq!(
+                    arbol(a.path()),
+                    arbol(b.path()),
+                    "{defecto:?} semilla {semilla}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inyeccion_marca_en_cambio_solo_con_rangos_y_defecto_de_linea() {
+        let fuente = fuente_con_igualdades();
+        let cambios = rangos_de("src/lib.rs", &[(10, 20)]);
+        let dir = repo_de(&[("src/lib.rs", fuente.as_str())]);
+        let dentro = con_cambios(Defecto::ComportamientoRoto, dir.path(), Some(&cambios), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert!(dentro.en_cambio, "{dentro:?}");
+        let sin_rangos = repo_de(&[("src/lib.rs", fuente.as_str())]);
+        let fuera = con_cambios(Defecto::ComportamientoRoto, sin_rangos.path(), None, 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert!(!fuera.en_cambio, "sin rangos no hay cambio: {fuera:?}");
+        let otro = repo_de(&[("src/lib.rs", fuente.as_str())]);
+        let secreto = con_cambios(Defecto::SecretoEnCodigo, otro.path(), Some(&cambios), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert!(!secreto.en_cambio, "el secreto no es de línea: {secreto:?}");
+    }
+
+    /// `inyectar_con` de `ComportamientoRoto` en `dir`, con `cambios` y el estado inicial `inicial`.
+    fn con_inicial(
+        dir: &Path,
+        cambios: &BTreeMap<String, Vec<(u32, u32)>>,
+        inicial: &Path,
+        semilla: u64,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos: &[],
+            cambios: Some(cambios),
+            inicial: Some(inicial),
+            excluidos: &BTreeSet::new(),
+        };
+        inyectar_con(Defecto::ComportamientoRoto, dir, &contexto, semilla)
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_cambia_mayor_por_mayor_o_igual_dentro_del_cambio() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let dir = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n\npub fn dos(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+        )]);
+        let inicial = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+        )]);
+        let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.archivo, "src/lib.rs");
+        assert_eq!(inyeccion.linea, 2);
+        assert_eq!(inyeccion.operador.as_deref(), Some("> -> >="));
+        let nuevo = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+        assert_eq!(nuevo.lines().nth(1), Some("    a >= b"));
+        assert_eq!(nuevo.lines().nth(5), Some("    a > b"), "fuera del cambio");
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_descarta_el_cambio_que_el_inicial_ya_tenia() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let vacio = repo_de(&[]);
+        let dir = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+        )]);
+        let sin_revertir = con_inicial(dir.path(), &cambios, vacio.path(), 42)
+            .expect("E/S")
+            .expect("sin estado inicial que lo contenga, aplica `a >= b`");
+        assert_eq!(sin_revertir.linea, 2);
+        let dir = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+        )]);
+        let inicial = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a >= b\n}\n",
+        )]);
+        let antes = arbol(dir.path());
+        for semilla in 1..=5u64 {
+            let inyeccion =
+                con_inicial(dir.path(), &cambios, inicial.path(), semilla).expect("E/S");
+            assert_eq!(
+                inyeccion, None,
+                "semilla {semilla}: `a >= b` ya estaba en el inicial"
+            );
+        }
+        assert_eq!(arbol(dir.path()), antes, "no toca la copia");
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_sin_el_archivo_no_descarta_nada() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let inicial = repo_de(&[("src/otra.rs", "    a >= b\n")]);
+        let dir = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+        )]);
+        let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.linea, 2);
+        let nuevo = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+        assert_eq!(nuevo.lines().nth(1), Some("    a >= b"));
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_if_ofrece_or_y_negacion_de_la_condicion() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let inicial = repo_de(&[]);
+        let mut vistas = BTreeSet::new();
+        for semilla in 1..=40u64 {
+            let dir = repo_de(&[(
+                "src/lib.rs",
+                "pub fn uno(x: bool, y: bool) -> u32 {\n    if x && y { 1 } else { 0 }\n}\n",
+            )]);
+            let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), semilla)
+                .expect("E/S")
+                .expect("aplica");
+            assert_eq!(inyeccion.linea, 2, "semilla {semilla}");
+            assert!(inyeccion.operador.is_some(), "semilla {semilla}");
+            let nuevo = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+            vistas.insert(nuevo.lines().nth(1).expect("línea 2").to_string());
+        }
+        assert_eq!(
+            vistas,
+            BTreeSet::from([
+                "    if x || y { 1 } else { 0 }".to_string(),
+                "    if !(x && y) { 1 } else { 0 }".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn nombre_de_funcion_reconoce_calificadores_y_visibilidad() {
+        assert_eq!(
+            nombre_de_funcion("pub(crate) const fn f() -> u32 {"),
+            Some("f")
+        );
+        assert_eq!(nombre_de_funcion("async unsafe fn g() {"), Some("g"));
+        assert_eq!(nombre_de_funcion("pub(super) async fn h() {"), Some("h"));
+        assert_eq!(nombre_de_funcion("const fn k() -> u32 {"), Some("k"));
+        assert_eq!(nombre_de_funcion("pub unsafe fn m() {"), Some("m"));
+        assert_eq!(
+            nombre_de_funcion("pub fn procesar(x: u32) {"),
+            Some("procesar")
+        );
+        assert_eq!(nombre_de_funcion("const LIMITE: u32 = 3;"), None);
+        assert_eq!(nombre_de_funcion("let fn_x = 1;"), None);
+    }
+
+    #[test]
+    fn agregar_negacion_envuelve_la_condicion_con_parentesis() {
+        let linea = "    if x == 1 {";
+        let limpia = limpias_de(&[linea.to_string()]).remove(0);
+        let agregar = candidatos_de_linea(linea, &limpia)
+            .into_iter()
+            .find(|e| e.operador == "if: agregar !")
+            .expect("ofrece agregar !");
+        assert_eq!(agregar.aplicar(linea), "    if !(x == 1) {");
+    }
+
+    #[test]
+    fn agregar_negacion_no_confunde_una_llave_de_caracter_con_la_del_bloque() {
+        let linea = "    if c == '{' {";
+        let limpia = limpias_de(&[linea.to_string()]).remove(0);
+        let agregar = candidatos_de_linea(linea, &limpia)
+            .into_iter()
+            .find(|e| e.operador == "if: agregar !")
+            .expect("ofrece agregar !");
+        assert_eq!(agregar.aplicar(linea), "    if !(c == '{') {");
+    }
+
+    /// Repo con una sola línea candidata: `true` dentro del cambio. Su única edición es `true -> false`.
+    fn repo_con_un_true() -> tempfile::TempDir {
+        repo_de(&[("src/lib.rs", "pub fn activo() -> bool {\n    true\n}\n")])
+    }
+
+    /// `inyectar_con` de `ComportamientoRoto` en modo `inicial`, con `excluidos` dados.
+    fn con_inicial_excluyendo(
+        dir: &Path,
+        cambios: &BTreeMap<String, Vec<(u32, u32)>>,
+        inicial: &Path,
+        semilla: u64,
+        excluidos: &Excluidos,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos: &[],
+            cambios: Some(cambios),
+            inicial: Some(inicial),
+            excluidos,
+        };
+        inyectar_con(Defecto::ComportamientoRoto, dir, &contexto, semilla)
+    }
+
+    fn equivalente(linea: u32, edicion: &str) -> Equivalente {
+        Equivalente {
+            archivo: "src/lib.rs".into(),
+            linea,
+            edicion: edicion.into(),
+            motivo: "prueba".into(),
+        }
+    }
+
+    #[test]
+    fn equivalente_declarado_no_se_elige_nunca() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let inicial = repo_de(&[]);
+        let excluidos = identidades_de_equivalentes(&[equivalente(2, "true -> false")]);
+        for semilla in 1..=20u64 {
+            let dir = repo_con_un_true();
+            let elegida =
+                con_inicial_excluyendo(dir.path(), &cambios, inicial.path(), semilla, &excluidos)
+                    .expect("E/S");
+            assert_eq!(
+                elegida, None,
+                "semilla {semilla}: la línea declarada no se elige"
+            );
+            let texto = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+            assert_eq!(
+                texto, "pub fn activo() -> bool {\n    true\n}\n",
+                "semilla {semilla}"
+            );
+        }
+    }
+
+    #[test]
+    fn sin_la_lista_la_misma_linea_si_se_elige() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let inicial = repo_de(&[]);
+        for semilla in 1..=20u64 {
+            let dir = repo_con_un_true();
+            let inyeccion = con_inicial_excluyendo(
+                dir.path(),
+                &cambios,
+                inicial.path(),
+                semilla,
+                &Excluidos::new(),
+            )
+            .expect("E/S")
+            .expect("aplica");
+            assert_eq!(inyeccion.linea, 2, "semilla {semilla}");
+            assert_eq!(inyeccion.operador.as_deref(), Some("true -> false"));
+        }
+    }
+
+    #[test]
+    fn identidades_de_una_edicion_de_operador_son_solo_comportamiento() {
+        let excluidos = identidades_de_equivalentes(&[equivalente(7, "true -> false")]);
+        let esperado: Excluidos = [identidad_de_lugar(
+            Defecto::ComportamientoRoto,
+            "src/lib.rs",
+            7,
+            "true -> false",
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(excluidos, esperado);
+    }
+
+    #[test]
+    fn identidades_de_cuerpo_vaciado_o_edicion_vacia_suman_el_cuerpo() {
+        for edicion in ["cuerpo vaciado", ""] {
+            let excluidos = identidades_de_equivalentes(&[equivalente(7, edicion)]);
+            assert!(
+                excluidos.contains(&identidad_de_lugar(
+                    Defecto::CuerpoVaciado,
+                    "src/lib.rs",
+                    7,
+                    ""
+                )),
+                "edición {edicion:?} excluye el cuerpo vaciado"
+            );
+            assert_eq!(excluidos.len(), 2, "edición {edicion:?}");
+        }
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_cambia_true_y_mas_uno_por_su_par() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 5)]);
+        let inicial = repo_de(&[]);
+        let mut vistas = BTreeSet::new();
+        for semilla in 1..=40u64 {
+            let dir = repo_de(&[(
+                "src/lib.rs",
+                "pub fn uno(x: u32) -> u32 {\n    let n = x + 1;\n    let ok = true;\n    n\n}\n",
+            )]);
+            let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), semilla)
+                .expect("E/S")
+                .expect("aplica");
+            let nuevo = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+            vistas.insert(
+                nuevo
+                    .lines()
+                    .nth(inyeccion.linea as usize - 1)
+                    .expect("línea")
+                    .to_string(),
+            );
+        }
+        assert_eq!(
+            vistas,
+            BTreeSet::from([
+                "    let n = x - 1;".to_string(),
+                "    let ok = false;".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_ignora_operadores_en_textos_y_comentarios() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 5)]);
+        let inicial = repo_de(&[]);
+        let dir = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno(x: u32) -> u32 {\n    // x > 1\n    let t = \"a > b && if x\"; // x == y || z\n    x\n}\n",
+        )]);
+        let antes = arbol(dir.path());
+        for semilla in 1..=5u64 {
+            let inyeccion =
+                con_inicial(dir.path(), &cambios, inicial.path(), semilla).expect("E/S");
+            assert_eq!(inyeccion, None, "semilla {semilla}");
+        }
+        assert_eq!(arbol(dir.path()), antes);
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_no_muta_lineas_de_comentario_de_bloque() {
+        let codigo =
+            "pub fn uno(a: u32, b: u32) -> bool {\n    /*\n    a > b\n    */\n    a == b\n}\n";
+        let cambios = rangos_de("src/lib.rs", &[(1, 6)]);
+        let inicial = repo_de(&[]);
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/lib.rs", codigo)]);
+            let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), semilla)
+                .expect("E/S")
+                .expect("aplica en `a == b`");
+            assert_ne!(
+                inyeccion.linea, 3,
+                "semilla {semilla}: la línea 3 está en /* */"
+            );
+        }
+    }
+
+    #[test]
+    fn comportamiento_con_inicial_no_muta_lineas_de_cadena_cruda() {
+        let codigo =
+            "pub fn uno(a: u32, b: u32) -> bool {\n    let t = r#\"\na > b\n\"#;\n    a == b\n}\n";
+        let cambios = rangos_de("src/lib.rs", &[(1, 6)]);
+        let inicial = repo_de(&[]);
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/lib.rs", codigo)]);
+            let inyeccion = con_inicial(dir.path(), &cambios, inicial.path(), semilla)
+                .expect("E/S")
+                .expect("aplica en `a == b`");
+            assert_ne!(
+                inyeccion.linea, 3,
+                "semilla {semilla}: la línea 3 está en r#\"\"#"
+            );
+        }
+    }
+
+    /// Guarda: sin `inicial` la elección sigue siendo la de siempre. Mismo PRNG sobre las líneas de igualdad, en orden.
+    #[test]
+    fn comportamiento_sin_inicial_elige_con_la_semilla_como_antes() {
+        let fuente = fuente_con_igualdades();
+        for semilla in 1..=20u64 {
+            let esperada = Prng::nuevo(semilla).elegir(&[3u32, 12, 15, 25]).copied();
+            let dir = repo_de(&[("src/lib.rs", fuente.as_str())]);
+            let linea = con_cambios(Defecto::ComportamientoRoto, dir.path(), None, semilla)
+                .expect("E/S")
+                .map(|i| i.linea);
+            assert_eq!(linea, esperada, "semilla {semilla}");
+        }
+    }
+
+    /// `inyectar_con` de `defecto` en `dir`, con `cambios` y el estado inicial `inicial`.
+    fn con_inicial_de(
+        defecto: Defecto,
+        dir: &Path,
+        cambios: &BTreeMap<String, Vec<(u32, u32)>>,
+        inicial: &Path,
+        semilla: u64,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos: &[],
+            cambios: Some(cambios),
+            inicial: Some(inicial),
+            excluidos: &BTreeSet::new(),
+        };
+        inyectar_con(defecto, dir, &contexto, semilla)
+    }
+
+    #[test]
+    fn cuerpo_vaciado_cambia_el_cuerpo_de_una_funcion_que_existia_y_el_cambio_toco() {
+        let cambios = rangos_de("src/lib.rs", &[(2, 2)]);
+        let inicial = repo_de(&[("src/lib.rs", "pub fn uno(x: u32) -> u32 {\n    x + 1\n}\n")]);
+        let dir = repo_de(&[("src/lib.rs", "pub fn uno(x: u32) -> u32 {\n    x + 2\n}\n")]);
+        let inyeccion = con_inicial_de(
+            Defecto::CuerpoVaciado,
+            dir.path(),
+            &cambios,
+            inicial.path(),
+            42,
+        )
+        .expect("E/S")
+        .expect("aplica");
+        assert_eq!(inyeccion.archivo, "src/lib.rs");
+        assert_eq!(inyeccion.linea, 1, "la línea es la de la firma");
+        assert!(inyeccion.en_cambio, "{inyeccion:?}");
+        let nuevo = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+        assert_eq!(nuevo, "pub fn uno(x: u32) -> u32 {\n    todo!()\n}\n");
+    }
+
+    #[test]
+    fn cuerpo_vaciado_no_elige_una_funcion_nueva_del_cambio() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let inicial = repo_de(&[("src/lib.rs", "pub fn otra() -> u32 {\n    1\n}\n")]);
+        for semilla in 1..=5u64 {
+            let dir = repo_de(&[(
+                "src/lib.rs",
+                "pub fn nueva(x: u32) -> u32 {\n    x + 2\n}\n",
+            )]);
+            let antes = arbol(dir.path());
+            let inyeccion = con_inicial_de(
+                Defecto::CuerpoVaciado,
+                dir.path(),
+                &cambios,
+                inicial.path(),
+                semilla,
+            )
+            .expect("E/S");
+            assert_eq!(
+                inyeccion, None,
+                "semilla {semilla}: `nueva` no estaba en el inicial"
+            );
+            assert_eq!(
+                arbol(dir.path()),
+                antes,
+                "semilla {semilla}: no toca la copia"
+            );
+        }
+    }
+
+    #[test]
+    fn cuerpo_vaciado_salta_declaraciones_cuerpos_de_una_linea_y_todo() {
+        let codigo = "pub trait T {\n    fn f(&self) -> u32;\n}\n\npub fn uno() -> u32 { 1 }\n\npub fn dos() -> u32 {\n    todo!()\n}\n";
+        let cambios = rangos_de("src/lib.rs", &[(1, 20)]);
+        let inicial = repo_de(&[("src/lib.rs", codigo)]);
+        for semilla in 1..=5u64 {
+            let dir = repo_de(&[("src/lib.rs", codigo)]);
+            let antes = arbol(dir.path());
+            let inyeccion = con_inicial_de(
+                Defecto::CuerpoVaciado,
+                dir.path(),
+                &cambios,
+                inicial.path(),
+                semilla,
+            )
+            .expect("E/S");
+            assert_eq!(inyeccion, None, "semilla {semilla}");
+            assert_eq!(arbol(dir.path()), antes, "semilla {semilla}");
+        }
+    }
+
+    #[test]
+    fn cuerpo_vaciado_cuenta_llaves_fuera_de_cadenas_y_firma_multilinea() {
+        let codigo = "pub fn suma(\n    a: u32,\n    b: u32,\n) -> u32 {\n    let s = \"}{\"; // cierra } aquí\n    a + b\n}\n";
+        let cambios = rangos_de("src/lib.rs", &[(1, 8)]);
+        let inicial = repo_de(&[("src/lib.rs", codigo)]);
+        let dir = repo_de(&[("src/lib.rs", codigo)]);
+        let inyeccion = con_inicial_de(
+            Defecto::CuerpoVaciado,
+            dir.path(),
+            &cambios,
+            inicial.path(),
+            42,
+        )
+        .expect("E/S")
+        .expect("aplica");
+        assert_eq!(inyeccion.linea, 1, "la firma empieza en la línea 1");
+        let nuevo = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+        assert_eq!(
+            nuevo,
+            "pub fn suma(\n    a: u32,\n    b: u32,\n) -> u32 {\n    todo!()\n}\n"
+        );
+    }
+
+    #[test]
+    fn cuerpo_vaciado_sin_inicial_aplica_en_un_repo_de_fixture() {
+        let dir = copia_fixture();
+        let antes = arbol(dir.path());
+        let inyeccion = inyectar(Defecto::CuerpoVaciado, dir.path(), &capas_fixture(), 42)
+            .expect("no falla la E/S")
+            .expect("sin bootstrap/ cualquier función de producción sirve");
+        assert_eq!(inyeccion.defecto, Defecto::CuerpoVaciado);
+        assert!(
+            !inyeccion.en_cambio,
+            "sin cambio no hay línea tocada: {inyeccion:?}"
+        );
+        let despues = arbol(dir.path());
+        assert_eq!(cambiados(&antes, &despues), vec![inyeccion.archivo.clone()]);
+        assert!(despues[&inyeccion.archivo].contains("todo!()"));
+    }
+
+    /// Sin `inicial` cualquier función sirve. `en_cambio` dice si la elegida cruza una línea tocada.
+    #[test]
+    fn cuerpo_vaciado_sin_inicial_aplica_y_marca_si_cruza_el_cambio() {
+        let dentro = rangos_de("src/lib.rs", &[(1, 3)]);
+        let fuera = rangos_de("src/lib.rs", &[(10, 12)]);
+        let codigo = "pub fn uno(x: u32) -> u32 {\n    x + 2\n}\n";
+        let dir = repo_de(&[("src/lib.rs", codigo)]);
+        let con = con_cambios(Defecto::CuerpoVaciado, dir.path(), Some(&dentro), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert!(con.en_cambio, "la función cruza el cambio: {con:?}");
+        let dir = repo_de(&[("src/lib.rs", codigo)]);
+        let lejos = con_cambios(Defecto::CuerpoVaciado, dir.path(), Some(&fuera), 42)
+            .expect("E/S")
+            .expect("aplica igual: sin inicial cualquier función sirve");
+        assert!(!lejos.en_cambio, "la función no cruza el cambio: {lejos:?}");
+        let dir = repo_de(&[("src/lib.rs", codigo)]);
+        let sin_cambios = con_cambios(Defecto::CuerpoVaciado, dir.path(), None, 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert!(!sin_cambios.en_cambio, "sin cambios no hay línea tocada");
+    }
+
+    #[test]
+    fn modulo_borrado_con_inicial_no_aplica_aunque_haya_modulos_tocados() {
+        let cambios = rangos_de("src/a.rs", &[(1, 1)]);
+        let inicial = repo_de(&[]);
+        for semilla in 1..=10u64 {
+            let dir = repo_de(&[
+                ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+                ("src/a.rs", "pub fn a() -> u32 {\n    1\n}\n"),
+                ("src/b.rs", "pub fn b() -> u32 {\n    2\n}\n"),
+            ]);
+            let antes = arbol(dir.path());
+            let inyeccion = con_inicial_de(
+                Defecto::ModuloBorrado,
+                dir.path(),
+                &cambios,
+                inicial.path(),
+                semilla,
+            )
+            .expect("E/S");
+            assert_eq!(inyeccion, None, "semilla {semilla}");
+            assert_eq!(
+                arbol(dir.path()),
+                antes,
+                "semilla {semilla}: no toca el repo"
+            );
+        }
+    }
+
+    /// Sin `inicial`, `modulo_borrado` elige entre los módulos declarados, en orden, con la misma semilla que antes.
+    #[test]
+    fn modulo_borrado_sin_inicial_elige_con_la_semilla_como_antes() {
+        let rutas = ["src/a.rs", "src/b.rs", "src/c.rs"];
+        let cambios: BTreeMap<String, Vec<(u32, u32)>> = rutas
+            .iter()
+            .map(|r| (r.to_string(), vec![(1, 1)]))
+            .collect();
+        for semilla in 1..=10u64 {
+            let texto = [
+                ("src/lib.rs", "pub mod c;\npub mod a;\npub mod b;\n"),
+                ("src/a.rs", "pub fn a() -> u32 {\n    1\n}\n"),
+                ("src/b.rs", "pub fn b() -> u32 {\n    2\n}\n"),
+                ("src/c.rs", "pub fn c() -> u32 {\n    3\n}\n"),
+            ];
+            let esperada = Prng::nuevo(semilla).elegir(&rutas).copied();
+            let dir = repo_de(&texto);
+            let con = con_cambios(Defecto::ModuloBorrado, dir.path(), Some(&cambios), semilla)
+                .expect("E/S")
+                .map(|i| i.archivo);
+            assert_eq!(con.as_deref(), esperada, "con cambios, semilla {semilla}");
+            let dir = repo_de(&texto);
+            let sin = inyectar(
+                Defecto::ModuloBorrado,
+                dir.path(),
+                &capas_fixture(),
+                semilla,
+            )
+            .expect("E/S")
+            .map(|i| i.archivo);
+            assert_eq!(sin.as_deref(), esperada, "sin cambios, semilla {semilla}");
+        }
+    }
+
+    /// Guarda: la copia con `cuerpo_vaciado` compila en el fixture, en cada semilla probada.
+    #[test]
+    fn cuerpo_vaciado_la_copia_del_fixture_compila() {
+        let cambios: BTreeMap<String, Vec<(u32, u32)>> =
+            ["src/almacen.rs", "src/comandos.rs", "src/protocolo.rs"]
+                .iter()
+                .map(|r| (r.to_string(), vec![(1, 100)]))
+                .collect();
+        let objetivo = tempfile::tempdir().expect("temporal");
+        for semilla in 1..=8u64 {
+            let dir = copia_fixture();
+            let inicial = copia_fixture();
+            let inyeccion = con_inicial_de(
+                Defecto::CuerpoVaciado,
+                dir.path(),
+                &cambios,
+                inicial.path(),
+                semilla,
+            )
+            .expect("E/S")
+            .expect("aplica");
+            if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
+                panic!("semilla {semilla}: la copia con {inyeccion:?} no compila:\n{stderr}");
+            }
         }
     }
 }

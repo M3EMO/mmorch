@@ -233,6 +233,7 @@ mod tests {
             },
             id: String::new(),
             impacto: vec!["R1".to_string()],
+            previo: false,
         }
     }
 

@@ -102,7 +102,7 @@ fn contenedor_red_cortada_impide_salir_a_internet() {
 }
 
 #[test]
-fn contenedor_timeout_da_error_de_infraestructura_y_borra_el_contenedor() {
+fn contenedor_timeout_da_plazo_vencido_y_borra_el_contenedor() {
     root::saltar_sin_podman!();
     let _guarda = preparar();
     let repo = tempfile::tempdir().expect("temp dir");
@@ -111,9 +111,11 @@ fn contenedor_timeout_da_error_de_infraestructura_y_borra_el_contenedor() {
     e.timeout = Duration::from_secs(2);
     let inicio = Instant::now();
     let res = ejecutar(&e);
+    let prefijo_nombre = format!("root-oraculo-{}-", std::process::id());
     assert!(
-        matches!(res, Err(ErrorOraculo::Infra(_))),
-        "se esperaba Infra, llegó {res:?}"
+        matches!(&res, Err(ErrorOraculo::PlazoVencido { segundos, contenedor })
+            if *segundos == 2.0 && contenedor.starts_with(&prefijo_nombre)),
+        "se esperaba PlazoVencido, llegó {res:?}"
     );
     assert!(inicio.elapsed() < Duration::from_secs(10));
     let prefijo = format!("name=root-oraculo-{}-", std::process::id());
