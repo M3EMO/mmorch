@@ -25,8 +25,10 @@ pub(crate) const ARCHIVO_OUTCOMES: &str = "outcomes.json";
 pub(crate) const ARCHIVO_TESTS_FALLIDOS: &str = "tests-fallidos.txt";
 /// Listado JSON de los mutantes que deja `comando_de_listado` dentro de `/salida`.
 const ARCHIVO_LISTADO: &str = "listado.json";
-/// Mutantes "delete field ... from struct ... expression". cargo-mutants 27.1.0 ignora `-F` para este tipo:
-/// los corre siempre, aunque la muestra no los pida. Se excluyen con `--exclude-re` en el listado y en la corrida.
+/// cargo-mutants 27.1.0 ignora `-F` y `--exclude-re` para los mutantes "delete field ... from struct ... expression".
+/// Esos mutantes corren igual, aunque la muestra no los pida.
+/// `fuera_de_la_muestra` los saca del puntaje.
+/// `--exclude-re` se queda, para una versión de cargo-mutants que lo respete.
 const EXCLUIR_DELETE_FIELD: &str = "delete field .* from struct .* expression";
 const DETALLE_VIVO: &str = "este cambio de comportamiento no lo detecta ningún test";
 const SEVERIDAD_VIVO: u8 = 2;
