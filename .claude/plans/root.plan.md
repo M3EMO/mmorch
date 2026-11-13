@@ -9228,3 +9228,48 @@ La 119 va antes de la primera evaluación real con eficiencia. Puede correr en p
 9. **Sin cupo, o con un rol que no arranca:** la corrida no falla. La fila lleva la primera evaluación y el motivo.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (40): los briefs de la 118 y la 119
+
+**Estado.**
+- La suite con podman de `laptop/cadena-110-117` (e19886e) dio verde: 3395, 0 y 5.
+- El orquestador suma la 115 a esa cadena con cherry-pick. Después corre su suite con podman, sola.
+
+## 1. La 118: el barrido no corre con `ROOT_SIN_PODMAN=1`
+
+El brief está en `docs/builds/brief-local-118.md`, con base e19886e. Sigue la sección 2 de la vuelta (39).
+
+**Lo que el builder deja sin probar, porque no corre podman:**
+- `listar_lee_la_hora_de_creacion_de_podman_real` (`src/limpieza.rs:705`), y los demás tests de barrido con `saltar_sin_podman`.
+- **La prueba que importa es de convivencia.** El orquestador corre la suite con podman de la cadena mientras un builder corre la suite sin podman en otro worktree. Ningún test con podman debe dar 137.
+
+## 2. La 119: la medición de eficiencia, usable
+
+El brief está en `docs/builds/brief-local-119.md`, con base "punta de `laptop/cadena-110-117` con la 115". Sigue la sección 3 de la vuelta (39).
+
+**El diseño del `/salida` fijo, sin cambiar los constructores.** `EjecutorContenedor` (`src/oracle/perfiles/herramientas.rs:51`) se arma con literal en `src/oracle/mod.rs:411`, en `src/oracle/calibra/defectos.rs:104` y en varios tests. Un campo nuevo los rompería a todos. En cambio:
+- El trait `EjecutorHerramienta` suma `ejecutar_en(cmd, salida)`. Por defecto llama a `ejecutar(cmd)`. Los ejecutores falsos no cambian.
+- `EjecutorContenedor` lo implementa con la carpeta dada como `/salida`.
+- `eficiencia::medir` recibe una carpeta de trabajo, con una subcarpeta por lado. La borra al terminar, por `src/borrado.rs`.
+
+**El disco.** Cada lado guarda un `target` de debug y uno de release. En broot pueden ser varios GB por evaluación. Por eso la carpeta se borra siempre al terminar, también en un error.
+
+**Lo que el builder deja sin probar, porque no corre podman:**
+- Que `/sys/fs/cgroup/memory.peak` exista y se lea dentro del contenedor.
+- Que el `target` fijo evite recompilar las dependencias entre corridas.
+- Que `cargo clean --release -p` limpie solo el workspace.
+- El tiempo total de una evaluación real con eficiencia.
+- **La prueba del orquestador:** una evaluación de t1 con Eficiencia, sin API, con `--partes eficiencia` o su equivalente. Anota las cuatro medidas, sus motivos y el tiempo total.
+
+## 3. La 116 y la 119 no comparten archivos
+
+| Tarea | Archivos |
+|---|---|
+| 116 | `src/corre/corrida.rs`, `src/corre/mod.rs`, `src/tipos.rs` (solo `Fila`), `docs/interfaces.md` |
+| 119 | `src/oracle/eficiencia.rs`, `src/oracle/perfiles/herramientas.rs`, `src/oracle/mod.rs`, `src/oracle/informe.rs` |
+
+- La 119 no cambia el esquema. Si un punto lo pide, el builder se detiene y lo escribe en el informe.
+- **Corren en paralelo.** El orden de mezcla no importa.
+- La 118 toca `src/limpieza.rs`, que tampoco comparten.
+
+**Preguntas al usuario:** ninguna nueva.
