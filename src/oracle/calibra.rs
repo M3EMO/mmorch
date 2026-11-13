@@ -856,30 +856,61 @@ fn evaluar_copia(
     let _ = super::mutacion::tomar_muestra();
     let _ = super::mutacion::tomar_filtro();
     // Los casos corren con el plazo de la base: un plazo automático cambiaría con los tests que se apagan.
-    let veredicto = con_caso(&id, || {
+    let resultado = con_caso(&id, || {
         super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
             con_plazos_suites(Some(r.plazos_suites), || {
                 en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
             })
         })
-    })?;
+    });
     let mutantes = super::mutacion::tomar_muestra();
     let filtro = super::mutacion::tomar_filtro();
-    let frio = veredicto
-        .avisos
-        .iter()
-        .any(|aviso| aviso.starts_with(AVISO_TARGET_FRIO));
-    let vencio = veredicto
-        .avisos
-        .iter()
-        .any(|aviso| aviso.ends_with(MOTIVO_SUITE_PLAZO));
-    Ok(Evaluada {
-        veredicto,
-        reusado: reusa && !frio,
-        mutantes,
-        filtro,
-        vencio,
-    })
+    match resultado {
+        Ok(veredicto) => {
+            let frio = veredicto
+                .avisos
+                .iter()
+                .any(|aviso| aviso.starts_with(AVISO_TARGET_FRIO));
+            let vencio = veredicto
+                .avisos
+                .iter()
+                .any(|aviso| aviso.ends_with(MOTIVO_SUITE_PLAZO));
+            let veredicto = if vencio {
+                sin_veredicto_por_plazo(r.base, r.dimension)
+            } else {
+                veredicto
+            };
+            Ok(Evaluada {
+                veredicto,
+                reusado: reusa && !frio,
+                mutantes,
+                filtro,
+                vencio,
+            })
+        }
+        // Con junit presente, el plazo llega como error. Es un resultado de la copia, no un fallo de la calibración.
+        Err(ErrorOraculo::PlazoVencido { .. }) => Ok(Evaluada {
+            veredicto: sin_veredicto_por_plazo(r.base, r.dimension),
+            reusado: false,
+            mutantes: Vec::new(),
+            filtro: String::new(),
+            vencio: true,
+        }),
+        Err(otro) => Err(otro),
+    }
+}
+
+/// `base` con la dimensión sin veredicto por el plazo de una suite. La copia que pasó su plazo no mide nada.
+fn sin_veredicto_por_plazo(base: &Veredicto, dimension: Dimension) -> Veredicto {
+    let mut veredicto = base.clone();
+    if let Some(puntaje) = veredicto
+        .puntajes
+        .iter_mut()
+        .find(|p| p.dimension == dimension)
+    {
+        puntaje.sin_veredicto = Some(format!("suite sin veredicto: {MOTIVO_SUITE_PLAZO}"));
+    }
+    veredicto
 }
 
 /// Separa los mutantes que cambiaron frente a la base en ruido y explicados, en orden de `caso`. Sin `elegido`,
@@ -1093,13 +1124,9 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         if let Some(detencion) = juez_rechazado(r.tope) {
             return Ok(Medido::detenido(0, detencion));
         }
-        // Un limpio no tiene inyección que reemplazar. Si su suite pasó el plazo, no hay caso que medir.
-        if vencio {
-            return Err(ErrorOraculo::Infra(format!(
-                "una copia limpia {MOTIVO_SUITE_PLAZO}: la calibración no la mide"
-            )));
-        }
-        if let Some(c) = compartido {
+        // Un limpio no tiene inyección que reemplazar. Si su suite pasó el plazo, queda sin veredicto: no lo
+        // comparte con otras dimensiones, y el caso sigue.
+        if let Some(c) = compartido.filter(|_| !vencio) {
             c.guardar(i as u32, &veredicto)?;
         }
         // Un limpio no tiene mutante elegido ni tests apagados: cualquier mutante que cambió es ruido.
@@ -6074,10 +6101,148 @@ mod tests {
     }
 
     #[test]
-    fn calibra_limpio_que_pasa_su_plazo_es_error_y_no_se_mide() {
+    fn calibra_limpio_que_pasa_su_plazo_queda_sin_veredicto_y_no_aborta() {
         let base = veredicto_de(Dimension::Estructura, 1.0, None);
         let (_t, tarea) = tarea_prueba();
-        let ev = falso(Path::new(FIXTURE), &base, |_, _, base| con_plazo(base));
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                con_plazo(base)
+            } else {
+                bajada(base)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("la calibración sigue: el plazo de un limpio no la aborta");
+        assert_eq!(fila.limpios_sin_veredicto, 1);
+    }
+
+    /// Error que devuelve el oráculo cuando vence el plazo de una suite con junit presente.
+    fn plazo_vencido() -> ErrorOraculo {
+        ErrorOraculo::PlazoVencido {
+            segundos: 600.0,
+            contenedor: "x".into(),
+        }
+    }
+
+    /// Mide `n` casos de `Estructura` con un evaluador que puede fallar. `ev` recibe si la copia es limpia y
+    /// el veredicto base. La base siempre responde bien: no pasa por `ev`.
+    fn medir_con_error(
+        base: &Veredicto,
+        n: usize,
+        ev: impl Fn(bool, &Veredicto) -> Result<Veredicto, ErrorOraculo> + Sync,
+    ) -> Result<Medida, ErrorOraculo> {
+        let (_t, tarea) = tarea_prueba();
+        let arbol_base = arbol(Path::new(FIXTURE));
+        let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| {
+            if ruta == Path::new(FIXTURE) {
+                return Ok(base.clone());
+            }
+            ev(arbol(ruta) == arbol_base, base)
+        };
+        calibrar_medida(
+            &tarea,
+            Dimension::Estructura,
+            n,
+            42,
+            Path::new(FIXTURE),
+            &sin_tipo,
+            None,
+            &Vec::new,
+            &|| None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn calibra_defecto_con_plazo_vencido_con_junit_va_a_reemplazo() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let medida = medir_con_error(&base, 2, |limpia, base| {
+            if limpia {
+                Ok(base.clone())
+            } else {
+                Err(plazo_vencido())
+            }
+        })
+        .expect("la calibración sigue: el plazo de un defecto no la aborta");
+        let fila = medida.fila.expect("fila");
+        assert!(fila.reemplazos >= 1, "reemplazos: {}", fila.reemplazos);
+    }
+
+    #[test]
+    fn calibra_limpio_con_plazo_vencido_con_junit_queda_sin_veredicto() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let medida = medir_con_error(&base, 2, |limpia, base| {
+            if limpia {
+                Err(plazo_vencido())
+            } else {
+                Ok(bajada(base))
+            }
+        })
+        .expect("la calibración sigue: el plazo de un limpio no la aborta");
+        let fila = medida.fila.expect("fila");
+        assert_eq!(fila.limpios_sin_veredicto, 1);
+        let limpio = medida
+            .casos
+            .iter()
+            .find(|c| !c.es_defecto)
+            .expect("un caso limpio");
+        assert!(
+            limpio
+                .sin_veredicto
+                .as_deref()
+                .is_some_and(|m| m.ends_with(MOTIVO_SUITE_PLAZO)),
+            "{:?}",
+            limpio.sin_veredicto
+        );
+    }
+
+    #[test]
+    fn calibra_dos_limpios_de_cinco_con_plazo_vencido_no_calibra() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let vencidos = std::sync::atomic::AtomicUsize::new(0);
+        let medida = medir_con_error(&base, 10, |limpia, base| {
+            let vence = limpia && vencidos.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2;
+            if vence {
+                Err(plazo_vencido())
+            } else {
+                Ok(if limpia { base.clone() } else { bajada(base) })
+            }
+        })
+        .expect("la calibración sigue");
+        let fila = medida.fila.expect("fila");
+        assert_eq!((fila.limpios, fila.limpios_sin_veredicto), (5, 2));
+        let calibraciones = Calibraciones {
+            v: VERSION,
+            filas: vec![fila.clone()],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Estructura, 0.8)];
+        calibraciones.aplicar(
+            &fila.tarea,
+            fila.tarea_hash.as_deref().unwrap_or(""),
+            &mut puntajes,
+        );
+        assert!(!puntajes[0].calibrada);
+    }
+
+    #[test]
+    fn calibra_base_con_plazo_vencido_sigue_abortando() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let (_t, tarea) = tarea_prueba();
+        let ev = |ruta: &Path| {
+            if ruta == Path::new(FIXTURE) {
+                Err(plazo_vencido())
+            } else {
+                Ok(base.clone())
+            }
+        };
         let r = calibrar_con(
             &tarea,
             Dimension::Estructura,
@@ -6087,7 +6252,7 @@ mod tests {
             &ev,
         );
         assert!(
-            matches!(&r, Err(ErrorOraculo::Infra(m)) if m.contains(MOTIVO_SUITE_PLAZO)),
+            matches!(&r, Err(ErrorOraculo::PlazoVencido { .. })),
             "{r:?}"
         );
     }
