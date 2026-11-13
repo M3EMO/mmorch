@@ -17,13 +17,13 @@ use crate::oracle::tarea::{Requisito, Tarea};
 use crate::tipos::{Dimension, Fuente, Hallazgo};
 
 /// Sube cuando cambia una sonda de Seguridad. Cambia la clave de la línea base guardada.
-pub const VERSION_SONDAS_SEGURIDAD: u32 = 1;
+pub const VERSION_SONDAS_SEGURIDAD: u32 = 2;
 
 /// Aviso del veredicto cuando la tarea no trae `bootstrap/`.
 pub const AVISO_SIN_ESTADO_INICIAL: &str =
     "sin estado inicial: todo hallazgo de Seguridad cuenta como nuevo";
 
-/// Hallazgos de Seguridad del estado inicial, por sonda. La clave es el id del hallazgo.
+/// Hallazgos de Seguridad del estado inicial, por sonda. La clave es `clave_base` del hallazgo.
 /// El valor son las líneas donde aparece. Su largo es cuántas veces aparece.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LineaBase {
@@ -106,7 +106,7 @@ fn calcular(tarea: &Tarea, bootstrap: &Path, ej: &dyn EjecutorHerramienta) -> (L
                 Fuente::Sonda(nombre) if nombre == "cargo-audit" => &mut base.cargo_audit,
                 _ => continue,
             };
-            mapa.entry(h.id.clone()).or_default().push(h.linea);
+            mapa.entry(clave_base(h)).or_default().push(h.linea);
         }
     }
     let nativas = perfiles::sondas_nativas(bootstrap, tarea);
@@ -119,10 +119,24 @@ fn calcular(tarea: &Tarea, bootstrap: &Path, ej: &dyn EjecutorHerramienta) -> (L
         .filter(|s| s.dimension == Dimension::Seguridad)
     {
         for h in &sonda.hallazgos {
-            base.nativas.entry(h.id.clone()).or_default().push(h.linea);
+            base.nativas.entry(clave_base(h)).or_default().push(h.linea);
         }
     }
     (base, completa)
+}
+
+/// Clave de la línea base. El id no basta: un aviso y una vulnerabilidad del mismo crate y versión
+/// comparten id. Por eso suma la severidad. En cargo audit suma también el texto antes de `:`.
+fn clave_base(h: &Hallazgo) -> String {
+    if es_sonda(&h.fuente, "cargo-audit") {
+        let aviso = h
+            .detalle
+            .split_once(':')
+            .map_or(h.detalle.as_str(), |(a, _)| a);
+        format!("{}|{}|{aviso}", h.id, h.severidad)
+    } else {
+        format!("{}|{}", h.id, h.severidad)
+    }
 }
 
 fn leer(ruta: &Path) -> Option<LineaBase> {
@@ -138,7 +152,7 @@ fn guardar(ruta: &Path, base: &LineaBase) -> std::io::Result<()> {
     fs::write(ruta, texto)
 }
 
-/// Marca `previo` en cada hallazgo que estaba en la base. Un id cuenta tantas veces como aparece en la base.
+/// Marca `previo` en cada hallazgo que estaba en la base. Una clave (`clave_base`) cuenta tantas veces como aparece en la base.
 /// Con `cambios` (nativas), solo cuentan los hallazgos fuera de los rangos cambiados. Los primeros que
 /// alcanzan para la base quedan previos. El resto es nuevo, también el que cae dentro del cambio.
 pub fn marcar(
@@ -173,13 +187,13 @@ fn marcar_refs(
 ) {
     let mut grupos: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, h) in hallazgos.iter().enumerate() {
-        grupos.entry(h.id.clone()).or_default().push(i);
+        grupos.entry(clave_base(h)).or_default().push(i);
     }
     for h in hallazgos.iter_mut() {
         h.previo = false;
     }
-    for (id, indices) in grupos {
-        let Some(lineas) = base.get(&id) else {
+    for (clave, indices) in grupos {
+        let Some(lineas) = base.get(&clave) else {
             continue;
         };
         let candidatos: Vec<usize> = indices
@@ -311,7 +325,7 @@ mod tests {
     fn base_de(hs: &[Hallazgo]) -> BTreeMap<String, Vec<u32>> {
         let mut base: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         for h in hs {
-            base.entry(h.id.clone()).or_default().push(h.linea);
+            base.entry(clave_base(h)).or_default().push(h.linea);
         }
         base
     }
@@ -382,6 +396,72 @@ mod tests {
         marcar(&mut repo, &base, Some(&cambios));
         assert!(repo[0].previo, "la línea 5 es la de la base");
         assert!(!repo[1].previo, "la línea 20 cae en el cambio: es nueva");
+    }
+
+    /// Hallazgo de cargo audit con su severidad y su detalle (`aviso: título`).
+    fn cargo_audit_con(sev: u8, detalle: &str) -> Hallazgo {
+        crear_hallazgo(
+            Dimension::Seguridad,
+            sev,
+            "Cargo.lock",
+            16,
+            "time 0.1.43",
+            detalle,
+            "cargo-audit",
+            &[],
+        )
+    }
+
+    #[test]
+    fn previos_aviso_unmaintained_no_tapa_la_vulnerabilidad_del_mismo_crate() {
+        let aviso = cargo_audit_con(1, "RUSTSEC-2020-0071: unmaintained");
+        let vuln = cargo_audit_con(3, "RUSTSEC-2020-0072: vulnerable");
+        assert_eq!(aviso.id, vuln.id, "mismo archivo, cita y dimensión");
+        let base = LineaBase {
+            cargo_audit: base_de(std::slice::from_ref(&aviso)),
+            ..LineaBase::default()
+        };
+        // El parser emite las vulnerabilidades antes que los avisos.
+        let mut sondas = [ResultadoSonda {
+            dimension: Dimension::Seguridad,
+            valor: None,
+            motivo: None,
+            hallazgos: vec![vuln, aviso],
+        }];
+        marcar_herramientas(&mut sondas, &base);
+        let hs = &sondas[0].hallazgos;
+        assert!(!hs[0].previo, "la vulnerabilidad es nueva");
+        assert!(hs[1].previo, "el aviso viejo sigue previo");
+    }
+
+    #[test]
+    fn previos_unsafe_y_unwrap_en_la_misma_linea_no_se_confunden() {
+        let cita = "let x = y.unwrap();";
+        let unsafe_ = crear_hallazgo(
+            Dimension::Seguridad,
+            2,
+            "src/x.rs",
+            7,
+            cita,
+            "unsafe fuera de tests",
+            "seguridad-nativa",
+            &[],
+        );
+        let unwrap = crear_hallazgo(
+            Dimension::Seguridad,
+            1,
+            "src/x.rs",
+            7,
+            cita,
+            "unwrap fuera de tests",
+            "seguridad-nativa",
+            &[],
+        );
+        let base = base_de(std::slice::from_ref(&unwrap));
+        let mut repo = [unsafe_, unwrap];
+        marcar(&mut repo, &base, None);
+        assert!(!repo[0].previo, "unsafe no estaba en la base");
+        assert!(repo[1].previo, "unwrap estaba en la base");
     }
 
     #[test]
