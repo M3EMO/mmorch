@@ -8686,3 +8686,85 @@ Los dos puntos no comparten archivos, y corren en paralelo.
 **Después de la 109 no queda trabajo de código que no dependa del usuario.**
 
 **Preguntas al usuario:** ninguna nueva. P95 y P97 a P103 siguen abiertas.
+
+## Vuelta del 2026-11-14 (32): la mezcla, P103 a, Colab, y lo que se aplica en ROOT_HOME
+
+**Estado.** El usuario ordenó la mezcla: "si mezclar". El PR 1 mezcló `laptop/tarea-109` en `claude/root-e7813e`, con el commit 64361fa. La suite con podman del árbol mezclado dio 3326, 0 y 4. La serie 112 repite la 111 en las doce filas.
+
+**Respuestas del usuario, del 2026-11-13, literales:**
+- Mezcla: "si mezclar".
+- P103: "a". "Listo" pide un veredicto en cada dimensión que aplica.
+- Colab: "a", que es "Sí, armarlo". Antes había dicho: "Usar colab si es posible para liberar la pc". El tope es "Hasta 50 unidades".
+- Disco: "a y b". El orquestador quitó 70 worktrees viejos y los homes 96 a 108.
+- P100 quedó resuelta por la limpieza. P95, P97, P98, P99, P101 y P102 siguen sin respuesta.
+
+## 1. El diseño de P103 a
+
+**Sin juez no hay pregunta nueva.** La opción "a" decía: "Sin juez, la decisión es 'sin decisión'". El usuario la eligió así. Root no dice "no listo", porque el producto no falló en nada: lo que faltó fue la medición. "Sin decisión" ya existe, y dice justo eso.
+
+**Lo que leí.** Hoy `sin_decision` (`src/oracle/informe.rs:327`) solo dispara por dos cosas: una dimensión sin veredicto cuya rúbrica tiene ítems que bloquean, como Seguridad, y Completitud sin veredicto. Diseño, Arquitectura y Estructura sin veredicto no la disparan.
+
+**La regla nueva.**
+1. **Una dimensión que aplica, sin veredicto, da "sin decisión".** El motivo nombra la dimensión y por qué no tiene veredicto. Por ejemplo: "Diseño sin veredicto: el juez no corrió, falta la clave de API".
+2. **El orden no cambia.** Primero los bloqueos, después "no listo", después "sin decisión", y al final "listo". Un producto con un test oculto en rojo y sin juez da "no listo". Un producto con un secreto da "bloqueado".
+3. **Qué es "no aplica".** Una dimensión no aplica si la tarea no la pide. Por ejemplo, Eficiencia sin `[eficiencia]`, Entrega sin `[entrega]`, o Arquitectura sin módulos ni capas. Hoy ese caso también llega como `sin_veredicto`, mezclado con "no se pudo medir". La Tarea 110 los separa con una marca propia en `Puntaje`.
+4. **El resumen** dice qué dimensiones quedaron sin medir, y por qué.
+
+**Un caso que la respuesta del usuario no fija: una dimensión "inestable en esta tarea".** La Tarea 83 deja sin puntaje a una dimensión de juez cuyos ítems estables pesan menos de la mitad. Leída al pie de la letra, la regla "a" da "sin decisión" en esa tarea siempre, con juez o sin él. La 110 implementa esa lectura literal. Relajarla es una decisión del usuario: va en P104.
+
+## 2. El diseño de Colab
+
+**Lo que no puede ir a Colab.**
+- **La evaluación y la calibración.** Necesitan podman, la imagen `root-oraculo-rust:4` y `--network none`. Una VM de Colab no corre podman de forma confiable.
+- **Los criterios de admisión de la minería.** La vuelta (2) del 2026-11-09 ya lo fijó: un test que cambia de entorno cambia la etiqueta. Toda la admisión sigue en un solo entorno.
+
+**Lo que sí va a Colab, en una VM de CPU:**
+1. **La suite sin podman de cada tarea.** Es `tools/test-seguro.sh` con `ROOT_SIN_PODMAN=1`, sobre la punta de la rama. No pide claves ni podman. Es la parte que más ocupa la laptop: compila Root y corre más de 3000 tests. La suite con podman sigue en la laptop.
+2. **El filtro barato de repos para la minería,** cuando P97 lo pida: "¿pasa `cargo test` en la punta?". Un repo que pasa se mide después en la laptop.
+
+**Reglas.**
+- **Ninguna clave va a Colab hoy.** Ninguna de las dos tareas usa API. Si algún día hace falta una, va solo por Colab Secrets, nunca en un archivo ni en un comando.
+- **Solo VM de CPU.** Una A100 no sirve para ninguna de estas tareas. Si alguna vez hiciera falta, el orquestador pregunta antes.
+- **Tope de 50 unidades** en total, con el gasto anotado por corrida.
+- **Primero se mide:** cuánto tarda la suite sin podman en una VM de Colab, contra la laptop. Si tarda más del doble, solo se usa cuando la laptop está ocupada con una suite con podman.
+- **No es código de Root.** Es un script del orquestador, fuera del repo. La Tarea 110 no lo incluye.
+
+## 3. Lo que el orquestador aplica ahora en el `ROOT_HOME` real
+
+Cada paso tiene su prueba. Si una prueba falla, se para y se informa.
+
+| Paso | Qué | Prueba |
+|---|---|---|
+| 0 | Copia de seguridad de `oraculos/s2-t1` a `s2-t3` y de `calibracion/`, con reflink | La copia existe y pesa lo mismo |
+| 1 | Instalar el binario mezclado (64361fa) | `r00t --version` da ese commit |
+| 2 | Comprobar la imagen `:4` | `scripts/probar-imagen-oraculo.sh` da 14 OK |
+| 3 | En los tres `tarea.toml`: imagen `:4`, y `contrato.cmd` y `oculto.cmd` con el comando nuevo de nextest | Ningún `cmd` trae `\|\| exit 1` después del `cp`. Todos borran el junit viejo antes |
+| 4 | Ids ocultos ampliados en t1 a t3: el `-E` y los `pruebas`, con todos los tests que agrega el commit, sacados de un junit real | `evaluar` del repo bueno da el oculto en verde. El padre da al menos un rojo |
+| 5 | Capas, **derivadas otra vez con el binario mezclado.** La 102 cambió `analizar`, así que las de la serie 89 pueden quedar viejas | `r00t oraculo capas --repo <bueno> --tarea s2-tN` pasa la verificación en las tres |
+| 6 | `con_tests/` en las tres tareas, con el árbol del commit | `calibrar --dimension pruebas` informa `repo_origen` igual a `con_tests` |
+| 7 | El equivalente de t1 en `[calibracion]`: `composite_pattern.rs:113`, `true` a `false`, con su motivo | El `tarea.toml` carga, y la fila de Funciona informa un equivalente excluido |
+| 8 | `armar_s2.py` con las cinco reglas: comando nuevo de nextest, oculto con todos los tests nuevos, `con_tests/`, capas desde `r00t oraculo capas`, e imagen `:4` | Regenerar t1 en una carpeta temporal y compararla con la aplicada. Solo cambian las rutas |
+| 9 | Recalibrar sin API Seguridad, Pruebas, Funciona y Completitud en t1 a t3 | Las filas nuevas traen `inyecciones_distintas` y `tarea_hash`, y repiten la serie 112 |
+
+- Los pasos 3 a 7 van de a una tarea: primero t1, y su prueba, antes de t2.
+- **Cuidado con el paso 4 después de la 110.** Sin clave de API, `evaluar` dará "sin decisión" por P103 a. La prueba del paso 4 mira el oculto, no la decisión.
+
+## 4. Tarea 110
+
+Brief: `docs/builds/brief-local-110.md`, con base 64361fa y rama `laptop/tarea-110`.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Marca de "no aplica" en `Puntaje`, separada de "no se pudo medir" | `src/tipos.rs`, `src/oracle/mod.rs`, y las sondas que hoy dan `sin_veredicto` por no aplicar |
+| 2 | La regla de P103 a en `sin_decision`, y la línea del resumen | `src/oracle/informe.rs` |
+
+El punto 2 usa la marca del punto 1. Van en serie.
+
+## Preguntas para el usuario (2026-11-14, 32)
+
+P95, P97, P98, P99, P101 y P102 siguen abiertas.
+
+**P104: con P103 a, "listo" pide un veredicto en cada dimensión que aplica.** Una dimensión de juez puede quedar "inestable en esta tarea": el juez da niveles distintos sobre el mismo código, y Root no le da puntaje. Leída al pie de la letra, tu respuesta "a" da "sin decisión" en esa tarea siempre, con juez o sin él.
+
+- **a)** Dejarlo así. Una dimensión inestable cuenta como sin veredicto, y la tarea da "sin decisión".
+- **b)** Una dimensión inestable cuenta como medida: Root la midió y encontró que el juez no es confiable ahí. "Listo" puede salir, y el resumen la nombra: "Diseño inestable en esta tarea". Recomendada: la inestabilidad es una propiedad medida del juez en esa tarea, no una medición que faltó. Con a, el ruido del juez decidiría si una tarea puede estar lista.
