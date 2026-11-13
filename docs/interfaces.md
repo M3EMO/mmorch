@@ -2706,6 +2706,63 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "motivo"
       ]
     },
+    "MedidaEficiencia": {
+      "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
+      "type": "object",
+      "properties": {
+        "medida": {
+          "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
+          "type": "string"
+        },
+        "motivo": {
+          "description": "Por qué la medida no tiene valor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "razon": {
+          "description": "Repo sobre referencia. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "referencia": {
+          "description": "Mínimo de las corridas del estado inicial. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "regresion": {
+          "description": "Verdadero si el repo queda más lento o más pesado que el ruido permite.",
+          "type": "boolean"
+        },
+        "repo": {
+          "description": "Mínimo de las corridas del repo. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ruido": {
+          "description": "Dispersión de la referencia, con piso de 2 %. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "medida",
+        "regresion"
+      ]
+    },
     "NivelItem": {
       "description": "Nivel de un ítem de rúbrica. `nivel` va de 0 a 3.",
       "type": "object",
@@ -2984,6 +3041,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "costo_usd": {
           "type": "number",
           "format": "double"
+        },
+        "eficiencia_auto": {
+          "description": "Medidas de Eficiencia contra el estado inicial, que Root mide sola en Rust. Un veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MedidaEficiencia"
+          }
         },
         "estado": {
           "$ref": "#/$defs/Estado"
@@ -5589,6 +5654,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "type": "number",
       "format": "double"
     },
+    "eficiencia_auto": {
+      "description": "Medidas de Eficiencia contra el estado inicial, que Root mide sola en Rust. Un veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MedidaEficiencia"
+      }
+    },
     "estado": {
       "$ref": "#/$defs/Estado"
     },
@@ -6349,6 +6422,63 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "required": [
         "item",
         "motivo"
+      ]
+    },
+    "MedidaEficiencia": {
+      "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
+      "type": "object",
+      "properties": {
+        "medida": {
+          "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
+          "type": "string"
+        },
+        "motivo": {
+          "description": "Por qué la medida no tiene valor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "razon": {
+          "description": "Repo sobre referencia. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "referencia": {
+          "description": "Mínimo de las corridas del estado inicial. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "regresion": {
+          "description": "Verdadero si el repo queda más lento o más pesado que el ruido permite.",
+          "type": "boolean"
+        },
+        "repo": {
+          "description": "Mínimo de las corridas del repo. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ruido": {
+          "description": "Dispersión de la referencia, con piso de 2 %. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "medida",
+        "regresion"
       ]
     },
     "NivelItem": {

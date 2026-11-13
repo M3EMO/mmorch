@@ -727,6 +727,9 @@ fn cierre_de_build(reporte: &str) -> Option<bool> {
 /// Motivo de Eficiencia cuando la tarea no define `[eficiencia]`: la tarea no pide la dimensión.
 pub const MOTIVO_SIN_EFICIENCIA: &str = "la tarea no define [eficiencia]";
 
+/// Motivo de Eficiencia en Rust sin `[eficiencia]` y sin `bootstrap/`: no hay estado inicial contra el que medir.
+pub const MOTIVO_SIN_ESTADO_INICIAL: &str = "sin estado inicial";
+
 /// Eficiencia: corre `eficiencia.cmd` del oráculo. Por debajo del piso, un hallazgo de severidad 3.
 pub fn eficiencia(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda {
     let d = Dimension::Eficiencia;

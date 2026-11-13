@@ -44,12 +44,13 @@ use crate::ficha::{self, ErrorFicha};
 use crate::proveedores::{Prompt, RespuestaJuez};
 use crate::tipos::{
     Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, HallazgoDescartado, ItemFaltante,
-    Pendiente, Puntaje, Rol, TasaTest, VERSION, Veredicto,
+    MedidaEficiencia, Pendiente, Puntaje, Rol, TasaTest, VERSION, Veredicto,
 };
 use crate::track::stats::wilson_inferior;
 use calibra::Calibraciones;
 use contenedor::{Ejecucion, Resultado};
 use descarga::python::AVISO_NO_VERIFICADAS;
+use eficiencia::ResultadoMedida;
 use entrega::{FabricaEscenarios, FabricaReal, Podman, PodmanReal, ResultadoEntrega};
 use informe::{Redactor, RedactorMedido, RedactorProveedor};
 use juez::{EntradaJuez, EstadoJuez, ExtractoGuardado, JuezProveedor, ModeloJuez, ResultadoJuez};
@@ -822,6 +823,24 @@ fn evaluar_con(
         }
         None
     };
+    // La medición automática de Eficiencia: Rust con `bootstrap/`, si la partes pide. Sus dos ejecutores son
+    // nuevos, sin memo ni reuso (Tarea 115).
+    let eficiencia_auto =
+        if partes.mide(Dimension::Eficiencia) && tarea.lenguaje == "rust" && bootstrap.is_dir() {
+            let ej_inicial = (deps.herramientas)(&Preparada {
+                repo: bootstrap.clone(),
+                cache: cache.clone(),
+                rustsec: rustsec.clone(),
+            });
+            let ej_del_repo = (deps.herramientas)(&Preparada {
+                repo: repo_copia.clone(),
+                cache: cache.clone(),
+                rustsec: rustsec.clone(),
+            });
+            eficiencia::medir(ej_inicial.as_ref(), ej_del_repo.as_ref())
+        } else {
+            Vec::new()
+        };
     let preparada = Preparada {
         repo: repo_copia.clone(),
         cache,
@@ -878,6 +897,7 @@ fn evaluar_con(
         deps.calibracion,
         no_compila,
         base_previa.as_ref(),
+        &eficiencia_auto,
     )?;
     let mut tasas = BTreeMap::new();
     for (id, tasa) in &contrato.tasas {
@@ -953,6 +973,7 @@ fn evaluar_con(
         hallazgos_descartados: medicion.hallazgos_descartados,
         extractos: medicion.extractos,
         no_compila,
+        eficiencia_auto: medicion.eficiencia_auto,
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
     let redactor_medido = deps
@@ -1039,6 +1060,8 @@ struct Medicion {
     hallazgos_descartados: Vec<HallazgoDescartado>,
     /// Ventanas que leyó el juez de diseño. Van al `Veredicto`.
     extractos: Vec<ExtractoGuardado>,
+    /// Medidas de Eficiencia contra el estado inicial, en el orden de `Medida`. Van al `Veredicto`.
+    eficiencia_auto: Vec<MedidaEficiencia>,
 }
 
 /// El juez de diseño que `medir` usa: el modelo si se armó, su nombre y las rúbricas de la evaluación.
@@ -1061,7 +1084,8 @@ struct Juicio {
 
 /// Mide las nueve dimensiones con las sondas, los requisitos y el juez de diseño. `descarga` son los
 /// hallazgos de la descarga: los que tocan una dimensión con sondas entran a su puntaje. `partes` dice qué
-/// corre: lo que no corre no llama a su contenedor, y su dimensión no se mide (Tarea 12).
+/// corre: lo que no corre no llama a su contenedor, y su dimensión no se mide (Tarea 12). `auto` son las
+/// medidas de Eficiencia contra `bootstrap/`; vacío si no se midieron (Tarea 115).
 #[allow(clippy::too_many_arguments)]
 fn medir(
     tarea: &Tarea,
@@ -1076,7 +1100,9 @@ fn medir(
     calibracion: &Calibraciones,
     no_compila: bool,
     base: Option<&previos::LineaBase>,
+    auto: &[ResultadoMedida],
 ) -> Result<Medicion, ErrorOraculo> {
+    let eficiencia_auto: Vec<MedidaEficiencia> = auto.iter().map(medida_de_eficiencia).collect();
     let resultados = requisitos::desde_clasificaciones(contrato, oculto);
     let estados = requisitos::evaluar_requisitos(
         &tarea.requisito,
@@ -1246,14 +1272,14 @@ fn medir(
                     .collect();
                 // Si ninguna sonda de la dimensión mide para el lenguaje, sus hallazgos quedan y su parte de
                 // sondas no tiene veredicto (Tarea 31).
-                // Eficiencia sin `[eficiencia]`: la tarea no pide la dimensión, en ningún lenguaje.
-                let sin_eficiencia =
-                    dimension == Dimension::Eficiencia && tarea.eficiencia.is_none();
                 let sin_sondas = sin_sonda_todas(dimension, juez.rubricas, tarea);
-                let mut de_sondas = if sin_eficiencia {
-                    sin_veredicto_puntaje(
-                        dimension,
-                        perfiles::herramientas::MOTIVO_SIN_EFICIENCIA.into(),
+                let mut de_sondas = if dimension == Dimension::Eficiencia {
+                    puntaje_de_eficiencia(
+                        tarea,
+                        de_la_dimension,
+                        extra,
+                        &eficiencia_auto,
+                        bootstrap.is_dir(),
                     )
                 } else if sin_sondas {
                     sin_veredicto_puntaje(dimension, motivo_sin_sonda(&tarea.lenguaje))
@@ -1310,6 +1336,7 @@ fn medir(
         pendientes: entrega.pendientes,
         hallazgos_descartados: descartados,
         extractos,
+        eficiencia_auto,
     })
 }
 
@@ -1865,6 +1892,93 @@ fn puntaje_de(
     }
 }
 
+/// Pasa una medida de `eficiencia` a la forma del veredicto (Tarea 115).
+fn medida_de_eficiencia(r: &ResultadoMedida) -> MedidaEficiencia {
+    MedidaEficiencia {
+        medida: r.medida.id().into(),
+        referencia: r.referencia,
+        repo: r.repo,
+        razon: r.comparacion.as_ref().map(|c| c.razon),
+        ruido: r.comparacion.as_ref().map(|c| c.ruido),
+        regresion: r.comparacion.as_ref().is_some_and(|c| c.regresion),
+        motivo: r.motivo.clone(),
+    }
+}
+
+/// Valor de una medida automática: 1 sin regresión; con regresión, referencia sobre repo (1 sobre la razón).
+/// `None` si la medida no tiene valor (Tarea 115).
+fn valor_de_medida(m: &MedidaEficiencia) -> Option<f32> {
+    let razon = m.razon?;
+    Some(if m.regresion {
+        (1.0 / razon) as f32
+    } else {
+        1.0
+    })
+}
+
+/// Puntaje de Eficiencia (Tarea 115). Con `[eficiencia]`, el banco da su valor y la medición automática lo
+/// baja si mide menos. Sin `[eficiencia]`, la medición automática decide en Rust con `bootstrap/`.
+/// `auto` vacío: no se midió, y el banco decide solo, como antes.
+fn puntaje_de_eficiencia(
+    tarea: &Tarea,
+    mut sondas: Vec<ResultadoSonda>,
+    extra: Vec<Hallazgo>,
+    auto: &[MedidaEficiencia],
+    con_estado_inicial: bool,
+) -> Puntaje {
+    const DIMENSION: Dimension = Dimension::Eficiencia;
+    if tarea.eficiencia.is_none() {
+        // Sin `[eficiencia]`, la sonda solo dice que la tarea no la pide: no cuenta.
+        sondas.clear();
+        if tarea.lenguaje != "rust" {
+            return sin_veredicto_puntaje(
+                DIMENSION,
+                perfiles::herramientas::MOTIVO_SIN_EFICIENCIA.into(),
+            );
+        }
+        if !con_estado_inicial {
+            return sin_veredicto_puntaje(
+                DIMENSION,
+                perfiles::herramientas::MOTIVO_SIN_ESTADO_INICIAL.into(),
+            );
+        }
+    }
+    if auto.is_empty() {
+        return puntaje_de(DIMENSION, sondas, extra, tarea);
+    }
+    let auto_min = auto.iter().filter_map(valor_de_medida).reduce(f32::min);
+    let banco = sondas.into_iter().next();
+    let valor_banco = banco.as_ref().and_then(|s| s.valor);
+    let valor = match (valor_banco, auto_min) {
+        (Some(b), Some(a)) => Some(b.min(a)),
+        (Some(b), None) => Some(b),
+        (None, Some(a)) => Some(a),
+        (None, None) => None,
+    };
+    match valor {
+        Some(valor) => {
+            let hallazgos = banco.map(|s| s.hallazgos).unwrap_or_default();
+            let sonda = ResultadoSonda {
+                dimension: DIMENSION,
+                valor: Some(valor),
+                motivo: None,
+                hallazgos,
+            };
+            puntaje_de(DIMENSION, vec![sonda], extra, tarea)
+        }
+        None => {
+            // El motivo del banco va primero. Después, los de cada medida, sin repetir.
+            let mut motivos: Vec<String> = banco.and_then(|s| s.motivo).into_iter().collect();
+            for motivo in auto.iter().filter_map(|m| m.motivo.clone()) {
+                if !motivos.contains(&motivo) {
+                    motivos.push(motivo);
+                }
+            }
+            sin_veredicto_puntaje(DIMENSION, motivos.join("; "))
+        }
+    }
+}
+
 /// Exclusiones de la suite del contrato: las entradas `contrato:` de `[[entorno]]` y de
 /// `[[oraculo_dudoso]]`, sin el prefijo. Así coinciden con los ids que mide la suite (desempates 1 y 16).
 fn excluidos_del_contrato(tarea: &Tarea) -> BTreeSet<String> {
@@ -2001,6 +2115,7 @@ fn es_no_aplica(motivo: &str) -> bool {
     [
         perfiles::rust::MOTIVO_SIN_MODULOS,
         perfiles::herramientas::MOTIVO_SIN_EFICIENCIA,
+        perfiles::herramientas::MOTIVO_SIN_ESTADO_INICIAL,
         entrega::MOTIVO_SIN_ITEMS,
     ]
     .contains(&motivo)
@@ -6120,9 +6235,10 @@ mod tests {
         let correr = correr_suites(JUNIT_CONTRATO);
         let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
         let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        // Sin `bootstrap/` no hay estado inicial contra el que medir (Tarea 115).
         assert_eq!(
             efi.no_aplica.as_deref(),
-            Some("la tarea no define [eficiencia]"),
+            Some("sin estado inicial"),
             "{efi:?}"
         );
         assert_eq!(efi.sin_veredicto, None, "{efi:?}");
@@ -6145,6 +6261,251 @@ mod tests {
             "{efi:?}"
         );
         assert_eq!(efi.sin_veredicto, None, "{efi:?}");
+    }
+
+    // --- Tarea 115: medición automática de Eficiencia contra `bootstrap/` ---
+
+    /// Ejecutor de la medición de Eficiencia. Responde los comandos de `eficiencia.rs`, y lo demás como
+    /// `HerramientasSanas`. El estado inicial tarda 1 s por corrida de tests; el repo, `ns_repo`. El banco
+    /// da `ops` ops/s; sin `ops`, el banco falla.
+    struct EficienciaFalsa {
+        base: HerramientasSanas,
+        inicial: bool,
+        ns_repo: u64,
+        ops: Option<f64>,
+        cmds: Comandos,
+    }
+
+    impl EjecutorHerramienta for EficienciaFalsa {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if cmd == "bench-eficiencia" {
+                let mut salida = SalidaHerramienta::default();
+                match self.ops {
+                    Some(ops) => salida.stdout = format!(r#"{{"ops_s": {ops}}}"#),
+                    None => salida.codigo = 1,
+                }
+                return Ok(salida);
+            }
+            let medicion = cmd == eficiencia::cmd_metadata()
+                || cmd == eficiencia::cmd_lista()
+                || cmd.contains("date +%s%N");
+            if !medicion {
+                return self.base.ejecutar(cmd);
+            }
+            self.cmds.borrow_mut().push(cmd.to_string());
+            let mut salida = SalidaHerramienta::default();
+            if cmd == eficiencia::cmd_metadata() {
+                let metadata =
+                    r#"{"packages":[{"name":"app","targets":[{"kind":["bin"],"name":"app"}]}]}"#;
+                salida
+                    .archivos
+                    .insert("metadata.json".into(), metadata.into());
+            } else if cmd == eficiencia::cmd_lista() {
+                let lista = r#"<testsuites><testsuite name="x"><testcase name="t1" classname="c"/></testsuite></testsuites>"#;
+                salida.archivos.insert("lista.xml".into(), lista.into());
+            } else if cmd.contains("--no-run") {
+                let ns = if self.inicial {
+                    1_000_000_000
+                } else {
+                    self.ns_repo
+                };
+                salida.stdout = format!("ROOT_NS {ns}\nROOT_MEM 1000\n");
+            } else {
+                salida.stdout = "ROOT_NS 2000000000\nROOT_BUILD 0\nROOT_SIZE 500\n".into();
+            }
+            Ok(salida)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            self.base.tiene_rustsec()
+        }
+    }
+
+    /// Fábrica de `EficienciaFalsa`. El lado del estado inicial se reconoce por su ruta `bootstrap`.
+    fn fabrica_eficiencia(
+        ns_repo: u64,
+        ops: Option<f64>,
+        cmds: Comandos,
+    ) -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
+        move |p: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(EficienciaFalsa {
+                base: HerramientasSanas {
+                    faltan: Vec::new(),
+                    fuga: false,
+                },
+                inicial: p.repo.ends_with("bootstrap"),
+                ns_repo,
+                ops,
+                cmds: cmds.clone(),
+            })
+        }
+    }
+
+    /// Tarea de Rust sin `[eficiencia]`, con `bootstrap/` y su `Cargo.lock` listos.
+    fn tarea_rust_sin_tabla_con_estado_inicial(base: &Path) -> Tarea {
+        let mut tarea = tarea_rust(base);
+        tarea.eficiencia = None;
+        let bootstrap = tarea.dir.join("bootstrap");
+        fs::create_dir_all(&bootstrap).expect("bootstrap");
+        fs::write(bootstrap.join("Cargo.lock"), LOCK_SANO).expect("lock inicial");
+        tarea
+    }
+
+    /// Evalúa la tarea de Rust con el ejecutor de Eficiencia `fabrica` y las suites sanas.
+    fn evaluar_con_eficiencia(
+        base: &Path,
+        tarea: &Tarea,
+        fabrica: &dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
+        partes: Option<Partes>,
+    ) -> Veredicto {
+        let repo = repo_rust(base, LOCK_SANO);
+        let home = home_con_cache(base, LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let o = OpcionesOraculo {
+            partes,
+            ..opciones(&home)
+        };
+        evaluar_falso_con(&repo, tarea, &o, &correr, fabrica).expect("evalúa")
+    }
+
+    #[test]
+    fn oraculo_eficiencia_rust_sin_tabla_con_estado_inicial_mide_sola() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_sin_tabla_con_estado_inicial(base.path());
+        let cmds = Comandos::default();
+        let fabrica = fabrica_eficiencia(1_000_000_000, None, cmds.clone());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(efi.no_aplica, None, "{efi:?}");
+        assert_eq!(efi.sin_veredicto, None, "{efi:?}");
+        assert!((efi.valor - 1.0).abs() < 0.01, "{efi:?}");
+        assert_eq!(v.eficiencia_auto.len(), 4, "{:?}", v.eficiencia_auto);
+        assert!(!cmds.borrow().is_empty(), "la medición debe correr");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_auto_con_tests_1_3_veces_mas_lentos_da_077() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_sin_tabla_con_estado_inicial(base.path());
+        let fabrica = fabrica_eficiencia(1_300_000_000, None, Comandos::default());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert!((efi.valor - 0.77).abs() < 0.01, "{efi:?}");
+        let tiempo = v
+            .eficiencia_auto
+            .iter()
+            .find(|m| m.medida == "tiempo_tests")
+            .expect("tiempo_tests");
+        assert!(tiempo.regresion, "{tiempo:?}");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_rust_sin_estado_inicial_sin_tabla_es_no_aplica_con_motivo() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        tarea.eficiencia = None;
+        let cmds = Comandos::default();
+        let fabrica = fabrica_eficiencia(1_300_000_000, None, cmds.clone());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(
+            efi.no_aplica.as_deref(),
+            Some("sin estado inicial"),
+            "{efi:?}"
+        );
+        assert_eq!(efi.sin_veredicto, None, "{efi:?}");
+        assert!(cmds.borrow().is_empty(), "sin estado inicial no mide");
+        assert!(v.eficiencia_auto.is_empty(), "{:?}", v.eficiencia_auto);
+    }
+
+    #[test]
+    fn oraculo_eficiencia_banco_bajo_gana_a_la_medicion() {
+        // El banco da 3000 ops/s con piso 5000: 0,6. La medición da 0,77. Vale el menor: 0,6.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_estado_inicial_y_tabla(base.path());
+        let fabrica = fabrica_eficiencia(1_300_000_000, Some(3000.0), Comandos::default());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert!((efi.valor - 0.6).abs() < 0.01, "{efi:?}");
+        assert!(
+            v.hallazgos
+                .iter()
+                .any(|h| h.dimension == Dimension::Eficiencia),
+            "el hallazgo del banco sigue: {:?}",
+            v.hallazgos
+        );
+    }
+
+    #[test]
+    fn oraculo_eficiencia_banco_alto_deja_ganar_a_la_medicion() {
+        // El banco da 4500 ops/s: 0,9. La medición da 0,77. Vale el menor: 0,77.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_estado_inicial_y_tabla(base.path());
+        let fabrica = fabrica_eficiencia(1_300_000_000, Some(4500.0), Comandos::default());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert!((efi.valor - 0.77).abs() < 0.01, "{efi:?}");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_banco_sin_valor_deja_decidir_a_la_medicion() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_estado_inicial_y_tabla(base.path());
+        let fabrica = fabrica_eficiencia(1_300_000_000, None, Comandos::default());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(efi.sin_veredicto, None, "{efi:?}");
+        assert!((efi.valor - 0.77).abs() < 0.01, "{efi:?}");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_sin_medidas_da_sin_veredicto_con_motivos() {
+        // Ningún comando de medición responde: cada medida trae su motivo y la dimensión no es "no aplica".
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_sin_tabla_con_estado_inicial(base.path());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &herramientas(&[]), None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(efi.no_aplica, None, "{efi:?}");
+        let motivo = efi.sin_veredicto.as_deref().unwrap_or_default();
+        assert!(motivo.contains("sin metadata.json"), "{motivo}");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_calibracion_de_diseno_no_llama_la_medicion() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_sin_tabla_con_estado_inicial(base.path());
+        let cmds = Comandos::default();
+        let fabrica = fabrica_eficiencia(1_300_000_000, None, cmds.clone());
+        let partes = partes_de(Dimension::Diseno, &[], &tarea);
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, Some(partes));
+        assert!(cmds.borrow().is_empty(), "{:?}", cmds.borrow());
+        assert!(v.eficiencia_auto.is_empty(), "{:?}", v.eficiencia_auto);
+    }
+
+    #[test]
+    fn oraculo_eficiencia_no_rust_con_estado_inicial_no_mide_sola() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust_sin_tabla_con_estado_inicial(base.path());
+        tarea.lenguaje = "python".into();
+        let cmds = Comandos::default();
+        let fabrica = fabrica_eficiencia(1_300_000_000, None, cmds.clone());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(
+            efi.no_aplica.as_deref(),
+            Some("la tarea no define [eficiencia]"),
+            "{efi:?}"
+        );
+        assert!(cmds.borrow().is_empty(), "{:?}", cmds.borrow());
+    }
+
+    /// Tarea de Rust con `[eficiencia]` (piso 5000) y `bootstrap/` listo.
+    fn tarea_rust_con_estado_inicial_y_tabla(base: &Path) -> Tarea {
+        let tarea = tarea_rust(base);
+        let bootstrap = tarea.dir.join("bootstrap");
+        fs::create_dir_all(&bootstrap).expect("bootstrap");
+        fs::write(bootstrap.join("Cargo.lock"), LOCK_SANO).expect("lock inicial");
+        tarea
     }
 
     #[test]

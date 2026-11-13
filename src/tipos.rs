@@ -358,6 +358,26 @@ pub struct ItemFaltante {
     pub motivo: String,
 }
 
+/// Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).
+/// `razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MedidaEficiencia {
+    /// Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.
+    pub medida: String,
+    /// Mínimo de las corridas del estado inicial. `None` si la medida no tiene valor.
+    pub referencia: Option<f64>,
+    /// Mínimo de las corridas del repo. `None` si la medida no tiene valor.
+    pub repo: Option<f64>,
+    /// Repo sobre referencia. `None` si la medida no tiene valor.
+    pub razon: Option<f64>,
+    /// Dispersión de la referencia, con piso de 2 %. `None` si la medida no tiene valor.
+    pub ruido: Option<f64>,
+    /// Verdadero si el repo queda más lento o más pesado que el ruido permite.
+    pub regresion: bool,
+    /// Por qué la medida no tiene valor.
+    pub motivo: Option<String>,
+}
+
 /// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del
 /// `Veredicto`, salvo `evidencia_visible`, que también lee la tarea.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -478,6 +498,9 @@ pub struct Veredicto {
     /// El producto no compila: la suite del contrato salió con 101 bajo nextest. Un veredicto viejo lee false.
     #[serde(default)]
     pub no_compila: bool,
+    /// Medidas de Eficiencia contra el estado inicial, que Root mide sola en Rust. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub eficiencia_auto: Vec<MedidaEficiencia>,
 }
 
 impl Default for Veredicto {
@@ -511,6 +534,7 @@ impl Default for Veredicto {
             hallazgos_descartados: Vec::new(),
             extractos: Vec::new(),
             no_compila: false,
+            eficiencia_auto: Vec::new(),
         }
     }
 }
@@ -733,6 +757,7 @@ mod tests {
             hallazgos_descartados: Vec::new(),
             extractos: Vec::new(),
             no_compila: false,
+            eficiencia_auto: Vec::new(),
         }
     }
 
@@ -1181,6 +1206,33 @@ mod tests {
         json.as_object_mut().expect("objeto").remove("extractos");
         let viejo: Veredicto = serde_json::from_value(json).expect("lee");
         assert!(viejo.extractos.is_empty(), "{:?}", viejo.extractos);
+    }
+
+    #[test]
+    fn veredicto_viejo_sin_eficiencia_auto_lee_vacio() {
+        // Un veredicto anterior al campo `eficiencia_auto` lo lee con lista vacía (Tarea 115).
+        let v = Veredicto {
+            eficiencia_auto: vec![MedidaEficiencia {
+                medida: "tiempo_tests".into(),
+                referencia: Some(1.0),
+                repo: Some(1.3),
+                razon: Some(1.3),
+                ruido: Some(0.02),
+                regresion: true,
+                motivo: None,
+            }],
+            ..Veredicto::default()
+        };
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("eficiencia_auto");
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee");
+        assert!(
+            viejo.eficiencia_auto.is_empty(),
+            "{:?}",
+            viejo.eficiencia_auto
+        );
     }
 
     #[test]
