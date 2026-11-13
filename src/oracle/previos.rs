@@ -66,7 +66,7 @@ pub fn linea_base(
 /// Carpeta de `home` donde van las líneas base guardadas.
 const CARPETA: &str = "previos";
 
-/// Clave de la memoria: el hash de `bootstrap/`, la versión de las sondas, la imagen y la base de RustSec.
+/// Clave de la memoria: el hash de `bootstrap/`, la versión de las sondas, la imagen, el lenguaje y la base de RustSec.
 /// La base suma su huella de contenido. Sin huella, suma solo si va montada.
 /// `None` si `bootstrap/` no se puede leer: entonces no hay memoria y la línea base se calcula.
 fn clave_de(tarea: &Tarea, bootstrap: &Path, ej: &dyn EjecutorHerramienta) -> Option<String> {
@@ -76,6 +76,7 @@ fn clave_de(tarea: &Tarea, bootstrap: &Path, ej: &dyn EjecutorHerramienta) -> Op
         version,
         VERSION_SONDAS_SEGURIDAD.to_string(),
         tarea.imagen.clone(),
+        tarea.lenguaje.clone(),
         ej.huella_rustsec()
             .unwrap_or_else(|| ej.tiene_rustsec().to_string()),
     ] {
@@ -358,6 +359,36 @@ mod tests {
         assert!(clave_a.is_some(), "bootstrap se lee: hay clave");
         assert_ne!(clave_a, clave_b, "otra base de RustSec, otra clave");
         assert_eq!(clave_a, clave_a_bis, "la misma base da la misma clave");
+    }
+
+    #[test]
+    fn previos_otro_lenguaje_da_otra_clave() {
+        let bootstrap = tempfile::tempdir().expect("temp dir");
+        fs::write(bootstrap.path().join("Cargo.lock"), CARGO_LOCK).expect("escribe el lock");
+        let tarea_de = |lenguaje: &str| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let texto = format!(
+                "nombre = \"x\"\nlenguaje = \"{lenguaje}\"\nimagen = \"i\"\nspec = \"s\"\n\
+                 [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n"
+            );
+            fs::write(dir.path().join("tarea.toml"), texto).expect("escribe tarea.toml");
+            let tarea = Tarea::cargar_de(dir.path()).expect("carga la tarea");
+            (dir, tarea)
+        };
+        let (_dir_rust, rust) = tarea_de("rust");
+        let (_dir_python, python) = tarea_de("python");
+        let (_dir_rust_bis, rust_bis) = tarea_de("rust");
+        let base = EjecutorConHuella { huella: "a".into() };
+
+        let clave_rust = clave_de(&rust, bootstrap.path(), &base);
+        let clave_python = clave_de(&python, bootstrap.path(), &base);
+        let clave_rust_bis = clave_de(&rust_bis, bootstrap.path(), &base);
+
+        assert_ne!(clave_rust, clave_python, "otro lenguaje, otra clave");
+        assert_eq!(
+            clave_rust, clave_rust_bis,
+            "el mismo lenguaje da la misma clave"
+        );
     }
 
     fn cargo_audit_de(archivo: &str, linea: u32, cita: &str) -> Hallazgo {
