@@ -424,6 +424,11 @@ const MOTIVO_SIN_CASOS: &str = "ningún caso aplicable en las tareas medidas";
 /// Prefijo del motivo de una dimensión inestable. Las filas viejas lo guardaban en `no_aplica`.
 const PREFIJO_INESTABLE: &str = "inestable en esta tarea";
 
+/// `true` si el motivo de un puntaje sin veredicto es de una dimensión inestable en esta tarea.
+pub fn es_motivo_inestable(motivo: &str) -> bool {
+    motivo.starts_with(PREFIJO_INESTABLE)
+}
+
 impl Fila {
     /// Pasa el motivo de inestable de una fila vieja de `no_aplica` a `inestable`. Una fila nueva no cambia.
     fn normalizar_inestable(&mut self) {

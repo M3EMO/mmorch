@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use super::ErrorOraculo;
+use super::calibra::es_motivo_inestable;
 use super::evidencia::oraciones_con_id;
 use super::juez::desenvuelto;
 use super::perfiles::tiene_perfil;
@@ -191,7 +192,7 @@ pub fn informar_con(
         riesgos: riesgos(v, tarea),
         proximos_pasos: proximos_pasos(v, tarea, &bloqueantes, presentes),
         bloqueantes,
-        resumen: resumen(v, &decidido.disparos),
+        resumen: resumen(v, rubricas, &decidido.disparos),
         confianza: confianza(v, tarea),
     };
     if let Some(redactor) = redactor {
@@ -320,21 +321,37 @@ fn decidir(
     }
 }
 
-/// Motivo de la dimensión sin veredicto, o `None` si tiene veredicto. Es la lectura literal de P103 a:
-/// cualquier `sin_veredicto` cuenta, también el de una dimensión inestable en esta tarea. El usuario puede
-/// relajarla en P104. Esta función es el único lugar que la define.
+/// Motivo de la dimensión sin veredicto, o `None` si cuenta como medida. Sigue P103 a para cualquier motivo.
+/// La excepción es una dimensión inestable en esta tarea: cuenta como medida y el resumen la nombra (P104 b).
+/// Lo que frena la decisión sale de `sin_veredicto_que_frena`, que parte de esta función.
 fn sin_veredicto_de(p: &Puntaje) -> Option<&str> {
-    p.sin_veredicto.as_deref()
+    p.sin_veredicto
+        .as_deref()
+        .filter(|motivo| !es_motivo_inestable(motivo))
+}
+
+/// Motivo de la dimensión sin veredicto que frena la decisión, o `None`. Frena todo lo que `sin_veredicto_de`
+/// cuenta como sin veredicto. Frena también una dimensión inestable que es Seguridad, Completitud o cuya
+/// rúbrica bloquea. Así la inestabilidad no tapa a una dimensión que bloquea.
+fn sin_veredicto_que_frena<'a>(p: &'a Puntaje, rubricas: &[Rubrica]) -> Option<&'a str> {
+    let frena_si_inestable = matches!(p.dimension, Dimension::Seguridad | Dimension::Completitud)
+        || bloquea_la_dimension(p.dimension, rubricas);
+    match sin_veredicto_de(p) {
+        Some(motivo) => Some(motivo),
+        None if frena_si_inestable => p.sin_veredicto.as_deref(),
+        None => None,
+    }
 }
 
 /// Dimensiones sin veredicto que dejan la decisión en `SinDecision` si no hay evidencia de `Bloqueado` ni de
 /// `NoListo` (decisión 48, desempate 9 y Tarea 32). Una dimensión cuya rúbrica tiene un ítem `bloquea = true`
 /// lo hace con su regla propia. Completitud lo hace siempre, aunque su rúbrica no bloquee. Cualquier otra
-/// dimensión sin veredicto lo hace con `dimension_sin_veredicto` (P103 a). Una dimensión `no_aplica` no cuenta.
+/// dimensión sin veredicto lo hace con `dimension_sin_veredicto` (P103 a). Una dimensión inestable que no
+/// frena cuenta como medida y no entra aquí (P104 b). Una dimensión `no_aplica` no cuenta.
 fn sin_decision(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     let mut salida = Vec::new();
     for p in &v.puntajes {
-        let Some(motivo) = sin_veredicto_de(p) else {
+        let Some(motivo) = sin_veredicto_que_frena(p, rubricas) else {
             continue;
         };
         if bloquea_la_dimension(p.dimension, rubricas) {
@@ -610,8 +627,8 @@ fn sin_cumplir(e: &EstadoRequisito) -> bool {
 }
 
 /// Resumen determinista: una frase por disparo, con sus ids. Sin disparos, dice qué cumple.
-/// Al final suma la línea de dimensiones sin medir, si hay alguna.
-fn resumen(v: &Veredicto, disparos: &[Disparo]) -> String {
+/// Al final suma la línea de dimensiones sin medir y la de inestables, si hay. En ese orden.
+fn resumen(v: &Veredicto, rubricas: &[Rubrica], disparos: &[Disparo]) -> String {
     let base = if disparos.is_empty() {
         let cumplen: Vec<&str> = v
             .requisitos
@@ -628,22 +645,39 @@ fn resumen(v: &Veredicto, disparos: &[Disparo]) -> String {
         let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
         frases.join(" ")
     };
-    match linea_sin_medir(v) {
-        Some(linea) => format!("{base} {linea}"),
-        None => base,
-    }
+    let lineas: Vec<String> = [linea_sin_medir(v, rubricas), linea_inestable(v, rubricas)]
+        .into_iter()
+        .flatten()
+        .collect();
+    std::iter::once(base)
+        .chain(lineas)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// Línea con las dimensiones sin veredicto, en el orden de `puntajes`. Las `no_aplica` no entran.
-/// Usa "Sin medir:" para una y para varias. Solo cambia la lista, como pide el brief de P103.
-fn linea_sin_medir(v: &Veredicto) -> Option<String> {
+/// Línea con las dimensiones que frenan sin veredicto, en el orden de `puntajes`. Las `no_aplica` no entran.
+/// Una inestable que cuenta como medida no entra; sale en `linea_inestable`. Usa "Sin medir:" para una y para varias.
+fn linea_sin_medir(v: &Veredicto, rubricas: &[Rubrica]) -> Option<String> {
     let nombres: Vec<&str> = v
         .puntajes
         .iter()
-        .filter(|p| sin_veredicto_de(p).is_some())
+        .filter(|p| sin_veredicto_que_frena(p, rubricas).is_some())
         .map(|p| nombre_dimension(p.dimension))
         .collect();
     (!nombres.is_empty()).then(|| format!("Sin medir: {}.", unir(&nombres)))
+}
+
+/// Línea con las dimensiones inestables en esta tarea que cuentan como medida, en el orden de `puntajes`.
+/// Usa "Inestable en esta tarea:" para una y para varias. Las que frenan salen en `linea_sin_medir`.
+fn linea_inestable(v: &Veredicto, rubricas: &[Rubrica]) -> Option<String> {
+    let nombres: Vec<&str> = v
+        .puntajes
+        .iter()
+        .filter(|p| p.sin_veredicto.as_deref().is_some_and(es_motivo_inestable))
+        .filter(|p| sin_veredicto_que_frena(p, rubricas).is_none())
+        .map(|p| nombre_dimension(p.dimension))
+        .collect();
+    (!nombres.is_empty()).then(|| format!("Inestable en esta tarea: {}.", unir(&nombres)))
 }
 
 /// Un candidato a acción con sus claves de orden: el peso del requisito afectado y la severidad.
@@ -2199,13 +2233,77 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_diseno_inestable_en_la_tarea_da_sin_decision() {
-        // P103 a: una dimensión inestable en esta tarea cuenta como sin veredicto.
+    fn informe_diseno_inestable_en_la_tarea_cuenta_como_medida_y_da_listo() {
+        // P104 b: una dimensión inestable en esta tarea cuenta como medida. No deja la decisión sin decisión.
         let mut v = ecc();
         con_sin_veredicto(
             &mut v,
             Dimension::Diseno,
             "inestable en esta tarea: diseno.errores",
+        );
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_resumen_diseno_inestable_la_nombra_en_inestable_y_no_sin_medir() {
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Diseno,
+            "inestable en esta tarea: diseno.errores",
+        );
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("Inestable en esta tarea: Diseño."),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("Sin medir: Diseño."), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_diseno_inestable_y_arquitectura_sin_juez_dan_sin_decision_con_arquitectura() {
+        // Diseño inestable cuenta como medida. Arquitectura sin juez sigue frenando la decisión.
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Diseno,
+            "inestable en esta tarea: diseno.errores",
+        );
+        con_sin_veredicto(&mut v, Dimension::Arquitectura, "el juez no corrió");
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("dimension_sin_veredicto: arquitectura"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            !i.motivo.contains("dimension_sin_veredicto: diseno"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.resumen.contains("Sin medir: Arquitectura."),
+            "{}",
+            i.resumen
+        );
+        assert!(
+            i.resumen.contains("Inestable en esta tarea: Diseño."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_seguridad_inestable_en_la_tarea_sigue_dando_sin_decision() {
+        // Seguridad bloquea por su rúbrica embebida. Su inestabilidad no la cuenta como medida.
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Seguridad,
+            "inestable en esta tarea: seguridad.x",
         );
         let i = informar(
             &v,
@@ -2217,10 +2315,48 @@ modulos = ["config"]
         .expect("informa");
         assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
         assert!(
-            i.motivo.contains("dimension_sin_veredicto: diseno"),
+            i.motivo
+                .contains("dimension_que_bloquea_sin_veredicto: seguridad"),
             "{}",
             i.motivo
         );
+        assert!(i.resumen.contains("Sin medir: Seguridad."), "{}", i.resumen);
+        assert!(
+            !i.resumen.contains("Inestable en esta tarea:"),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_completitud_inestable_en_la_tarea_sigue_dando_sin_decision() {
+        // Completitud frena la decisión aunque su motivo sea de inestable.
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Completitud,
+            "inestable en esta tarea: completitud.x",
+        );
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("completitud_sin_veredicto"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.resumen.contains("Sin medir: Completitud."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn es_motivo_inestable_reconoce_solo_el_prefijo_de_inestable() {
+        assert!(es_motivo_inestable(
+            "inestable en esta tarea: diseno.errores"
+        ));
+        assert!(!es_motivo_inestable("el juez no corrió"));
     }
 
     #[test]
