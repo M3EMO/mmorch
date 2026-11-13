@@ -3367,7 +3367,8 @@ mod tests {
             Some(Decision::NoListo)
         );
         assert_eq!(v.estado, Estado::Rojo);
-        // Con el mínimo en 0,75, el mismo conteo da listo y verde: el conteo no decide.
+        // Con el mínimo en 0,75, el mismo conteo ya no da no listo: el conteo no decide. Sin juez, Diseño no
+        // tiene veredicto y P103 a deja la decisión en sin decisión, no en listo.
         let reglas = ReglasDecision {
             completitud_minima: 0.75,
             ..ReglasDecision::default()
@@ -3380,9 +3381,9 @@ mod tests {
         let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
         assert_eq!(
             v.informe.as_ref().map(|i| i.decision),
-            Some(Decision::Listo)
+            Some(Decision::SinDecision)
         );
-        assert_eq!(v.estado, Estado::Verde);
+        assert_eq!(v.estado, Estado::SinVeredicto);
     }
 
     #[test]

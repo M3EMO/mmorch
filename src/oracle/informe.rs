@@ -19,7 +19,7 @@ use crate::config::ReglasDecision;
 use crate::proveedores::{self, Prompt, causa_tope_alcanzado};
 use crate::tipos::{
     Accion, AvisoPrevio, Confianza, Cumplimiento, Decision, Dimension, Eleccion, Estado,
-    EstadoRequisito, Fuente, Hallazgo, Informe, ParteSinVeredicto, Veredicto,
+    EstadoRequisito, Fuente, Hallazgo, Informe, ParteSinVeredicto, Puntaje, Veredicto,
 };
 
 /// Máximo de riesgos y de próximos pasos.
@@ -320,14 +320,21 @@ fn decidir(
     }
 }
 
+/// Motivo de la dimensión sin veredicto, o `None` si tiene veredicto. Es la lectura literal de P103 a:
+/// cualquier `sin_veredicto` cuenta, también el de una dimensión inestable en esta tarea. El usuario puede
+/// relajarla en P104. Esta función es el único lugar que la define.
+fn sin_veredicto_de(p: &Puntaje) -> Option<&str> {
+    p.sin_veredicto.as_deref()
+}
+
 /// Dimensiones sin veredicto que dejan la decisión en `SinDecision` si no hay evidencia de `Bloqueado` ni de
 /// `NoListo` (decisión 48, desempate 9 y Tarea 32). Una dimensión cuya rúbrica tiene un ítem `bloquea = true`
-/// lo hace. Completitud lo hace siempre, aunque su rúbrica no bloquee. Una dimensión sin veredicto sin ítems
-/// que bloquean no cambia la decisión.
+/// lo hace con su regla propia. Completitud lo hace siempre, aunque su rúbrica no bloquee. Cualquier otra
+/// dimensión sin veredicto lo hace con `dimension_sin_veredicto` (P103 a). Una dimensión `no_aplica` no cuenta.
 fn sin_decision(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     let mut salida = Vec::new();
     for p in &v.puntajes {
-        let Some(motivo) = p.sin_veredicto.as_deref() else {
+        let Some(motivo) = sin_veredicto_de(p) else {
             continue;
         };
         if bloquea_la_dimension(p.dimension, rubricas) {
@@ -344,6 +351,8 @@ fn sin_decision(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
             });
         } else if p.dimension == Dimension::Completitud {
             salida.push(completitud_sin_veredicto(Some(motivo)));
+        } else {
+            salida.push(dimension_sin_veredicto(p.dimension, motivo));
         }
     }
     let hay_completitud = v
@@ -573,6 +582,18 @@ fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Dispar
     salida
 }
 
+/// Disparo de una dimensión sin veredicto que no bloquea por su rúbrica: la decisión queda en sin decisión.
+fn dimension_sin_veredicto(dimension: Dimension, motivo: &str) -> Disparo {
+    Disparo {
+        regla: format!("dimension_sin_veredicto: {}", dimension.clave()),
+        frase: format!(
+            "{} no tiene veredicto: {motivo}.",
+            nombre_dimension(dimension)
+        ),
+        hallazgo: None,
+    }
+}
+
 /// Disparo de la completitud sin veredicto: la decisión queda cerrada en no listo.
 fn completitud_sin_veredicto(motivo: Option<&str>) -> Disparo {
     let motivo = motivo.unwrap_or("sin puntaje de completitud");
@@ -592,22 +613,40 @@ fn sin_cumplir(e: &EstadoRequisito) -> bool {
 }
 
 /// Resumen determinista: una frase por disparo, con sus ids. Sin disparos, dice qué cumple.
+/// Al final suma la línea de dimensiones sin medir, si hay alguna.
 fn resumen(v: &Veredicto, disparos: &[Disparo]) -> String {
-    if disparos.is_empty() {
+    let base = if disparos.is_empty() {
         let cumplen: Vec<&str> = v
             .requisitos
             .iter()
             .filter(|e| e.cumplimiento == Cumplimiento::Cumplido)
             .map(|e| e.id.as_str())
             .collect();
-        return if cumplen.is_empty() {
+        if cumplen.is_empty() {
             "Listo: ninguna regla de bloqueo ni de no listo disparó.".to_string()
         } else {
             format!("Listo: cumplen {}.", unir(&cumplen))
-        };
+        }
+    } else {
+        let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
+        frases.join(" ")
+    };
+    match linea_sin_medir(v) {
+        Some(linea) => format!("{base} {linea}"),
+        None => base,
     }
-    let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
-    frases.join(" ")
+}
+
+/// Línea con las dimensiones sin veredicto, en el orden de `puntajes`. Las `no_aplica` no entran.
+/// Usa "Sin medir:" para una y para varias. Solo cambia la lista, como pide el brief de P103.
+fn linea_sin_medir(v: &Veredicto) -> Option<String> {
+    let nombres: Vec<&str> = v
+        .puntajes
+        .iter()
+        .filter(|p| sin_veredicto_de(p).is_some())
+        .map(|p| nombre_dimension(p.dimension))
+        .collect();
+    (!nombres.is_empty()).then(|| format!("Sin medir: {}.", unir(&nombres)))
 }
 
 /// Un candidato a acción con sus claves de orden: el peso del requisito afectado y la severidad.
@@ -2044,8 +2083,9 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_eficiencia_sin_veredicto_deja_listo_y_la_lista_en_confianza() {
-        // Eficiencia no tiene ítems con `bloquea`: sin veredicto, la decisión sigue en `Listo`.
+    fn informe_eficiencia_sin_veredicto_da_sin_decision_y_la_lista_en_confianza() {
+        // P103 a: "Listo" exige veredicto en toda dimensión que aplica. Eficiencia sin sondas no tiene veredicto,
+        // aunque su rúbrica no tenga ítems con `bloquea`. La decisión queda en `SinDecision`.
         let mut v = ecc();
         v.puntajes[2].valor = 0.0;
         v.puntajes[2].sin_veredicto = Some("sin sondas".into());
@@ -2057,13 +2097,203 @@ modulos = ["config"]
             None,
         )
         .expect("informa");
-        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
         assert_eq!(i.confianza.sin_veredicto.len(), 1, "{:?}", i.confianza);
         assert_eq!(
             i.confianza.sin_veredicto[0].dimension,
             Dimension::Eficiencia
         );
         assert_eq!(i.confianza.sin_veredicto[0].motivo, "sin sondas");
+    }
+
+    /// Deja sin veredicto la dimensión `dimension` con el motivo `motivo`.
+    fn con_sin_veredicto(v: &mut Veredicto, dimension: Dimension, motivo: &str) {
+        let p = v
+            .puntajes
+            .iter_mut()
+            .find(|p| p.dimension == dimension)
+            .expect("hay la dimensión");
+        p.valor = 0.0;
+        p.sin_veredicto = Some(motivo.into());
+    }
+
+    #[test]
+    fn informe_diseno_sin_veredicto_da_sin_decision_y_nombra_la_regla() {
+        // P103 a: cualquier dimensión sin veredicto deja `SinDecision`, aunque su rúbrica no bloquee.
+        let mut v = ecc();
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("dimension_sin_veredicto: diseno"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.resumen
+                .contains("Diseño no tiene veredicto: el juez no corrió."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_no_aplica_sin_veredicto_no_dispara_y_deja_listo() {
+        // Un `no_aplica` no es un veredicto que falte: la tarea no pide la dimensión.
+        let mut v = ecc();
+        let eficiencia = v
+            .puntajes
+            .iter_mut()
+            .find(|p| p.dimension == Dimension::Eficiencia)
+            .expect("hay eficiencia");
+        eficiencia.valor = 0.0;
+        eficiencia.no_aplica = Some("la tarea no pide eficiencia".into());
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_test_oculto_fallido_con_diseno_sin_veredicto_da_no_listo() {
+        // La evidencia de `NoListo` gana a `SinDecision`: no se suma el disparo de Diseño.
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/extra.py::caso_suelto".into()];
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("test_oculto_fuera_de_requisitos"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            !i.motivo.contains("dimension_sin_veredicto"),
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
+    fn informe_secreto_con_diseno_sin_veredicto_da_bloqueado() {
+        // Un secreto bloquea siempre. Diseño sin veredicto no cambia eso.
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto", "gitleaks", true));
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert_eq!(i.bloqueantes, vec!["h-secreto".to_string()]);
+    }
+
+    #[test]
+    fn informe_diseno_inestable_en_la_tarea_da_sin_decision() {
+        // P103 a: una dimensión inestable en esta tarea cuenta como sin veredicto.
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Diseno,
+            "inestable en esta tarea: diseno.errores",
+        );
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("dimension_sin_veredicto: diseno"),
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
+    fn informe_resumen_sin_veredicto_nombra_la_dimension_sin_medir() {
+        let mut v = ecc();
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        let i = informe_de(&v);
+        assert!(i.resumen.contains("Sin medir: Diseño."), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_resumen_sin_veredicto_nombra_las_dos_dimensiones_sin_medir() {
+        // El orden sale de `puntajes`: Arquitectura va antes que Diseño.
+        let mut v = ecc();
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        con_sin_veredicto(&mut v, Dimension::Arquitectura, "el juez no corrió");
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("Sin medir: Arquitectura y Diseño."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_veredicto_viejo_sin_no_aplica_con_diseno_sin_veredicto_da_sin_decision() {
+        // Guarda: un JSON viejo, sin `no_aplica`, decide como hoy. Una dimensión sin veredicto da `SinDecision`.
+        let mut v = ecc();
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        for p in json["puntajes"].as_array_mut().expect("lista de puntajes") {
+            p.as_object_mut().expect("puntaje").remove("no_aplica");
+        }
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee");
+        let i = informar(
+            &viejo,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("dimension_sin_veredicto: diseno"),
+            "{}",
+            i.motivo
+        );
+        // Un JSON viejo sano sigue en `Listo`.
+        let mut json_sano = serde_json::to_value(ecc()).expect("serializa");
+        for p in json_sano["puntajes"]
+            .as_array_mut()
+            .expect("lista de puntajes")
+        {
+            p.as_object_mut().expect("puntaje").remove("no_aplica");
+        }
+        let sano: Veredicto = serde_json::from_value(json_sano).expect("lee");
+        let i_sano = informar(
+            &sano,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i_sano.decision, Decision::Listo, "{}", i_sano.motivo);
     }
 
     #[test]
