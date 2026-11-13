@@ -138,7 +138,7 @@ const CARGO_HOME_DESCARGA: &str = "/tmp/cargo-dl";
 const COMANDO_VENDOR: &str =
     "cd /repo && cargo vendor --locked --versioned-dirs /cache/vendor > /cache/config.toml";
 // La copia `/tmp/w` trae `.cargo/` del repo: el lock sale con el mismo config que la descarga.
-const COMANDO_LOCK: &str = "mkdir -p /tmp/w && cp -r /repo/. /tmp/w/ && cd /tmp/w && cargo generate-lockfile && cp /tmp/w/Cargo.lock /salida/Cargo.lock";
+const COMANDO_LOCK: &str = "mkdir -p /tmp/w && cp -a /repo/. /tmp/w/ && cd /tmp/w && cargo generate-lockfile && cp /tmp/w/Cargo.lock /salida/Cargo.lock";
 const URL_RUSTSEC: &str = "https://github.com/RustSec/advisory-db";
 const CADUCIDAD_RUSTSEC: Duration = Duration::from_secs(24 * 3600);
 /// Fragmentos (en minúscula) de errores de red o de registro caído.
@@ -1994,10 +1994,24 @@ location searched: crates.io index";
         );
     }
 
+    /// La copia del lock usa `cp -a`: conserva los atributos y trae `.cargo/`.
+    #[test]
+    fn comando_lock_no_usa_cp_r() {
+        assert!(!COMANDO_LOCK.contains("cp -r"), "{COMANDO_LOCK}");
+    }
+
+    #[test]
+    fn comando_lock_copia_repo_con_cp_a() {
+        assert!(
+            COMANDO_LOCK.contains("cp -a /repo/. /tmp/w/"),
+            "{COMANDO_LOCK}"
+        );
+    }
+
     #[test]
     fn descarga_comando_lock_genera_en_la_copia_del_repo_con_su_config() {
         assert!(
-            COMANDO_LOCK.contains("cp -r /repo/. /tmp/w/"),
+            COMANDO_LOCK.contains("cp -a /repo/. /tmp/w/"),
             "{COMANDO_LOCK}"
         );
         assert!(

@@ -277,6 +277,20 @@ fn afirma_detectado(e: &Ensayo, defecto: Defecto, en_linea: bool) {
 /// Sin cambios en la copia.
 fn sin_cambios(_: &Path) {}
 
+/// Los comandos de copia usan `cp -a`, no `cp -r`. Así conservan los atributos del repo.
+#[test]
+fn comando_eficiencia_no_usa_cp_r() {
+    assert!(
+        !COMANDO_EFICIENCIA.contains("cp -r"),
+        "{COMANDO_EFICIENCIA}"
+    );
+}
+
+#[test]
+fn comando_oculto_no_usa_cp_r() {
+    assert!(!COMANDO_OCULTO.contains("cp -r"), "{COMANDO_OCULTO}");
+}
+
 #[test]
 fn secreto_en_codigo_lo_detecta_gitleaks() {
     crate::saltar_sin_podman!();
@@ -324,7 +338,7 @@ fn bucle_cuadratico_lo_detecta_el_comando_de_eficiencia() {
 
 /// Comando de `[eficiencia]`: copia el repo a `/tmp` (rw) y corre el ejemplo en debug. El ejemplo imprime
 /// `ops_s` en su última línea. Debug, para que el bucle no lo borre el optimizador.
-const COMANDO_EFICIENCIA: &str = "cp -r /repo /tmp/ws && cd /tmp/ws && CARGO_TARGET_DIR=/tmp/ws/target cargo run -q --example medir";
+const COMANDO_EFICIENCIA: &str = "cp -a /repo /tmp/ws && cd /tmp/ws && CARGO_TARGET_DIR=/tmp/ws/target cargo run -q --example medir";
 
 /// Ejemplo de la copia: llama a cada función de producción del fixture, unas 20 veces.
 const MEDIR_RS: &str = r#"use std::time::Instant;
@@ -426,7 +440,7 @@ const REQUISITO_MODULO: &str = "[[requisito]]\nid = \"R1\"\ntitulo = \"Ejecuta c
 const TEST_COMANDOS: &str = "use calibra_fixture::comandos::ejecutar;\n\n#[test]\nfn ejecuta_numero_valido() {\n    assert_eq!(ejecutar(\"7\"), Ok(7));\n}\n";
 
 /// Oculto: `cargo test` en una copia de escritura, con su salida convertida a junit por `junit.py`.
-const COMANDO_OCULTO: &str = "cp -r /repo /tmp/ws && cd /tmp/ws && cargo test --no-fail-fast --lib --tests 2>&1 | python3 /oraculo/oculto/junit.py > /salida/oculto.xml";
+const COMANDO_OCULTO: &str = "cp -a /repo /tmp/ws && cd /tmp/ws && cargo test --no-fail-fast --lib --tests 2>&1 | python3 /oraculo/oculto/junit.py > /salida/oculto.xml";
 
 /// Conversor de la salida de `cargo test` a junit: un `testcase` por línea `test <nombre> ... <estado>`.
 /// La clase es `tests.test_<binario>`, con el nombre del archivo de la corrida (`tests/comandos.rs` da `comandos`).

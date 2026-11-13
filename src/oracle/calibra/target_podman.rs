@@ -14,7 +14,7 @@ use crate::tipos::{Conteo, Dimension, Puntaje, Veredicto};
 
 /// Oculto que compila con el `target` de `/salida`. Sin esto, cargo compilaría en `/tmp/ws/target` y el reuso no
 /// tendría efecto.
-const COMANDO_OCULTO_CON_TARGET: &str = "cp -r /repo /tmp/ws && cd /tmp/ws && CARGO_TARGET_DIR=/salida/target cargo test --no-fail-fast --lib --tests 2>&1 | python3 /oraculo/oculto/junit.py > /salida/oculto.xml";
+const COMANDO_OCULTO_CON_TARGET: &str = "cp -a /repo /tmp/ws && cd /tmp/ws && CARGO_TARGET_DIR=/salida/target cargo test --no-fail-fast --lib --tests 2>&1 | python3 /oraculo/oculto/junit.py > /salida/oculto.xml";
 
 /// Cambio de fuente que mueve el mtime y no cambia el comportamiento del fixture.
 const CAMBIO_SIN_EFECTO: &str = "\n// cambio de mtime sin efecto (Tarea 59)\n";
@@ -51,6 +51,15 @@ fn medido_de_completitud(v: &Veredicto) -> (Vec<Puntaje>, Conteo, Vec<String>, V
         v.ocultos_fallidos.clone(),
         v.inestables.clone(),
     )
+}
+
+/// El oculto con `target` copia el repo con `cp -a`. Así conserva los atributos y el `target` reusado.
+#[test]
+fn comando_oculto_con_target_no_usa_cp_r() {
+    assert!(
+        !COMANDO_OCULTO_CON_TARGET.contains("cp -r"),
+        "{COMANDO_OCULTO_CON_TARGET}"
+    );
 }
 
 #[test]
