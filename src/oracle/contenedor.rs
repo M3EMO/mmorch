@@ -47,6 +47,13 @@ static CONTADOR: AtomicU64 = AtomicU64::new(0);
 pub const SUFIJO_SELINUX: &str = "z";
 /// Opción de `podman run` y `podman build` que no pasa al contenedor las variables de proxy del host (M4).
 pub(crate) const PROXY_FUERA: &str = "--http-proxy=false";
+/// Perfil de `cargo` sin debuginfo (P106 c): compilar y enlazar cuesta menos.
+/// Todo comando sobre el `target` sembrado comparte esta huella de perfil. Por eso viven aquí.
+/// Un valor de `e.env` para la misma clave va después y gana.
+const PERFIL_SIN_DEBUGINFO: [(&str, &str); 2] = [
+    ("CARGO_PROFILE_DEV_DEBUG", "0"),
+    ("CARGO_PROFILE_TEST_DEBUG", "0"),
+];
 
 /// Qué correr, con qué montajes y con qué límite de tiempo. Su `Debug` oculta el valor de los secretos.
 #[derive(Clone)]
@@ -183,6 +190,10 @@ fn opciones(e: &Ejecucion) -> Vec<String> {
         );
     }
     montaje(&mut args, &e.salida, "/salida", SUFIJO_SELINUX);
+    for (clave, valor) in PERFIL_SIN_DEBUGINFO {
+        args.push("-e".into());
+        args.push(format!("{clave}={valor}"));
+    }
     for (clave, valor) in &e.env {
         args.push("-e".into());
         args.push(format!("{clave}={valor}"));
@@ -858,6 +869,53 @@ mod tests {
     fn contenedor_argumentos_pasan_cada_variable_de_entorno() {
         let args = argumentos(&ejecucion(), "n");
         assert!(contiene_par(&args, "-e", "PYTHONPATH=/repo"));
+    }
+
+    /// Posición del `-e` que precede al par `clave=valor`, o `None` si no existe.
+    fn posicion_de_variable(args: &[String], variable: &str) -> Option<usize> {
+        args.windows(2)
+            .position(|p| p[0] == "-e" && p[1] == variable)
+    }
+
+    #[test]
+    fn contenedor_argumentos_llevan_perfil_sin_debuginfo() {
+        let args = argumentos(&ejecucion(), "n");
+        assert!(
+            contiene_par(&args, "-e", "CARGO_PROFILE_DEV_DEBUG=0"),
+            "{args:?}"
+        );
+        assert!(
+            contiene_par(&args, "-e", "CARGO_PROFILE_TEST_DEBUG=0"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn contenedor_argumentos_separado_llevan_perfil_sin_debuginfo() {
+        let args = argumentos_separado(&ejecucion(), "n", &["sleep", "infinity"]);
+        assert!(
+            contiene_par(&args, "-e", "CARGO_PROFILE_DEV_DEBUG=0"),
+            "{args:?}"
+        );
+        assert!(
+            contiene_par(&args, "-e", "CARGO_PROFILE_TEST_DEBUG=0"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn contenedor_env_propio_manda_sobre_el_perfil_sin_debuginfo() {
+        let mut e = ejecucion();
+        e.env.push(("CARGO_PROFILE_DEV_DEBUG".into(), "2".into()));
+        let args = argumentos(&e, "n");
+        let constante = posicion_de_variable(&args, "CARGO_PROFILE_DEV_DEBUG=0")
+            .expect("la constante va en los argumentos");
+        let propio = posicion_de_variable(&args, "CARGO_PROFILE_DEV_DEBUG=2")
+            .expect("el valor de e.env va en los argumentos");
+        assert!(
+            constante < propio,
+            "podman usa el último -e: el de e.env debe ir después: {args:?}"
+        );
     }
 
     #[test]
