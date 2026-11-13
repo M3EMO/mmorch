@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use super::ErrorOraculo;
 use super::calibra::es_motivo_inestable;
+use super::eficiencia::UMBRAL_NO_LISTO;
 use super::evidencia::oraciones_con_id;
 use super::juez::desenvuelto;
 use super::perfiles::tiene_perfil;
@@ -20,7 +21,8 @@ use crate::config::ReglasDecision;
 use crate::proveedores::{self, Prompt, causa_tope_alcanzado};
 use crate::tipos::{
     Accion, AvisoPrevio, Confianza, Cumplimiento, Decision, Dimension, Eleccion, Estado,
-    EstadoRequisito, Fuente, Hallazgo, Informe, ParteSinVeredicto, Puntaje, Veredicto,
+    EstadoRequisito, Fuente, Hallazgo, Informe, MedidaEficiencia, ParteSinVeredicto, Puntaje,
+    Veredicto,
 };
 
 /// Máximo de riesgos y de próximos pasos.
@@ -507,7 +509,8 @@ fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
 /// Reglas de no listo: un producto o sus tests que no compilan; cada test oculto o del contrato que falla, lo
 /// cubra o no un requisito (`test_oculto_falla`, `test_contrato_falla`); la completitud con veredicto bajo su
 /// mínimo; y una dimensión calibrada bajo su mínimo de `[decision.minimo]`. Una completitud sin veredicto no
-/// dispara aquí: `sin_decision` la cubre si no hay evidencia.
+/// dispara aquí: `sin_decision` la cubre si no hay evidencia. Una regresión de eficiencia mayor que
+/// `UMBRAL_NO_LISTO` también dispara aquí, sin esperar la calibración.
 fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Disparo> {
     let mut salida = Vec::new();
     if v.no_compila {
@@ -530,6 +533,23 @@ fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Dispar
         salida.push(Disparo {
             regla: format!("test_contrato_falla: {test}"),
             frase: frase_de_test_que_falla("test del contrato", test, &quienes),
+            hallazgo: None,
+        });
+    }
+    // Regresión de eficiencia: no espera la calibración, como `test_oculto_falla`.
+    for m in &v.eficiencia_auto {
+        let Some(razon) = m.razon else {
+            continue;
+        };
+        if !m.regresion || razon <= UMBRAL_NO_LISTO {
+            continue;
+        }
+        let Some(frase) = frase_de_regresion(m) else {
+            continue;
+        };
+        salida.push(Disparo {
+            regla: format!("eficiencia_regresion: {}", m.medida),
+            frase,
             hallazgo: None,
         });
     }
@@ -627,7 +647,7 @@ fn sin_cumplir(e: &EstadoRequisito) -> bool {
 }
 
 /// Resumen determinista: una frase por disparo, con sus ids. Sin disparos, dice qué cumple.
-/// Al final suma la línea de dimensiones sin medir y la de inestables, si hay. En ese orden.
+/// Al final suma la línea de dimensiones sin medir, la de inestables y la de eficiencia, si hay. En ese orden.
 fn resumen(v: &Veredicto, rubricas: &[Rubrica], disparos: &[Disparo]) -> String {
     let base = if disparos.is_empty() {
         let cumplen: Vec<&str> = v
@@ -645,10 +665,14 @@ fn resumen(v: &Veredicto, rubricas: &[Rubrica], disparos: &[Disparo]) -> String 
         let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
         frases.join(" ")
     };
-    let lineas: Vec<String> = [linea_sin_medir(v, rubricas), linea_inestable(v, rubricas)]
-        .into_iter()
-        .flatten()
-        .collect();
+    let lineas: Vec<String> = [
+        linea_sin_medir(v, rubricas),
+        linea_inestable(v, rubricas),
+        linea_de_eficiencia(v),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     std::iter::once(base)
         .chain(lineas)
         .collect::<Vec<_>>()
@@ -1324,6 +1348,63 @@ fn nombre_dimension(d: Dimension) -> &'static str {
         Dimension::Entrega => "Entrega",
         Dimension::Pruebas => "Pruebas",
     }
+}
+
+/// Bytes en un MiB. Las medidas de memoria y tamaño llegan en bytes.
+const BYTES_POR_MIB: f64 = 1_048_576.0;
+
+/// Frase de una regresión de eficiencia: la razón con un decimal y los dos valores. Los tiempos van en
+/// segundos. La memoria y el tamaño van en bytes y se muestran en MiB. `None` si faltan números o la medida
+/// es desconocida.
+fn frase_de_regresion(m: &MedidaEficiencia) -> Option<String> {
+    let (Some(referencia), Some(repo), Some(razon)) = (m.referencia, m.repo, m.razon) else {
+        return None;
+    };
+    let razon_txt = format!("{razon:.1}").replace('.', ",");
+    let segundos = |v: f64| numero(v as f32);
+    let mib = |v: f64| numero((v / BYTES_POR_MIB) as f32);
+    let frase = match m.medida.as_str() {
+        "tiempo_tests" => format!(
+            "Los tests tardan {razon_txt} veces más: {} s contra {} s.",
+            segundos(repo),
+            segundos(referencia)
+        ),
+        "tiempo_compilacion" => format!(
+            "La compilación tarda {razon_txt} veces más: {} s contra {} s.",
+            segundos(repo),
+            segundos(referencia)
+        ),
+        "memoria_pico" => format!(
+            "Los tests usan {razon_txt} veces más memoria: {} MiB contra {} MiB.",
+            mib(repo),
+            mib(referencia)
+        ),
+        "tamano_binario" => format!(
+            "El binario pesa {razon_txt} veces más: {} MiB contra {} MiB.",
+            mib(repo),
+            mib(referencia)
+        ),
+        _ => return None,
+    };
+    Some(frase)
+}
+
+/// Línea de eficiencia del resumen. Con regresión, nombra la de mayor razón. Sin regresión y con medidas con
+/// valor, dice que no hay regresiones. Sin medidas con valor, no hay línea.
+fn linea_de_eficiencia(v: &Veredicto) -> Option<String> {
+    let con_valor = || v.eficiencia_auto.iter().filter(|m| m.razon.is_some());
+    let mayor = con_valor().filter(|m| m.regresion).max_by(|a, b| {
+        a.razon
+            .partial_cmp(&b.razon)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if let Some(m) = mayor {
+        return frase_de_regresion(m);
+    }
+    con_valor()
+        .next()
+        .is_some()
+        .then(|| "Sin regresiones de eficiencia.".to_string())
 }
 
 /// Número con dos decimales y coma, como se lee en español.
@@ -2135,6 +2216,186 @@ modulos = ["config"]
             Dimension::Eficiencia
         );
         assert_eq!(i.confianza.sin_veredicto[0].motivo, "sin sondas");
+    }
+
+    /// Medida de eficiencia con sus números. `razon` va tal cual, como la deja la medición.
+    fn eficiencia(
+        medida: &str,
+        referencia: f64,
+        repo: f64,
+        razon: f64,
+        ruido: f64,
+        regresion: bool,
+    ) -> MedidaEficiencia {
+        MedidaEficiencia {
+            medida: medida.into(),
+            referencia: Some(referencia),
+            repo: Some(repo),
+            razon: Some(razon),
+            ruido: Some(ruido),
+            regresion,
+            motivo: None,
+        }
+    }
+
+    #[test]
+    fn informe_eficiencia_regresion_de_1_6_sobre_el_ruido_da_no_listo_y_la_frase() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.01, 1.62, 1.6, 0.02, true)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("eficiencia_regresion: tiempo_tests"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.resumen
+                .contains("Los tests tardan 1,6 veces más: 1,62 s contra 1,01 s."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_regresion_dentro_del_ruido_no_dispara() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.01, 1.62, 1.6, 0.7, false)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+        assert!(!i.motivo.contains("eficiencia_regresion"), "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_eficiencia_regresion_de_1_3_no_dispara_y_el_resumen_la_nombra() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.0, 1.3, 1.3, 0.02, true)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+        assert!(
+            i.resumen
+                .contains("Los tests tardan 1,3 veces más: 1,30 s contra 1,00 s."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_sin_regresiones_lo_dice_en_el_resumen() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.0, 1.0, 1.0, 0.02, false)];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("Sin regresiones de eficiencia."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_sin_medicion_no_suma_linea() {
+        let i = informe_de(&ecc());
+        assert!(
+            !i.resumen.contains("regresiones de eficiencia"),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("veces más"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_dos_regresiones_nombra_la_de_mayor_razon() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia(
+                "memoria_pico",
+                100.0 * BYTES_POR_MIB,
+                130.0 * BYTES_POR_MIB,
+                1.3,
+                0.02,
+                true,
+            ),
+            eficiencia("tiempo_compilacion", 7.75, 10.85, 1.4, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .contains("La compilación tarda 1,4 veces más: 10,85 s contra 7,75 s."),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("usan 1,3 veces"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_regresion_con_secreto_da_bloqueado() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto", "gitleaks", false));
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.01, 2.02, 2.0, 0.02, true)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_eficiencia_regresion_no_espera_la_calibracion() {
+        let mut v = ecc();
+        for p in v.puntajes.iter_mut() {
+            p.calibrada = false;
+            p.motivo_sin_calibrar = Some("sin calibrar".into());
+        }
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.01, 1.62, 1.6, 0.02, true)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("eficiencia_regresion: tiempo_tests"),
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
+    fn frase_de_regresion_da_las_cuatro_medidas_con_mib() {
+        let casos = [
+            (
+                eficiencia("tiempo_tests", 1.01, 1.62, 1.6, 0.02, true),
+                "Los tests tardan 1,6 veces más: 1,62 s contra 1,01 s.",
+            ),
+            (
+                eficiencia("tiempo_compilacion", 7.75, 12.40, 1.6, 0.02, true),
+                "La compilación tarda 1,6 veces más: 12,40 s contra 7,75 s.",
+            ),
+            (
+                eficiencia(
+                    "memoria_pico",
+                    100.0 * BYTES_POR_MIB,
+                    160.0 * BYTES_POR_MIB,
+                    1.6,
+                    0.02,
+                    true,
+                ),
+                "Los tests usan 1,6 veces más memoria: 160,00 MiB contra 100,00 MiB.",
+            ),
+            (
+                eficiencia(
+                    "tamano_binario",
+                    10.0 * BYTES_POR_MIB,
+                    16.0 * BYTES_POR_MIB,
+                    1.6,
+                    0.02,
+                    true,
+                ),
+                "El binario pesa 1,6 veces más: 16,00 MiB contra 10,00 MiB.",
+            ),
+        ];
+        for (medida, esperada) in casos {
+            assert_eq!(
+                frase_de_regresion(&medida).as_deref(),
+                Some(esperada),
+                "{}",
+                medida.medida
+            );
+        }
     }
 
     /// Deja sin veredicto la dimensión `dimension` con el motivo `motivo`.
