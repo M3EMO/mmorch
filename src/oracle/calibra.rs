@@ -555,7 +555,7 @@ fn rubricas_de(dimension: Dimension) -> Vec<Rubrica> {
 }
 
 /// `dimension` tiene ítems que mide el juez (`juez` o `mixto`). Sin ellos, solo cuentan sus sondas.
-fn tiene_items_de_juez(dimension: Dimension) -> bool {
+pub(crate) fn tiene_items_de_juez(dimension: Dimension) -> bool {
     rubricas_de(dimension)
         .iter()
         .flat_map(|r| r.item.iter())

@@ -219,6 +219,15 @@ fn oraculo_calibrar(
             fila.no_aplicable,
             fila.reemplazos
         );
+        let calibraciones = oracle::calibra::Calibraciones::cargar(&home)?;
+        let version = calibraciones.version_en(
+            &home,
+            &fila.tarea,
+            fila.tarea_hash.as_deref().unwrap_or_default(),
+            fila.dimension,
+        );
+        let juez = oracle::calibra::tiene_items_de_juez(fila.dimension);
+        println!("{}", texto_version(&version, juez));
         if let Some(ruta) = &calibrada.casos {
             println!("casos: {}", ruta.display());
         }
@@ -237,6 +246,59 @@ fn lineas_de_avisos(avisos: &[String]) -> Vec<String> {
 /// Una métrica con dos decimales, o `sin medir` si no tiene casos de una clase.
 fn medida(valor: Option<f32>) -> String {
     valor.map_or_else(|| "sin medir".to_string(), |v| format!("{v:.2}"))
+}
+
+/// Casos acertados más que faltan para que la cota de Wilson de `aciertos` de `total` llegue a la cota mínima.
+/// Cada caso nuevo es un acierto. Da 0 si la cota ya llega.
+fn casos_que_faltan(aciertos: u32, total: u32) -> u32 {
+    (0..)
+        .find(|k| {
+            oracle::calibra::wilson_inferior(aciertos + k, total + k)
+                >= oracle::calibra::COTA_WILSON_MINIMA
+        })
+        .unwrap_or(0)
+}
+
+/// Una clase de la versión: su cota de Wilson y, si no llega a la cota mínima, los casos que faltan.
+fn texto_cota(nombre: &str, aciertos: u32, total: u32) -> String {
+    let cota = oracle::calibra::wilson_inferior(aciertos, total);
+    let faltan = casos_que_faltan(aciertos, total);
+    if faltan == 0 {
+        return format!("{nombre} Wilson {cota:.2}");
+    }
+    format!(
+        "{nombre} Wilson {cota:.2} (faltan {faltan} casos sin fallos para {})",
+        oracle::calibra::COTA_WILSON_MINIMA
+    )
+}
+
+/// Texto de la versión de Root para `calibrar`. Un juez muestra la cota de Wilson de sensibilidad y de
+/// especificidad con los casos que faltan. Un oráculo muestra si hay un defecto detectado y si los limpios dieron bien.
+fn texto_version(version: &oracle::calibra::Version, juez: bool) -> String {
+    if juez {
+        return format!(
+            "versión: {}, {}",
+            texto_cota("sensibilidad", version.detectados, version.defectos),
+            texto_cota(
+                "especificidad",
+                version.limpios_bien,
+                version.limpios_con_veredicto
+            )
+        );
+    }
+    let defectos = match version.detectados {
+        0 => "sin defecto detectado".to_string(),
+        1 => "1 defecto detectado".to_string(),
+        n => format!("{n} defectos detectados"),
+    };
+    let mal =
+        version.limpios_con_veredicto - version.limpios_bien.min(version.limpios_con_veredicto);
+    let limpios = match mal {
+        0 => "limpios bien".to_string(),
+        1 => "1 limpio mal".to_string(),
+        n => format!("{n} limpios mal"),
+    };
+    format!("versión: {defectos}, {limpios}")
 }
 
 /// `oraculo validar`: mide la validez del juicio de Root y escribe `casos/validez.json` (Tarea 12b). Con
@@ -1208,6 +1270,57 @@ fn imprimir_registrados(json: bool, cuantos: usize) {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    fn version_de(
+        defectos: u32,
+        detectados: u32,
+        limpios: u32,
+        bien: u32,
+    ) -> oracle::calibra::Version {
+        oracle::calibra::Version {
+            defectos,
+            detectados,
+            limpios_con_veredicto: limpios,
+            limpios_bien: bien,
+            limpios,
+            limpios_sin_veredicto: 0,
+            tareas: vec!["t".into()],
+        }
+    }
+
+    #[test]
+    fn texto_version_de_juez_con_cinco_de_cinco_dice_la_cota_y_los_casos_que_faltan() {
+        let texto = texto_version(&version_de(5, 5, 5, 5), true);
+        assert!(texto.contains("sensibilidad Wilson 0.57"), "{texto}");
+        assert!(texto.contains("especificidad Wilson 0.57"), "{texto}");
+        assert!(
+            texto.contains("faltan 11 casos sin fallos para 0.8"),
+            "{texto}"
+        );
+    }
+
+    #[test]
+    fn texto_version_de_juez_que_ya_llega_no_pide_casos() {
+        let texto = texto_version(&version_de(16, 16, 16, 16), true);
+        assert!(texto.contains("sensibilidad Wilson 0.81"), "{texto}");
+        assert!(!texto.contains("faltan"), "{texto}");
+    }
+
+    #[test]
+    fn texto_version_de_oraculo_dice_defecto_detectado_y_limpios_bien() {
+        let texto = texto_version(&version_de(1, 1, 3, 3), false);
+        assert!(
+            texto.contains("1 defecto detectado, limpios bien"),
+            "{texto}"
+        );
+    }
+
+    #[test]
+    fn texto_version_de_oraculo_sin_defecto_o_con_limpio_mal_lo_dice() {
+        let texto = texto_version(&version_de(2, 0, 3, 2), false);
+        assert!(texto.contains("sin defecto detectado"), "{texto}");
+        assert!(texto.contains("1 limpio mal"), "{texto}");
+    }
 
     #[test]
     fn lineas_de_avisos_escribe_una_linea_por_aviso_en_orden() {
