@@ -3,7 +3,7 @@
 # Uso: scripts/probar-imagen-oraculo.sh
 set -euo pipefail
 
-IMAGEN=${IMAGEN:-localhost/root-oraculo-rust:3}
+IMAGEN=${IMAGEN:-localhost/root-oraculo-rust:4}
 BANCO=${BANCO:-$HOME/Proyectos/bench-ecc-sdlc}
 LVP=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
 
@@ -85,6 +85,8 @@ chequeo "(g) cargo mutants --version" correr "$IMAGEN" cargo mutants --version
 chequeo "(g) gitleaks version" correr "$IMAGEN" gitleaks version
 chequeo "(g) hadolint --version" correr "$IMAGEN" hadolint --version
 chequeo "(g) cargo nextest --version" correr "$IMAGEN" cargo nextest --version
+# nextest.toml: el perfil ci debe traer slow-timeout. Lo lee el propio parser TOML de python3.
+chequeo "(g) nextest.toml perfil ci tiene slow-timeout" correr "$IMAGEN" python3 -c 'import tomllib; d = tomllib.load(open("/etc/root-oraculo/nextest.toml", "rb")); assert "slow-timeout" in d["profile"]["ci"]'
 
 if [ "$FALLOS" -gt 0 ]; then
     echo "$FALLOS chequeo(s) con FALLA"
