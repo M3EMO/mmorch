@@ -50,3 +50,18 @@ Ninguno.
 2. ¿Se incluye la fuente de descarga en la línea base? Decisión: no. Pide exponer la construcción de hallazgos de `descarga.rs`.
 3. Los hallazgos de Seguridad de reglas de Dockerfile (por ejemplo, correr como root) ahora pueden quedar previos. Decisión: sí, sigue la regla de P96.
 4. `calcular` usa `sondas_configs_locales` y no corre hadolint sobre `bootstrap/`. Decisión: el organizador cambió esto frente a la orden del subagente, porque hadolint es de Entrega y costaba un contenedor extra.
+
+## Tarea 104b
+
+La 104b cierra el hueco de la pregunta 1: un secreto previo de `configs-secretos` bloquea otra vez.
+
+| Commit | Punto | Qué hace |
+|---|---|---|
+| 75111dc | 1 | `es_fuente_de_secretos` en `previos.rs` es la única definición. `es_secreto` y `quitar_previos` la usan. Dos tests en rojo antes: bloqueo y ausencia en "Avisos previos". |
+| f406124 | 2 | Test de guarda: un hallazgo previo de severidad 3 de la sonda `dockerfile` no bloquea y sale en "Avisos previos". Falla si `es_secreto` devuelve siempre verdadero. |
+
+Suite: `ROOT_SIN_PODMAN=1 cargo test` da 2672 tests de la librería en verde, 0 fallos. Los demás binarios de tests también dan verde. Clippy con `-D warnings` da cero avisos.
+
+Llamadores revisados con grep -w: `es_secreto` (dos usos en `informe.rs`) y `quitar_previos` (`mod.rs:1225`). La firma de ambos no cambia. Se borró `SONDA_SECRETOS` de `informe.rs`; la constante homónima de `configs.rs` es otra.
+
+Pregunta abierta: la regla (c) de `reglas_dockerfile` ("secreto en ENV o ARG") emite con la fuente `dockerfile`. Por eso `es_fuente_de_secretos` no la reconoce. Si ese hallazgo es previo, sale como aviso y no bloquea. No lo toqué, porque queda fuera de la tabla. ¿Esa regla debe emitir con una fuente de secretos?
