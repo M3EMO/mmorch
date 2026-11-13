@@ -7,7 +7,7 @@ Rama `laptop/tarea-117`, base 64361fa. Todo corrió con `ROOT_SIN_PODMAN=1`.
 | Momento | Pruebas de la librería | Fallas | Ignoradas |
 |---|---|---|---|
 | Base 64361fa | 2751 verdes | 0 | 0 |
-| Final | 2762 verdes | 0 | 1 (la medición del punto 3) |
+| Final | 2759 verdes | 0 | 1 (la medición del punto 3) |
 
 La suma de la base incluye los otros binarios de `tests/`. Todos quedaron en verde.
 Los tests nuevos son 5 del punto 1 y 3 del punto 2. El punto 3 suma 1 ignorado.
