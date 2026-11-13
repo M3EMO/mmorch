@@ -192,6 +192,7 @@ mod tests {
                 exactitud_balanceada: None,
                 items,
                 sin_veredicto: None,
+                no_aplica: None,
                 faltantes: vec![],
             }],
             hallazgos,

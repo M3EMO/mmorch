@@ -2837,6 +2837,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           ],
           "default": null
         },
+        "no_aplica": {
+          "description": "Por qué la tarea no pide la dimensión. Con `Some`, `sin_veredicto` queda vacío y `valor` vale 0.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "sin_veredicto": {
           "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",
           "type": [
@@ -4468,6 +4476,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     },
     "motivo_sin_calibrar": {
       "description": "Por qué el puntaje no está calibrado por su huella, como \"calibración de otro juez\".\n`None` si está calibrado o si no hay fila con muestra suficiente.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "no_aplica": {
+      "description": "Por qué la tarea no pide la dimensión. Con `Some`, `sin_veredicto` queda vacío y `valor` vale 0.",
       "type": [
         "string",
         "null"
@@ -6460,6 +6476,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "motivo_sin_calibrar": {
           "description": "Por qué el puntaje no está calibrado por su huella, como \"calibración de otro juez\".\n`None` si está calibrado o si no hay fila con muestra suficiente.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "no_aplica": {
+          "description": "Por qué la tarea no pide la dimensión. Con `Some`, `sin_veredicto` queda vacío y `valor` vale 0.",
           "type": [
             "string",
             "null"

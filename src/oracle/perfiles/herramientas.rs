@@ -724,6 +724,9 @@ fn cierre_de_build(reporte: &str) -> Option<bool> {
         .and_then(|v| v["success"].as_bool())
 }
 
+/// Motivo de Eficiencia cuando la tarea no define `[eficiencia]`: la tarea no pide la dimensión.
+pub const MOTIVO_SIN_EFICIENCIA: &str = "la tarea no define [eficiencia]";
+
 /// Eficiencia: corre `eficiencia.cmd` del oráculo. Por debajo del piso, un hallazgo de severidad 3.
 pub fn eficiencia(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda {
     let d = Dimension::Eficiencia;
@@ -731,7 +734,7 @@ pub fn eficiencia(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda
         return ResultadoSonda {
             dimension: d,
             valor: None,
-            motivo: Some("la tarea no define [eficiencia]".into()),
+            motivo: Some(MOTIVO_SIN_EFICIENCIA.into()),
             hallazgos: Vec::new(),
         };
     };

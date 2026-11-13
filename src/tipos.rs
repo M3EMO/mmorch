@@ -259,6 +259,9 @@ pub struct Puntaje {
     /// Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.
     #[serde(default)]
     pub sin_veredicto: Option<String>,
+    /// Por qué la tarea no pide la dimensión. Con `Some`, `sin_veredicto` queda vacío y `valor` vale 0.
+    #[serde(default)]
+    pub no_aplica: Option<String>,
     /// Ítems de la dimensión que ninguna sonda mide para el lenguaje de la tarea.
     #[serde(default)]
     pub faltantes: Vec<ItemFaltante>,
@@ -270,6 +273,13 @@ pub struct Puntaje {
     /// Un puntaje sin el campo vale vacía.
     #[serde(default)]
     pub inestables: Vec<String>,
+}
+
+impl Puntaje {
+    /// Verdadero si la dimensión no tiene valor: no se pudo medir o la tarea no la pide.
+    pub fn sin_valor(&self) -> bool {
+        self.sin_veredicto.is_some() || self.no_aplica.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -688,6 +698,7 @@ mod tests {
                 exactitud_balanceada: Some(0.97),
                 items: Vec::new(),
                 sin_veredicto: None,
+                no_aplica: None,
                 faltantes: Vec::new(),
             }],
             hallazgos: vec![Hallazgo {
@@ -872,6 +883,7 @@ mod tests {
             exactitud_balanceada: None,
             items: Vec::new(),
             sin_veredicto: None,
+            no_aplica: None,
             faltantes: Vec::new(),
         });
         ida_y_vuelta(&Hallazgo {
@@ -1045,6 +1057,15 @@ mod tests {
     }
 
     #[test]
+    fn tipos_puntaje_viejo_sin_no_aplica_se_lee_none() {
+        let texto = r#"{"dimension":"eficiencia","valor":0.0,"calibrada":false,
+            "exactitud_balanceada":null,"sin_veredicto":"sin sondas"}"#;
+        let p: Puntaje = serde_json::from_str(texto).expect("un puntaje viejo se acepta");
+        assert_eq!(p.no_aplica, None);
+        assert!(p.sin_valor());
+    }
+
+    #[test]
     fn tipos_puntaje_viejo_sin_inestables_se_lee_vacia() {
         let texto = r#"{"dimension":"diseno","valor":0.5,"calibrada":false,
             "exactitud_balanceada":0.7,"items":[],"sin_veredicto":null,"faltantes":[]}"#;
@@ -1070,6 +1091,7 @@ mod tests {
             exactitud_balanceada: Some(0.7),
             items: Vec::new(),
             sin_veredicto: None,
+            no_aplica: None,
             faltantes: Vec::new(),
             motivo_sin_calibrar: Some("calibración de otro juez".into()),
         });
@@ -1086,6 +1108,7 @@ mod tests {
             exactitud_balanceada: None,
             items: Vec::new(),
             sin_veredicto: Some("juez no corrido".into()),
+            no_aplica: None,
             faltantes: Vec::new(),
         });
     }

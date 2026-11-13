@@ -203,6 +203,7 @@ mod tests {
                     })
                     .collect(),
                 sin_veredicto: None,
+                no_aplica: None,
                 faltantes: vec![],
             }],
             ..Veredicto::default()

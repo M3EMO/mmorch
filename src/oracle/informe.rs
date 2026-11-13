@@ -1424,6 +1424,7 @@ modulos = ["config"]
                     exactitud_balanceada: None,
                     items: Vec::new(),
                     sin_veredicto: None,
+                    no_aplica: None,
                     faltantes: Vec::new(),
                 },
                 (Dimension::Completitud, None) => Puntaje {
@@ -1435,6 +1436,7 @@ modulos = ["config"]
                     exactitud_balanceada: None,
                     items: Vec::new(),
                     sin_veredicto: Some("ningún requisito tiene nivel medido".into()),
+                    no_aplica: None,
                     faltantes: Vec::new(),
                 },
                 _ => Puntaje {
@@ -1446,6 +1448,7 @@ modulos = ["config"]
                     exactitud_balanceada: None,
                     items: Vec::new(),
                     sin_veredicto: None,
+                    no_aplica: None,
                     faltantes: Vec::new(),
                 },
             })

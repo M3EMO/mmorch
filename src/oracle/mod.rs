@@ -907,8 +907,15 @@ fn evaluar_con(
     let tarea_hash = calibra::hash_de_tarea(tarea)?;
     deps.calibracion
         .aplicar(&tarea.nombre, &tarea_hash, &mut puntajes);
+    // Un puntaje que la tarea no pide no se calibra: `global` y `sin_calibrar` no lo cuentan.
+    for puntaje in puntajes.iter_mut().filter(|p| p.no_aplica.is_some()) {
+        puntaje.calibrada = false;
+    }
     // Un puntaje calibrado no lleva motivo. Uno sin calibrar lleva el motivo de su fila, si esa fila no vale.
-    for puntaje in puntajes.iter_mut().filter(|p| !p.calibrada) {
+    for puntaje in puntajes
+        .iter_mut()
+        .filter(|p| !p.calibrada && p.no_aplica.is_none())
+    {
         puntaje.motivo_sin_calibrar = deps
             .calibracion
             .motivo_sin_calibrar(&tarea.nombre, &tarea_hash, puntaje.dimension)
@@ -1238,8 +1245,16 @@ fn medir(
                     .collect();
                 // Si ninguna sonda de la dimensión mide para el lenguaje, sus hallazgos quedan y su parte de
                 // sondas no tiene veredicto (Tarea 31).
+                // Eficiencia sin `[eficiencia]`: la tarea no pide la dimensión, en ningún lenguaje.
+                let sin_eficiencia =
+                    dimension == Dimension::Eficiencia && tarea.eficiencia.is_none();
                 let sin_sondas = sin_sonda_todas(dimension, juez.rubricas, tarea);
-                let mut de_sondas = if sin_sondas {
+                let mut de_sondas = if sin_eficiencia {
+                    sin_veredicto_puntaje(
+                        dimension,
+                        perfiles::herramientas::MOTIVO_SIN_EFICIENCIA.into(),
+                    )
+                } else if sin_sondas {
                     sin_veredicto_puntaje(dimension, motivo_sin_sonda(&tarea.lenguaje))
                 } else {
                     puntaje_de(dimension, de_la_dimension, extra, tarea)
@@ -1461,6 +1476,7 @@ fn parte_juez(
             exactitud_balanceada: None,
             items: puntuacion.items,
             sin_veredicto: None,
+            no_aplica: None,
             faltantes,
         },
         peso,
@@ -1587,7 +1603,7 @@ fn juntar_partes(dimension: Dimension, sondas: Parte, juez: Option<Parte>) -> Pu
     let mut faltantes = Vec::new();
     sumar_faltantes(&mut faltantes, sondas.puntaje.faltantes.clone());
     // Una parte de sondas con veredicto pesa al menos 1: sin pesos en la rúbrica, su valor sigue (B).
-    let ws = if sondas.puntaje.sin_veredicto.is_some() {
+    let ws = if sondas.puntaje.sin_valor() {
         0
     } else {
         sondas.peso.max(1)
@@ -1600,6 +1616,10 @@ fn juntar_partes(dimension: Dimension, sondas: Parte, juez: Option<Parte>) -> Pu
         None => (0.0, 0),
     };
     if ws + wj == 0 {
+        // Si todos los motivos dicen que la tarea no pide la dimensión, no hay veredicto que dar.
+        if !motivos.is_empty() && motivos.iter().all(|m| es_no_aplica(m)) {
+            return puntaje_no_aplica(dimension, motivos.join("; "), faltantes);
+        }
         return sin_veredicto_con_faltantes(dimension, motivos.join("; "), faltantes);
     }
     let valor = (ws as f32 * sondas.puntaje.valor + wj as f32 * vj) / (ws + wj) as f32;
@@ -1612,13 +1632,14 @@ fn juntar_partes(dimension: Dimension, sondas: Parte, juez: Option<Parte>) -> Pu
         exactitud_balanceada: None,
         items: juez.map(|j| j.puntaje.items).unwrap_or_default(),
         sin_veredicto: None,
+        no_aplica: None,
         faltantes,
     }
 }
 
 /// Peso con el que una parte entra al valor: su suma de pesos si tiene veredicto, 0 si no (desempate B).
 fn peso_medido(parte: &Parte) -> u32 {
-    if parte.puntaje.sin_veredicto.is_some() {
+    if parte.puntaje.sin_valor() {
         0
     } else {
         parte.peso
@@ -1683,7 +1704,7 @@ fn aplicar_cobertura(
     medido: u32,
     puntaje: Puntaje,
 ) -> Puntaje {
-    if rubrica_del_juez(rubricas, dimension).is_none() {
+    if puntaje.no_aplica.is_some() || rubrica_del_juez(rubricas, dimension).is_none() {
         return puntaje;
     }
     let total = peso_total(dimension, rubricas, excluidos);
@@ -1730,7 +1751,7 @@ fn aplicar_inestables(
     excluidos: &[String],
     puntaje: Puntaje,
 ) -> Puntaje {
-    if excluidos.is_empty() {
+    if excluidos.is_empty() || puntaje.no_aplica.is_some() {
         return puntaje;
     }
     let inestables = excluidos.to_vec();
@@ -1908,6 +1929,7 @@ fn funciona(
         exactitud_balanceada: None,
         items: Vec::new(),
         sin_veredicto: None,
+        no_aplica: None,
         faltantes: Vec::new(),
     }
 }
@@ -1948,8 +1970,39 @@ fn sin_veredicto_puntaje(dimension: Dimension, motivo: String) -> Puntaje {
         exactitud_balanceada: None,
         items: Vec::new(),
         sin_veredicto: Some(motivo),
+        no_aplica: None,
         faltantes: Vec::new(),
     }
+}
+
+/// Puntaje de una dimensión que la tarea no pide: `valor` 0, sin veredicto y con el motivo de no aplica.
+fn puntaje_no_aplica(
+    dimension: Dimension,
+    motivo: String,
+    faltantes: Vec<ItemFaltante>,
+) -> Puntaje {
+    Puntaje {
+        inestables: Vec::new(),
+        motivo_sin_calibrar: None,
+        dimension,
+        valor: 0.0,
+        calibrada: false,
+        exactitud_balanceada: None,
+        items: Vec::new(),
+        sin_veredicto: None,
+        no_aplica: Some(motivo),
+        faltantes,
+    }
+}
+
+/// Verdadero si `motivo` dice que la tarea no pide la dimensión. Los demás motivos son de no medido.
+fn es_no_aplica(motivo: &str) -> bool {
+    [
+        perfiles::rust::MOTIVO_SIN_MODULOS,
+        perfiles::herramientas::MOTIVO_SIN_EFICIENCIA,
+        entrega::MOTIVO_SIN_ITEMS,
+    ]
+    .contains(&motivo)
 }
 
 /// Las nueve dimensiones sin veredicto, con el mismo motivo.
@@ -1965,7 +2018,7 @@ fn puntajes_sin_veredicto(motivo: &str) -> Vec<Puntaje> {
 fn sin_calibrar(puntajes: &[Puntaje]) -> Vec<Dimension> {
     puntajes
         .iter()
-        .filter(|p| p.sin_veredicto.is_none() && !p.calibrada)
+        .filter(|p| !p.sin_valor() && !p.calibrada)
         .map(|p| p.dimension)
         .collect()
 }
@@ -6013,7 +6066,7 @@ mod tests {
         let sin: Vec<Dimension> = v
             .puntajes
             .iter()
-            .filter(|p| p.sin_veredicto.is_some())
+            .filter(|p| p.sin_valor())
             .map(|p| p.dimension)
             .collect();
         // Entrega no tiene ítems propios medidos: sus requisitos no cuentan (son de Completitud).
@@ -6036,7 +6089,8 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let v = veredicto_sano(base.path());
         let arq = puntaje_de_prueba(&v, Dimension::Arquitectura);
-        assert_eq!(arq.sin_veredicto.as_deref(), Some("sin módulos"), "{arq:?}");
+        assert_eq!(arq.no_aplica.as_deref(), Some("sin módulos"), "{arq:?}");
+        assert_eq!(arq.sin_veredicto, None, "{arq:?}");
         let faltan: Vec<_> = arq
             .faltantes
             .iter()
@@ -6044,6 +6098,80 @@ mod tests {
             .collect();
         assert_eq!(faltan.len(), 1, "{:?}", arq.faltantes);
         assert_eq!(faltan[0].motivo, "sin módulos");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_sin_tabla_rust_es_no_aplica() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        tarea.eficiencia = None;
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(
+            efi.no_aplica.as_deref(),
+            Some("la tarea no define [eficiencia]"),
+            "{efi:?}"
+        );
+        assert_eq!(efi.sin_veredicto, None, "{efi:?}");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_sin_tabla_no_rust_es_no_aplica() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        tarea.lenguaje = "python".into();
+        tarea.eficiencia = None;
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(
+            efi.no_aplica.as_deref(),
+            Some("la tarea no define [eficiencia]"),
+            "{efi:?}"
+        );
+        assert_eq!(efi.sin_veredicto, None, "{efi:?}");
+    }
+
+    #[test]
+    fn oraculo_entrega_sin_entrega_es_no_aplica() {
+        // Sin `[entrega]`, sin escenarios ni Dockerfile: la Entrega no midió ningún ítem propio.
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
+        assert_eq!(
+            entrega.no_aplica.as_deref(),
+            Some("entrega sin ítems medidos"),
+            "{entrega:?}"
+        );
+        assert_eq!(entrega.sin_veredicto, None, "{entrega:?}");
+    }
+
+    #[test]
+    fn oraculo_diseno_sin_juez_sigue_con_sin_veredicto_y_sin_no_aplica() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let rubricas = [rubrica_diseno()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con(
+            &repo,
+            &tarea,
+            &opciones(&home),
+            Dependencias {
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        )
+        .expect("evalúa");
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        assert!(diseno.sin_veredicto.is_some(), "{diseno:?}");
+        assert_eq!(diseno.no_aplica, None, "{diseno:?}");
     }
 
     /// Tarea de Rust como `tarea_rust`, con `[arquitectura]` que declara una capa de tres módulos.
@@ -7540,7 +7668,7 @@ mod tests {
         let con_veredicto: Vec<Dimension> = v
             .puntajes
             .iter()
-            .filter(|p| p.sin_veredicto.is_none() && p.dimension != Dimension::Seguridad)
+            .filter(|p| !p.sin_valor() && p.dimension != Dimension::Seguridad)
             .map(|p| p.dimension)
             .collect();
         assert_eq!(v.sin_calibrar, con_veredicto);
@@ -7797,6 +7925,7 @@ mod tests {
                 exactitud_balanceada: None,
                 items: Vec::new(),
                 sin_veredicto: None,
+                no_aplica: None,
                 faltantes: Vec::new(),
             },
             peso,
@@ -8484,7 +8613,7 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_sin_dockerfile_no_llama_a_podman_y_entrega_queda_sin_veredicto() {
+    fn oraculo_sin_dockerfile_no_llama_a_podman_y_entrega_queda_no_aplica() {
         let base = tempfile::tempdir().expect("base");
         let repo = repo_rust(base.path(), LOCK_SANO);
         let correr = correr_suites(JUNIT_CONTRATO);
@@ -8493,12 +8622,10 @@ mod tests {
         let deps = deps_con_podman(&correr, &fabrica, &podman);
         let v = evaluar_con_deps(base.path(), &repo, deps);
         assert_eq!(podman.total(), 0, "{:?}", podman.builds());
-        // Los requisitos son de Completitud: sin ítem propio medido, Entrega no da veredicto.
+        // Los requisitos son de Completitud: sin `[entrega]` ni Dockerfile, la tarea no pide Entrega.
         let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
-        let motivo = entrega
-            .sin_veredicto
-            .as_deref()
-            .expect("entrega sin veredicto");
+        assert_eq!(entrega.sin_veredicto, None, "{entrega:?}");
+        let motivo = entrega.no_aplica.as_deref().expect("entrega no aplica");
         assert!(motivo.contains("sin ítems medidos"), "{motivo}");
     }
 

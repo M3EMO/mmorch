@@ -225,6 +225,7 @@ mod tests {
                 exactitud_balanceada: None,
                 items: Vec::new(),
                 sin_veredicto: sin.map(String::from),
+                no_aplica: None,
                 faltantes: Vec::new(),
             }],
             ..Veredicto::default()

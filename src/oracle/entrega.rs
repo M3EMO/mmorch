@@ -1255,7 +1255,7 @@ pub(crate) fn entregar_con(
 }
 
 /// Motivo de la sonda cuando la entrega no midió ningún ítem.
-const MOTIVO_SIN_ITEMS: &str = "entrega sin ítems medidos";
+pub(crate) const MOTIVO_SIN_ITEMS: &str = "entrega sin ítems medidos";
 
 /// Deja la sonda sin veredicto. El motivo nuevo va después del previo, si lo hay.
 fn sin_veredicto_sonda(sonda: &mut ResultadoSonda, causas: &str) {

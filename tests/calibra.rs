@@ -75,6 +75,7 @@ fn veredicto_plano() -> Veredicto {
             exactitud_balanceada: None,
             items: vec![],
             sin_veredicto: None,
+            no_aplica: None,
             faltantes: vec![],
         }],
         ..Veredicto::default()
@@ -539,6 +540,7 @@ fn veredicto_seguridad(valor: f32, sin: Option<&str>) -> Veredicto {
             exactitud_balanceada: None,
             items: vec![],
             sin_veredicto: sin.map(str::to_string),
+            no_aplica: None,
             faltantes: vec![],
         }],
         ..Veredicto::default()
@@ -969,6 +971,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
             exactitud_balanceada: None,
             items: vec![],
             sin_veredicto: None,
+            no_aplica: None,
             faltantes: vec![],
         },
         Puntaje {
@@ -980,6 +983,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
             exactitud_balanceada: None,
             items: vec![],
             sin_veredicto: None,
+            no_aplica: None,
             faltantes: vec![],
         },
     ];
@@ -1191,6 +1195,7 @@ fn veredicto_con(dimension: Dimension, valor: f32, sin: Option<&str>) -> Veredic
             exactitud_balanceada: None,
             items: vec![],
             sin_veredicto: sin.map(str::to_string),
+            no_aplica: None,
             faltantes: vec![],
         }],
         ..Veredicto::default()
