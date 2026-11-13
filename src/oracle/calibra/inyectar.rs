@@ -10,6 +10,7 @@ use std::path::Path;
 use crate::borrado;
 use crate::oracle::mutacion::MutanteMuerto;
 use crate::oracle::perfiles::rust::{LimitesEstructura, analizar};
+use crate::oracle::tarea::Equivalente;
 use crate::tipos::Dimension;
 
 /// Defecto que se inyecta en una copia. Cada uno apunta a una dimensión y a un ítem de rúbrica.
@@ -122,6 +123,31 @@ pub struct Identidad {
 
 /// Identidades ya elegidas o inválidas. Un reemplazo no elige ninguna de ellas.
 pub type Excluidos = BTreeSet<Identidad>;
+
+/// Identidades que la calibración nunca elige: las de los equivalentes declarados en `tarea.toml`. Cada entrada
+/// excluye su operador de `ComportamientoRoto`. Si la edición está vacía o es `cuerpo vaciado`, excluye también
+/// el vaciado de la función en esa línea.
+pub fn identidades_de_equivalentes(equivalentes: &[Equivalente]) -> Excluidos {
+    let mut excluidos = Excluidos::new();
+    for equivalente in equivalentes {
+        let edicion = equivalente.edicion.trim();
+        excluidos.insert(identidad_de_lugar(
+            Defecto::ComportamientoRoto,
+            &equivalente.archivo,
+            equivalente.linea,
+            edicion,
+        ));
+        if edicion.is_empty() || edicion == "cuerpo vaciado" {
+            excluidos.insert(identidad_de_lugar(
+                Defecto::CuerpoVaciado,
+                &equivalente.archivo,
+                equivalente.linea,
+                "",
+            ));
+        }
+    }
+    excluidos
+}
 
 /// Identidad de un lugar de inyección. `linea` es 0 en los defectos de archivo entero.
 fn identidad_de_lugar(defecto: Defecto, archivo: &str, linea: u32, edicion: &str) -> Identidad {
@@ -3376,6 +3402,115 @@ pub fn dos(x: u32) -> bool {
             .find(|e| e.operador == "if: agregar !")
             .expect("ofrece agregar !");
         assert_eq!(agregar.aplicar(linea), "    if !(c == '{') {");
+    }
+
+    /// Repo con una sola línea candidata: `true` dentro del cambio. Su única edición es `true -> false`.
+    fn repo_con_un_true() -> tempfile::TempDir {
+        repo_de(&[("src/lib.rs", "pub fn activo() -> bool {\n    true\n}\n")])
+    }
+
+    /// `inyectar_con` de `ComportamientoRoto` en modo `inicial`, con `excluidos` dados.
+    fn con_inicial_excluyendo(
+        dir: &Path,
+        cambios: &BTreeMap<String, Vec<(u32, u32)>>,
+        inicial: &Path,
+        semilla: u64,
+        excluidos: &Excluidos,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos: &[],
+            cambios: Some(cambios),
+            inicial: Some(inicial),
+            excluidos,
+        };
+        inyectar_con(Defecto::ComportamientoRoto, dir, &contexto, semilla)
+    }
+
+    fn equivalente(linea: u32, edicion: &str) -> Equivalente {
+        Equivalente {
+            archivo: "src/lib.rs".into(),
+            linea,
+            edicion: edicion.into(),
+            motivo: "prueba".into(),
+        }
+    }
+
+    #[test]
+    fn equivalente_declarado_no_se_elige_nunca() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let inicial = repo_de(&[]);
+        let excluidos = identidades_de_equivalentes(&[equivalente(2, "true -> false")]);
+        for semilla in 1..=20u64 {
+            let dir = repo_con_un_true();
+            let elegida =
+                con_inicial_excluyendo(dir.path(), &cambios, inicial.path(), semilla, &excluidos)
+                    .expect("E/S");
+            assert_eq!(
+                elegida, None,
+                "semilla {semilla}: la línea declarada no se elige"
+            );
+            let texto = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+            assert_eq!(
+                texto, "pub fn activo() -> bool {\n    true\n}\n",
+                "semilla {semilla}"
+            );
+        }
+    }
+
+    #[test]
+    fn sin_la_lista_la_misma_linea_si_se_elige() {
+        let cambios = rangos_de("src/lib.rs", &[(1, 3)]);
+        let inicial = repo_de(&[]);
+        for semilla in 1..=20u64 {
+            let dir = repo_con_un_true();
+            let inyeccion = con_inicial_excluyendo(
+                dir.path(),
+                &cambios,
+                inicial.path(),
+                semilla,
+                &Excluidos::new(),
+            )
+            .expect("E/S")
+            .expect("aplica");
+            assert_eq!(inyeccion.linea, 2, "semilla {semilla}");
+            assert_eq!(inyeccion.operador.as_deref(), Some("true -> false"));
+        }
+    }
+
+    #[test]
+    fn identidades_de_una_edicion_de_operador_son_solo_comportamiento() {
+        let excluidos = identidades_de_equivalentes(&[equivalente(7, "true -> false")]);
+        let esperado: Excluidos = [identidad_de_lugar(
+            Defecto::ComportamientoRoto,
+            "src/lib.rs",
+            7,
+            "true -> false",
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(excluidos, esperado);
+    }
+
+    #[test]
+    fn identidades_de_cuerpo_vaciado_o_edicion_vacia_suman_el_cuerpo() {
+        for edicion in ["cuerpo vaciado", ""] {
+            let excluidos = identidades_de_equivalentes(&[equivalente(7, edicion)]);
+            assert!(
+                excluidos.contains(&identidad_de_lugar(
+                    Defecto::CuerpoVaciado,
+                    "src/lib.rs",
+                    7,
+                    ""
+                )),
+                "edición {edicion:?} excluye el cuerpo vaciado"
+            );
+            assert_eq!(excluidos.len(), 2, "edición {edicion:?}");
+        }
     }
 
     #[test]

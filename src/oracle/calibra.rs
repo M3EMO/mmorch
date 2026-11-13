@@ -21,7 +21,7 @@ use super::juez::{ExtractoGuardado, huella_del_prompt};
 use super::memo::{Alcance, MemoSondas, ReusoSondas};
 use super::mutacion::{EstadoMutante, MutanteEstado, MutanteMuerto};
 use super::rubrica::{Mide, Rubrica, cargar_embebidas};
-use super::tarea::Tarea;
+use super::tarea::{Equivalente, Tarea};
 use super::{
     AVISO_TARGET_FRIO, CARPETA_TEMPORALES, ErrorOraculo, OpcionesOraculo, Partes, Target,
     partes_de, temporal,
@@ -135,6 +135,10 @@ pub struct Fila {
     /// es anterior a la Tarea 106 y puede contar inyecciones repetidas. `Some(0)` si no midió defectos.
     #[serde(default)]
     pub inyecciones_distintas: Option<u32>,
+    /// Entradas de `[calibracion].equivalentes` que la corrida aplicó: el largo de la lista declarada, sin
+    /// entradas repetidas (mismo archivo, línea y edición). Una fila sin el campo vale 0.
+    #[serde(default)]
+    pub equivalentes_excluidos: u32,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -398,7 +402,7 @@ fn huella_vigente(fila: &Fila, dimension: Dimension) -> bool {
 
 pub mod inyectar;
 
-use inyectar::{Defecto, Excluidos, Inyeccion};
+use inyectar::{Defecto, Excluidos, Inyeccion, identidades_de_equivalentes};
 
 mod compartidos;
 mod estables;
@@ -748,12 +752,14 @@ struct Ronda<'a> {
     mutantes_base: &'a [MutanteEstado],
     /// Plazo fijo por mutante de los casos, de la duración de la base. `None`: la base no trajo duración.
     plazo_mutantes: Option<u64>,
-    /// Lo que excluye cada caso en su primera inyección, por índice. Vacío en los impares. Ver `preelegir`.
+    /// Lo que excluye cada caso en su primera inyección, por índice. Incluye `curadas`. Ver `preelegir`.
     previos: Vec<Excluidos>,
     /// Casos sin candidatos distintos (ver `preelegir`). Se miden como no aplicables, sin copiar.
     agotado: Vec<bool>,
     /// Identidades ya elegidas o inválidas. Lo lee y lo suma cada reemplazo. Nunca se repite una inyección.
     usadas: Mutex<Excluidos>,
+    /// Equivalentes declarados en `tarea.toml`. Ningún caso los elige: son el punto de partida de `usadas`.
+    curadas: Excluidos,
 }
 
 impl Ronda<'_> {
@@ -884,11 +890,11 @@ fn explicado_por_apagados(
 
 /// Lo que `preelegir` decide antes de medir: qué excluye cada caso, si se agotó y todo lo elegido.
 struct Preelegidas {
-    /// Lo que excluye el caso `i` en su primera inyección. Vacío en los impares y en los casos sin elección.
+    /// Lo que excluye el caso `i` en su primera inyección: las curadas y lo elegido antes. Los impares no lo usan.
     previos: Vec<Excluidos>,
-    /// `true` si el caso `i` no tiene candidatos distintos: los demás casos ya inyectan todos los suyos.
+    /// `true` si el caso `i` no tiene candidatos distintos ni curados: los demás casos ya inyectan todos los suyos.
     agotado: Vec<bool>,
-    /// Identidades de todas las inyecciones preelegidas.
+    /// Identidades de las curadas y de todas las inyecciones preelegidas.
     usadas: Excluidos,
 }
 
@@ -916,15 +922,15 @@ fn inyectar_en(
 }
 
 /// Elige en serie la inyección de cada caso con defecto (los pares), en orden de índice, antes de medir. Cada caso
-/// excluye las inyecciones que eligieron los anteriores, así dos casos no inyectan lo mismo. Si no queda candidato
-/// distinto, pero el defecto sí aplica sin exclusiones, el caso queda agotado. Si no aplica ni así, se mide como
-/// siempre y sale su motivo normal.
+/// excluye las curadas y las inyecciones que eligieron los anteriores, así dos casos no inyectan lo mismo. Si no
+/// queda candidato distinto ni curado, pero el defecto sí aplica con solo las curadas excluidas, el caso queda
+/// agotado. Si no aplica ni así, se mide como siempre y sale su motivo normal.
 fn preelegir(r: &Ronda, n: usize) -> Result<Preelegidas, ErrorOraculo> {
     let limites = crate::oracle::perfiles::rust::LimitesEstructura::default();
     let mut pre = Preelegidas {
-        previos: vec![Excluidos::new(); n],
+        previos: vec![r.curadas.clone(); n],
         agotado: vec![false; n],
-        usadas: Excluidos::new(),
+        usadas: r.curadas.clone(),
     };
     for i in (0..n).step_by(2) {
         let defecto = r.defectos[(i / 2) % r.defectos.len()];
@@ -935,19 +941,35 @@ fn preelegir(r: &Ronda, n: usize) -> Result<Preelegidas, ErrorOraculo> {
         let elegida = inyectar_en(r, defecto, &copia, &previo, &limites, semilla)?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
+        pre.previos[i] = previo;
         if let Some(inyeccion) = elegida {
             pre.usadas.insert(inyeccion.identidad());
-            pre.previos[i] = previo;
             continue;
         }
         super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
-        let sin_exclusiones =
-            inyectar_en(r, defecto, &copia, &Excluidos::new(), &limites, semilla)?;
+        let sin_exclusiones = inyectar_en(r, defecto, &copia, &r.curadas, &limites, semilla)?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
         pre.agotado[i] = sin_exclusiones.is_some();
     }
     Ok(pre)
+}
+
+/// Lista declarada de `[calibracion].equivalentes`. Vacía sin `[calibracion]`.
+fn equivalentes_de(tarea: &Tarea) -> &[Equivalente] {
+    tarea
+        .calibracion
+        .as_ref()
+        .map_or(&[], |c| c.equivalentes.as_slice())
+}
+
+/// Entradas distintas de `equivalentes_de`: dos con el mismo archivo, línea y edición cuentan una.
+fn cuantos_equivalentes(tarea: &Tarea) -> u32 {
+    equivalentes_de(tarea)
+        .iter()
+        .map(|e| (e.archivo.as_str(), e.linea, e.edicion.trim()))
+        .collect::<BTreeSet<_>>()
+        .len() as u32
 }
 
 /// Mide el caso `i`. Los pares llevan un defecto: el de `defectos[(i / 2) % len]`, la misma rotación de los
@@ -1333,6 +1355,7 @@ fn calibrar_medida_con_hilos(
         previos: Vec::new(),
         agotado: Vec::new(),
         usadas: Mutex::new(Excluidos::new()),
+        curadas: identidades_de_equivalentes(equivalentes_de(tarea)),
     };
     // Las elecciones de los casos se hacen antes de lanzar los hilos: así cada caso sabe qué excluir.
     let pre = preelegir(&ronda, n)?;
@@ -1567,6 +1590,7 @@ fn fila_de(
         plazo_mutantes: None,
         repo_origen: None,
         inyecciones_distintas: Some(inyecciones_distintas),
+        equivalentes_excluidos: cuantos_equivalentes(tarea),
     }
 }
 
@@ -1897,6 +1921,7 @@ fn fila_no_aplica(
         plazo_mutantes: None,
         repo_origen: None,
         inyecciones_distintas: Some(0),
+        equivalentes_excluidos: cuantos_equivalentes(tarea),
     }
 }
 
@@ -2656,6 +2681,7 @@ mod tests {
             plazo_mutantes: None,
             repo_origen: None,
             inyecciones_distintas: None,
+            equivalentes_excluidos: 0,
             tarea: tarea.into(),
             dimension,
             n: 20,
@@ -9546,5 +9572,74 @@ mod tests {
             .remove("plazo_mutantes");
         let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
         assert_eq!(leida.plazo_mutantes, None);
+    }
+
+    const EQUIVALENTE_DE_PRUEBA: &str = "\n[calibracion]\n\n[[calibracion.equivalentes]]\n\
+        archivo = \"src/lib.rs\"\nlinea = 2\nedicion = \"true -> false\"\nmotivo = \"x\"\n";
+
+    /// La fila cuenta las entradas de `[calibracion].equivalentes`: una entrada da 1.
+    #[test]
+    fn fila_cuenta_los_equivalentes_declarados() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let tarea = tarea_en(dir.path(), EQUIVALENTE_DE_PRUEBA);
+        let fila = fila_de(&tarea, Dimension::Funciona, 42, &[], &[], 0, false);
+        assert_eq!(fila.equivalentes_excluidos, 1);
+    }
+
+    /// Dos entradas iguales (mismo archivo, línea y edición) cuentan una vez.
+    #[test]
+    fn fila_cuenta_una_vez_los_equivalentes_repetidos() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let repetida = format!(
+            "{EQUIVALENTE_DE_PRUEBA}{}",
+            EQUIVALENTE_DE_PRUEBA.trim_start_matches("\n[calibracion]\n")
+        );
+        let tarea = tarea_en(dir.path(), &repetida);
+        let fila = fila_de(&tarea, Dimension::Funciona, 42, &[], &[], 0, false);
+        assert_eq!(fila.equivalentes_excluidos, 1);
+    }
+
+    /// La fila de una dimensión no aplicable también cuenta sus equivalentes.
+    #[test]
+    fn fila_no_aplica_cuenta_los_equivalentes_declarados() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let tarea = tarea_en(dir.path(), EQUIVALENTE_DE_PRUEBA);
+        let fila = fila_no_aplica(&tarea, "hash", Dimension::Funciona, 42, "motivo");
+        assert_eq!(fila.equivalentes_excluidos, 1);
+    }
+
+    /// Dos funciones con cuerpo en `Completitud`: `uno` (línea 1) es un equivalente declarado. Cada caso con
+    /// defecto cae en `dos` (línea 5). El caso sobrante queda agotado y nunca elige `uno`, con cualquier semilla.
+    #[test]
+    fn equivalente_declarado_nunca_se_inyecta_y_el_sobrante_queda_agotado() {
+        let repo = tempfile::tempdir().expect("temporal");
+        std::fs::create_dir_all(repo.path().join("src")).expect("carpeta src");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn uno(x: u32) -> u32 {\n    x + 1\n}\n\npub fn dos(x: u32) -> u32 {\n    x * 2\n}\n",
+        )
+        .expect("escribe lib.rs");
+        let base = veredicto_de(Dimension::Completitud, 1.0, None);
+        let extra = "\n[calibracion]\n\n[[calibracion.equivalentes]]\n\
+            archivo = \"src/lib.rs\"\nlinea = 1\nedicion = \"cuerpo vaciado\"\nmotivo = \"x\"\n";
+        let dir_tarea = tempfile::tempdir().expect("temporal");
+        let tarea = tarea_en(dir_tarea.path(), extra);
+        let ev = evaluador_que_baja(repo.path(), &base);
+        for semilla in 0..10u64 {
+            let medida =
+                medir_dimension(&tarea, Dimension::Completitud, repo.path(), 6, semilla, &ev);
+            let lineas: Vec<u32> = medida
+                .casos
+                .iter()
+                .filter_map(|c| c.inyeccion.as_ref().map(|i| i.linea))
+                .collect();
+            assert_eq!(lineas, vec![5], "semilla {semilla}: solo `dos` se inyecta");
+            let agotados = medida
+                .no_aplicables
+                .iter()
+                .filter(|no| no.motivo == MOTIVO_DISTINTOS_AGOTADOS)
+                .count();
+            assert_eq!(agotados, 2, "semilla {semilla}");
+        }
     }
 }

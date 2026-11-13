@@ -73,6 +73,24 @@ pub struct Exclusion {
     pub motivo: String,
 }
 
+/// Un mutante equivalente declarado por una persona: cambia el código sin cambiar el comportamiento, así que
+/// ningún test lo mata. `edicion` usa el formato de la Tarea 98 (p. ej. `true -> false`). `motivo` es obligatorio.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Equivalente {
+    /// Ruta relativa a la raíz del repo, con `/`. Ej.: `src/composite_pattern.rs`.
+    #[serde(default)]
+    pub archivo: String,
+    /// Línea 1-based de la edición.
+    #[serde(default)]
+    pub linea: u32,
+    /// Operador de la edición (p. ej. `true -> false`), o `cuerpo vaciado` para vaciar la función.
+    #[serde(default)]
+    pub edicion: String,
+    /// Por qué la edición es equivalente. Sin texto, la carga falla.
+    #[serde(default)]
+    pub motivo: String,
+}
+
 /// Un requisito del producto. `modulos` lo liga al código que lo implementa.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Requisito {
@@ -155,6 +173,9 @@ pub struct CalibracionTarea {
     /// Funciones donde el bucle O(n²) de la calibración puede caer. Vacía: cualquier función de producción.
     #[serde(default)]
     pub camino_caliente: Vec<String>,
+    /// Mutantes equivalentes que la calibración nunca inyecta. Las declara una persona: Root no escribe esta lista.
+    #[serde(default)]
+    pub equivalentes: Vec<Equivalente>,
 }
 
 /// Un flujo real de usuario. `cmd` sale 0 si el flujo funciona.
@@ -223,8 +244,25 @@ impl Tarea {
                 ));
             }
         }
+        self.validar_equivalentes()?;
         self.validar_pruebas()?;
         self.validar_requisitos()
+    }
+
+    /// Cada equivalente declarado tiene un motivo con texto. El error dice el archivo y la línea.
+    fn validar_equivalentes(&self) -> Result<(), String> {
+        let Some(calibracion) = &self.calibracion else {
+            return Ok(());
+        };
+        for equivalente in &calibracion.equivalentes {
+            if equivalente.motivo.trim().is_empty() {
+                return Err(format!(
+                    "un equivalente necesita su motivo ({}:{})",
+                    equivalente.archivo, equivalente.linea
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Los límites de `[pruebas]` deben ser mayores que cero.
@@ -808,5 +846,65 @@ cmd = "exit 0"
             Tarea::cargar_de(dir.path()),
             Err(ErrorOraculo::Tarea(_))
         ));
+    }
+
+    const EQUIVALENTE_CON_MOTIVO: &str = "\n[calibracion]\n\n[[calibracion.equivalentes]]\n\
+        archivo = \"src/composite_pattern.rs\"\nlinea = 113\nedicion = \"true -> false\"\n\
+        motivo = \"la rama sin hijos da verdadero en ambos casos\"\n";
+
+    #[test]
+    fn equivalente_con_motivo_carga_con_sus_cuatro_campos() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), &format!("{MINIMO}{EQUIVALENTE_CON_MOTIVO}"));
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        let equivalentes = t.calibracion.expect("calibracion").equivalentes;
+        assert_eq!(equivalentes.len(), 1);
+        let e = &equivalentes[0];
+        assert_eq!(e.archivo, "src/composite_pattern.rs");
+        assert_eq!(e.linea, 113);
+        assert_eq!(e.edicion, "true -> false");
+        assert_eq!(e.motivo, "la rama sin hijos da verdadero en ambos casos");
+    }
+
+    #[test]
+    fn equivalente_sin_motivo_es_error_de_carga_con_archivo_y_linea() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let sin_clave = EQUIVALENTE_CON_MOTIVO.replace(
+            "motivo = \"la rama sin hijos da verdadero en ambos casos\"\n",
+            "",
+        );
+        let solo_espacios = EQUIVALENTE_CON_MOTIVO.replace(
+            "motivo = \"la rama sin hijos da verdadero en ambos casos\"",
+            "motivo = \"   \"",
+        );
+        for texto in [sin_clave, solo_espacios] {
+            escribir(dir.path(), &format!("{MINIMO}{texto}"));
+            let error = Tarea::cargar_de(dir.path()).expect_err("debe rechazar el equivalente");
+            assert!(
+                matches!(&error, ErrorOraculo::Tarea(msg)
+                    if msg.contains("un equivalente necesita su motivo")
+                        && msg.contains("composite_pattern.rs:113")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn calibracion_sin_tabla_queda_none() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), MINIMO);
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert!(t.calibracion.is_none());
+    }
+
+    #[test]
+    fn calibracion_sin_equivalentes_trae_lista_vacia() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            &format!("{MINIMO}\n[calibracion]\ncamino_caliente = [\"procesar\"]\n"),
+        );
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert!(t.calibracion.expect("calibracion").equivalentes.is_empty());
     }
 }

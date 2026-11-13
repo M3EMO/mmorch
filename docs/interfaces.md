@@ -652,6 +652,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "dimension": {
           "$ref": "#/$defs/Dimension"
         },
+        "equivalentes_excluidos": {
+          "description": "Entradas de `[calibracion].equivalentes` que la corrida aplicó: el largo de la lista declarada, sin\nentradas repetidas (mismo archivo, línea y edición). Una fila sin el campo vale 0.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "especificidad": {
           "type": [
             "number",
