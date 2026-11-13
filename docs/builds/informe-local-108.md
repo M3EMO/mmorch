@@ -57,3 +57,13 @@ El punto 3 se construyó en la rama `laptop/tarea-108-p3` y se pasó con `cherry
 4. ¿El pid propio cuenta como r00t vivo en el barrido de `corre`? Decisión: sí, por la regla de `limpieza.rs`. El margen de 300 s sigue como barrera.
 5. ¿`mismo_binario` basta para contar un pid como vivo en el barrido de credenciales? Decisión: sí. Un pid reusado por el mismo ejecutable lo corrige solo el margen.
 6. Un limpio vencido sin junit pierde sus otros puntajes: su veredicto pasa a ser un clon de la base. Decisión: se acepta, porque ese limpio no mide.
+
+## 7. Tarea 108b: un test con podman esperaba el error viejo
+
+- El test `contenedor_timeout_da_error_de_infraestructura_y_borra_el_contenedor` esperaba `ErrorOraculo::Infra`.
+- La Tarea 108 cambió el plazo vencido a `ErrorOraculo::PlazoVencido`. El test corre solo con podman, por eso la suite sin podman no lo vio.
+- Ahora el test se llama `contenedor_timeout_da_plazo_vencido_y_borra_el_contenedor`.
+- Espera `PlazoVencido` con `segundos` igual a 2 y un `contenedor` que empieza con `root-oraculo-<pid propio>-`.
+- El tiempo menor a 10 s y la ausencia de contenedores vivos quedan igual.
+- El `grep` de `saltar_sin_podman` no halló otro test que espere `Infra` por un plazo. Los demás `Infra` son de imagen o pull.
+- No hubo test en rojo previo: sin podman el test se salta. El orquestador confirma con la suite con podman.
