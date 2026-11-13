@@ -4992,6 +4992,31 @@ mod tests {
         }
     }
 
+    /// Fila de Seguridad con 10 limpios, `sin_veredicto` de ellos sin veredicto, exactitud 1.0 y el resto por defecto.
+    fn fila_con_limpios_sin_veredicto(sin_veredicto: u32) -> Fila {
+        Fila {
+            limpios: 10,
+            limpios_sin_veredicto: sin_veredicto,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        }
+    }
+
+    /// Guarda: 2 de 10 limpios sin veredicto es el 20%, justo en el tope. Calibra.
+    #[test]
+    fn calibra_regla_del_20_por_ciento_dos_de_diez_calibra() {
+        let fila = fila_con_limpios_sin_veredicto(2);
+        assert!(muestra_suficiente(&fila));
+        assert!(calibra_con_una_fila(fila, Dimension::Seguridad));
+    }
+
+    /// Guarda: 3 de 10 limpios sin veredicto es el 30%, sobre el tope. No calibra, aunque la muestra alcance.
+    #[test]
+    fn calibra_regla_del_20_por_ciento_tres_de_diez_no_calibra() {
+        let fila = fila_con_limpios_sin_veredicto(3);
+        assert!(muestra_suficiente(&fila));
+        assert!(!calibra_con_una_fila(fila, Dimension::Seguridad));
+    }
+
     #[test]
     fn fila_sin_limpios_sin_veredicto_carga_con_cero() {
         let fila = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
@@ -6131,9 +6156,10 @@ mod tests {
         }
     }
 
-    /// Mide `n` casos de `Estructura` con un evaluador que puede fallar. `ev` recibe si la copia es limpia y
+    /// Mide `n` casos de `dimension` con un evaluador que puede fallar. `ev` recibe si la copia es limpia y
     /// el veredicto base. La base siempre responde bien: no pasa por `ev`.
     fn medir_con_error(
+        dimension: Dimension,
         base: &Veredicto,
         n: usize,
         ev: impl Fn(bool, &Veredicto) -> Result<Veredicto, ErrorOraculo> + Sync,
@@ -6148,7 +6174,7 @@ mod tests {
         };
         calibrar_medida(
             &tarea,
-            Dimension::Estructura,
+            dimension,
             n,
             42,
             Path::new(FIXTURE),
@@ -6164,7 +6190,7 @@ mod tests {
     #[test]
     fn calibra_defecto_con_plazo_vencido_con_junit_va_a_reemplazo() {
         let base = veredicto_de(Dimension::Estructura, 1.0, None);
-        let medida = medir_con_error(&base, 2, |limpia, base| {
+        let medida = medir_con_error(Dimension::Estructura, &base, 2, |limpia, base| {
             if limpia {
                 Ok(base.clone())
             } else {
@@ -6179,7 +6205,35 @@ mod tests {
     #[test]
     fn calibra_limpio_con_plazo_vencido_con_junit_queda_sin_veredicto() {
         let base = veredicto_de(Dimension::Estructura, 1.0, None);
-        let medida = medir_con_error(&base, 2, |limpia, base| {
+        let medida = medir_con_error(Dimension::Estructura, &base, 2, |limpia, base| {
+            if limpia {
+                Err(plazo_vencido())
+            } else {
+                Ok(bajada(base))
+            }
+        })
+        .expect("la calibración sigue: el plazo de un limpio no la aborta");
+        let fila = medida.fila.expect("fila");
+        assert_eq!(fila.limpios_sin_veredicto, 1);
+        let limpio = medida
+            .casos
+            .iter()
+            .find(|c| !c.es_defecto)
+            .expect("un caso limpio");
+        assert!(
+            limpio
+                .sin_veredicto
+                .as_deref()
+                .is_some_and(|m| m.ends_with(MOTIVO_SUITE_PLAZO)),
+            "{:?}",
+            limpio.sin_veredicto
+        );
+    }
+
+    #[test]
+    fn calibra_limpio_con_plazo_vencido_en_diseno_queda_sin_veredicto_y_no_aborta() {
+        let base = veredicto_de(Dimension::Diseno, 1.0, None);
+        let medida = medir_con_error(Dimension::Diseno, &base, 2, |limpia, base| {
             if limpia {
                 Err(plazo_vencido())
             } else {
@@ -6208,7 +6262,7 @@ mod tests {
     fn calibra_dos_limpios_de_cinco_con_plazo_vencido_no_calibra() {
         let base = veredicto_de(Dimension::Estructura, 1.0, None);
         let vencidos = std::sync::atomic::AtomicUsize::new(0);
-        let medida = medir_con_error(&base, 10, |limpia, base| {
+        let medida = medir_con_error(Dimension::Estructura, &base, 10, |limpia, base| {
             let vence = limpia && vencidos.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2;
             if vence {
                 Err(plazo_vencido())
