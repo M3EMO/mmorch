@@ -72,3 +72,15 @@ Los puntos 1 y 4 se construyeron en worktrees aparte (`local107-p1`, `local107-p
 10. El punto 3 copia el repo hasta cinco veces más por caso con defecto antes de medir. Decisión: se acepta el costo.
 11. Si una inyección elegida no se vuelve a aplicar al medir, el punto 3 devuelve error de infraestructura. Decisión: se deja el error, porque indica no determinismo.
 12. Se acepta perder el motivo de la sonda (sección 3). Decisión: sí, según el texto del punto 3 del brief.
+
+## 8. Tarea 107b: el barrido borraba contenedores de un proceso vivo
+
+- Defecto: `huerfanos` contaba como muerto todo pid cuyo cmdline no era `r00t`. El binario de tests se llama `root-<hash>`. Un hilo de test borraba los contenedores de otro hilo del mismo proceso.
+- Arreglo en `src/limpieza.rs`: un pid cuenta como vivo si cumple una regla.
+  1. Es el pid del proceso actual.
+  2. `/proc/<pid>/exe` apunta al mismo archivo que `current_exe()`.
+  3. El nombre base del primer argumento es `r00t` o empieza con `r00t-`.
+- Sin carpeta en `/proc`, o con un pid reusado por otro programa, el pid cuenta como muerto. `r00tkit` cuenta como muerto.
+- Tests nuevos: pid propio, `r00t-<sha>`, `r00tkit` y `exe` por enlace simbólico. Los tres primeros casos vivos estaban en rojo antes del arreglo.
+- `corre::barrido` no cambia. La duplicación queda para el planner.
+- Llamadores: `r00t_vivo` y `es_r00t` de `limpieza.rs` solo se usan dentro del módulo. `es_r00t` de `corre/barrido.rs` es otra función.

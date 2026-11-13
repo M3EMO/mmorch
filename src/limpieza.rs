@@ -1,11 +1,12 @@
 //! Limpieza de los contenedores de `oraculo evaluar`, `calibrar` y `auditar`.
 //! Cada contenedor lleva en su nombre el pid del `r00t` que lo creó: `<prefijo><pid>-<n>`.
 //! Al recibir SIGINT o SIGTERM, el proceso quita los suyos. Al arrancar un contenedor, quita los
-//! de procesos que ya no son `r00t`. SIGKILL no se atrapa: el barrido cubre ese caso.
+//! de pids que ya no son un `r00t` vivo. SIGKILL no se atrapa: el barrido cubre ese caso.
 //!
 //! Este módulo no toma el turno de podman. La señal puede llegar mientras el hilo principal tiene
 //! el turno en un contenedor largo. Tomarlo dejaría la limpieza colgada.
 
+use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -31,7 +32,7 @@ const PLAZO_AL_SENAL: Duration = Duration::from_secs(10);
 const PLAZO_BARRIDO: Duration = PLAZO_LIMPIEZA;
 /// Carpeta donde Linux muestra los procesos vivos.
 const PROCESOS: &str = "/proc";
-/// Nombre del programa `r00t`. Su proceso es el único que puede dejar un contenedor vivo.
+/// Nombre base del programa `r00t`. Los binarios `r00t-<sha>` también cuentan como `r00t`.
 const NOMBRE_R00T: &str = "r00t";
 /// Programa de podman en producción.
 const PODMAN: &str = "podman";
@@ -99,19 +100,36 @@ fn pid_del_nombre(nombre: &str) -> Option<u32> {
     resto.split('-').next()?.parse().ok()
 }
 
-/// Dice si `pid` es un proceso `r00t` vivo. Sigue la regla de `corre::barrido`: sin carpeta, cmdline
-/// ilegible o cmdline que no es `r00t` cuentan como muerto.
+/// Dice si `pid` cuenta como `r00t` vivo en `raiz_proc`. Cuenta como vivo si es este proceso, si
+/// corre el mismo binario o si su cmdline es `r00t` o `r00t-<sha>`. Sin carpeta o cmdline ilegible
+/// cuenta como muerto.
 fn r00t_vivo(pid: u32, raiz_proc: &Path) -> bool {
-    fs::read(raiz_proc.join(pid.to_string()).join("cmdline")).is_ok_and(|cmdline| es_r00t(&cmdline))
+    pid == std::process::id()
+        || fs::read(raiz_proc.join(pid.to_string()).join("cmdline"))
+            .is_ok_and(|cmdline| es_r00t(&cmdline))
+        || mismo_binario(pid, raiz_proc)
 }
 
-/// Dice si el cmdline (argumentos separados por NUL) empieza con un programa `r00t`. Mira solo el
-/// nombre base del primer argumento.
+/// Dice si `<raiz_proc>/<pid>/exe` apunta al mismo archivo que este programa. Si una ruta no se
+/// puede resolver, devuelve `false`.
+fn mismo_binario(pid: u32, raiz_proc: &Path) -> bool {
+    let exe = raiz_proc.join(pid.to_string()).join("exe");
+    match (
+        fs::canonicalize(exe),
+        env::current_exe().and_then(fs::canonicalize),
+    ) {
+        (Ok(del_pid), Ok(propio)) => del_pid == propio,
+        _ => false,
+    }
+}
+
+/// Dice si el primer argumento del cmdline (separado por NUL) es `r00t` o `r00t-<sha>`. Mira solo
+/// el nombre base. `r00tkit` no cuenta.
 fn es_r00t(cmdline: &[u8]) -> bool {
     let primero = cmdline.split(|byte| *byte == 0).next().unwrap_or_default();
     Path::new(OsStr::from_bytes(primero))
         .file_name()
-        .is_some_and(|nombre| nombre == NOMBRE_R00T)
+        .is_some_and(|nombre| nombre == NOMBRE_R00T || nombre.as_bytes().starts_with(b"r00t-"))
 }
 
 /// Lista los contenedores que coinciden con `root-` en `programa ps`. Sin filtrar por familia.
@@ -436,6 +454,60 @@ mod tests {
             huerfanos(&nombres, &proc_falso),
             vec!["root-oraculo-777-0".to_string()],
             "un cmdline que no es r00t cuenta como muerto"
+        );
+    }
+
+    #[test]
+    fn pid_propio_cuenta_como_vivo_aunque_no_tenga_carpeta() {
+        let tmp = TempDir::new().expect("tmp");
+        let raiz = tmp.path().join("proc");
+        fs::create_dir_all(&raiz).expect("proc");
+        let nombres = vec![format!("root-oraculo-{}-0", std::process::id())];
+        assert!(
+            huerfanos(&nombres, &raiz).is_empty(),
+            "el pid de este proceso se conserva"
+        );
+    }
+
+    #[test]
+    fn cmdline_root_con_guion_y_sha_cuenta_como_vivo() {
+        let tmp = TempDir::new().expect("tmp");
+        let proc_falso = proc_con(tmp.path(), 4242, b"/x/r00t-88169de\0oraculo\0");
+        let nombres = vec!["root-oraculo-4242-0".to_string()];
+        assert!(
+            huerfanos(&nombres, &proc_falso).is_empty(),
+            "un binario r00t-<sha> cuenta como vivo"
+        );
+    }
+
+    #[test]
+    fn cmdline_r00tkit_cuenta_como_muerto() {
+        let tmp = TempDir::new().expect("tmp");
+        let proc_falso = proc_con(tmp.path(), 4242, b"r00tkit\0");
+        let nombres = vec!["root-oraculo-4242-0".to_string()];
+        assert_eq!(
+            huerfanos(&nombres, &proc_falso),
+            vec!["root-oraculo-4242-0".to_string()],
+            "r00tkit no es r00t"
+        );
+    }
+
+    #[test]
+    fn exe_del_binario_actual_cuenta_como_vivo() {
+        let tmp = TempDir::new().expect("tmp");
+        let raiz = tmp.path().join("proc");
+        let carpeta = raiz.join("4242");
+        fs::create_dir_all(&carpeta).expect("proc");
+        fs::write(carpeta.join("cmdline"), b"/x/root-abc123\0").expect("cmdline");
+        std::os::unix::fs::symlink(
+            std::env::current_exe().expect("exe actual"),
+            carpeta.join("exe"),
+        )
+        .expect("enlace exe");
+        let nombres = vec!["root-oraculo-4242-0".to_string()];
+        assert!(
+            huerfanos(&nombres, &raiz).is_empty(),
+            "un proceso con el mismo binario cuenta como vivo"
         );
     }
 
