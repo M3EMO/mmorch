@@ -131,6 +131,10 @@ pub struct Fila {
     /// salió de `--repo` o de `[calibracion] repo`, y en las dimensiones que no son Pruebas.
     #[serde(default)]
     pub repo_origen: Option<String>,
+    /// Identidades de inyección distintas entre los defectos medidos. Una fila sin el campo vale `None`:
+    /// es anterior a la Tarea 106 y puede contar inyecciones repetidas. `Some(0)` si no midió defectos.
+    #[serde(default)]
+    pub inyecciones_distintas: Option<u32>,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -1455,6 +1459,21 @@ fn calibrar_medida_con_hilos(
     })
 }
 
+/// Defectos medidos con identidad de inyección distinta. De cada identidad sale el caso de menor `indice`.
+/// Un defecto sin inyección no tiene identidad que repetir: cuenta solo.
+fn defectos_distintos(casos: &[Caso]) -> Vec<&Caso> {
+    let mut defectos: Vec<&Caso> = casos.iter().filter(|c| c.es_defecto).collect();
+    defectos.sort_by_key(|c| c.indice);
+    let mut vistas = BTreeSet::new();
+    defectos
+        .into_iter()
+        .filter(|c| match c.inyeccion.as_ref().map(Inyeccion::identidad) {
+            Some(identidad) => vistas.insert(identidad),
+            None => true,
+        })
+        .collect()
+}
+
 /// La fila de los casos medidos: sensibilidad, especificidad y exactitud por dimensión y por ítem.
 /// Deja `tarea_hash` en `None`: quien la llama lo pone con el hash del `tarea.toml`.
 fn fila_de(
@@ -1478,9 +1497,12 @@ fn fila_de(
         .filter(|c| !c.es_defecto && c.sin_veredicto.is_none());
     let defectos_en_piso = casos.iter().filter(|c| c.es_defecto && c.piso).count() as u32;
     let omisiones: u32 = casos.iter().map(|c| c.omitidos.len() as u32).sum();
+    // La sensibilidad cuenta inyecciones distintas: un defecto repetido no suma dos veces.
+    let defectos_unicos = defectos_distintos(casos);
+    let inyecciones_distintas = defectos_unicos.len() as u32;
     let sensibilidad = proporcion(
-        casos.iter().filter(|c| c.es_defecto && c.detectado).count() as u32,
-        defectos_medidos,
+        defectos_unicos.iter().filter(|c| c.detectado).count() as u32,
+        inyecciones_distintas,
     );
     let especificidad = proporcion(
         limpios_con_veredicto
@@ -1491,9 +1513,9 @@ fn fila_de(
     );
     let mut items_medidos = BTreeMap::new();
     for item in items {
-        let positivos: Vec<bool> = casos
+        let positivos: Vec<bool> = defectos_unicos
             .iter()
-            .filter(|c| c.es_defecto && c.item_defecto == Some(*item))
+            .filter(|c| c.item_defecto == Some(*item))
             .filter_map(|c| c.detecta_en(item))
             .collect();
         let negativos: Vec<bool> = casos
@@ -1544,6 +1566,7 @@ fn fila_de(
         extractos_base: Vec::new(),
         plazo_mutantes: None,
         repo_origen: None,
+        inyecciones_distintas: Some(inyecciones_distintas),
     }
 }
 
@@ -1873,6 +1896,7 @@ fn fila_no_aplica(
         extractos_base: Vec::new(),
         plazo_mutantes: None,
         repo_origen: None,
+        inyecciones_distintas: Some(0),
     }
 }
 
@@ -2564,6 +2588,14 @@ pub fn texto_especificidad(fila: &Fila) -> String {
     )
 }
 
+/// Texto de las inyecciones distintas de la fila. Sin el campo, la fila es anterior a la Tarea 106.
+pub fn texto_inyecciones(fila: &Fila) -> String {
+    match fila.inyecciones_distintas {
+        Some(n) => format!("inyecciones distintas {n}"),
+        None => "fila anterior a la Tarea 106: puede contar inyecciones repetidas".to_string(),
+    }
+}
+
 /// Texto de los defectos en piso y de las omisiones de la fila.
 /// Un defecto en piso no puede bajar su ítem, así que no mide la dimensión.
 pub fn texto_piso(fila: &Fila) -> String {
@@ -2581,7 +2613,7 @@ fn proporcion(aciertos: u32, total: u32) -> Option<f32> {
 /// Una fila calibra solo con muestra mínima de defectos y de limpios CON veredicto.
 /// Los limpios sin veredicto no cuentan para el mínimo de limpios.
 fn muestra_suficiente(fila: &Fila) -> bool {
-    fila.defectos >= MIN_DEFECTOS_APLICABLES
+    fila.inyecciones_distintas.unwrap_or(fila.defectos) >= MIN_DEFECTOS_APLICABLES
         && fila.limpios.saturating_sub(fila.limpios_sin_veredicto) >= MIN_LIMPIOS
 }
 
@@ -2623,6 +2655,7 @@ mod tests {
             tarea_hash: None,
             plazo_mutantes: None,
             repo_origen: None,
+            inyecciones_distintas: None,
             tarea: tarea.into(),
             dimension,
             n: 20,
@@ -6857,6 +6890,107 @@ mod tests {
         objeto.remove("omisiones");
         let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
         assert_eq!((leida.defectos_en_piso, leida.omisiones), (0, 0));
+    }
+
+    /// Caso con defecto de `inyeccion`. `detectado` dice si la dimensión lo cazó.
+    fn caso_defecto_identidad(indice: u32, inyeccion: Inyeccion, detectado: bool) -> Caso {
+        let mut caso = Caso::nuevo(indice, Some(inyeccion), Veredicto::default());
+        caso.detectado = detectado;
+        caso
+    }
+
+    #[test]
+    fn fila_nueva_cuenta_inyecciones_distintas_igual_a_sus_defectos() {
+        let base = veredicto_base();
+        let fila = calibrar(
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| if limpia { base.clone() } else { hundido(base) },
+            20,
+        );
+        assert!(fila.defectos > 0, "hay defectos medidos");
+        assert_eq!(fila.inyecciones_distintas, Some(fila.defectos));
+    }
+
+    #[test]
+    fn identidad_repetida_cuenta_una_vez_en_sensibilidad_y_en_distintas() {
+        let (_t, tarea) = tarea_prueba();
+        let x = inyeccion_modulo();
+        let mut y = inyeccion_modulo();
+        y.archivo = "src/otro.rs".into();
+        // Dos casos con la identidad de `x`. El de menor índice no detecta: va primero en el vector.
+        let casos = vec![
+            caso_defecto_identidad(2, x.clone(), true),
+            caso_defecto_identidad(1, x.clone(), false),
+            caso_defecto_identidad(3, y, true),
+            Caso::nuevo(4, None, Veredicto::default()),
+        ];
+        let fila = fila_de(&tarea, Dimension::Seguridad, 1, &casos, &[], 0, false);
+        assert_eq!(fila.defectos, 3, "el conteo crudo cuenta los tres defectos");
+        assert_eq!(fila.inyecciones_distintas, Some(2));
+        // Sobre identidades: `x` (índice 1, no detecta) e `y` (detecta). Uno de dos.
+        assert_eq!(fila.sensibilidad, Some(0.5));
+    }
+
+    #[test]
+    fn muestra_suficiente_cuenta_inyecciones_distintas_no_defectos() {
+        let repetidos = Fila {
+            defectos: 6,
+            inyecciones_distintas: Some(4),
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        };
+        assert!(!muestra_suficiente(&repetidos));
+        let distintos = Fila {
+            inyecciones_distintas: Some(5),
+            ..repetidos.clone()
+        };
+        assert!(muestra_suficiente(&distintos));
+    }
+
+    #[test]
+    fn texto_inyecciones_de_fila_vieja_avisa_que_puede_repetir() {
+        let vieja = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let texto = texto_inyecciones(&vieja);
+        assert!(
+            texto.contains("fila anterior a la Tarea 106: puede contar inyecciones repetidas"),
+            "texto: {texto}"
+        );
+    }
+
+    #[test]
+    fn texto_inyecciones_de_fila_nueva_da_el_numero() {
+        let nueva = Fila {
+            inyecciones_distintas: Some(4),
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(0.95))
+        };
+        let texto = texto_inyecciones(&nueva);
+        assert!(texto.contains("inyecciones distintas 4"), "texto: {texto}");
+    }
+
+    #[test]
+    fn fila_vieja_sin_inyecciones_distintas_se_lee_none_y_calibra_como_hoy() {
+        let fila = Fila {
+            defectos: 5,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(0.95))
+        };
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        vieja
+            .as_object_mut()
+            .expect("objeto")
+            .remove("inyecciones_distintas");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!(leida.inyecciones_distintas, None);
+        assert!(
+            muestra_suficiente(&leida),
+            "cinco defectos bastan sin el campo"
+        );
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![leida],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
+        c.aplicar("memora", "", &mut puntajes);
+        assert!(puntajes[0].calibrada, "la fila vieja calibra como hoy");
     }
 
     #[test]

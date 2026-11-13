@@ -708,6 +708,16 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "inyecciones_distintas": {
+          "description": "Identidades de inyección distintas entre los defectos medidos. Una fila sin el campo vale `None`:\nes anterior a la Tarea 106 y puede contar inyecciones repetidas. `Some(0)` si no midió defectos.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
         "items": {
           "description": "Exactitud balanceada de cada ítem de rúbrica, por ejemplo `seguridad.secretos`.",
           "type": "object",
