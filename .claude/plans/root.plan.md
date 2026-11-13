@@ -8871,3 +8871,78 @@ P104 sigue abierta.
 - **a)** Una regresión de más de 1,5 veces en cualquier medida, que además pasa la variación propia de la referencia, da "no listo". Una regresión menor solo baja la escala de Eficiencia. Recomendada: da mal cuando el empeoramiento es claro, y una escala continua cuando es chico. El 1,5 deja margen para el ruido de la medición.
 - **b)** Nunca da "no listo". La regresión solo baja la escala de Eficiencia, y el informe la muestra.
 - **c)** Igual que a, pero con otro umbral. Decime cuál.
+
+## Vuelta del 2026-11-14 (34): el barrido entre worktrees, P104 b, P105 a, y el orden desde la 112
+
+**Estado.** La Tarea 110 está en `laptop/tarea-110` (741a43d). Sin podman dio 3339, 0 y 4. Con podman dio 3332, 7 y 4, corriendo al mismo tiempo que el builder de la 111. La 111 se construye desde 64361fa. El orquestador aplicó en el `ROOT_HOME` real las capas nuevas y `armar_s2.py` con las seis reglas, y la recalibración sin API corre ahora.
+
+**Respuestas del usuario, del 2026-11-13, literales:** P105: "a e intentar subir la eficiencia". P104: "b".
+
+## 1. La sospecha del orquestador se sostiene
+
+**Lo que leí** en `src/limpieza.rs:106`. `r00t_vivo` da un pid por vivo en tres casos: es este proceso, su cmdline es `r00t` o `r00t-*`, o su `/proc/<pid>/exe` es el mismo binario que el propio.
+
+**El caso que falla.** Dos worktrees corren su suite a la vez. Cada uno compila su propio binario de tests, que se llama `root-<hash>`. Para el proceso A, un pid del proceso B no es él mismo, no se llama `r00t`, y no es el mismo binario. A lo da por muerto, y su barrido quita los contenedores vivos de B. Los 7 rojos muestran justo eso: contenedores matados con 137, y "la imagen no trae sh".
+
+**El error de fondo es de diseño, y es mío.** En las vueltas (29) y (30) definí "vivo" por el nombre o por el binario. Un nombre no prueba quién es el dueño de un contenedor. El tiempo sí.
+
+**El arreglo: el dueño de un contenedor es el proceso que ya existía cuando el contenedor se creó.**
+1. Root lee la hora de creación de cada contenedor con `podman ps`.
+2. Root lee la hora de arranque del pid del nombre, desde `/proc/<pid>/stat` y `btime`, como ya hace el barrido de `corre`.
+3. **El dueño está vivo si el pid existe y arrancó antes de la creación del contenedor, con un margen de 300 s.** El margen cubre la suspensión y NTP, como en la vuelta (9).
+4. Si el pid no existe, o arrancó después de la creación más el margen, el dueño murió, y el contenedor se quita.
+5. **No mira el nombre del binario.** Sirve para `r00t`, `r00t-<sha>`, el binario de tests de cualquier worktree, y uno renombrado.
+6. **El barrido de `corre`** ya usa esta idea con los segundos del id de la corrida. Las dos reglas pasan a ser una sola, en `src/limpieza.rs`.
+
+**El error queda del lado de no borrar.** Un pid que otro proceso reusa en menos de 5 minutos conserva su contenedor huérfano hasta el próximo barrido.
+
+**La confirmación la da el orquestador.** Repite la suite de la 110 sola. Si da verde, la causa es esta.
+
+## 2. P104 b en la regla de la 110
+
+**La decisión del usuario:** una dimensión "inestable en esta tarea" cuenta como medida.
+- No dispara "sin decisión". "Listo" puede salir.
+- El resumen la nombra: "Diseño inestable en esta tarea".
+- El cambio vive en `sin_veredicto_de`, en `src/oracle/informe.rs`, como dejó preparado la 110.
+- Nada cambia en el diseño de la vuelta (33).
+
+## 3. P105 a, y lo que no fija "intentar subir la eficiencia"
+
+**Lo que sí está fijado, con P105 a:**
+1. Por cada medida (tiempo de la suite del contrato, memoria pico, tamaño del binario de release y tiempo de compilación), Root calcula la razón contra el estado inicial.
+2. **Una regresión de más de 1,5 veces, que además pasa la variación propia de la referencia, da "no listo".** La regla nombra la medida y su razón.
+3. **Una regresión menor solo baja la escala.** El valor de cada medida es la referencia dividida por la medida, con un máximo de 1. Eficiencia es el menor de esos valores.
+4. Una tarea que trae `[eficiencia]` sigue con su banco, y la medición automática se suma.
+
+**Lo que el texto no fija:** "intentar subir la eficiencia" se puede leer de tres formas. Va en P106. Mientras tanto, la Tarea 115 construye solo lo fijado.
+
+## 4. Las cinco preguntas de la 110
+
+1. **Los lectores de calibración leen `sin_veredicto.is_some()`, y ven un `no_aplica` como un 0 medido: se arregla.** Pasan a `!sin_valor()`. El caso que más importa es Entrega en brasa. Va en la Tarea 114, después de la 111, porque las dos tocan `calibra.rs`.
+2. **"Sin medir: Diseño." con una, y la lista con varias:** acepto.
+3. **La dimensión inestable cuenta sin código extra, en `sin_veredicto_de`:** acepto. Con P104 b, ese es el lugar del cambio.
+4. **`sin_calibrar` y `confianza.sin_veredicto` ya no listan las dimensiones que no aplican:** acepto. Una dimensión que no aplica no es una falta de medición.
+5. **Eficiencia sin `[eficiencia]` en otros lenguajes pasa a `no_aplica`:** acepto hasta la Tarea 115. Con la medición automática, Eficiencia aplica en toda tarea con estado inicial y lenguaje con sonda.
+
+## 5. El orden de las tareas desde la 112
+
+**Corrección del orden de la vuelta (33).** Allí llamé 112 al test oculto rojo, y 113 a la eficiencia. El barrido entre worktrees pasa primero, porque ensucia toda suite que corre en paralelo. Los números quedan así:
+
+| Tarea | Qué | Depende de | Base |
+|---|---|---|---|
+| 112 | El dueño de un contenedor por tiempo, y una sola regla con el barrido de `corre` | Nada | 64361fa |
+| 113 | P95: un test oculto rojo da "no listo". P104 b: una dimensión inestable cuenta como medida | La 110, por `informe.rs` | 741a43d |
+| 114 | Los lectores de calibración usan `!sin_valor()` | La 110 y la 111, por `calibra.rs` | Punta de la 111, ya rebasada sobre la 110 |
+| 115 | P105 a: eficiencia sin declararla | La 110, por `mod.rs`. La parte de P106 espera la respuesta | 741a43d, o la punta de la 113 si ya está |
+
+- La 112 arranca ya. Brief: `docs/builds/brief-local-112.md`.
+- La 113 puede arrancar en paralelo con la 112, desde 741a43d.
+- La 114 espera a que la 111 termine.
+
+## Preguntas para el usuario (2026-11-14, 34)
+
+**P106: en P105 dijiste "a e intentar subir la eficiencia".** La parte "a" ya está diseñada. "Intentar subir la eficiencia" se puede leer de tres formas, y cada una pide un trabajo distinto.
+
+- **a)** La escala premia una mejora. Si el cambio es más rápido o más liviano que el estado inicial, Eficiencia sube, y el informe lo dice. Hoy la escala solo baja.
+- **b)** Root empuja la mejora. El informe nombra la medida que más empeoró, o la que más se puede ganar, como próximo paso. En `r00t corre`, el builder recibe esa medida antes de cerrar, y tiene una vuelta para mejorarla. Recomendada: es lo que hace un project manager con una regresión. Además usa la misma medición de la parte "a", sin otra herramienta.
+- **c)** Root mismo es más eficiente: cada evaluación tarda menos y gasta menos.
