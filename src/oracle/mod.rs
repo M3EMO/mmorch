@@ -7131,10 +7131,13 @@ mod tests {
         inestables: &[&str],
         huella: Option<String>,
     ) -> Calibraciones {
+        // `inestables_de` pide el `tarea_hash` actual: la fila lleva el de `tarea_rust`.
+        let carpeta = tempfile::tempdir().expect("carpeta de la tarea");
+        let tarea_hash = calibra::hash_de_tarea(&tarea_rust(carpeta.path())).expect("hash");
         Calibraciones {
             v: calibra::VERSION,
             filas: vec![calibra::Fila {
-                tarea_hash: None,
+                tarea_hash: Some(tarea_hash),
                 plazo_mutantes: None,
                 duracion_contrato: None,
                 duracion_oculto: None,

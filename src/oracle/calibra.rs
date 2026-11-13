@@ -284,13 +284,14 @@ impl Calibraciones {
     }
 
     /// Ítems inestables de la fila más reciente de `dimension` que sirve para la tarea. Sirve una fila con
-    /// huella actual y con el `tarea_hash` actual, o sin `tarea_hash`. Las demás filas no cuentan. Vacía si
-    /// ninguna sirve: sus ítems salen de otro juez o de otro `tarea.toml` (Tarea 83, punto 2).
+    /// huella actual y con el `tarea_hash` actual. Una fila sin huella o sin `tarea_hash` no sirve. Las demás
+    /// filas no cuentan. Vacía si ninguna sirve: sus ítems salen de otro juez o de otro `tarea.toml` (Tarea 83,
+    /// punto 2).
     pub fn inestables_de(&self, tarea: &str, tarea_hash: &str, dimension: Dimension) -> &[String] {
         self.filas
             .iter()
             .filter(|f| f.tarea == tarea && f.dimension == dimension)
-            .filter(|f| huella_vigente(f, dimension) && tarea_vigente(f, tarea_hash))
+            .filter(|f| huella_actual(f, dimension) && f.tarea_hash.as_deref() == Some(tarea_hash))
             .max_by(|a, b| a.ts.total_cmp(&b.ts))
             .map_or(&[], |fila| fila.inestables.as_slice())
     }
@@ -406,7 +407,7 @@ fn hash_actual(home: &Path, tarea: &str, tarea_evaluada: &str, tarea_hash: &str)
     Some(calcular_hash(&bytes))
 }
 
-/// La fila tiene la huella actual de `dimension`. Sin huella, no vale para calibrar.
+/// La fila tiene la huella actual de `dimension`. Sin huella, no vale para calibrar ni para ítems inestables.
 fn huella_actual(fila: &Fila, dimension: Dimension) -> bool {
     fila.huella.as_deref() == Some(huella_de(dimension).as_str())
 }
@@ -555,15 +556,6 @@ fn trae_juicio_del_juez(veredicto: &Veredicto, dimension: Dimension) -> bool {
         .filter(|p| p.dimension == dimension)
         .flat_map(|p| p.items.iter())
         .any(|i| matches!(i.fuente, Fuente::Juez { .. }))
-}
-
-/// La fila sirve para `dimension` según su huella, para los ítems inestables. Con huella, debe ser la actual.
-/// Sin huella, sirve solo si la dimensión no tiene ítems del juez. La calibración usa `huella_actual`.
-fn huella_vigente(fila: &Fila, dimension: Dimension) -> bool {
-    match &fila.huella {
-        Some(huella) => *huella == huella_de(dimension),
-        None => !tiene_items_de_juez(dimension),
-    }
 }
 
 pub mod inyectar;
@@ -5739,13 +5731,13 @@ mod tests {
         let vieja = Fila {
             inestables: vec!["diseno.errores".into()],
             huella: Some(huella_de(Dimension::Diseno)),
-            tarea_hash: None,
+            tarea_hash: Some("tarea-actual".into()),
             ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
         };
         let nueva = Fila {
             inestables: vec!["diseno.ciclos".into()],
             huella: Some(huella_de(Dimension::Diseno)),
-            tarea_hash: None,
+            tarea_hash: Some("tarea-actual".into()),
             ..fila("memora", Dimension::Diseno, 2.0, Some(1.0))
         };
         let c = Calibraciones {
@@ -5836,6 +5828,43 @@ mod tests {
         assert_eq!(
             c.inestables_de("memora", "tarea-actual", Dimension::Diseno),
             ["diseno.ciclos".to_string()]
+        );
+    }
+
+    #[test]
+    fn inestables_de_sin_tarea_hash_no_los_da() {
+        let sin_hash = Fila {
+            inestables: vec!["diseno.ciclos".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
+            tarea_hash: None,
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![sin_hash],
+        };
+        assert!(
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn inestables_de_sin_huella_en_dimension_sin_juez_no_los_da() {
+        assert!(!tiene_items_de_juez(Dimension::Seguridad));
+        let sin_huella = Fila {
+            inestables: vec!["seguridad.unsafe".into()],
+            huella: None,
+            tarea_hash: Some("tarea-actual".into()),
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![sin_huella],
+        };
+        assert!(
+            c.inestables_de("memora", "tarea-actual", Dimension::Seguridad)
+                .is_empty()
         );
     }
 
