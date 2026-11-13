@@ -457,11 +457,11 @@ pub fn motivo_inestable(inestables: &[String]) -> String {
     inestables::motivo(&inestables.iter().cloned().collect())
 }
 
-/// Media de los `valor` de las dimensiones calibradas y con veredicto, con pesos iguales. `None` si ninguna.
+/// Media de los `valor` de las dimensiones calibradas y con valor, con pesos iguales. `None` si ninguna.
 pub fn global_de(puntajes: &[Puntaje]) -> Option<f32> {
     let valores: Vec<f32> = puntajes
         .iter()
-        .filter(|p| p.calibrada && p.sin_veredicto.is_none())
+        .filter(|p| p.calibrada && !p.sin_valor())
         .map(|p| p.valor)
         .collect();
     (!valores.is_empty()).then(|| valores.iter().sum::<f32>() / valores.len() as f32)
@@ -2710,7 +2710,7 @@ fn motivo_con_juez(
     item: Option<&str>,
     lugar: Option<&regla::Lugar>,
 ) -> Option<String> {
-    if puntaje_de(&caso.veredicto, dimension).is_none_or(|p| p.sin_veredicto.is_some()) {
+    if puntaje_de(&caso.veredicto, dimension).is_none_or(Puntaje::sin_valor) {
         return None;
     }
     regla::detecta_con_juez(base, &caso.veredicto, dimension, item, lugar)
@@ -2728,7 +2728,7 @@ fn motivo_de_deteccion(
     ruidosos: &BTreeSet<String>,
 ) -> Option<String> {
     let pv = puntaje_de(veredicto, dimension)?;
-    if pv.sin_veredicto.is_some() {
+    if pv.sin_valor() {
         return None;
     }
     let pb = puntaje_de(base, dimension)?;
@@ -2761,7 +2761,7 @@ fn motivo_de_mutante_vivo(
     ruidosos: &BTreeSet<String>,
 ) -> Option<String> {
     let pv = puntaje_de(veredicto, dimension)?;
-    if pv.sin_veredicto.is_some() {
+    if pv.sin_valor() {
         return None;
     }
     let vivos: Vec<&Hallazgo> = veredicto
@@ -2815,7 +2815,7 @@ fn detecta_item(
     let Some(pv) = puntaje_de(veredicto, dimension) else {
         return Some(false);
     };
-    if pv.sin_veredicto.is_some() {
+    if pv.sin_valor() {
         return Some(false);
     }
     let con_juez = regla::es_con_juez(dimension);
@@ -10086,6 +10086,109 @@ mod tests {
             motivo_de_deteccion(&base, &veredicto, Dimension::Completitud, &BTreeSet::new())
                 .as_deref(),
             Some("hallazgo_nuevo:t::nuevo"),
+        );
+    }
+
+    /// Puntaje de `dimension` que la tarea no pide: `valor` 0 y `no_aplica` puesto.
+    fn no_aplica_de(dimension: Dimension, items: Vec<NivelItem>) -> Puntaje {
+        Puntaje {
+            valor: 0.0,
+            items,
+            no_aplica: Some("la tarea no pide la dimensión".into()),
+            ..puntaje(dimension, 0.0)
+        }
+    }
+
+    #[test]
+    fn motivo_de_deteccion_no_aplica_con_valor_cero_no_detecta() {
+        // Seguridad no tiene juez ni exige tests malos. La base mide 1.0 y el caso no pide la dimensión.
+        let base = Veredicto {
+            puntajes: vec![puntaje(Dimension::Seguridad, 1.0)],
+            ..Veredicto::default()
+        };
+        let veredicto = Veredicto {
+            puntajes: vec![no_aplica_de(Dimension::Seguridad, vec![])],
+            ..Veredicto::default()
+        };
+        assert_eq!(
+            motivo_de_deteccion(&base, &veredicto, Dimension::Seguridad, &BTreeSet::new()),
+            None,
+        );
+    }
+
+    #[test]
+    fn global_no_cuenta_el_puntaje_con_no_aplica_aunque_este_calibrado() {
+        let puntajes = vec![
+            Puntaje {
+                calibrada: true,
+                ..puntaje(Dimension::Seguridad, 0.9)
+            },
+            Puntaje {
+                calibrada: true,
+                ..no_aplica_de(Dimension::Diseno, vec![])
+            },
+        ];
+        let global = global_de(&puntajes).expect("hay una calibrada con valor");
+        assert!((global - 0.9).abs() < 1e-6, "{global}");
+    }
+
+    #[test]
+    fn motivo_con_juez_no_aplica_no_detecta_aunque_el_item_baje() {
+        // La base tiene el ítem en 3. El caso lo pone en 0, pero la dimensión no se pide.
+        let base = diseno_con(&[(ITEM_MODULARIDAD, 3)]);
+        let mut veredicto = diseno_con(&[(ITEM_MODULARIDAD, 0)]);
+        veredicto.puntajes[0].valor = 0.0;
+        veredicto.puntajes[0].no_aplica = Some("la tarea no pide diseño".into());
+        let caso = Caso::nuevo(1, None, veredicto);
+        assert_eq!(
+            motivo_con_juez(
+                &base,
+                &caso,
+                Dimension::Diseno,
+                Some(ITEM_MODULARIDAD),
+                None
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn mutante_vivo_no_aplica_no_detecta_aunque_el_hallazgo_coincida() {
+        // El hallazgo coincide con un mutante muerto de la base. Sin puntaje pedido, no cuenta.
+        let base = pruebas_con(1.0, vec![]);
+        let muertos = vec![muerto_de_base("src/lib.rs", "reemplaza suma -> 0")];
+        let mut veredicto =
+            pruebas_con(0.0, vec![mutante_vivo("src/lib.rs", "reemplaza suma -> 0")]);
+        veredicto.puntajes[0].no_aplica = Some("la tarea no pide pruebas".into());
+        assert_eq!(
+            motivo_de_mutante_vivo(
+                &base,
+                &veredicto,
+                Dimension::Pruebas,
+                &muertos,
+                &BTreeSet::new(),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn detecta_item_no_aplica_no_detecta_aunque_el_nivel_baje() {
+        // Diseño con juez: una baja de 3 niveles cuenta, salvo que la dimensión no se pida.
+        let base = diseno_con(&[(ITEM_MODULARIDAD, 3)]);
+        let mut veredicto = diseno_con(&[(ITEM_MODULARIDAD, 0)]);
+        veredicto.puntajes[0].valor = 0.0;
+        veredicto.puntajes[0].no_aplica = Some("la tarea no pide diseño".into());
+        assert_eq!(
+            detecta_item(
+                &base,
+                &veredicto,
+                Dimension::Diseno,
+                ITEM_MODULARIDAD,
+                true,
+                &BTreeSet::new(),
+            ),
+            Some(false),
         );
     }
 

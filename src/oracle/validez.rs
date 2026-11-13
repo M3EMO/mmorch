@@ -543,7 +543,7 @@ fn decision_de(v: &Veredicto) -> Option<Decision> {
 fn completitud_de(v: &Veredicto) -> Option<f32> {
     v.puntajes
         .iter()
-        .find(|p| p.dimension == Dimension::Completitud && p.sin_veredicto.is_none())
+        .find(|p| p.dimension == Dimension::Completitud && !p.sin_valor())
         .map(|p| p.valor)
 }
 
@@ -1601,6 +1601,20 @@ anclas = [
             no_aplica: None,
             faltantes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn completitud_de_no_aplica_da_none() {
+        // La tarea no pide completitud. El puntaje trae valor 0 y no cuenta.
+        let v = Veredicto {
+            puntajes: vec![Puntaje {
+                valor: 0.0,
+                no_aplica: Some("la tarea no pide completitud".into()),
+                ..puntaje(Dimension::Completitud, 0.0, vec![])
+            }],
+            ..Veredicto::default()
+        };
+        assert_eq!(completitud_de(&v), None);
     }
 
     /// Veredicto armado. `niveles` pone un ítem por par, con su nivel de Root.
