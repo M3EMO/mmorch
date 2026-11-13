@@ -344,13 +344,15 @@ pub fn quitar_previos(sondas: &[ResultadoSonda], reqs: &[Requisito]) -> Vec<Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ReglasDecision;
     use crate::oracle::ErrorOraculo;
+    use crate::oracle::informe::informar_con;
     use crate::oracle::perfiles::herramientas::{
         COMANDO_CARGO_AUDIT, COMANDO_GITLEAKS, SalidaHerramienta,
     };
     use crate::oracle::perfiles::{crear_hallazgo, puntuar_hallazgos};
     use crate::oracle::tarea::Tarea;
-    use crate::tipos::Dimension;
+    use crate::tipos::{Decision, Dimension, Veredicto};
     use std::cell::RefCell;
     use std::fs;
 
@@ -829,6 +831,125 @@ mod tests {
         let secretos = secretos_de(&sondas);
         assert_eq!(secretos.len(), 1, "{secretos:?}");
         assert!(!secretos[0].previo, "no estaba en bootstrap/: es nuevo");
+    }
+
+    /// Hallazgos de Seguridad de `sondas`, de cualquier fuente.
+    fn seguridad_de_sondas(sondas: &[ResultadoSonda]) -> Vec<Hallazgo> {
+        sondas
+            .iter()
+            .filter(|s| s.dimension == Dimension::Seguridad)
+            .flat_map(|s| s.hallazgos.iter())
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn previos_secreto_de_env_en_dockerfile_igual_en_bootstrap_es_secreto_previo() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let bootstrap = tempfile::tempdir().expect("temp dir");
+        let repo = tempfile::tempdir().expect("temp dir");
+        // Valores falsos: la clave tiene forma de AWS y el valor no es una clave real.
+        let dockerfile = "FROM rust:1.80\nENV AWS_SECRET_ACCESS_KEY=AKIAFAKEFAKEFAKE1234\n";
+        fs::write(bootstrap.path().join("Dockerfile"), dockerfile).expect("escribe Dockerfile");
+        fs::write(repo.path().join("Dockerfile"), dockerfile).expect("escribe Dockerfile");
+        let (_tarea_dir, tarea) = tarea_rust();
+        let ej = EjecutorContado::nuevo();
+
+        let base = linea_base(home.path(), &tarea, bootstrap.path(), &ej);
+        assert_eq!(
+            base.configs.len(),
+            1,
+            "el secreto del Dockerfile va a la base: {base:?}"
+        );
+
+        let mut sondas = configs::sondas_configs_locales(repo.path(), &tarea);
+        marcar_configs(&mut sondas, &base, Some(bootstrap.path()), repo.path());
+        let hallazgos = seguridad_de_sondas(&sondas);
+        let secreto = hallazgos
+            .iter()
+            .find(|h| h.severidad == 3)
+            .expect("hay un hallazgo de severidad 3");
+        assert!(secreto.previo, "igual que en bootstrap/: es previo");
+        assert!(
+            es_fuente_de_secretos(&secreto.fuente),
+            "un secreto en ENV de Dockerfile es secreto: {:?}",
+            secreto.fuente
+        );
+    }
+
+    /// Secreto de ENV en un Dockerfile igual en bootstrap/ y en el repo, ya marcado previo.
+    fn secreto_de_dockerfile_previo() -> Hallazgo {
+        let home = tempfile::tempdir().expect("temp dir");
+        let bootstrap = tempfile::tempdir().expect("temp dir");
+        let repo = tempfile::tempdir().expect("temp dir");
+        let dockerfile = "FROM rust:1.80\nENV AWS_SECRET_ACCESS_KEY=AKIAFAKEFAKEFAKE1234\n";
+        fs::write(bootstrap.path().join("Dockerfile"), dockerfile).expect("escribe Dockerfile");
+        fs::write(repo.path().join("Dockerfile"), dockerfile).expect("escribe Dockerfile");
+        let (_tarea_dir, tarea) = tarea_rust();
+        let ej = EjecutorContado::nuevo();
+        let base = linea_base(home.path(), &tarea, bootstrap.path(), &ej);
+        let mut sondas = configs::sondas_configs_locales(repo.path(), &tarea);
+        marcar_configs(&mut sondas, &base, Some(bootstrap.path()), repo.path());
+        seguridad_de_sondas(&sondas)
+            .into_iter()
+            .find(|h| h.severidad == 3)
+            .expect("hay un hallazgo de severidad 3")
+    }
+
+    #[test]
+    fn previos_secreto_previo_de_dockerfile_bloquea_con_la_nota() {
+        let (_tarea_dir, tarea) = tarea_rust();
+        let mut v = Veredicto::default();
+        v.hallazgos.push(secreto_de_dockerfile_previo());
+        let i = informar_con(
+            &v,
+            &tarea,
+            &ReglasDecision::default(),
+            &[],
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert!(
+            i.resumen
+                .contains("estaba en el estado inicial; los secretos bloquean siempre"),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn previos_dockerfile_corre_como_root_igual_en_bootstrap_no_es_secreto() {
+        let bootstrap = tempfile::tempdir().expect("temp dir");
+        let repo = tempfile::tempdir().expect("temp dir");
+        let dockerfile = "FROM rust:1.80\nRUN cargo build --release\n";
+        fs::write(bootstrap.path().join("Dockerfile"), dockerfile).expect("escribe Dockerfile");
+        fs::write(repo.path().join("Dockerfile"), dockerfile).expect("escribe Dockerfile");
+        // La regla de root sale de la sonda de entrega, no de sondas_configs_locales. Se arma aquí.
+        let en_bootstrap =
+            configs::dockerfile_corre_como_root(bootstrap.path(), &[]).expect("lee bootstrap");
+        let en_repo = configs::dockerfile_corre_como_root(repo.path(), &[]).expect("lee repo");
+        assert_eq!(en_repo.len(), 1, "{en_repo:?}");
+
+        let base = LineaBase {
+            configs: base_de(&en_bootstrap),
+            ..LineaBase::default()
+        };
+        let mut sondas = vec![ResultadoSonda {
+            dimension: Dimension::Seguridad,
+            valor: None,
+            motivo: None,
+            hallazgos: en_repo,
+        }];
+        marcar_configs(&mut sondas, &base, Some(bootstrap.path()), repo.path());
+        let aviso = &sondas[0].hallazgos[0];
+        assert!(aviso.previo, "igual que en bootstrap/: es previo");
+        assert!(
+            !es_fuente_de_secretos(&aviso.fuente),
+            "correr como root no es un secreto: {:?}",
+            aviso.fuente
+        );
     }
 
     #[test]

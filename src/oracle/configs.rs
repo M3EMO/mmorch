@@ -655,7 +655,7 @@ fn reglas_dockerfile(archivo: &str, texto: &str, requisitos: &[Requisito]) -> Ve
                             inst.linea,
                             &clave,
                             "secreto literal en ENV o ARG: va a la imagen",
-                            SONDA_DOCKERFILE,
+                            SONDA_SECRETOS,
                             requisitos,
                         ));
                     }
