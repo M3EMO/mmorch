@@ -66,7 +66,8 @@ pub fn linea_base(
 /// Carpeta de `home` donde van las líneas base guardadas.
 const CARPETA: &str = "previos";
 
-/// Clave de la memoria: el hash de `bootstrap/`, la versión de las sondas, la imagen y si hay RustSec.
+/// Clave de la memoria: el hash de `bootstrap/`, la versión de las sondas, la imagen y la base de RustSec.
+/// La base suma su huella de contenido. Sin huella, suma solo si va montada.
 /// `None` si `bootstrap/` no se puede leer: entonces no hay memoria y la línea base se calcula.
 fn clave_de(tarea: &Tarea, bootstrap: &Path, ej: &dyn EjecutorHerramienta) -> Option<String> {
     let version = historial::hash_de_version(bootstrap).ok()?;
@@ -75,7 +76,8 @@ fn clave_de(tarea: &Tarea, bootstrap: &Path, ej: &dyn EjecutorHerramienta) -> Op
         version,
         VERSION_SONDAS_SEGURIDAD.to_string(),
         tarea.imagen.clone(),
-        ej.tiene_rustsec().to_string(),
+        ej.huella_rustsec()
+            .unwrap_or_else(|| ej.tiene_rustsec().to_string()),
     ] {
         digest.update(parte.as_bytes());
         digest.update([0]);
@@ -293,6 +295,43 @@ mod tests {
         fn tiene_rustsec(&self) -> bool {
             true
         }
+    }
+
+    /// Ejecutor de mentira con una huella de RustSec fija. No corre comandos.
+    struct EjecutorConHuella {
+        huella: String,
+    }
+
+    impl EjecutorHerramienta for EjecutorConHuella {
+        fn ejecutar(&self, _cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            Ok(SalidaHerramienta::default())
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            true
+        }
+
+        fn huella_rustsec(&self) -> Option<String> {
+            Some(self.huella.clone())
+        }
+    }
+
+    #[test]
+    fn previos_dos_bases_de_rustsec_distintas_dan_claves_distintas() {
+        let bootstrap = tempfile::tempdir().expect("temp dir");
+        fs::write(bootstrap.path().join("Cargo.lock"), CARGO_LOCK).expect("escribe el lock");
+        let (_tarea_dir, tarea) = tarea_rust();
+        let base_a = EjecutorConHuella { huella: "a".into() };
+        let base_b = EjecutorConHuella { huella: "b".into() };
+        let base_a_otra_vez = EjecutorConHuella { huella: "a".into() };
+
+        let clave_a = clave_de(&tarea, bootstrap.path(), &base_a);
+        let clave_b = clave_de(&tarea, bootstrap.path(), &base_b);
+        let clave_a_bis = clave_de(&tarea, bootstrap.path(), &base_a_otra_vez);
+
+        assert!(clave_a.is_some(), "bootstrap se lee: hay clave");
+        assert_ne!(clave_a, clave_b, "otra base de RustSec, otra clave");
+        assert_eq!(clave_a, clave_a_bis, "la misma base da la misma clave");
     }
 
     fn cargo_audit_de(archivo: &str, linea: u32, cita: &str) -> Hallazgo {

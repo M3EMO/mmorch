@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
 use crate::oracle::ErrorOraculo;
@@ -37,6 +38,12 @@ pub trait EjecutorHerramienta {
     /// Verdadero si la base de RustSec va montada en `/rustsec`.
     fn tiene_rustsec(&self) -> bool {
         false
+    }
+
+    /// Huella del contenido de la base de RustSec montada. `None` si no hay base montada.
+    /// Cambia si cambia cualquier archivo de la base.
+    fn huella_rustsec(&self) -> Option<String> {
+        None
     }
 }
 
@@ -94,6 +101,55 @@ impl EjecutorHerramienta for EjecutorContenedor {
     fn tiene_rustsec(&self) -> bool {
         self.rustsec.is_some()
     }
+
+    fn huella_rustsec(&self) -> Option<String> {
+        let raiz = self.rustsec.as_ref()?;
+        // Si la carpeta no se puede leer, la huella es un valor fijo. No queda vacía.
+        Some(huella_de_carpeta(raiz).unwrap_or_else(|_| "ilegible".into()))
+    }
+}
+
+/// Huella SHA-256 del contenido de `raiz`. Recorre los archivos en orden de ruta relativa.
+/// No sigue enlaces y salta las carpetas `.git`. Cada archivo suma su ruta, un 0, su largo y su contenido.
+fn huella_de_carpeta(raiz: &Path) -> std::io::Result<String> {
+    let mut archivos = Vec::new();
+    recoger_archivos(raiz, raiz, &mut archivos)?;
+    archivos.sort();
+    let mut digest = Sha256::new();
+    for (relativa, ruta) in &archivos {
+        let contenido = fs::read(ruta)?;
+        digest.update(relativa.as_bytes());
+        digest.update([0]);
+        digest.update((contenido.len() as u64).to_le_bytes());
+        digest.update(&contenido);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Junta los archivos regulares bajo `dir` con su ruta relativa a `raiz`.
+fn recoger_archivos(
+    raiz: &Path,
+    dir: &Path,
+    salida: &mut Vec<(String, PathBuf)>,
+) -> std::io::Result<()> {
+    for entrada in fs::read_dir(dir)? {
+        let entrada = entrada?;
+        let ruta = entrada.path();
+        let tipo = entrada.file_type()?;
+        if tipo.is_dir() {
+            if entrada.file_name() != ".git" {
+                recoger_archivos(raiz, &ruta, salida)?;
+            }
+        } else if tipo.is_file() {
+            let relativa = ruta.strip_prefix(raiz).map_err(std::io::Error::other)?;
+            salida.push((relativa.to_string_lossy().into_owned(), ruta));
+        }
+    }
+    Ok(())
 }
 
 /// Reporte JSON de gitleaks: `Secret` y `Match` no están en la estructura, así que nunca se leen.
@@ -1871,6 +1927,35 @@ mod tests {
 
     /// Aviso RUSTSEC-2020-0071 (crate `time` 0.1.43). Es el mismo del fixture `tests/fixtures/sondas/cargo-audit.json`.
     const AVISO_TIME: &str = "```toml\n[advisory]\nid = \"RUSTSEC-2020-0071\"\npackage = \"time\"\ndate = \"2020-11-18\"\nurl = \"https://github.com/time-rs/time/issues/293\"\ncategories = [\"code-execution\"]\nkeywords = [\"segfault\"]\naliases = [\"CVE-2020-26235\", \"GHSA-wcg3-cvx6-7396\"]\n\n[versions]\npatched = [\">=0.2.23\"]\nunaffected = [\"=0.2.0\", \"=0.2.1\", \"=0.2.2\", \"=0.2.3\", \"=0.2.4\", \"=0.2.5\", \"=0.2.6\"]\n```\n\n# Potential segfault in the time crate\n\nUnix-like operating systems may segfault due to dereferencing a dangling pointer in specific circumstances.\n";
+
+    #[test]
+    fn huella_de_carpeta_cambia_con_el_contenido_y_no_con_la_copia() {
+        let escribir = |dir: &tempfile::TempDir, ruta: &str, texto: &str| {
+            fs::write(dir.path().join(ruta), texto).expect("escribe el archivo");
+        };
+        let a = tempfile::tempdir().expect("temp dir");
+        escribir(&a, "x.txt", "uno");
+        let copia = tempfile::tempdir().expect("temp dir");
+        escribir(&copia, "x.txt", "uno");
+        let otro_contenido = tempfile::tempdir().expect("temp dir");
+        escribir(&otro_contenido, "x.txt", "dos");
+        let otro_nombre = tempfile::tempdir().expect("temp dir");
+        escribir(&otro_nombre, "y.txt", "uno");
+        let con_git = tempfile::tempdir().expect("temp dir");
+        escribir(&con_git, "x.txt", "uno");
+        fs::create_dir_all(con_git.path().join(".git")).expect("crea .git");
+        escribir(&con_git, ".git/HEAD", "ref: otra");
+
+        let de = |dir: &tempfile::TempDir| huella_de_carpeta(dir.path()).expect("lee la carpeta");
+        assert_eq!(de(&a), de(&copia), "igual contenido, igual huella");
+        assert_ne!(de(&a), de(&otro_contenido), "otro contenido, otra huella");
+        assert_ne!(
+            de(&a),
+            de(&otro_nombre),
+            "otro nombre de archivo, otra huella"
+        );
+        assert_eq!(de(&a), de(&con_git), "la carpeta .git no cuenta");
+    }
 
     /// Mini base de RustSec con el formato de advisory-db: `crates/time/RUSTSEC-2020-0071.md`. Se hace repo git
     /// con un commit por si cargo audit lo pide. Todo local, sin red.

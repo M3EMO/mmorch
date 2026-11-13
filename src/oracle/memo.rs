@@ -98,6 +98,10 @@ impl EjecutorHerramienta for EjecutorGrabador<'_> {
     fn tiene_rustsec(&self) -> bool {
         self.real.tiene_rustsec()
     }
+
+    fn huella_rustsec(&self) -> Option<String> {
+        self.real.huella_rustsec()
+    }
 }
 
 /// Qué sondas toma el reuso. Un alcance nuevo suma una variante y un brazo en `EjecutorReusador::toma`.
@@ -152,6 +156,10 @@ impl EjecutorHerramienta for EjecutorReusador<'_> {
 
     fn tiene_rustsec(&self) -> bool {
         self.real.tiene_rustsec()
+    }
+
+    fn huella_rustsec(&self) -> Option<String> {
+        self.real.huella_rustsec()
     }
 }
 
