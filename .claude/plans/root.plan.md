@@ -9096,3 +9096,72 @@ P104 sigue abierta.
 4. **Los lectores de un `Puntaje` que preguntan "¿tiene valor?" usan `!sin_valor()`.** Hoy leen `sin_veredicto`, y ven un `no_aplica` como un 0 medido.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (38): la 114, la 117, Colab, y el brief de la 115
+
+**Estado.**
+- La Tarea 114 terminó en `laptop/tarea-114` (840a1d6), sobre la cadena 110 y 111, con 3365, 0 y 4 sin podman.
+- La Tarea 117 terminó en `laptop/tarea-117` (3d9b97c), desde 64361fa. Sin debuginfo, el `target` del fixture pesa 4,7 veces menos. El tiempo cae en el ruido.
+- El orquestador encadenó la 113 sobre la 114 en `laptop/cadena-110-114` (eee0aa0), sin conflictos.
+- **Colab, primera medida:** la suite sin podman de 3d9b97c tardó 323 s, con la compilación, en una VM de 2 núcleos y 12 GB. Dio 3329, 5 y 5. Las 5 fallas son de entorno. Costó 0,01 unidades.
+
+## 1. Las tres preguntas de la 114
+
+1. **`tarea_vigente` sigue en `motivo_sin_calibrar_en`:** acepto por ahora. Solo elige el texto del motivo, y no cambia si la dimensión calibra. Va a la lista de limpiezas: una fila sin `tarea_hash` debe dar el motivo "fila de una versión vieja".
+2. **Un `no_aplica` en la base o en un caso:** acepto. La calibración salta una dimensión con `no_aplica` antes de medir. Ningún camino de producción lo crea.
+3. **El test del punto 1 queda en `mod.rs`:** acepto. Ahí están sus helpers.
+
+## 2. Las dos preguntas de la 117
+
+1. **`src/corre/contenedor.rs` no recibe las variables de debuginfo: queda así.** Ese contenedor es el espacio de trabajo del builder, no una medición de Root. Root no cambia el perfil con el que trabaja el builder. Las mediciones de Root salen todas de `opciones`, y ahí la huella es una sola.
+2. **La medida con un proyecto con dependencias:** no hace falta otra tarea. La medición del reparto del tiempo, de la vuelta (35), la da con t1.
+
+**Lista de limpiezas, sin tarea todavía:**
+- El motivo de una fila sin `tarea_hash` (pregunta 1 de la 114).
+- El literal `localhost/root-oraculo-rust:2` en un test de la 112.
+
+## 3. Cómo corre Root en Colab
+
+Es un script del orquestador, no código de Root. Estas son sus reglas.
+
+1. **Un usuario sin privilegios.** El script crea `rootci` con `useradd -m`. Clona el repo en su carpeta, con ese dueño. Instala la cadena de Rust con rustup para ese usuario, en la misma versión que la laptop. Todo lo demás corre con `sudo -u rootci -H`. Como root, los tests de permisos fallan: root lee un archivo sin permisos.
+2. **`tools/test-seguro.sh`, siempre.** Arma un `ROOT_HOME` nuevo, saca las claves, y deja los temporales fuera de `/tmp`. Con `cargo test` solo, la medida no se compara con la laptop.
+3. **`ROOT_SIN_PODMAN=1`.** Colab no tiene podman.
+4. **Sin claves.** La suite no las necesita. El script no lee Colab Secrets ni monta Drive.
+5. **Dos tiempos separados.** Primero `tools/test-seguro.sh --no-run`, que solo compila. Después la suite. El script anota los dos tiempos.
+6. **Los tests de plazo.** Root no cambia sus plazos para Colab. El script vuelve a correr cada test que falló, una vez y solo, con `--exact` y `--test-threads=1`.
+   - Si pasa solo, el informe lo lista como "falla bajo carga", aparte de las fallas reales.
+   - Si falla solo, es una falla real.
+   - El script nunca borra ni oculta una falla. Las dos listas salen en el informe.
+7. **La comparación con la laptop.** El orquestador corre lo mismo en la laptop libre, con un `target` vacío (`CARGO_TARGET_DIR_SEGURO`), sobre el mismo commit. La comparación pide el mismo commit, la misma versión de Rust y un `target` frío en los dos lados.
+8. **Colab no reemplaza al hook.** El hook de la laptop sigue corriendo la suite antes de cada commit. Colab sirve para correr suites largas sin ocupar la laptop.
+
+## 4. El diseño de la 115
+
+**Qué se compara.** El estado inicial, `bootstrap/`, contra el repo evaluado. Solo en Rust, que tiene `cargo`, nextest y binarios de release. En otro lenguaje, la medición automática da `no_aplica`, como decidió la 110.
+
+**Cuatro medidas, cada una con su ruido:**
+
+| Medida | Cómo | Corridas por lado | Valor que se compara |
+|---|---|---|---|
+| Tiempo de los tests | nextest sobre los tests que pasan en los dos lados | 3, alternadas | El mínimo |
+| Memoria pico | `memory.peak` del cgroup, en la misma corrida de los tests | 3 | El mínimo |
+| Tiempo de compilación | `cargo build --release` del paquete, después de `cargo clean --release -p` | 3, alternadas | El mínimo |
+| Tamaño del binario | La suma de los binarios de release del paquete | 1 | El tamaño |
+
+- **Solo los tests que pasan en los dos lados.** El estado inicial no trae la función nueva. Sus tests nuevos fallan o no existen. Comparar suites distintas no mide eficiencia.
+- **Alternadas:** inicial, repo, inicial, repo. Así una carga pasajera de la máquina pega en los dos lados.
+- **Memoria en un contenedor que solo corre tests.** La compilación va antes, en otra llamada. Si no, el pico sería el de `rustc`.
+- **Ruido de una medida:** la dispersión de la referencia, (máximo − mínimo) / mínimo, con un piso de 2 %. El tamaño no tiene ruido, y usa el piso.
+- **Razón:** medida del repo / medida de la referencia.
+- **Cuenta como regresión** si la razón pasa 1 + ruido.
+- **"No listo"** si una regresión pasa 1,5. Esta regla no espera la calibración, igual que un test rojo.
+- **Valor de cada medida:** 1 si no hay regresión. Si hay, referencia / medida.
+- **Eficiencia** es el menor valor. Con `[eficiencia]`, también entra el valor del banco de la tarea.
+- **Sin `bootstrap/`:** `no_aplica`, con el motivo "sin estado inicial".
+- **Una medida que no se puede tomar** queda sin valor, con su motivo. Las otras siguen.
+- **El informe** nombra la medida que más empeoró, con los dos números. Es la parte de P106 b que vive en el informe.
+
+**Costo.** Son 3 compilaciones del paquete y 3 corridas de tests por lado. La calibración solo mide eficiencia cuando calibra Eficiencia (`partes.mide`). La calibración automática de Eficiencia queda para otra tarea.
+
+**Preguntas al usuario:** ninguna nueva.
