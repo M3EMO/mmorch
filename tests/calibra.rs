@@ -927,11 +927,11 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
     .expect("calibra");
     // Seguridad calibrada en la misma tarea: `global` la cuenta y Eficiencia no.
     let seguridad = Fila {
-        tarea_hash: None,
+        tarea_hash: Some(String::new()),
         plazo_mutantes: None,
         defectos_en_piso: 0,
         repo_origen: None,
-        inyecciones_distintas: None,
+        inyecciones_distintas: Some(10),
         equivalentes_excluidos: 0,
         duracion_contrato: None,
         duracion_oculto: None,
@@ -955,7 +955,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
         reemplazos: 0,
         ruidosos: Vec::new(),
         casos_ruidosos: 0,
-        huella: None,
+        huella: Some(root::oracle::calibra::huella_de(Dimension::Seguridad)),
         inestables: Vec::new(),
         extractos_base: Vec::new(),
     };

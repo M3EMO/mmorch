@@ -705,7 +705,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "huella": {
-          "description": "Huella del juez con que se midió la fila: el prompt y las rúbricas de la dimensión (`huella_de`).\nUna fila sin el campo vale `None`. Con ítems del juez, `None` cuenta como vieja y no calibra.",
+          "description": "Huella del juez con que se midió la fila: el prompt y las rúbricas de la dimensión (`huella_de`).\nUna fila sin el campo vale `None`, y no cuenta para calibrar.",
           "type": [
             "string",
             "null"
@@ -713,7 +713,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": null
         },
         "incompleta": {
-          "description": "`true` si el tope de gasto detuvo la calibración antes de medir todos sus casos (decisión 48). Una\nfila incompleta no calibra la dimensión, aunque su exactitud llegue a `UMBRAL`.",
+          "description": "`true` si el tope de gasto detuvo la calibración antes de medir todos sus casos (decisión 48). Una\nfila incompleta no cuenta para la versión, aunque tenga casos suficientes.",
           "type": "boolean",
           "default": false
         },
@@ -845,7 +845,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "string"
         },
         "tarea_hash": {
-          "description": "Hash del `tarea.toml` con que se midió la fila. Otro `tarea.toml` deja la fila sin valor.\nUna fila sin el campo vale `None`, y sigue valiendo.",
+          "description": "Hash del `tarea.toml` con que se midió la fila. Otro `tarea.toml` deja la fila sin valor.\nUna fila sin el campo vale `None`, y no cuenta para calibrar.",
           "type": [
             "string",
             "null"

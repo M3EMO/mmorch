@@ -7620,13 +7620,18 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let repo = repo_rust(base.path(), LOCK_SANO);
         let home = home_con_cache(base.path(), LOCK_SANO);
+        let hash = calibra::hash_de_tarea(&tarea_rust(base.path())).expect("hash");
         fs::write(
             home.join(calibra::ARCHIVO),
             json!({"v": 1, "filas": [
-                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 20, "defectos": 10,
-                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.95},
-                {"tarea": "tarea-rust", "dimension": "diseno", "n": 20, "defectos": 10,
-                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.7},
+                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 32, "defectos": 16, "limpios": 16,
+                 "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+                 "sensibilidad": 1.0, "especificidad": 1.0, "exactitud_balanceada": 1.0,
+                 "tarea_hash": hash, "huella": calibra::huella_de(Dimension::Seguridad)},
+                {"tarea": "tarea-rust", "dimension": "diseno", "n": 32, "defectos": 16, "limpios": 16,
+                 "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+                 "sensibilidad": 0.5, "especificidad": 1.0, "exactitud_balanceada": 0.7,
+                 "tarea_hash": hash, "huella": calibra::huella_de(Dimension::Diseno)},
             ]})
             .to_string(),
         )
@@ -7658,10 +7663,10 @@ mod tests {
         );
         let seguridad = puntaje_de_prueba(&v, Dimension::Seguridad);
         assert!(seguridad.calibrada);
-        assert_eq!(seguridad.exactitud_balanceada, Some(0.95));
+        assert_eq!(seguridad.exactitud_balanceada, Some(1.0));
         let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
         assert!(!diseno.calibrada);
-        assert_eq!(diseno.exactitud_balanceada, Some(0.7));
+        assert_eq!(diseno.exactitud_balanceada, Some(0.75));
         let global = v.global.expect("hay una calibrada con veredicto");
         assert!((global - seguridad.valor).abs() < 1e-6, "{global}");
         assert!(v.sin_calibrar.contains(&Dimension::Diseno));
@@ -7680,14 +7685,18 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let repo = repo_rust(base.path(), LOCK_SANO);
         let home = home_con_cache(base.path(), LOCK_SANO);
+        let hash = calibra::hash_de_tarea(&tarea_rust(base.path())).expect("hash");
         fs::write(
             home.join(calibra::ARCHIVO),
             json!({"v": 1, "filas": [
-                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 20, "defectos": 10,
-                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.95},
-                {"tarea": "tarea-rust", "dimension": "diseno", "n": 20, "defectos": 10,
-                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.95,
-                 "huella": "vieja"},
+                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 32, "defectos": 16, "limpios": 16,
+                 "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+                 "sensibilidad": 1.0, "especificidad": 1.0, "exactitud_balanceada": 1.0,
+                 "tarea_hash": hash, "huella": calibra::huella_de(Dimension::Seguridad)},
+                {"tarea": "tarea-rust", "dimension": "diseno", "n": 32, "defectos": 16, "limpios": 16,
+                 "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+                 "sensibilidad": 1.0, "especificidad": 1.0, "exactitud_balanceada": 1.0,
+                 "tarea_hash": hash, "huella": "vieja"},
             ]})
             .to_string(),
         )
@@ -7838,6 +7847,7 @@ mod tests {
         let lib = [("src/lib.rs", "pub fn f() -> u8 { 1 }\n")];
         let ecc = repo_con(base.path().join("memora-ecc"), LOCK_SANO, &lib);
         let sdlc = repo_con(base.path().join("memora-sdlc"), LOCK_SANO, &lib);
+        let hash = calibra::hash_de_tarea(&tarea_rust(base.path())).expect("hash");
         let filas = [
             Dimension::Funciona,
             Dimension::Seguridad,
@@ -7850,27 +7860,27 @@ mod tests {
         ]
         .into_iter()
         .map(|dimension| calibra::Fila {
-            tarea_hash: None,
+            tarea_hash: Some(hash.clone()),
             plazo_mutantes: None,
             duracion_contrato: None,
             duracion_oculto: None,
             repo_origen: None,
-            inyecciones_distintas: None,
+            inyecciones_distintas: Some(16),
             equivalentes_excluidos: 0,
             tarea: "tarea-rust".into(),
             dimension,
-            n: 20,
-            defectos: 10,
-            limpios: 10,
+            n: 32,
+            defectos: 16,
+            limpios: 16,
             limpios_sin_veredicto: 0,
             no_aplicable: 0,
             defectos_en_piso: 0,
             omisiones: 0,
             semilla: 42,
             ts: 1.0,
-            sensibilidad: Some(0.95),
-            especificidad: Some(0.95),
-            exactitud_balanceada: Some(0.95),
+            sensibilidad: Some(1.0),
+            especificidad: Some(1.0),
+            exactitud_balanceada: Some(1.0),
             items: BTreeMap::new(),
             incompleta: false,
             no_aplica: None,
@@ -7878,7 +7888,7 @@ mod tests {
             reemplazos: 0,
             ruidosos: Vec::new(),
             casos_ruidosos: 0,
-            huella: None,
+            huella: Some(calibra::huella_de(dimension)),
             inestables: Vec::new(),
             extractos_base: Vec::new(),
         })
