@@ -9396,3 +9396,195 @@ cat "$P/tiempo.txt" "$P/recompilo.txt" "$P/motivos-raros.txt" "$P/disco-pico.txt
 - La rama `laptop/tarea-119-inf`, que el orquestador puede borrar.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (42): la 120, P101 a sin medir nada, y los briefs de la 121 y la 122
+
+**Estado.**
+- La suite con podman de `laptop/cadena-110-119` (3ad1b39) dio 3460, 1 y 5. La falla pasó 3 de 3 sola: es de carga.
+- La Tarea 120 terminó en verde sin podman: 3471, 0 y 5 (8ea0972). El builder dejó los worktrees `l120-p3` a `l120-p6`.
+- `laptop/cadena-110-120` (ea04410) es la 120 sobre 3ad1b39. Su suite con podman corre ahora. Después corre la prueba de la 119, con `REPO_T1=~/.cache/root-wt/mineria/s2/rep/t1-ref`.
+- **P101 a costó 0,4168 USD y no midió nada.** Diseño de s2-t1 dio n=0, con los seis ítems inestables. Arquitectura de s2-t1 cortó con rc 3. S2 suma 3,5809 USD, de un tope de 7.
+- El disco está al 92 %, con unos 40 GB libres. El usuario todavía no decidió el borrado de 78 carpetas de `~/.cache/root-tests`.
+
+## 1. Las siete preguntas de la 120
+
+1. **El digest se lee 1 + casos veces:** acepto. El brief se equivocó: cada caso decide su propio reuso del `target`.
+2. **`calibrar_tarea_con_lector` y su envoltorio:** acepto. El envoltorio es la única entrada de producción. No hace falta mover `lib.rs`.
+3. **`medir` suma el parámetro `avisos`:** acepto. Sigue el estilo de `oracle/mod.rs`.
+4. **El texto del aviso:** acepto.
+5. **El filtro de la vuelta exige razón, referencia y repo:** acepto.
+6. **Sin regresiones después del filtro, no hay vuelta:** acepto.
+7. **El error de sintaxis de `podman_falso` con la lista vacía:** se arregla en la Tarea 122. Un error impreso en cada corrida tapa errores reales.
+
+**Los worktrees `l120-p3` a `l120-p6`:** el orquestador los quita después de confirmar que sus commits están en `laptop/tarea-120`.
+
+## 2. P101 a: lo que dicen los datos
+
+**Lo que leí.** `serie.out`, `t1-diseno.json`, `t1-arquitectura.err` y las llamadas de `eventos.jsonl` entre las 00:36 y las 00:56 UTC. La medición no guardó las respuestas del juez.
+
+**Diseño.** La base se juzgó tres veces. Hubo cinco llamadas al juez:
+
+| Hora UTC | Llamada | Tokens de salida | Reintento |
+|---|---|---|---|
+| 00:37:41 | Juicio 1 | 12 897 | No |
+| 00:39:19 | Juicio 2 | 12 986 | No |
+| 00:40:10 | Reintento del juicio 2 | 6 217 | Sí |
+| 00:42:24 | Juicio 3 | 16 889 | No |
+| 00:43:07 | Reintento del juicio 3 | 5 071 | Sí |
+
+- Los tres juicios recibieron los mismos extractos. `extractos_base` trae tres listas iguales. La entrada no varió.
+- **Un ítem es inestable en dos casos** (`src/oracle/calibra/inestables.rs:54`): si falta en algún juicio, o si sus niveles varían 2 o más.
+- **Que los seis salgan inestables a la vez apunta a ítems que faltan.** Que seis niveles varíen 2 o más a la vez es muy raro.
+- **Por qué falta un ítem** (`src/oracle/juez.rs:754`): el juez lo dejó sin nivel, o su cita no pasó el gate, o rompió el contrato. El juez reintenta una vez solo esos ítems. Si el reintento tampoco da nivel, el ítem queda en `faltantes`.
+- Los juicios 2 y 3 necesitaron reintento. Eso confirma que esos juicios perdieron ítems.
+
+**La causa, confirmada en el código.** Un juicio repetido que pierde ítems puede bajar de dos tercios de cobertura.
+- Entonces `aplicar_cobertura` (`src/oracle/mod.rs:1735`) llama a `sin_veredicto_con_faltantes`.
+- Ese puntaje sale de `sin_veredicto_puntaje` (`src/oracle/mod.rs:2085`), que deja `items` vacío.
+- La regla de inestables ve que **todos** los ítems faltan en ese juicio. Marca los seis como inestables a la vez.
+- Es lo que muestran los datos: los seis juntos, y dos juicios con reintento.
+
+**La conclusión de Diseño.** Hay un defecto de código y una duda de diseño.
+- **El defecto:** un juicio sin veredicto no es una medida que varía. Es una medida que falta. Root no debe leerlo como inestabilidad.
+- **La duda:** un ítem que falta en un solo juicio, por el gate o por `sin_evidencia`, ¿es inestable? Es un problema de evidencia, no de opinión. Sin las respuestas guardadas, no sé qué ítems faltaron por cada motivo.
+
+**Arquitectura.** La rúbrica pesa 10:
+
+| Ítem | Mide | Peso |
+|---|---|---|
+| `arquitectura.dependencias` | sonda | 3 |
+| `arquitectura.adecuacion` | juez | 3 |
+| `arquitectura.extensibilidad` | juez | 2 |
+| `arquitectura.interfaces` | juez | 2 |
+
+- Midió 6 de 10. La única suma que da 6 es dependencias más adecuación.
+- **Faltaron `extensibilidad` e `interfaces`.** Pasó en el primer juicio, a las 00:55:58. Root cortó ahí, sin otro juicio.
+- El cambio de t1 es `src/pattern/composite_pattern.rs`. Es posible que el juez no viera interfaces ni puntos de extensión en el cambio, y dijera `sin_evidencia`. También es posible una cita que no pasó el gate. Sin la respuesta, no se distingue.
+- **Un segundo defecto:** Root informa esto como "error de infraestructura". No lo es. Es una medición válida: la base no da veredicto de Arquitectura en esta tarea.
+
+## 3. Qué arreglo pide cada uno
+
+**Los dos van en la Tarea 121.**
+1. **La evidencia.** La fila guarda cada juicio de la base: el nivel de cada ítem, sus faltantes con su motivo, y su motivo sin veredicto.
+2. **Un juicio sin veredicto no es inestabilidad.** Si cualquier juicio de la base queda sin veredicto, la fila lo dice en un campo nuevo, `base_sin_veredicto`. La fila no cuenta para calibrar. Los ítems no se marcan inestables.
+3. **El error deja de ser de infraestructura.** La base de Arquitectura sin veredicto es un resultado de la medición. `calibrar` escribe la fila y sale bien.
+4. **Cada ítem inestable lleva su causa:** "falta en el juicio k: <motivo>", o "varía de a a b".
+
+**Lo que no hago todavía.** No cambio la regla de dos tercios, ni la de un ítem que falta en un solo juicio. Las dos se deciden con los datos de la 121.
+
+**El gasto.** Repetir P101 a con la 121 cuesta cerca de 0,42 USD otra vez. Con lo gastado, S2 llega a unos 4 USD, de 7. La repetición va después de la 121, y antes de cualquier cambio de regla.
+
+## 4. El orden, ajustado
+
+El orden de la vuelta (41), sección 6, sigue. Cambia el paso 4:
+1. La mezcla de la cadena 110 a 120.
+2. La prueba de la 119.
+3. **La 121.** Sin ella, Diseño y Arquitectura no se pueden calibrar en t1.
+4. **P101 a otra vez,** con la 121. Con sus datos se decide la regla de inestables.
+5. La medición del reparto del tiempo, de la sección 6. No pide código.
+6. Siguen los pasos 6 a 10 de la vuelta (41).
+
+**La 122 corre en paralelo con la 121.** Arregla la misma carrera ETXTBSY en los dos helpers que quedan, y el error de la lista vacía. No comparte archivos con la 121.
+
+## 5. Los briefs
+
+- `docs/builds/brief-local-121.md`: la evidencia de los juicios de la base.
+- `docs/builds/brief-local-122.md`: la carrera ETXTBSY en `corre`.
+
+## 6. La medición del reparto del tiempo, sin código
+
+**Se puede, con un `podman` envoltorio al frente del `PATH`.** Root llama a `podman` por el `PATH` (`src/oracle/contenedor.rs:444`). El envoltorio anota la hora de inicio, los argumentos y la hora de fin de cada llamada. Después corre el podman real. El comando de cada contenedor es el último argumento, después de `sh -c`, y dice la fase.
+
+**Qué se calibra.** Completitud y Pruebas de s2-t1, con n=4 cada una. Las dos no usan el juez, así que no gastan API. Pruebas trae la mutación, que es la fase que más se sospecha.
+
+**Corre solo,** sin builders ni otra suite. No toca el `ROOT_HOME` real.
+
+```bash
+set -euo pipefail
+RAIZ=/home/mpera/.claude/orchestration
+REPO_T1=$HOME/.cache/root-wt/mineria/s2/rep/t1-ref
+P=$HOME/.cache/root-wt/reparto
+mkdir -p "$P/home" "$P/bin" "$P/scripts"
+
+# 1. El binario de la cadena 110 a 120.
+git -C "$RAIZ" worktree add --detach "$P/wt" laptop/cadena-110-120
+git -C "$P/wt" config --worktree core.hooksPath .githooks
+CARGO_TARGET_DIR="$P/target" cargo build --release --manifest-path "$P/wt/Cargo.toml"
+R="$P/target/release/r00t"
+
+# 2. Una copia del ROOT_HOME con reflink.
+for x in root.toml cache oraculos configs previos calibracion.json politica.json; do
+  cp -a --reflink=always "$HOME/.local/share/root/$x" "$P/home/"
+done
+
+# 3. El envoltorio de podman. Anota inicio, fin, código y argumentos, uno por línea en JSON.
+cat > "$P/bin/podman" <<'SH'
+#!/usr/bin/env bash
+inicio=$(date +%s.%N)
+/usr/bin/podman "$@"
+rc=$?
+fin=$(date +%s.%N)
+python3 -I -c 'import json,sys; print(json.dumps({"inicio":float(sys.argv[1]),"fin":float(sys.argv[2]),"rc":int(sys.argv[3]),"args":sys.argv[4:]}))' "$inicio" "$fin" "$rc" "$@" >> "$REPARTO_LOG"
+exit $rc
+SH
+chmod +x "$P/bin/podman"
+export REPARTO_LOG="$P/podman.jsonl"
+
+# 4. Las dos calibraciones, sin claves, con el envoltorio.
+for d in completitud pruebas; do
+  a=$(date +%s.%N)
+  env -u DEEPSEEK_API_KEY -u ANTHROPIC_API_KEY PATH="$P/bin:$PATH" ROOT_HOME="$P/home" \
+    "$R" oraculo calibrar --tarea s2-t1 --dimension "$d" --n 4 --repo "$REPO_T1" \
+    > "$P/$d.json" 2> "$P/$d.err" || echo "$d rc $?" >> "$P/rc.txt"
+  b=$(date +%s.%N)
+  echo "$d $a $b" >> "$P/totales.txt"
+done
+
+# 5. El reparto por fase.
+cat > "$P/scripts/reparto.py" <<'PY'
+import json, re, sys
+log, totales = sys.argv[1], sys.argv[2]
+fases = [
+    ("mutacion", r"cargo mutants"),
+    ("suite_nextest", r"cargo nextest"),
+    ("suite_pytest", r"pytest"),
+    ("clippy", r"cargo clippy"),
+    ("audit", r"cargo audit"),
+    ("gitleaks", r"gitleaks"),
+    ("descarga", r"cargo vendor|generate-lockfile|pip "),
+    ("eficiencia", r"ROOT_NS|ROOT_COMPILAR|cargo metadata"),
+    ("compilacion", r"cargo build|cargo test --no-run"),
+]
+por_fase, n_por_fase, otras = {}, {}, {}
+for linea in open(log):
+    e = json.loads(linea)
+    args = e["args"]
+    dur = e["fin"] - e["inicio"]
+    if not args or args[0] != "run":
+        clave = "podman " + (args[0] if args else "?")
+        otras[clave] = otras.get(clave, 0.0) + dur
+        continue
+    cmd = args[-1]
+    fase = next((f for f, pat in fases if re.search(pat, cmd)), "otro")
+    por_fase[fase] = por_fase.get(fase, 0.0) + dur
+    n_por_fase[fase] = n_por_fase.get(fase, 0) + 1
+for linea in open(totales):
+    d, a, b = linea.split()
+    print(f"total {d}: {float(b) - float(a):.1f} s")
+total_run = sum(por_fase.values())
+for f, s in sorted(por_fase.items(), key=lambda x: -x[1]):
+    print(f"{f:14s} {s:9.1f} s  {n_por_fase[f]:4d} contenedores  {100 * s / total_run:5.1f} %")
+for k, s in sorted(otras.items(), key=lambda x: -x[1]):
+    print(f"{k:14s} {s:9.1f} s  (fuera de run)")
+PY
+python3 -I "$P/scripts/reparto.py" "$P/podman.jsonl" "$P/totales.txt" | tee "$P/reparto.txt"
+
+# 6. Lo que queda: ningún contenedor de Root vivo.
+/usr/bin/podman ps -a --format '{{.Names}}' | grep -c '^root-' || true
+```
+
+**Lo que se informa:** `reparto.txt`, `rc.txt` si existe, y el número del paso 6. La diferencia entre el total y la suma de los contenedores es el tiempo de Root fuera de podman: copias, inyección y lectura.
+
+**Al terminar,** el orquestador quita el worktree con `git -C "$RAIZ" worktree remove "$P/wt"`.
+
+**Preguntas al usuario:** ninguna nueva.
