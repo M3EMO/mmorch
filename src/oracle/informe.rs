@@ -1409,14 +1409,32 @@ fn frase_de_regresion_o_generica(m: &MedidaEficiencia, razon: f64) -> String {
     }
 }
 
-/// Línea de eficiencia del resumen. Con regresión, nombra la de mayor razón. Sin regresión y con medidas con
-/// valor, dice que no hay regresiones. Sin medidas con valor, no hay línea.
+/// Orden fijo de las medidas para desempatar el resumen. Un id fuera de esta lista va después de todas.
+const ORDEN_DE_MEDIDAS: [&str; 4] = [
+    "tiempo_tests",
+    "memoria_pico",
+    "tiempo_compilacion",
+    "tamano_binario",
+];
+
+/// Posición de `medida` en `ORDEN_DE_MEDIDAS`. Un id desconocido queda después de todas.
+fn posicion_en_orden(medida: &str) -> usize {
+    ORDEN_DE_MEDIDAS
+        .iter()
+        .position(|o| *o == medida)
+        .unwrap_or(ORDEN_DE_MEDIDAS.len())
+}
+
+/// Línea de eficiencia del resumen. Con regresión, nombra la de mayor razón; en empate, la de menor posición
+/// en `ORDEN_DE_MEDIDAS`. Sin regresión y con medidas con valor, dice que no hay regresiones. Sin medidas con
+/// valor, no hay línea.
 fn linea_de_eficiencia(v: &Veredicto) -> Option<String> {
     let con_valor = || v.eficiencia_auto.iter().filter(|m| m.razon.is_some());
     let mayor = con_valor().filter(|m| m.regresion).max_by(|a, b| {
         a.razon
             .partial_cmp(&b.razon)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| posicion_en_orden(&b.medida).cmp(&posicion_en_orden(&a.medida)))
     });
     if let Some(m) = mayor {
         let razon = m.razon?;
@@ -2346,6 +2364,74 @@ modulos = ["config"]
             i.resumen
         );
         assert!(!i.resumen.contains("usan 1,3 veces"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_empate_nombra_la_medida_del_orden_fijo() {
+        // Razón igual: gana tiempo_tests aunque tamano_binario vaya último en el vector, donde hoy gana
+        // (en empate queda la última).
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia("tiempo_tests", 1.0, 1.3, 1.3, 0.02, true),
+            eficiencia(
+                "tamano_binario",
+                10.0 * BYTES_POR_MIB,
+                13.0 * BYTES_POR_MIB,
+                1.3,
+                0.02,
+                true,
+            ),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .contains("Los tests tardan 1,3 veces más: 1,30 s contra 1,00 s."),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("El binario pesa"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_empate_con_id_desconocido_gana_el_conocido() {
+        // El id desconocido va último: hoy gana por ser la última del empate.
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia(
+                "tamano_binario",
+                10.0 * BYTES_POR_MIB,
+                13.0 * BYTES_POR_MIB,
+                1.3,
+                0.02,
+                true,
+            ),
+            eficiencia("otra", 1.25, 1.625, 1.3, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .contains("El binario pesa 1,3 veces más: 13,00 MiB contra 10,00 MiB."),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("La medida otra"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_mayor_razon_desconocida_sigue_ganando() {
+        // El orden solo desempata: una razón mayor gana aunque el id sea desconocido.
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia("tiempo_tests", 1.0, 1.3, 1.3, 0.02, true),
+            eficiencia("otra", 1.25, 2.0, 1.6, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .contains("La medida otra empeora 1,6 veces: 2,00 contra 1,25."),
+            "{}",
+            i.resumen
+        );
     }
 
     #[test]
