@@ -11015,3 +11015,11 @@ echo "rc_d3=$?"
 | 11 | La validez sobre el final sellado | Los pasos 1 a 10 | Laptop si usa el juez | Según el final |
 
 **Preguntas al usuario:** P109 y P110.
+
+**Nota del orquestador (2026-11-14), después de la vuelta 54: la Prueba 0d corrió.** El primer intento falló por el script: `--ro-bind / /` no deja crear `/repo`. Con `mkdir -p /repo /salida` antes, dio:
+- d1: `hola`, `touch /repo/b` con "Read-only file system", `escribe_salida`, `rc_d1=0`.
+- d2: `hola`, solo la interfaz `lo`, `red_cerrada` ("Network is unreachable"), `rc_d2=0`.
+- d3: `pid=2`, `rc_d3=0`.
+- Gasto: menos de 0,01 unidades. Saldo: 769,72.
+
+Bubblewrap cumple lo que pide la sección 5 para seguir. P110 sigue siendo del usuario.
