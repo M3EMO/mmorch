@@ -1409,7 +1409,8 @@ fn frase_de_regresion_o_generica(m: &MedidaEficiencia, razon: f64) -> String {
     }
 }
 
-/// Orden fijo de las medidas para desempatar el resumen. Un id fuera de esta lista va después de todas.
+/// Orden fijo de las medidas para desempatar el resumen. Un id fuera de esta lista va después de todas,
+/// y entre esos, en orden alfabético.
 const ORDEN_DE_MEDIDAS: [&str; 4] = [
     "tiempo_tests",
     "memoria_pico",
@@ -1426,8 +1427,8 @@ fn posicion_en_orden(medida: &str) -> usize {
 }
 
 /// Línea de eficiencia del resumen. Con regresión, nombra la de mayor razón; en empate, la de menor posición
-/// en `ORDEN_DE_MEDIDAS`. Sin regresión y con medidas con valor, dice que no hay regresiones. Sin medidas con
-/// valor, no hay línea.
+/// en `ORDEN_DE_MEDIDAS`, y entre dos ids desconocidos, la de menor id alfabético. Sin regresión y con medidas
+/// con valor, dice que no hay regresiones. Sin medidas con valor, no hay línea.
 fn linea_de_eficiencia(v: &Veredicto) -> Option<String> {
     let con_valor = || v.eficiencia_auto.iter().filter(|m| m.razon.is_some());
     let mayor = con_valor().filter(|m| m.regresion).max_by(|a, b| {
@@ -1435,6 +1436,7 @@ fn linea_de_eficiencia(v: &Veredicto) -> Option<String> {
             .partial_cmp(&b.razon)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| posicion_en_orden(&b.medida).cmp(&posicion_en_orden(&a.medida)))
+            .then_with(|| b.medida.cmp(&a.medida))
     });
     if let Some(m) = mayor {
         let razon = m.razon?;
@@ -2415,6 +2417,56 @@ modulos = ["config"]
             i.resumen
         );
         assert!(!i.resumen.contains("La medida otra"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_empate_entre_desconocidos_gana_el_alfabetico() {
+        // Dos ids fuera del orden fijo, misma razón: gana el primero en orden alfabético, no el último del vector.
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia("zeta", 1.0, 1.3, 1.3, 0.02, true),
+            eficiencia("alfa", 1.0, 1.3, 1.3, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("La medida alfa empeora 1,3 veces"),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("La medida zeta"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_empate_entre_desconocidos_no_depende_del_vector() {
+        // Mismo caso con el vector invertido: el resultado no cambia.
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia("alfa", 1.0, 1.3, 1.3, 0.02, true),
+            eficiencia("zeta", 1.0, 1.3, 1.3, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("La medida alfa empeora 1,3 veces"),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("La medida zeta"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_razon_mayor_gana_a_desconocido_alfabetico() {
+        // Guarda: una razón mayor gana aunque el id sea alfabéticamente posterior.
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia("alfa", 1.0, 1.3, 1.3, 0.02, true),
+            eficiencia("zeta", 1.0, 1.5, 1.5, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("La medida zeta empeora 1,5 veces"),
+            "{}",
+            i.resumen
+        );
     }
 
     #[test]
