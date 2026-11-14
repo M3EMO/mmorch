@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::oracle::ErrorOraculo;
@@ -88,11 +89,19 @@ pub struct EjecutorGrabador<'a> {
     pub memo: &'a MemoSondas,
 }
 
+// Los dos envoltorios implementan `ejecutar_en`.
+// El valor por defecto del trait ignora la carpeta y llama a `ejecutar`.
 impl EjecutorHerramienta for EjecutorGrabador<'_> {
     fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
         let salida = self.real.ejecutar(cmd)?;
         self.memo.anotar(cmd, &salida);
         Ok(salida)
+    }
+
+    fn ejecutar_en(&self, cmd: &str, salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+        let s = self.real.ejecutar_en(cmd, salida)?;
+        self.memo.anotar(cmd, &s);
+        Ok(s)
     }
 
     fn tiene_rustsec(&self) -> bool {
@@ -154,6 +163,15 @@ impl EjecutorHerramienta for EjecutorReusador<'_> {
         self.real.ejecutar(cmd)
     }
 
+    fn ejecutar_en(&self, cmd: &str, salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+        if self.toma(cmd)
+            && let Some(s) = self.reuso.memo.salida_de(cmd)
+        {
+            return Ok(s);
+        }
+        self.real.ejecutar_en(cmd, salida)
+    }
+
     fn tiene_rustsec(&self) -> bool {
         self.real.tiene_rustsec()
     }
@@ -168,6 +186,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::fs;
+    use std::path::{Path, PathBuf};
 
     /// Ejecutor falso: responde `salida` a cada comando y registra los comandos.
     struct Falso {
@@ -563,5 +582,105 @@ mod tests {
         };
         reusador.ejecutar(&cmd).expect("delega");
         assert_eq!(real.cmds.borrow().as_slice(), [cmd]);
+    }
+
+    /// Ejecutor falso que anota la carpeta de cada llamada. `ejecutar` anota `None`.
+    struct FalsoEn {
+        llamadas: RefCell<Vec<(String, Option<PathBuf>)>>,
+        salida: SalidaHerramienta,
+    }
+
+    impl EjecutorHerramienta for FalsoEn {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            self.llamadas.borrow_mut().push((cmd.to_string(), None));
+            Ok(self.salida.clone())
+        }
+
+        fn ejecutar_en(&self, cmd: &str, salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+            self.llamadas
+                .borrow_mut()
+                .push((cmd.to_string(), Some(salida.to_path_buf())));
+            Ok(self.salida.clone())
+        }
+    }
+
+    fn falso_en(salida: SalidaHerramienta) -> FalsoEn {
+        FalsoEn {
+            llamadas: RefCell::new(Vec::new()),
+            salida,
+        }
+    }
+
+    #[test]
+    fn grabador_ejecutar_en_llega_al_real_con_la_misma_carpeta() {
+        let real = falso_en(SalidaHerramienta::default());
+        let memo = MemoSondas::nuevo();
+        let grabador = EjecutorGrabador {
+            real: &real,
+            memo: &memo,
+        };
+        let carpeta = Path::new("/carpeta/fija");
+        grabador.ejecutar_en("cmd-a", carpeta).expect("ejecuta");
+        assert_eq!(
+            real.llamadas.borrow().as_slice(),
+            [("cmd-a".to_string(), Some(carpeta.to_path_buf()))]
+        );
+    }
+
+    #[test]
+    fn grabador_ejecutar_en_anota_la_salida_en_el_memo() {
+        let real = falso_en(con_outcomes("{\"grabada\":true}"));
+        let memo = MemoSondas::nuevo();
+        let grabador = EjecutorGrabador {
+            real: &real,
+            memo: &memo,
+        };
+        let salida = grabador
+            .ejecutar_en("cmd-a", Path::new("/carpeta/fija"))
+            .expect("ejecuta");
+        assert_eq!(memo.salida_de("cmd-a"), Some(salida));
+    }
+
+    #[test]
+    fn reusador_ejecutar_en_con_comando_grabado_devuelve_lo_grabado_sin_llamar_al_real() {
+        let tarea = tarea_rust();
+        let cmd = crate::oracle::mutacion::construir_comando(&tarea);
+        let grabada = con_outcomes("{\"grabada\":true}");
+        let memo = Arc::new(MemoSondas::nuevo());
+        memo.anotar(&cmd, &grabada);
+        let real = falso_en(SalidaHerramienta::default());
+        let reuso = reuso_de_mutacion(&memo);
+        let reusador = EjecutorReusador {
+            real: &real,
+            reuso: &reuso,
+        };
+        let salida = reusador
+            .ejecutar_en(&cmd, Path::new("/carpeta/fija"))
+            .expect("reusa");
+        assert_eq!(salida, grabada);
+        assert!(
+            real.llamadas.borrow().is_empty(),
+            "no debe correr: {:?}",
+            real.llamadas
+        );
+    }
+
+    #[test]
+    fn reusador_ejecutar_en_con_comando_no_grabado_llega_al_real_con_la_misma_carpeta() {
+        let tarea = tarea_rust();
+        let cmd = crate::oracle::mutacion::construir_comando(&tarea);
+        let memo = Arc::new(MemoSondas::nuevo());
+        let real = falso_en(SalidaHerramienta::default());
+        let reuso = reuso_de_mutacion(&memo);
+        let reusador = EjecutorReusador {
+            real: &real,
+            reuso: &reuso,
+        };
+        let carpeta = Path::new("/carpeta/fija");
+        reusador.ejecutar_en(&cmd, carpeta).expect("delega");
+        assert_eq!(
+            real.llamadas.borrow().as_slice(),
+            [(cmd, Some(carpeta.to_path_buf()))]
+        );
     }
 }
