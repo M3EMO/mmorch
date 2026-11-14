@@ -6,6 +6,11 @@ set -euo pipefail
 
 ROOT_BIN_DIR="${ROOT_BIN_DIR:-/usr/local/bin}"
 ROOT_ETC_DIR="${ROOT_ETC_DIR:-/etc/root-oraculo}"
+ROOT_RAIZ_DIR="${ROOT_RAIZ_DIR:-}"
+
+# Carpetas que bwrap no puede crear. Son los destinos de argumentos_bwrap en src/oracle/contenedor.rs.
+# Copia de CARPETAS_RUNTIME en preparar-runtime.sh. Si cambia una, cambiar la otra y contenedor.rs.
+CARPETAS_RUNTIME=(/repo /salida /oraculo /cache /rustsec /trabajo)
 
 # Herramientas con SHA-256 fijado en HERRAMIENTAS_SHA256.
 NOMBRES_HERRAMIENTAS=(cargo-audit cargo-mutants cargo-nextest gitleaks hadolint)
@@ -118,6 +123,18 @@ control_nextest() {
     fi
 }
 
+# Control de carpetas: cada una de CARPETAS_RUNTIME existe bajo ROOT_RAIZ_DIR.
+control_carpetas() {
+    local ruta
+    for ruta in "${CARPETAS_RUNTIME[@]}"; do
+        if [ -d "${ROOT_RAIZ_DIR:-}$ruta" ]; then
+            ok "$ruta"
+        else
+            mal_control "$ruta" "carpeta existente" "ausente"
+        fi
+    done
+}
+
 # Control bwrap: responde a `bwrap --version`. Muestra la versión.
 control_bwrap() {
     local salida
@@ -164,6 +181,7 @@ for nombre in "${NOMBRES_HERRAMIENTAS[@]}"; do
 done
 control_nextest
 control_bwrap
+control_carpetas
 
 if [ "$fallos" -eq 0 ]; then
     exit 0

@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # Prepara el runtime de Colab para el oráculo Rust. Corre como root en Ubuntu 24.04.
 # Instala bubblewrap, Rust fijado, las herramientas del paquete y nextest.toml.
-# Termina llamando a verificar-versiones.sh. Uso: preparar-runtime.sh <carpeta_del_paquete>
+# Crea las carpetas del runtime y termina llamando a verificar-versiones.sh.
+# Uso: preparar-runtime.sh <carpeta_del_paquete>
 set -euo pipefail
 
 ROOT_BIN_DIR="${ROOT_BIN_DIR:-/usr/local/bin}"
 ROOT_ETC_DIR="${ROOT_ETC_DIR:-/etc/root-oraculo}"
-export ROOT_BIN_DIR ROOT_ETC_DIR
+ROOT_RAIZ_DIR="${ROOT_RAIZ_DIR:-}"
+export ROOT_BIN_DIR ROOT_ETC_DIR ROOT_RAIZ_DIR
+
+# Carpetas que bwrap no puede crear. Son los destinos de argumentos_bwrap en src/oracle/contenedor.rs.
+# Copia de CARPETAS_RUNTIME en verificar-versiones.sh. Si cambia una, cambiar la otra y contenedor.rs.
+CARPETAS_RUNTIME=(/repo /salida /oraculo /cache /rustsec /trabajo)
 
 # Base de las descargas de rustup-init para x86_64. Copia de BASE_RUSTUP en src/oracle/colab.rs.
 RUSTUP_BASE="https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu"
@@ -86,7 +92,15 @@ escribir_nextest() {
     printf '%s' "$NEXTEST_TOML" >"$ROOT_ETC_DIR/nextest.toml"
 }
 
-# Paso 5: corre el control de versiones. Si falla, el script falla.
+# Paso 5: crea las carpetas del runtime bajo ROOT_RAIZ_DIR. bwrap no puede crearlas al montar.
+crear_carpetas() {
+    local ruta
+    for ruta in "${CARPETAS_RUNTIME[@]}"; do
+        mkdir -p "${ROOT_RAIZ_DIR:-}$ruta"
+    done
+}
+
+# Paso 6: corre el control de versiones. Si falla, el script falla.
 llamar_verificar() {
     if ! bash "$(dirname "$0")/verificar-versiones.sh" "$carpeta"; then
         echo "mal verificar-versiones.sh: el runtime no cumple las versiones fijadas"
@@ -120,4 +134,5 @@ paso bubblewrap instalar_bubblewrap
 paso rust instalar_rust
 paso herramientas instalar_herramientas
 paso nextest escribir_nextest
+paso carpetas crear_carpetas
 paso verificar llamar_verificar

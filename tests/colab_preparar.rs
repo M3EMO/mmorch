@@ -33,12 +33,20 @@ const HERRAMIENTAS: [&str; 5] = [
     "hadolint",
 ];
 
-/// Carpetas de un test: falsos para el PATH, binarios de `ROOT_BIN_DIR`, `ROOT_ETC_DIR` y el paquete.
+/// Carpetas que bwrap no puede crear. Son los destinos de `argumentos_bwrap` en `contenedor.rs`.
+/// Lista fija: si cambia, cambian también los dos scripts y `contenedor.rs`.
+const CARPETAS_RUNTIME: [&str; 6] = [
+    "/repo", "/salida", "/oraculo", "/cache", "/rustsec", "/trabajo",
+];
+
+/// Carpetas de un test: falsos para el PATH, binarios de `ROOT_BIN_DIR`, `ROOT_ETC_DIR`, el paquete
+/// y `runtime`, la raíz de `ROOT_RAIZ_DIR` con las seis carpetas de `CARPETAS_RUNTIME`.
 struct Escenario {
     falsos: PathBuf,
     bin: PathBuf,
     etc: PathBuf,
     paquete: PathBuf,
+    runtime: PathBuf,
     _raiz: tempfile::TempDir,
 }
 
@@ -57,10 +65,15 @@ fn escenario() -> Escenario {
         bin: raiz.path().join("bin"),
         etc: raiz.path().join("etc"),
         paquete: raiz.path().join("paquete"),
+        runtime: raiz.path().join("runtime"),
         _raiz: raiz,
     };
     for carpeta in [&e.falsos, &e.bin, &e.etc, &e.paquete] {
         fs::create_dir_all(carpeta).expect("crea carpeta");
+    }
+    for ruta in CARPETAS_RUNTIME.iter() {
+        // Path::join con una ruta absoluta la reemplaza. Se quita la barra inicial.
+        fs::create_dir_all(e.runtime.join(ruta.trim_start_matches('/'))).expect("crea carpeta");
     }
     escribir_ejecutable(
         &e.falsos.join("rustc"),
@@ -127,6 +140,7 @@ fn correr(e: &Escenario) -> Output {
         .env("PATH", path)
         .env("ROOT_BIN_DIR", &e.bin)
         .env("ROOT_ETC_DIR", &e.etc)
+        .env("ROOT_RAIZ_DIR", &e.runtime)
         .output()
         .expect("lanza bash")
 }
@@ -172,9 +186,89 @@ fn verificacion_coincide() {
         String::from_utf8_lossy(&salida.stderr)
     );
     let ls = lineas(&salida);
-    assert_eq!(ls.len(), 9, "una línea por control: {ls:?}");
+    assert_eq!(ls.len(), 15, "una línea por control: {ls:?}");
     for linea in &ls {
         assert!(linea.starts_with("ok "), "línea inesperada: {linea}");
+    }
+}
+
+#[test]
+fn seis_carpetas_dan_ok_cada_una() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea seis_carpetas_dan_ok_cada_una");
+        return;
+    }
+    let e = escenario();
+    let shas = shas_de_bin(&e);
+    escribir_versiones(&e, "1.90.0", &shas);
+    let salida = correr(&e);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let ls = lineas(&salida);
+    for ruta in CARPETAS_RUNTIME.iter() {
+        let esperado = format!("ok {ruta}");
+        assert!(ls.contains(&esperado), "falta {esperado}: {ls:?}");
+    }
+}
+
+#[test]
+fn sin_repo_nombra_repo_y_sale_mal() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea sin_repo_nombra_repo_y_sale_mal");
+        return;
+    }
+    let e = escenario();
+    let shas = shas_de_bin(&e);
+    escribir_versiones(&e, "1.90.0", &shas);
+    fs::remove_dir(e.runtime.join("repo")).expect("quita repo");
+    let salida = correr(&e);
+    assert!(!salida.status.success(), "debe salir distinto de 0");
+    let ls = lineas(&salida);
+    assert!(
+        ls.iter().any(|l| l.starts_with("mal /repo")),
+        "falta la línea mal /repo: {ls:?}"
+    );
+}
+
+/// Lee la lista `CARPETAS_RUNTIME=(...)` de un script. Debe caber en una sola línea.
+fn lista_de_carpetas(texto: &str) -> Vec<String> {
+    let linea = texto
+        .lines()
+        .find(|l| l.starts_with("CARPETAS_RUNTIME=("))
+        .expect("falta la línea CARPETAS_RUNTIME=(...)");
+    linea
+        .trim_start_matches("CARPETAS_RUNTIME=(")
+        .trim_end_matches(')')
+        .split_whitespace()
+        .map(String::from)
+        .collect()
+}
+
+#[test]
+fn carpetas_del_runtime_son_los_montajes_de_bwrap() {
+    let contenedor = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/oracle/contenedor.rs"
+    ))
+    .expect("lee contenedor.rs");
+    for ruta in CARPETAS_RUNTIME.iter() {
+        let literal = format!("\"{ruta}\"");
+        assert!(
+            contenedor.contains(&literal),
+            "contenedor.rs no tiene el destino {literal}"
+        );
+    }
+    let esperado: Vec<String> = CARPETAS_RUNTIME.iter().map(|r| r.to_string()).collect();
+    for script in [PREPARAR, SCRIPT] {
+        let texto = fs::read_to_string(script).expect("lee el script");
+        assert_eq!(
+            lista_de_carpetas(&texto),
+            esperado,
+            "la lista de {script} no es la de argumentos_bwrap"
+        );
     }
 }
 
