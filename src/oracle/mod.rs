@@ -6288,6 +6288,7 @@ mod tests {
             }
             let medicion = cmd == eficiencia::cmd_metadata()
                 || cmd == eficiencia::cmd_lista()
+                || cmd == eficiencia::cmd_compilar_tests()
                 || cmd.contains("date +%s%N");
             if !medicion {
                 return self.base.ejecutar(cmd);
@@ -6304,14 +6305,18 @@ mod tests {
                 let lista = r#"<testsuites><testsuite name="x"><testcase name="t1" classname="c"/></testsuite></testsuites>"#;
                 salida.archivos.insert("lista.xml".into(), lista.into());
             } else if cmd.contains("--no-run") {
+                // Compilación de tests (Tarea 119): sale bien y no mide nada.
+                salida.stdout = "ROOT_COMPILAR 0\n".into();
+            } else if cmd.contains("cargo clean") {
+                salida.stdout = "ROOT_NS 2000000000\nROOT_BUILD 0\nROOT_SIZE 500\n".into();
+            } else {
+                // Corrida medida de tests: su `--no-run` ya no está en el comando (Tarea 119).
                 let ns = if self.inicial {
                     1_000_000_000
                 } else {
                     self.ns_repo
                 };
                 salida.stdout = format!("ROOT_NS {ns}\nROOT_MEM 1000\n");
-            } else {
-                salida.stdout = "ROOT_NS 2000000000\nROOT_BUILD 0\nROOT_SIZE 500\n".into();
             }
             Ok(salida)
         }

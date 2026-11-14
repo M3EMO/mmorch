@@ -182,12 +182,19 @@ pub(crate) fn cmd_lista() -> String {
     )
 }
 
-/// Ejecuta una corrida de tests con el filtro `filtro` (vacío o ` -E '...'`).
-/// Lee `ROOT_NS` (nanosegundos) y `ROOT_MEM` (bytes, vacío si no hay `memory.peak`).
-/// El `--no-run` compila antes del reloj. Cada contenedor es nuevo, así que el pico de memoria incluye esa compilación.
+/// Ejecuta una corrida de tests medida con el filtro `filtro` (vacío o ` -E '...'`). No compila: los tests
+/// ya están compilados por `cmd_compilar_tests`. Lee `ROOT_NS` (nanosegundos) y `ROOT_MEM` (bytes, vacío si no
+/// hay `memory.peak`). Las líneas `Compiling` de cargo salen en stdout: si hay una, la corrida recompiló.
 pub(crate) fn cmd_tests(filtro: &str) -> String {
     format!(
-        "{PRELUDIO}cd /repo && export CARGO_TARGET_DIR=/salida/target && cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml --no-run >/dev/null 2>&1; a=$(date +%s%N); cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml{filtro} >/dev/null 2>&1; b=$(date +%s%N); echo \"ROOT_NS $((b-a))\"; echo \"ROOT_MEM $(cat /sys/fs/cgroup/memory.peak 2>/dev/null)\""
+        "{PRELUDIO}cd /repo && export CARGO_TARGET_DIR=/salida/target && a=$(date +%s%N); cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml{filtro} 2>&1 | grep -E '^ *Compiling'; b=$(date +%s%N); echo \"ROOT_NS $((b-a))\"; echo \"ROOT_MEM $(cat /sys/fs/cgroup/memory.peak 2>/dev/null)\""
+    )
+}
+
+/// Compila los tests antes de las corridas medidas. Lee `ROOT_COMPILAR` (código de salida de nextest).
+pub(crate) fn cmd_compilar_tests() -> String {
+    format!(
+        "{PRELUDIO}cd /repo && export CARGO_TARGET_DIR=/salida/target && cargo nextest run --no-run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml >/dev/null 2>&1; echo \"ROOT_COMPILAR $?\""
     )
 }
 
@@ -341,7 +348,33 @@ fn preparar_filtro(
     Ok(format!(" -E 'not ({expr})'"))
 }
 
-/// Mide tiempo y memoria de los tests. Corre los dos lados alternados, `CORRIDAS` veces.
+/// Motivo de una corrida medida que compiló algo: su reloj y su pico de memoria incluyen rustc.
+const MOTIVO_RECOMPILO: &str = "la corrida medida recompiló";
+
+/// Dice si la salida de una corrida trae una línea `Compiling` de cargo.
+fn recompilo(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .any(|l| l.trim_start().starts_with("Compiling"))
+}
+
+/// Compila los tests de un lado. Un error o un código distinto de cero dan el motivo.
+fn compilar_tests(lado: &Lado) -> Result<(), String> {
+    let nombre = lado.nombre;
+    let salida = lado
+        .ejecutar(&cmd_compilar_tests())
+        .map_err(|e| format!("{nombre}: {e}"))?;
+    match leer_marca(&salida.stdout, "ROOT_COMPILAR") {
+        Some(0.0) => Ok(()),
+        Some(_) => Err(format!("{nombre}: la compilación de los tests falló")),
+        None => Err(format!(
+            "{nombre}: salida ilegible de la compilación de tests"
+        )),
+    }
+}
+
+/// Mide tiempo y memoria de los tests. Compila los tests de cada lado, y luego corre los dos lados
+/// alternados, `CORRIDAS` veces. Un lado que no compila no corre.
 fn medir_tests(
     inicial: &Lado,
     repo: &Lado,
@@ -360,6 +393,12 @@ fn medir_tests(
     let lados = [inicial, repo];
     let mut tiempo: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut memoria: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
+    for (k, lado) in lados.iter().enumerate() {
+        if let Err(motivo) = compilar_tests(lado) {
+            anotar(&mut tiempo[k], Err(motivo.clone()));
+            anotar(&mut memoria[k], Err(motivo));
+        }
+    }
     for _ in 0..CORRIDAS {
         for (k, lado) in lados.iter().enumerate() {
             let nombre = lado.nombre;
@@ -371,6 +410,10 @@ fn medir_tests(
                     let motivo = format!("{nombre}: {e}");
                     anotar(&mut tiempo[k], Err(motivo.clone()));
                     anotar(&mut memoria[k], Err(motivo));
+                }
+                Ok(salida) if recompilo(&salida.stdout) => {
+                    anotar(&mut tiempo[k], Err(MOTIVO_RECOMPILO.into()));
+                    anotar(&mut memoria[k], Err(MOTIVO_RECOMPILO.into()));
                 }
                 Ok(salida) => {
                     let ns = leer_marca(&salida.stdout, "ROOT_NS").map(|ns| ns / 1e9);
@@ -574,6 +617,7 @@ mod tests {
         lista: String,
         tests: String,
         build: String,
+        compilar: String,
     }
 
     impl EjecutorHerramienta for Falso<'_> {
@@ -593,6 +637,9 @@ mod tests {
                 salida.stdout = self.build.clone();
                 "build"
             } else if cmd.contains("--no-run") {
+                salida.stdout = self.compilar.clone();
+                "compilar_tests"
+            } else if cmd.contains("ROOT_NS") {
                 salida.stdout = self.tests.clone();
                 "tests"
             } else {
@@ -614,6 +661,7 @@ mod tests {
             lista: lista(&tests.iter().map(|t| (*t, true)).collect::<Vec<_>>()),
             tests: TESTS_OK.into(),
             build: BUILD_OK.into(),
+            compilar: "ROOT_COMPILAR 0\n".into(),
         }
     }
 
@@ -917,5 +965,94 @@ mod tests {
             let quedo: Vec<_> = fs::read_dir(tmp.path()).expect("lee tmp").collect();
             assert!(quedo.is_empty(), "error_en {error_en:?}: {quedo:?}");
         }
+    }
+
+    #[test]
+    fn cmd_tests_corre_solo_los_tests_sin_compilar() {
+        let cmd = cmd_tests(" -E 'not (test(=b))'");
+        assert!(!cmd.contains("--no-run"), "{cmd}");
+        assert!(!cmd.contains("cargo build"), "{cmd}");
+        assert!(cmd.contains("cargo nextest run"), "{cmd}");
+        assert!(cmd.contains("date +%s%N"), "{cmd}");
+        assert!(cmd.contains("/sys/fs/cgroup/memory.peak"), "{cmd}");
+    }
+
+    #[test]
+    fn cmd_compilar_tests_compila_con_no_run_y_deja_su_codigo() {
+        let cmd = cmd_compilar_tests();
+        assert!(cmd.contains("cargo nextest run --no-run"), "{cmd}");
+        assert!(cmd.contains("CARGO_TARGET_DIR=/salida/target"), "{cmd}");
+        assert!(cmd.contains("ROOT_COMPILAR $?"), "{cmd}");
+    }
+
+    #[test]
+    fn medir_compila_los_tests_una_vez_por_lado_antes_de_las_corridas() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        medir(&inicial, &repo, tmp.path());
+        let vistas: Vec<String> = log
+            .borrow()
+            .iter()
+            .filter_map(|e| {
+                let mut partes = e.splitn(3, ' ');
+                let lado = partes.next()?;
+                let tipo = partes.next()?;
+                matches!(tipo, "compilar_tests" | "tests").then(|| format!("{lado} {tipo}"))
+            })
+            .collect();
+        let mut esperado = vec!["inicial compilar_tests", "repo compilar_tests"];
+        for _ in 0..CORRIDAS {
+            esperado.extend(["inicial tests", "repo tests"]);
+        }
+        assert_eq!(vistas, esperado);
+    }
+
+    #[test]
+    fn corrida_medida_que_recompila_deja_tiempo_y_memoria_sin_valor() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = Falso {
+            tests: format!("   Compiling foo v0.1.0 (/repo)\n{TESTS_OK}"),
+            ..sano("repo", &log, &["a"])
+        };
+        let resultados = medir(&inicial, &repo, tmp.path());
+        for medida in [Medida::TiempoTests, Medida::MemoriaPico] {
+            let r = por_medida(&resultados, medida);
+            assert_eq!(
+                r.motivo.as_deref(),
+                Some("la corrida medida recompiló"),
+                "{medida:?}"
+            );
+            assert_eq!(r.referencia, None, "{medida:?}");
+            assert_eq!(r.repo, None, "{medida:?}");
+        }
+    }
+
+    #[test]
+    fn compilacion_de_tests_que_falla_deja_el_lado_sin_valor_y_no_corre_sus_tests() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = Falso {
+            compilar: "ROOT_COMPILAR 101\n".into(),
+            ..sano("repo", &log, &["a"])
+        };
+        let resultados = medir(&inicial, &repo, tmp.path());
+        for medida in [Medida::TiempoTests, Medida::MemoriaPico] {
+            let r = por_medida(&resultados, medida);
+            assert_eq!(
+                r.motivo.as_deref(),
+                Some("repo: la compilación de los tests falló"),
+                "{medida:?}"
+            );
+        }
+        assert!(
+            log.borrow().iter().all(|e| !e.starts_with("repo tests ")),
+            "{:?}",
+            log.borrow()
+        );
     }
 }
