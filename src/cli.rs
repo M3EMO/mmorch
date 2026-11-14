@@ -203,6 +203,15 @@ pub enum ColabAccion {
         #[arg(long)]
         raiz_root: Option<PathBuf>,
     },
+    /// Calibra en Colab: corre cada paquete de `colab empaquetar` en su runtime de CPU e importa la vuelta.
+    Calibrar {
+        /// Paquete `.tar.gz` de `colab empaquetar`. Se repite: cada paquete va a su runtime.
+        #[arg(long, num_args = 1, required = true)]
+        paquete: Vec<PathBuf>,
+        /// Repo de Root: de ahí sale el commit de la laptop. Por defecto, el directorio actual.
+        #[arg(long)]
+        raiz_root: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -438,6 +447,7 @@ impl Comando {
             Comando::Colab { accion } => match accion {
                 ColabAccion::Empaquetar { .. } => "colab empaquetar",
                 ColabAccion::Importar { .. } => "colab importar",
+                ColabAccion::Calibrar { .. } => "colab calibrar",
             },
             Comando::Observa { accion } => match accion {
                 ObservaAccion::Claude { .. } => "observa claude",

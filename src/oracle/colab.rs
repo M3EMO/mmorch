@@ -7,8 +7,8 @@
 //! Rust no queda listo, Root compila el producto en su máquina y sube el binario (respaldo). Root
 //! no instala nada en su propia máquina.
 //!
-//! Antes de pedir el runtime, Root anota la sesión en `$ROOT_HOME/colab/activo.json`. La borra
-//! al liberar el runtime. `correr.sh` corre en segundo plano en el runtime, y Root lo sondea cada
+//! Antes de pedir el runtime, Root anota la sesión en `$ROOT_HOME/colab/activo.json`, en una lista
+//! de sesiones. La quita al liberar el runtime. `correr.sh` corre en segundo plano en el runtime, y Root lo sondea cada
 //! minuto: libera el runtime en cuanto el junit cumple lo pedido, o cuando `correr.sh` termina.
 //! `SIGINT`, `SIGTERM` y el tope de duración (2 horas por defecto) también liberan el runtime.
 //! `oraculo pendientes --vigilar` es la red de seguridad: libera el runtime anotado si cumplió lo
@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use signal_hook::consts::{SIGINT, SIGTERM};
 
@@ -42,13 +42,13 @@ const VARIABLE_BINARIO: &str = "ROOT_COLAB_BIN";
 /// Solo para tests: baja el plazo del primer paso a los segundos que indique.
 const VARIABLE_PLAZO_PRUEBA: &str = "ROOT_COLAB_PLAZO_PRIMER_PASO_S";
 /// Tiempo máximo de cada llamada a la CLI, en segundos.
-const TIMEOUT_LLAMADA: Duration = Duration::from_secs(3600);
+pub(crate) const TIMEOUT_LLAMADA: Duration = Duration::from_secs(3600);
 /// Plazo del primer paso (`new`), que sirve de chequeo de sesión. La CLI responde la asignación
 /// o el error de login rápido. Si Colab tarda más de 60 s, el usuario reintenta.
 const PLAZO_PRIMER_PASO: Duration = Duration::from_secs(60);
 /// Plazo de `colab stop` cuando el primer paso no responde, y de la parada tras una señal o un tope.
 /// Su error se ignora en esos caminos.
-const PLAZO_STOP_FALLIDO: Duration = Duration::from_secs(30);
+pub(crate) const PLAZO_STOP_FALLIDO: Duration = Duration::from_secs(30);
 /// Pausa entre sondeos del hijo. Cada sondeo mira también las señales.
 const PASO_SONDEO: Duration = Duration::from_millis(50);
 /// Tiempo de `exec` para leer la GPU.
@@ -88,6 +88,7 @@ const FASE_RUNTIME: &str = "colab-runtime";
 const CARPETA_COLAB: &str = "colab";
 /// Archivo que anota la sesión pedida y todavía no liberada.
 const ARCHIVO_ACTIVO: &str = "activo.json";
+const ARCHIVO_CERROJO: &str = "activo.lock";
 /// Corrida que firma los `Gate` de un runtime anotado, sin tarea de por medio.
 const CORRIDA_ANOTADA: &str = "colab-activo";
 /// Mensaje exacto cuando la CLI no tiene sesión. Root no hace el login.
@@ -499,22 +500,21 @@ pub struct ResultadoColab {
     pub sesion: String,
 }
 
-/// Contenido de `activo.json`: el runtime pedido y todavía no liberado.
-#[derive(Debug, Deserialize)]
-struct Activo {
-    v: u64,
-    sesion: String,
-    pedido_ts: u64,
-    gpu_pedida: String,
+/// Una sesión anotada en `activo.json`: el runtime pedido y todavía no liberado.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EntradaActivo {
+    pub(crate) sesion: String,
+    pub(crate) pedido_ts: u64,
+    pub(crate) gpu_pedida: String,
     /// Tope de la corrida en segundos. Ausente en un `activo.json` viejo: vale el de `root.toml`.
-    #[serde(default)]
-    tope_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tope_s: Option<f64>,
     /// Ids que el junit debe traer. Ausentes en un `activo.json` viejo: `vigilar` no mira el junit.
     #[serde(default)]
-    ids: Vec<String>,
+    pub(crate) ids: Vec<String>,
     /// Repeticiones que pide la tarea. Ausentes en un `activo.json` viejo.
     #[serde(default)]
-    repeticiones: Option<u32>,
+    pub(crate) repeticiones: Option<u32>,
 }
 
 /// Qué hizo `vigilar` con el runtime anotado.
@@ -548,23 +548,46 @@ pub fn cumple_lo_pedido(junits: &[String], ids: &[String], repeticiones: u32) ->
         .all(|id| veces.get(id).is_some_and(|total| *total >= repeticiones))
 }
 
-/// Red de seguridad para el runtime anotado: lee `activo.json` y lo libera si pasó su tope o si su
-/// junit cumple lo pedido. Un runtime vigente no se toca. Sin `activo.json` no llama a la CLI.
+/// Red de seguridad para los runtimes anotados: revisa cada sesión de `activo.json` y libera la que
+/// pasó su tope o cuyo junit cumple lo pedido. Una sesión vigente no se toca. Sin `activo.json` no
+/// llama a la CLI. Si liberó alguna, `causa` trae las causas unidas por ", ".
 /// `tope_por_defecto` vale si el archivo no trae `tope_s`.
 pub fn vigilar(
     cli: &dyn ColabCli,
     home: &Path,
     tope_por_defecto: Duration,
 ) -> Result<Vigilancia, ErrorOraculo> {
-    let texto = match fs::read_to_string(ruta_activo(home)) {
-        Ok(texto) => texto,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vigilancia::SinRuntime),
-        Err(e) => return Err(infra("leer activo.json", e)),
-    };
-    let Some(activo) = leer_activo(&texto) else {
-        apartar_ilegible(home)?;
+    let sesiones = leer_sesiones(home)?;
+    if sesiones.is_empty() {
         return Ok(Vigilancia::SinRuntime);
-    };
+    }
+    let mut causas = Vec::new();
+    let mut errores = Vec::new();
+    for entrada in &sesiones {
+        match vigilar_una(cli, home, entrada, tope_por_defecto) {
+            Ok(Some(causa)) => causas.push(causa),
+            Ok(None) => {}
+            Err(e) => errores.push(e),
+        }
+    }
+    if let Some(error) = errores.into_iter().reduce(|a, b| sumar_error(a, Err(b))) {
+        return Err(error);
+    }
+    if causas.is_empty() {
+        return Ok(Vigilancia::Vigente);
+    }
+    Ok(Vigilancia::Liberado {
+        causa: causas.join(", "),
+    })
+}
+
+/// Revisa una sesión anotada. Devuelve `Some(causa)` si la liberó, `None` si sigue vigente.
+fn vigilar_una(
+    cli: &dyn ColabCli,
+    home: &Path,
+    activo: &EntradaActivo,
+    tope_por_defecto: Duration,
+) -> Result<Option<String>, ErrorOraculo> {
     let tope = activo
         .tope_s
         .and_then(|segundos| Duration::try_from_secs_f64(segundos).ok())
@@ -572,10 +595,10 @@ pub fn vigilar(
     let transcurrido = epoch_segundos().saturating_sub(activo.pedido_ts);
     if Duration::from_secs(transcurrido) >= tope {
         let motivo = format!("tope de {}", describir_tope(tope));
-        return parar_vigilado(cli, home, &activo, CAUSA_TOPE, &motivo);
+        return parar_vigilado(cli, home, activo, CAUSA_TOPE, &motivo).map(Some);
     }
     let Some(repeticiones) = activo.repeticiones.filter(|_| !activo.ids.is_empty()) else {
-        return Ok(Vigilancia::Vigente);
+        return Ok(None);
     };
 
     // Carpeta propia del vigía: la corrida que sigue viva es la que lo importa.
@@ -600,20 +623,21 @@ pub fn vigilar(
         .is_some_and(|textos| cumple_lo_pedido(&textos, &activo.ids, repeticiones));
     borrar_junits(home, &bajada.rutas);
     if cumple {
-        return parar_vigilado(cli, home, &activo, CAUSA_REQUISITO, CAUSA_REQUISITO);
+        return parar_vigilado(cli, home, activo, CAUSA_REQUISITO, CAUSA_REQUISITO).map(Some);
     }
-    Ok(Vigilancia::Vigente)
+    Ok(None)
 }
 
-/// Para el runtime anotado que decidió `vigilar` y registra su `Gate` con `accion` `vigilar`.
-/// `activo.json` se borra solo si la parada se confirma. Si no, devuelve error y lo conserva.
+/// Para la sesión anotada que decidió `vigilar` y registra su `Gate` con `accion` `vigilar`.
+/// La sesión sale de `activo.json` solo si la parada se confirma. Si no, devuelve error y la conserva.
+/// Devuelve la causa del `Gate`.
 fn parar_vigilado(
     cli: &dyn ColabCli,
     home: &Path,
-    activo: &Activo,
+    activo: &EntradaActivo,
     causa: &str,
     motivo: &str,
-) -> Result<Vigilancia, ErrorOraculo> {
+) -> Result<String, ErrorOraculo> {
     let sin_senal = Senales::default();
     let parada = Parada {
         plazo: PLAZO_STOP_FALLIDO,
@@ -639,25 +663,23 @@ fn parar_vigilado(
             activo.sesion
         )));
     }
-    borrar_activo(home)?;
-    Ok(Vigilancia::Liberado {
-        causa: causa.into(),
-    })
+    quitar_sesion(home, &activo.sesion)?;
+    Ok(causa.into())
 }
 
 /// Límites de una corrida: las señales y el tope de duración, contado desde su inicio.
-struct Limites<'a> {
-    cancelar: &'a Senales,
-    inicio: Instant,
-    tope: Duration,
+pub(crate) struct Limites<'a> {
+    pub(crate) cancelar: &'a Senales,
+    pub(crate) inicio: Instant,
+    pub(crate) tope: Duration,
 }
 
 impl Limites<'_> {
-    fn restante(&self) -> Duration {
+    pub(crate) fn restante(&self) -> Duration {
         self.tope.saturating_sub(self.inicio.elapsed())
     }
 
-    fn vencido(&self) -> bool {
+    pub(crate) fn vencido(&self) -> bool {
         self.inicio.elapsed() >= self.tope
     }
 }
@@ -737,7 +759,7 @@ pub fn correr_en_colab(
     match cli.ejecutar_con_plazo(&nuevo, plazo_nuevo, cancelar) {
         Ok(Espera::Termino(salida)) if salida.codigo == 0 => {}
         Ok(Espera::Termino(salida)) if parece_sin_sesion(&salida) => {
-            borrar_activo(home)?;
+            quitar_sesion(home, nombre_sesion)?;
             return Err(ErrorOraculo::Colab(MENSAJE_SIN_SESION.into()));
         }
         Ok(Espera::Plazo) if !lim.vencido() => {
@@ -761,7 +783,7 @@ pub fn correr_en_colab(
         }
         Err(e) => {
             // Ni siquiera se lanzó la CLI: no hay runtime que liberar.
-            borrar_activo(home)?;
+            quitar_sesion(home, nombre_sesion)?;
             return Err(e);
         }
         otro => {
@@ -859,45 +881,68 @@ pub fn correr_en_colab(
     }
 }
 
-/// Libera el runtime anotado en `activo.json`, si hay uno, y devuelve su sesión.
-/// Si la parada falla, conserva el archivo y devuelve error. Un `activo.json` ilegible se
-/// renombra y se conserva; su sesión no llega a la CLI.
+/// Libera todas las sesiones anotadas en `activo.json`, una por una, y devuelve sus nombres unidos
+/// por ", ". Una parada que falla deja su sesión anotada y no corta a las demás; el error la nombra.
+/// Un `activo.json` ilegible se renombra y se conserva; su sesión no llega a la CLI.
 pub fn liberar_anotado(cli: &dyn ColabCli, home: &Path) -> Result<Option<String>, ErrorOraculo> {
-    let ruta = ruta_activo(home);
-    let texto = match fs::read_to_string(&ruta) {
-        Ok(texto) => texto,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(infra("leer activo.json", e)),
-    };
-    let Some(activo) = leer_activo(&texto) else {
-        apartar_ilegible(home)?;
+    let sesiones = leer_sesiones(home)?;
+    if sesiones.is_empty() {
         return Ok(None);
-    };
+    }
+    let mut liberadas = Vec::new();
+    let mut no_confirmadas = Vec::new();
+    let mut errores = Vec::new();
+    for entrada in &sesiones {
+        match liberar_una_anotada(cli, home, entrada) {
+            Ok(true) => liberadas.push(entrada.sesion.as_str()),
+            Ok(false) => no_confirmadas.push(entrada.sesion.as_str()),
+            Err(e) => errores.push(e),
+        }
+    }
+    let primer_error = errores.into_iter().reduce(|a, b| sumar_error(a, Err(b)));
+    if no_confirmadas.is_empty() {
+        return match primer_error {
+            Some(error) => Err(error),
+            None => Ok(Some(liberadas.join(", "))),
+        };
+    }
+    let base = ErrorOraculo::Colab(format!(
+        "no se pudo liberar el runtime anotado {}; revísalo en Colab y corré `r00t oraculo pendientes --liberar`",
+        no_confirmadas.join(", ")
+    ));
+    Err(match primer_error {
+        Some(error) => sumar_error(base, Err(error)),
+        None => base,
+    })
+}
+
+/// Para una sesión anotada y la quita de `activo.json`. `Ok(false)` si la parada no se confirmó:
+/// la sesión se conserva y no hay `Gate`.
+fn liberar_una_anotada(
+    cli: &dyn ColabCli,
+    home: &Path,
+    entrada: &EntradaActivo,
+) -> Result<bool, ErrorOraculo> {
     let sin_senal = Senales::default();
     let parada = Parada {
         plazo: PLAZO_STOP_FALLIDO,
         cancelar: &sin_senal,
     };
-    let inexistente = match confirmar_parada(cli, &activo.sesion, parada) {
+    let inexistente = match confirmar_parada(cli, &entrada.sesion, parada) {
         Confirmacion::Confirmada => false,
         Confirmacion::SesionYaNoExistia => true,
-        Confirmacion::Fallida => {
-            return Err(ErrorOraculo::Colab(format!(
-                "no se pudo liberar el runtime anotado {}; revísalo en Colab y corré `r00t oraculo pendientes --liberar`",
-                activo.sesion
-            )));
-        }
+        Confirmacion::Fallida => return Ok(false),
     };
     let extra = json!({
         "accion": "liberar-huerfano",
-        "sesion": activo.sesion,
-        "pedido_ts": activo.pedido_ts,
-        "gpu_pedida": activo.gpu_pedida,
+        "sesion": entrada.sesion,
+        "pedido_ts": entrada.pedido_ts,
+        "gpu_pedida": entrada.gpu_pedida,
         "parada": if inexistente { "sin_sesion" } else { "ok" },
     });
     registrar(home, CORRIDA_ANOTADA, extra)?;
-    borrar_activo(home)?;
-    Ok(Some(activo.sesion))
+    quitar_sesion(home, &entrada.sesion)?;
+    Ok(true)
 }
 
 /// `true` si hay un `activo.json` que liberar.
@@ -928,14 +973,13 @@ fn ruta_activo(home: &Path) -> PathBuf {
     home.join(CARPETA_COLAB).join(ARCHIVO_ACTIVO)
 }
 
-fn epoch_segundos() -> u64 {
+pub(crate) fn epoch_segundos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
 }
 
 /// Anota la sesión pedida en `activo.json`, con su tope y lo que hay que cumplir para `vigilar`.
-/// Escribe un temporal en la misma carpeta y lo renombra.
 fn escribir_activo(
     home: &Path,
     sesion: &str,
@@ -943,31 +987,75 @@ fn escribir_activo(
     ids: &[String],
     repeticiones: u32,
 ) -> Result<(), ErrorOraculo> {
+    anotar_sesion(
+        home,
+        EntradaActivo {
+            sesion: sesion.into(),
+            pedido_ts: epoch_segundos(),
+            gpu_pedida: GPU_PEDIDA.into(),
+            tope_s: Some(tope.as_secs_f64()),
+            ids: ids.to_vec(),
+            repeticiones: Some(repeticiones),
+        },
+    )
+}
+
+/// Corre `f` con el cerrojo de `activo.json` tomado. El cerrojo se suelta al salir de la función.
+/// Nunca llamar a otra función de este bloque desde `f`: el cerrojo no es reentrante.
+fn con_cerrojo<T>(
+    home: &Path,
+    f: impl FnOnce() -> Result<T, ErrorOraculo>,
+) -> Result<T, ErrorOraculo> {
     let carpeta = home.join(CARPETA_COLAB);
     fs::create_dir_all(&carpeta).map_err(|e| infra("carpeta colab", e))?;
-    let texto = json!({
-        "v": 1,
-        "sesion": sesion,
-        "pedido_ts": epoch_segundos(),
-        "gpu_pedida": GPU_PEDIDA,
-        "tope_s": tope.as_secs_f64(),
-        "ids": ids,
-        "repeticiones": repeticiones,
+    let cerrojo = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(carpeta.join(ARCHIVO_CERROJO))
+        .map_err(|e| infra("abrir el cerrojo de activo.json", e))?;
+    fs4::FileExt::lock(&cerrojo).map_err(|e| infra("tomar el cerrojo de activo.json", e))?;
+    f()
+}
+
+/// Agrega una sesión a `activo.json` bajo cerrojo. Si ya estaba, la reemplaza.
+pub(crate) fn anotar_sesion(home: &Path, entrada: EntradaActivo) -> Result<(), ErrorOraculo> {
+    con_cerrojo(home, || {
+        let mut sesiones = leer_sesiones(home)?;
+        sesiones.retain(|e| e.sesion != entrada.sesion);
+        sesiones.push(entrada);
+        escribir_sesiones(home, &sesiones)
     })
-    .to_string();
+}
+
+/// Saca una sesión de `activo.json` bajo cerrojo. Si no quedan sesiones, borra el archivo.
+pub(crate) fn quitar_sesion(home: &Path, sesion: &str) -> Result<(), ErrorOraculo> {
+    con_cerrojo(home, || {
+        let mut sesiones = leer_sesiones(home)?;
+        let antes = sesiones.len();
+        sesiones.retain(|e| e.sesion != sesion);
+        if sesiones.is_empty() {
+            let ruta = ruta_activo(home);
+            if ruta.exists() {
+                crate::borrado::borrar_archivo_dentro(&home.join(CARPETA_COLAB), &ruta)
+                    .map_err(|e| infra("borrar activo.json", e))?;
+            }
+            return Ok(());
+        }
+        if sesiones.len() != antes {
+            escribir_sesiones(home, &sesiones)?;
+        }
+        Ok(())
+    })
+}
+
+/// Escribe la lista de sesiones en formato v2. Escribe un temporal en la misma carpeta y lo renombra.
+fn escribir_sesiones(home: &Path, sesiones: &[EntradaActivo]) -> Result<(), ErrorOraculo> {
+    let carpeta = home.join(CARPETA_COLAB);
+    let texto = json!({"v": 2, "sesiones": sesiones}).to_string();
     let temporal = carpeta.join(format!("{ARCHIVO_ACTIVO}.tmp-{}", std::process::id()));
     fs::write(&temporal, texto).map_err(|e| infra("escribir activo.json", e))?;
     fs::rename(&temporal, ruta_activo(home)).map_err(|e| infra("anotar activo.json", e))
-}
-
-/// Borra `activo.json` con la guarda de `borrado`. Si no existe, no hace nada.
-fn borrar_activo(home: &Path) -> Result<(), ErrorOraculo> {
-    let ruta = ruta_activo(home);
-    if !ruta.exists() {
-        return Ok(());
-    }
-    crate::borrado::borrar_archivo_dentro(&home.join(CARPETA_COLAB), &ruta)
-        .map_err(|e| infra("borrar activo.json", e))
 }
 
 /// Una sesión válida solo tiene letras ASCII, dígitos y guiones, y no pasa de 60 caracteres.
@@ -979,7 +1067,7 @@ fn sesion_valida(nombre: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-fn validar_sesion(nombre: &str) -> Result<(), ErrorOraculo> {
+pub(crate) fn validar_sesion(nombre: &str) -> Result<(), ErrorOraculo> {
     if sesion_valida(nombre) {
         Ok(())
     } else {
@@ -989,10 +1077,37 @@ fn validar_sesion(nombre: &str) -> Result<(), ErrorOraculo> {
     }
 }
 
-/// Lee `activo.json`. `None` si el JSON no sirve, la versión no es 1 o la sesión no es válida.
-fn leer_activo(texto: &str) -> Option<Activo> {
-    let activo: Activo = serde_json::from_str(texto).ok()?;
-    (activo.v == 1 && sesion_valida(&activo.sesion)).then_some(activo)
+/// Lee `activo.json` en formato v1 (una sesión) o v2 (una lista). `None` si el JSON no sirve, la
+/// versión no es 1 ni 2, o alguna sesión no es válida.
+fn leer_activo(texto: &str) -> Option<Vec<EntradaActivo>> {
+    let raiz: Value = serde_json::from_str(texto).ok()?;
+    let version = raiz.get("v")?.as_u64()?;
+    let sesiones = match version {
+        1 => vec![serde_json::from_value::<EntradaActivo>(raiz).ok()?],
+        2 => serde_json::from_value::<Vec<EntradaActivo>>(raiz.get("sesiones")?.clone()).ok()?,
+        _ => return None,
+    };
+    sesiones
+        .iter()
+        .all(|e| sesion_valida(&e.sesion))
+        .then_some(sesiones)
+}
+
+/// Lee las sesiones de `activo.json`. Sin archivo, la lista va vacía. Si el archivo es ilegible,
+/// lo aparta y la lista también va vacía.
+fn leer_sesiones(home: &Path) -> Result<Vec<EntradaActivo>, ErrorOraculo> {
+    let texto = match fs::read_to_string(ruta_activo(home)) {
+        Ok(texto) => texto,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(infra("leer activo.json", e)),
+    };
+    match leer_activo(&texto) {
+        Some(sesiones) => Ok(sesiones),
+        None => {
+            apartar_ilegible(home)?;
+            Ok(Vec::new())
+        }
+    }
 }
 
 /// Renombra `activo.json` a `activo.json.ilegible` y registra un aviso. Nunca borra el archivo.
@@ -1418,7 +1533,7 @@ fn binario_local(
 
 /// Llama a la CLI con el plazo dado, sin pasar de lo que queda del tope. Una señal o un plazo
 /// vencido cortan la espera y devuelven error. El llamador decide la liberación.
-fn paso(
+pub(crate) fn paso(
     cli: &dyn ColabCli,
     lim: &Limites,
     args: &[String],
@@ -1575,7 +1690,7 @@ fn cerrar_con_causa(
         texto = format!("{texto}; además, {e}");
     }
     if confirmacion.confirmada() {
-        if let Err(e) = borrar_activo(home) {
+        if let Err(e) = quitar_sesion(home, sesion) {
             texto = format!("{texto}; además, {e}");
         }
     } else {
@@ -1596,7 +1711,7 @@ fn sumar_error(error: ErrorOraculo, registro: Result<(), ErrorOraculo>) -> Error
 
 /// Cómo terminó lo que se libera. `Bien` trae la causa del corte. `Fallo` trae la causa del error, si la hay.
 #[derive(Clone, Copy)]
-enum Fin<'a> {
+pub(crate) enum Fin<'a> {
     Bien(&'a str),
     Fallo(Option<&'a str>),
 }
@@ -1604,7 +1719,7 @@ enum Fin<'a> {
 /// Para el runtime y registra el `Gate` de liberación. Con la parada confirmada, borra `activo.json`.
 /// Devuelve error si la parada no se confirma: el archivo se conserva. El `Gate` lleva `causa` si
 /// `fin` la trae.
-fn liberar(
+pub(crate) fn liberar(
     cli: &dyn ColabCli,
     home: &Path,
     corrida: &str,
@@ -1638,7 +1753,7 @@ fn liberar(
             "no se pudo liberar el runtime {sesion}; revísalo en Colab"
         )));
     }
-    borrar_activo(home)
+    quitar_sesion(home, sesion)
 }
 
 /// Pide `colab stop` con una parada. Una señal de `parada.cancelar` la corta.
@@ -1657,18 +1772,18 @@ fn parar(cli: &dyn ColabCli, sesion: &str, parada: Parada) -> Option<SalidaColab
 /// Cómo quedó una parada de `colab stop`. Una sesión que ya no existe cuenta como confirmada:
 /// el runtime ya no está.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Confirmacion {
+pub(crate) enum Confirmacion {
     Confirmada,
     SesionYaNoExistia,
     Fallida,
 }
 
 impl Confirmacion {
-    fn confirmada(self) -> bool {
+    pub(crate) fn confirmada(self) -> bool {
         self != Confirmacion::Fallida
     }
 
-    fn nota(self) -> Option<&'static str> {
+    pub(crate) fn nota(self) -> Option<&'static str> {
         match self {
             Confirmacion::SesionYaNoExistia => Some("la sesión ya no existía"),
             _ => None,
@@ -1677,7 +1792,7 @@ impl Confirmacion {
 }
 
 /// Pide la parada y clasifica la respuesta. Cualquier otro fallo, o un plazo vencido, no confirma.
-fn confirmar_parada(cli: &dyn ColabCli, sesion: &str, parada: Parada) -> Confirmacion {
+pub(crate) fn confirmar_parada(cli: &dyn ColabCli, sesion: &str, parada: Parada) -> Confirmacion {
     match parar(cli, sesion, parada) {
         Some(salida) if salida.codigo == 0 => Confirmacion::Confirmada,
         Some(salida) if parece_sesion_inexistente(&salida) => Confirmacion::SesionYaNoExistia,
@@ -1687,9 +1802,9 @@ fn confirmar_parada(cli: &dyn ColabCli, sesion: &str, parada: Parada) -> Confirm
 
 /// Plazo y señales de una parada. Una parada normal mira las señales; tras una señal, no.
 #[derive(Clone, Copy)]
-struct Parada<'a> {
-    plazo: Duration,
-    cancelar: &'a Senales,
+pub(crate) struct Parada<'a> {
+    pub(crate) plazo: Duration,
+    pub(crate) cancelar: &'a Senales,
 }
 
 fn parece_sesion_inexistente(salida: &SalidaColab) -> bool {
@@ -1726,7 +1841,7 @@ fn matar_arbol(hijo: &mut Child) {
     let _ = hijo.wait();
 }
 
-fn registrar_pedir(
+pub(crate) fn registrar_pedir(
     home: &Path,
     corrida: &str,
     sesion: &str,
@@ -1741,7 +1856,7 @@ fn registrar_pedir(
     registrar(home, corrida, extra)
 }
 
-fn registrar(home: &Path, corrida: &str, extra: Value) -> Result<(), ErrorOraculo> {
+pub(crate) fn registrar(home: &Path, corrida: &str, extra: Value) -> Result<(), ErrorOraculo> {
     let mapa = match extra {
         Value::Object(mapa) => mapa,
         _ => serde_json::Map::new(),
@@ -1850,7 +1965,7 @@ fn es_permitida(clave: &OsString) -> bool {
     VARIABLES_PERMITIDAS.contains(&nombre) || nombre.starts_with(PREFIJO_PERMITIDO)
 }
 
-fn parece_sin_sesion(salida: &SalidaColab) -> bool {
+pub(crate) fn parece_sin_sesion(salida: &SalidaColab) -> bool {
     let texto = format!("{}\n{}", salida.stdout, salida.stderr).to_lowercase();
     MARCADORES_SIN_SESION.iter().any(|m| texto.contains(m))
 }
@@ -1862,7 +1977,7 @@ fn es_t4(gpu: &str) -> bool {
 }
 
 /// Valor de la línea que empieza con `clave`. Vacío cuenta como ausente.
-fn marcador(stdout: &str, clave: &str) -> Option<String> {
+pub(crate) fn marcador(stdout: &str, clave: &str) -> Option<String> {
     stdout
         .lines()
         .find_map(|l| l.trim().strip_prefix(clave))
@@ -1870,7 +1985,7 @@ fn marcador(stdout: &str, clave: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-fn escribir(tmp: &Path, nombre: &str, texto: &str) -> Result<PathBuf, ErrorOraculo> {
+pub(crate) fn escribir(tmp: &Path, nombre: &str, texto: &str) -> Result<PathBuf, ErrorOraculo> {
     let ruta = tmp.join(nombre);
     fs::write(&ruta, texto).map_err(|e| infra(&format!("escribir {nombre}"), e))?;
     Ok(ruta)
@@ -1897,11 +2012,11 @@ fn leer_todo_con<R: Read>(lector: Option<R>, tope: usize) -> String {
     }
 }
 
-fn args(valores: &[&str]) -> Vec<String> {
+pub(crate) fn args(valores: &[&str]) -> Vec<String> {
     valores.iter().map(|v| (*v).to_string()).collect()
 }
 
-fn ruta(p: &Path) -> String {
+pub(crate) fn ruta(p: &Path) -> String {
     p.display().to_string()
 }
 
@@ -2599,10 +2714,15 @@ mod tests {
             .clone()
             .expect("activo.json debe existir al pedir el runtime");
         let json: Value = serde_json::from_str(&texto).expect("JSON");
-        assert_eq!(json["v"], 1);
-        assert_eq!(json["sesion"], "root-memora-1");
-        assert_eq!(json["gpu_pedida"], "T4");
-        assert!(json["pedido_ts"].as_u64().is_some_and(|t| t > 0), "{json}");
+        // Formato v2 (punto 3A): la sesión va en la lista `sesiones`.
+        assert_eq!(json["v"], 2);
+        let entrada = &json["sesiones"][0];
+        assert_eq!(entrada["sesion"], "root-memora-1");
+        assert_eq!(entrada["gpu_pedida"], "T4");
+        assert!(
+            entrada["pedido_ts"].as_u64().is_some_and(|t| t > 0),
+            "{json}"
+        );
         assert!(
             !ruta.exists(),
             "tras una corrida exitosa no queda activo.json"
@@ -3525,7 +3645,9 @@ mod tests {
 
     #[test]
     fn colab_activo_viejo_sin_campos_nuevos_se_lee() {
-        let activo = leer_activo(ACTIVO_VIEJO).expect("un activo viejo sigue leyéndose");
+        // Adaptado a la lista (punto 3A): `leer_activo` devuelve las sesiones, y un v1 trae una.
+        let activos = leer_activo(ACTIVO_VIEJO).expect("un activo viejo sigue leyéndose");
+        let activo = &activos[0];
         assert_eq!(activo.sesion, "vieja");
         assert!(activo.ids.is_empty());
         assert_eq!(activo.repeticiones, None);
@@ -3609,6 +3731,151 @@ mod tests {
         let r = vigilar(&falso, home.path(), Duration::from_secs(7200));
         assert!(matches!(r, Ok(Vigilancia::SinRuntime)), "{r:?}");
         assert!(falso.lineas().is_empty());
+    }
+
+    /// Una entrada de prueba con tope de una hora y un id por junit.
+    fn entrada_de(sesion: &str) -> EntradaActivo {
+        EntradaActivo {
+            sesion: sesion.into(),
+            pedido_ts: epoch_segundos(),
+            gpu_pedida: "T4".into(),
+            tope_s: Some(3600.0),
+            ids: vec!["test_o::o2".into()],
+            repeticiones: Some(1),
+        }
+    }
+
+    /// `activo.json` de formato v2 con esas sesiones, en orden.
+    fn activo_v2(sesiones: &[EntradaActivo]) -> String {
+        json!({"v": 2, "sesiones": sesiones}).to_string()
+    }
+
+    /// Sesiones que lista `activo.json` de formato v2, en orden.
+    fn sesiones_en_activo(home: &Path) -> Vec<String> {
+        let texto = fs::read_to_string(ruta_activo(home)).expect("activo.json");
+        let json: Value = serde_json::from_str(&texto).expect("JSON");
+        assert_eq!(json["v"], 2, "{json}");
+        json["sesiones"]
+            .as_array()
+            .expect("lista de sesiones")
+            .iter()
+            .map(|e| e["sesion"].as_str().expect("sesion").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn colab_anotar_dos_sesiones_las_lista_en_activo_json() {
+        let home = tempfile::tempdir().expect("home");
+        anotar_sesion(home.path(), entrada_de("uno")).expect("anota uno");
+        anotar_sesion(home.path(), entrada_de("dos")).expect("anota dos");
+        assert_eq!(sesiones_en_activo(home.path()), vec!["uno", "dos"]);
+    }
+
+    #[test]
+    fn colab_quitar_sesion_saca_una_y_la_ultima_borra_el_archivo() {
+        let home = tempfile::tempdir().expect("home");
+        anotar_sesion(home.path(), entrada_de("uno")).expect("anota uno");
+        anotar_sesion(home.path(), entrada_de("dos")).expect("anota dos");
+        quitar_sesion(home.path(), "uno").expect("quita uno");
+        assert_eq!(sesiones_en_activo(home.path()), vec!["dos"]);
+        quitar_sesion(home.path(), "dos").expect("quita dos");
+        assert!(
+            !ruta_activo(home.path()).exists(),
+            "quitar la última sesión borra activo.json"
+        );
+    }
+
+    #[test]
+    fn colab_activo_v1_liberar_anotado_libera_y_borra() {
+        let home = tempfile::tempdir().expect("home");
+        let ruta = escribir_activo_de_prueba(home.path(), ACTIVO_VIEJO);
+        let falso = Falso::nuevo(|_: &[String]| salida(0, "", ""));
+        let r = liberar_anotado(&falso, home.path());
+        assert_eq!(r.expect("sin error"), Some("vieja".to_string()));
+        assert_eq!(falso.lineas(), vec!["stop -s vieja".to_string()]);
+        assert!(!ruta.exists());
+    }
+
+    #[test]
+    fn colab_liberar_anotado_dos_sesiones_para_las_dos() {
+        let home = tempfile::tempdir().expect("home");
+        let ruta = escribir_activo_de_prueba(
+            home.path(),
+            &activo_v2(&[entrada_de("uno"), entrada_de("dos")]),
+        );
+        let falso = Falso::nuevo(|_: &[String]| salida(0, "", ""));
+        let r = liberar_anotado(&falso, home.path());
+        assert_eq!(r.expect("sin error"), Some("uno, dos".to_string()));
+        let lineas = falso.lineas();
+        assert!(lineas.iter().any(|l| l == "stop -s uno"), "{lineas:?}");
+        assert!(lineas.iter().any(|l| l == "stop -s dos"), "{lineas:?}");
+        assert!(!ruta.exists());
+    }
+
+    #[test]
+    fn colab_liberar_anotado_una_falla_libera_la_otra_y_conserva_la_fallida() {
+        let home = tempfile::tempdir().expect("home");
+        escribir_activo_de_prueba(
+            home.path(),
+            &activo_v2(&[entrada_de("uno"), entrada_de("dos")]),
+        );
+        let falso = Falso::nuevo(|args: &[String]| {
+            if args.iter().any(|a| a == "uno") {
+                salida(1, "", "raro")
+            } else {
+                salida(0, "", "")
+            }
+        });
+        let error = liberar_anotado(&falso, home.path()).expect_err("una parada falló");
+        assert!(error.to_string().contains("uno"), "{error}");
+        let lineas = falso.lineas();
+        assert!(lineas.iter().any(|l| l == "stop -s dos"), "{lineas:?}");
+        assert_eq!(sesiones_en_activo(home.path()), vec!["uno"]);
+    }
+
+    #[test]
+    fn colab_vigilar_dos_sesiones_libera_solo_la_vencida() {
+        let home = tempfile::tempdir().expect("home");
+        let mut vencida = entrada_de("vencida");
+        vencida.pedido_ts = ahora_s() - 3 * 3600;
+        vencida.tope_s = None;
+        let vigente = entrada_de("vigente");
+        escribir_activo_de_prueba(home.path(), &activo_v2(&[vencida, vigente]));
+        let falso = Falso::nuevo(|args: &[String]| match args[0].as_str() {
+            "download" => salida(1, "", "todavía no hay junit"),
+            _ => salida(0, "", ""),
+        });
+        let r = vigilar(&falso, home.path(), Duration::from_secs(7200));
+        match r {
+            Ok(Vigilancia::Liberado { causa }) => assert_eq!(causa, "tope de duración"),
+            otro => panic!("esperaba Liberado por el tope, llegó {otro:?}"),
+        }
+        let lineas = falso.lineas();
+        assert!(lineas.iter().any(|l| l == "stop -s vencida"), "{lineas:?}");
+        assert!(!lineas.iter().any(|l| l == "stop -s vigente"), "{lineas:?}");
+        assert_eq!(sesiones_en_activo(home.path()), vec!["vigente"]);
+    }
+
+    #[test]
+    fn colab_anotar_desde_dos_hilos_no_pierde_ninguna_sesion() {
+        let home = tempfile::tempdir().expect("home");
+        let hilos: Vec<thread::JoinHandle<()>> = ["a", "b"]
+            .iter()
+            .map(|letra| {
+                let home = home.path().to_path_buf();
+                let letra = letra.to_string();
+                thread::spawn(move || {
+                    for i in 0..30 {
+                        anotar_sesion(&home, entrada_de(&format!("{letra}-{i}"))).expect("anota");
+                    }
+                })
+            })
+            .collect();
+        for hilo in hilos {
+            hilo.join().expect("hilo");
+        }
+        let sesiones = sesiones_en_activo(home.path());
+        assert_eq!(sesiones.len(), 60, "{sesiones:?}");
     }
 
     #[test]

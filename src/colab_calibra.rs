@@ -10,7 +10,9 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,6 +23,7 @@ use crate::oracle::ErrorOraculo;
 use crate::oracle::calibra::{
     self, Calibraciones, CasoGuardado, Fila, hash_de_tarea, huella_de, tiene_items_de_juez,
 };
+use crate::oracle::colab::{self, ColabCli, SalidaColab, Senales, TIMEOUT_LLAMADA};
 use crate::oracle::contenedor::correr_programa;
 use crate::oracle::descarga::cache_de;
 use crate::oracle::tarea::{Tarea, cargar_en};
@@ -1524,6 +1527,787 @@ fn reservar_carpeta(padre: &Path, base: &str) -> io::Result<PathBuf> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Calibrar en Colab: `r00t colab calibrar`.
+// ---------------------------------------------------------------------------
+
+/// Tope de cada runtime. El reparto de la vuelta 53 estima de 15 a 45 minutos en 2 núcleos.
+/// Por eso 4 horas dejan un margen de cinco veces. Gasta como máximo 0,32 unidades a 0,08 por hora.
+pub const TOPE_RUNTIME: Duration = Duration::from_secs(4 * 3600);
+
+/// La CLI no necesita un valor para CPU: sin --gpu el runtime es de CPU. Sin verificar contra la CLI real.
+const ACELERADOR_CPU: Option<&str> = None;
+
+/// Carpeta remota donde el runtime descomprime el paquete de ida.
+const D_REMOTO: &str = "/content/root-paquete";
+/// Nombre remoto del paquete de ida. Vive en `/content`.
+const PAQUETE_REMOTO_IDA: &str = "paquete.tar.gz";
+/// Ruta remota del paquete de vuelta que arma el cierre.
+const VUELTA_REMOTA: &str = "/content/vuelta.tar.gz";
+/// Tiempo de la preparación del runtime, en segundos.
+const SEG_PREPARAR_CALIBRAR: u64 = 3600;
+/// Tiempo de un trabajo de calibración, en segundos. El tope del runtime lo acota.
+const SEG_TRABAJO_CALIBRAR: u64 = 14400;
+/// Tiempo del cierre que verifica y empaqueta la vuelta, en segundos.
+const SEG_CIERRE_CALIBRAR: u64 = 600;
+/// Margen que el laptop espera sobre el tiempo de un `exec` remoto.
+const MARGEN_EXEC: Duration = Duration::from_secs(300);
+/// Corrida que firma los `Gate` de cada runtime de calibración.
+const CORRIDA_CALIBRAR: &str = "colab-calibrar";
+/// Causa del `Gate` de liberación cuando el ciclo termina bien.
+const CAUSA_CALIBRACION_OK: &str = "calibración terminó";
+/// Causa del `Gate` de liberación cuando el ciclo falla.
+const CAUSA_CALIBRACION_FALLO: &str = "error-en-calibracion";
+/// Causa del `Gate` de liberación cuando el ciclo pasa su tope.
+const CAUSA_CALIBRACION_TOPE: &str = "tope de duración";
+/// Causa del `Gate` de liberación cuando una señal corta el ciclo.
+const CAUSA_CALIBRACION_SENAL: &str = "señal recibida";
+/// Acelerador que se registra en los `Gate` de los runtimes de calibración.
+const CPU: &str = "cpu";
+/// Plazo de cada llamada a la CLI en el ciclo de calibración.
+const TIMEOUT_CALIBRAR: Duration = TIMEOUT_LLAMADA;
+/// Nombre del manifiesto dentro del paquete de ida.
+const MANIFIESTO_IDA: &str = "manifiesto.json";
+/// Nombre del `calibracion.json` dentro de los paquetes de ida y de vuelta.
+const ARCHIVO_CALIBRACION: &str = "calibracion.json";
+
+/// Código de salida de un trabajo del paquete. Un código distinto de cero no es error del ciclo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodigoTrabajo {
+    pub tarea: String,
+    pub dimension: String,
+    pub codigo: i32,
+}
+
+/// Lo que pasó con un paquete: su runtime, su sesión, la importación o el motivo del fallo.
+#[derive(Debug)]
+pub struct ResultadoRuntime {
+    pub paquete: PathBuf,
+    pub sesion: String,
+    pub resultado: Result<ResumenImportar, String>,
+    pub codigos_de_trabajos: Vec<CodigoTrabajo>,
+}
+
+/// Resultado de `calibrar`: un resultado por paquete, en el orden de los paquetes.
+#[derive(Debug)]
+pub struct ResumenCalibrar {
+    pub runtimes: Vec<ResultadoRuntime>,
+}
+
+/// Punto de entrada de `colab calibrar`: arma la CLI real y el commit de `raiz_root`.
+pub fn calibrar_cli(
+    paquetes: Vec<PathBuf>,
+    raiz_root: Option<PathBuf>,
+) -> Result<ResumenCalibrar, ErrorOraculo> {
+    for paquete in &paquetes {
+        if !paquete.is_file() {
+            return Err(ErrorOraculo::Uso(format!(
+                "no existe el paquete {}",
+                paquete.display()
+            )));
+        }
+    }
+    let raiz_root = match raiz_root {
+        Some(raiz) => raiz,
+        None => std::env::current_dir()
+            .map_err(|e| ErrorOraculo::Infra(format!("directorio actual: {e}")))?,
+    };
+    let commit = commit_de(&raiz_root)?;
+    let cli = colab::ColabProceso::desde_entorno()?;
+    let senales = Senales::instalar()
+        .map_err(|e| ErrorOraculo::Infra(format!("no se pudieron registrar las señales: {e}")))?;
+    calibrar_con(
+        &cli,
+        &root_home(),
+        &paquetes,
+        &commit,
+        &senales,
+        TOPE_RUNTIME,
+    )
+}
+
+/// Corre todos los paquetes a la vez, cada uno en su runtime. Inyecta la CLI y el tope.
+/// Antes de lanzar, libera las sesiones huérfanas de corridas anteriores. Si eso falla, no lanza nada.
+pub fn calibrar_con(
+    cli: &(impl ColabCli + Sync),
+    home: &Path,
+    paquetes: &[PathBuf],
+    commit_laptop: &str,
+    senales: &Senales,
+    tope: Duration,
+) -> Result<ResumenCalibrar, ErrorOraculo> {
+    colab::liberar_anotado(cli, home)?;
+    let importacion = Mutex::new(());
+    let runtimes = thread::scope(|s| {
+        let hilos: Vec<_> = paquetes
+            .iter()
+            .enumerate()
+            .map(|(indice, paquete)| {
+                let importacion = &importacion;
+                let hilo = s.spawn(move || {
+                    ciclo_de_runtime(
+                        cli,
+                        home,
+                        paquete,
+                        indice,
+                        commit_laptop,
+                        senales,
+                        tope,
+                        importacion,
+                    )
+                });
+                (paquete, hilo)
+            })
+            .collect();
+        hilos
+            .into_iter()
+            .map(|(paquete, hilo)| {
+                hilo.join().unwrap_or_else(|_| {
+                    sin_runtime(paquete, "el hilo del runtime falló".into(), String::new())
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    Ok(ResumenCalibrar { runtimes })
+}
+
+/// Resultado de un paquete que falló antes de que llegara su vuelta.
+fn sin_runtime(paquete: &Path, motivo: String, sesion: String) -> ResultadoRuntime {
+    ResultadoRuntime {
+        paquete: paquete.to_path_buf(),
+        sesion,
+        resultado: Err(format!("{motivo}; su paquete de vuelta no llegó")),
+        codigos_de_trabajos: Vec::new(),
+    }
+}
+
+/// Ciclo completo de un paquete: anota, pide el runtime, corre los trabajos, baja la vuelta,
+/// libera el runtime y, si llegó la vuelta, la importa. Siempre libera y borra sus temporales.
+#[allow(clippy::too_many_arguments)]
+fn ciclo_de_runtime<C: ColabCli + Sync>(
+    cli: &C,
+    home: &Path,
+    paquete: &Path,
+    indice: usize,
+    commit_laptop: &str,
+    senales: &Senales,
+    tope: Duration,
+    importacion: &Mutex<()>,
+) -> ResultadoRuntime {
+    let paquete = match std::path::absolute(paquete) {
+        Ok(absoluto) => absoluto,
+        Err(e) => return sin_runtime(paquete, format!("ruta del paquete: {e}"), String::new()),
+    };
+    let manifiesto = match leer_manifiesto_de_paquete(&paquete) {
+        Ok(manifiesto) => manifiesto,
+        Err(e) => return sin_runtime(&paquete, e.to_string(), String::new()),
+    };
+    let Some(primero) = manifiesto.trabajos.first() else {
+        return sin_runtime(
+            &paquete,
+            "el paquete no trae trabajos".into(),
+            String::new(),
+        );
+    };
+    let sesion = format!("{}-{indice}", colab::nombre_sesion(&primero.tarea));
+    if let Err(e) = colab::validar_sesion(&sesion) {
+        return sin_runtime(&paquete, e.to_string(), sesion);
+    }
+    let base = home.join("tmp");
+    let tmp = base.join(format!("colab-calibrar-{sesion}"));
+    let preparado = fs::create_dir_all(&base)
+        .and_then(|()| borrado::borrar_dir_dentro(&base, &tmp))
+        .and_then(|()| fs::create_dir_all(&tmp));
+    if let Err(e) = preparado {
+        return sin_runtime(&paquete, format!("carpeta temporal: {e}"), sesion);
+    }
+
+    let entrada = colab::EntradaActivo {
+        sesion: sesion.clone(),
+        pedido_ts: colab::epoch_segundos(),
+        gpu_pedida: CPU.into(),
+        tope_s: Some(tope.as_secs_f64()),
+        ids: Vec::new(),
+        repeticiones: None,
+    };
+    if let Err(e) = colab::anotar_sesion(home, entrada) {
+        return sin_runtime(&paquete, e.to_string(), sesion);
+    }
+
+    let lim = colab::Limites {
+        cancelar: senales,
+        inicio: Instant::now(),
+        tope,
+    };
+    let mut codigos = Vec::new();
+    let fase = correr_runtime(
+        cli,
+        &lim,
+        home,
+        &paquete,
+        &sesion,
+        &tmp,
+        &manifiesto,
+        &mut codigos,
+    );
+    let fin = match &fase {
+        Ok(_) => colab::Fin::Bien(CAUSA_CALIBRACION_OK),
+        Err(_) if lim.vencido() => colab::Fin::Fallo(Some(CAUSA_CALIBRACION_TOPE)),
+        Err(_) if senales.recibida().is_some() => colab::Fin::Fallo(Some(CAUSA_CALIBRACION_SENAL)),
+        Err(_) => colab::Fin::Fallo(Some(CAUSA_CALIBRACION_FALLO)),
+    };
+    let liberado = liberar_calibracion(cli, home, &sesion, senales, fin);
+
+    let resultado = match (fase, liberado) {
+        (Ok(vuelta), Ok(())) => {
+            importar_vuelta(home, &paquete, &vuelta, &sesion, commit_laptop, importacion)
+                .map_err(|e| e.to_string())
+        }
+        (Ok(_), Err(e)) => Err(e.to_string()),
+        (Err(e), Ok(())) => Err(format!("{e}; su paquete de vuelta no llegó")),
+        (Err(e), Err(l)) => Err(format!("{e}; además, {l}; su paquete de vuelta no llegó")),
+    };
+    let resultado = match (resultado, limpiar_temporales(home, &tmp, &sesion)) {
+        (Ok(mut resumen), Err(e)) => {
+            resumen
+                .avisos
+                .push(format!("no se borraron temporales: {e}"));
+            Ok(resumen)
+        }
+        (Err(mensaje), Err(e)) => Err(format!("{mensaje}; además, no se borraron temporales: {e}")),
+        (resultado, Ok(())) => resultado,
+    };
+    ResultadoRuntime {
+        paquete,
+        sesion,
+        resultado,
+        codigos_de_trabajos: codigos,
+    }
+}
+
+/// Pide el runtime, sube el paquete, corre la preparación y cada trabajo, cierra la vuelta y la baja.
+/// Un código distinto de cero de un trabajo no es error: se guarda en `codigos`. Devuelve la vuelta local.
+#[allow(clippy::too_many_arguments)]
+fn correr_runtime<C: ColabCli>(
+    cli: &C,
+    lim: &colab::Limites,
+    home: &Path,
+    paquete: &Path,
+    sesion: &str,
+    tmp: &Path,
+    manifiesto: &Manifiesto,
+    codigos: &mut Vec<CodigoTrabajo>,
+) -> Result<PathBuf, ErrorOraculo> {
+    pedir_runtime(cli, lim, home, sesion)?;
+
+    let subida = llamar(
+        cli,
+        lim,
+        &colab::args(&[
+            "upload",
+            "-s",
+            sesion,
+            &colab::ruta(paquete),
+            PAQUETE_REMOTO_IDA,
+        ]),
+        TIMEOUT_CALIBRAR,
+    )?;
+    if subida.codigo != 0 {
+        return Err(ErrorOraculo::Infra(format!(
+            "no se pudo subir el paquete: {}",
+            subida.stderr.trim()
+        )));
+    }
+
+    let guion = colab::escribir(tmp, "preparar.py", &script_preparar())?;
+    let preparado = ejecutar_guion(cli, lim, sesion, SEG_PREPARAR_CALIBRAR, &guion)?;
+    if preparado.codigo != 0 || colab::marcador(&preparado.stdout, "ROOT_OK=").is_none() {
+        return Err(ErrorOraculo::Infra(format!(
+            "la preparación del runtime falló: {}",
+            preparado.stderr.trim()
+        )));
+    }
+
+    let archivos = &manifiesto.archivos;
+    for (indice, trabajo) in manifiesto.trabajos.iter().enumerate() {
+        let args: Vec<String> = trabajo
+            .args
+            .iter()
+            .map(|a| ruta_remota(a, archivos))
+            .collect();
+        let entorno: BTreeMap<String, String> = trabajo
+            .entorno
+            .iter()
+            .map(|(clave, valor)| (clave.clone(), ruta_remota(valor, archivos)))
+            .collect();
+        let guion = colab::escribir(
+            tmp,
+            &format!("trabajo-{indice}.py"),
+            &script_trabajo(indice, &args, &entorno),
+        )?;
+        let salida = ejecutar_guion(cli, lim, sesion, SEG_TRABAJO_CALIBRAR, &guion)?;
+        if salida.codigo != 0 || colab::marcador(&salida.stdout, "ROOT_OK=").is_none() {
+            return Err(ErrorOraculo::Infra(format!(
+                "el trabajo {} {} no corrió: {}",
+                trabajo.tarea,
+                trabajo.dimension,
+                salida.stderr.trim()
+            )));
+        }
+        let codigo = colab::marcador(&salida.stdout, "ROOT_CODIGO=")
+            .and_then(|v| v.parse::<i32>().ok())
+            .ok_or_else(|| {
+                ErrorOraculo::Infra(format!("el trabajo {} no dio su código", trabajo.tarea))
+            })?;
+        codigos.push(CodigoTrabajo {
+            tarea: trabajo.tarea.clone(),
+            dimension: trabajo.dimension.clone(),
+            codigo,
+        });
+    }
+
+    let guion = colab::escribir(tmp, "cierre.py", &script_cierre())?;
+    let cierre = ejecutar_guion(cli, lim, sesion, SEG_CIERRE_CALIBRAR, &guion)?;
+    if cierre.codigo != 0 || colab::marcador(&cierre.stdout, "ROOT_OK=").is_none() {
+        return Err(ErrorOraculo::Infra(format!(
+            "el cierre de la vuelta falló: {}",
+            cierre.stderr.trim()
+        )));
+    }
+
+    let vuelta = tmp.join("vuelta.tar.gz");
+    let bajada = llamar(
+        cli,
+        lim,
+        &colab::args(&[
+            "download",
+            "-s",
+            sesion,
+            VUELTA_REMOTA,
+            &colab::ruta(&vuelta),
+        ]),
+        TIMEOUT_CALIBRAR,
+    )?;
+    if bajada.codigo != 0 || !vuelta.is_file() {
+        return Err(ErrorOraculo::Infra(format!(
+            "no se pudo bajar la vuelta: {}",
+            bajada.stderr.trim()
+        )));
+    }
+    Ok(vuelta)
+}
+
+/// Pide el runtime de CPU y registra el pedido. Sin respuesta correcta, da error.
+fn pedir_runtime<C: ColabCli>(
+    cli: &C,
+    lim: &colab::Limites,
+    home: &Path,
+    sesion: &str,
+) -> Result<(), ErrorOraculo> {
+    let salida = llamar(cli, lim, &args_new(sesion), cli.plazo_primer_paso());
+    let estado = match &salida {
+        Ok(s) if s.codigo == 0 => "ok",
+        _ => "fallo",
+    };
+    let registro = colab::registrar(
+        home,
+        CORRIDA_CALIBRAR,
+        serde_json::json!({
+            "accion": "pedir",
+            "sesion": sesion,
+            "gpu_pedida": CPU,
+            "resultado": estado,
+        }),
+    );
+    let salida = salida?;
+    registro?;
+    if salida.codigo == 0 {
+        return Ok(());
+    }
+    if colab::parece_sin_sesion(&salida) {
+        return Err(ErrorOraculo::Colab(colab::MENSAJE_SIN_SESION.into()));
+    }
+    Err(ErrorOraculo::Infra(format!(
+        "colab new salió con código {}: {}",
+        salida.codigo,
+        salida.stderr.trim()
+    )))
+}
+
+/// Argumentos de `new`. Sin acelerador, el runtime es de CPU.
+fn args_new(sesion: &str) -> Vec<String> {
+    let mut args = colab::args(&["new", "-s", sesion]);
+    if let Some(acelerador) = ACELERADOR_CPU {
+        args.extend(colab::args(&["--gpu", acelerador]));
+    }
+    args
+}
+
+/// Llama a la CLI sin pasar del tope. Con el tope vencido, no llama.
+fn llamar(
+    cli: &dyn ColabCli,
+    lim: &colab::Limites,
+    args: &[String],
+    plazo: Duration,
+) -> Result<SalidaColab, ErrorOraculo> {
+    if lim.vencido() {
+        return Err(ErrorOraculo::Colab(format!(
+            "tope de {} superado",
+            colab::describir_tope(lim.tope)
+        )));
+    }
+    colab::paso(cli, lim, args, plazo)
+}
+
+/// Corre un guion de Python en el runtime. El plazo de Root es el del guion más un margen.
+fn ejecutar_guion<C: ColabCli>(
+    cli: &C,
+    lim: &colab::Limites,
+    sesion: &str,
+    segundos: u64,
+    guion: &Path,
+) -> Result<SalidaColab, ErrorOraculo> {
+    llamar(
+        cli,
+        lim,
+        &colab::args(&[
+            "exec",
+            "-s",
+            sesion,
+            "--timeout",
+            &segundos.to_string(),
+            "-f",
+            &colab::ruta(guion),
+        ]),
+        Duration::from_secs(segundos) + MARGEN_EXEC,
+    )
+}
+
+/// Libera el runtime con `fin`. Si una señal corta la parada, la reintenta sin señales.
+fn liberar_calibracion<C: ColabCli>(
+    cli: &C,
+    home: &Path,
+    sesion: &str,
+    senales: &Senales,
+    fin: colab::Fin,
+) -> Result<(), ErrorOraculo> {
+    let parada = colab::Parada {
+        plazo: TIMEOUT_CALIBRAR,
+        cancelar: senales,
+    };
+    match colab::liberar(cli, home, CORRIDA_CALIBRAR, sesion, CPU, fin, parada) {
+        Err(_) if senales.recibida().is_some() => {
+            let sin_senal = Senales::default();
+            let parada = colab::Parada {
+                plazo: TIMEOUT_CALIBRAR,
+                cancelar: &sin_senal,
+            };
+            colab::liberar(cli, home, CORRIDA_CALIBRAR, sesion, CPU, fin, parada)
+        }
+        otro => otro,
+    }
+}
+
+/// Arma la vuelta y la importa. Las importaciones van de una en una.
+fn importar_vuelta(
+    home: &Path,
+    ida: &Path,
+    vuelta: &Path,
+    sesion: &str,
+    commit_laptop: &str,
+    importacion: &Mutex<()>,
+) -> Result<ResumenImportar, ErrorOraculo> {
+    let armado = armar_paquete_de_vuelta(home, ida, vuelta, sesion)?;
+    let _turno = importacion.lock().unwrap_or_else(|e| e.into_inner());
+    importar(home, &armado, commit_laptop)
+}
+
+/// Borra la carpeta de trabajo del runtime y el paquete de vuelta armado. Sin error si no existen.
+fn limpiar_temporales(home: &Path, tmp: &Path, sesion: &str) -> io::Result<()> {
+    let base = home.join("tmp");
+    borrado::borrar_dir_dentro(&base, tmp)?;
+    borrado::borrar_archivo_dentro(&base, &base.join(format!("vuelta-{sesion}.tar.gz")))
+}
+
+/// Lee el manifiesto del paquete de ida sin extraer el resto.
+fn leer_manifiesto_de_paquete(paquete: &Path) -> Result<Manifiesto, ErrorOraculo> {
+    let absoluto = std::path::absolute(paquete)
+        .map_err(|e| ErrorOraculo::Infra(format!("ruta del paquete: {e}")))?;
+    let salida = Command::new("tar")
+        .arg("-xzf")
+        .arg(&absoluto)
+        .arg("-O")
+        .arg("./manifiesto.json")
+        .output()
+        .map_err(|e| ErrorOraculo::Infra(format!("correr tar: {e}")))?;
+    if !salida.status.success() {
+        return Err(ErrorOraculo::Uso(format!(
+            "no se pudo leer el manifiesto de {}: {}",
+            paquete.display(),
+            String::from_utf8_lossy(&salida.stderr).trim()
+        )));
+    }
+    serde_json::from_slice(&salida.stdout)
+        .map_err(|e| ErrorOraculo::Uso(format!("manifiesto ilegible: {e}")))
+}
+
+/// Arma el paquete de vuelta a partir del paquete de ida y de la vuelta bajada de Colab.
+/// Deja el tar.gz en `ROOT_HOME/tmp/vuelta-<sesion>.tar.gz` y devuelve su ruta.
+pub fn armar_paquete_de_vuelta(
+    home: &Path,
+    ida: &Path,
+    vuelta: &Path,
+    sesion: &str,
+) -> Result<PathBuf, ErrorOraculo> {
+    let tmp = home.join("tmp");
+    fs::create_dir_all(&tmp)
+        .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", tmp.display())))?;
+    let trabajo = tmp.join(format!("vuelta-armar-{sesion}"));
+    borrado::borrar_dir_dentro(&tmp, &trabajo)
+        .map_err(|e| ErrorOraculo::Infra(format!("limpiar {}: {e}", trabajo.display())))?;
+    fs::create_dir_all(&trabajo)
+        .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", trabajo.display())))?;
+    let resultado = armar_en(home, ida, vuelta, sesion, &trabajo);
+    let limpieza = borrado::borrar_dir_dentro(&tmp, &trabajo);
+    let salida = resultado?;
+    limpieza.map_err(|e| ErrorOraculo::Infra(format!("borrar la carpeta de trabajo: {e}")))?;
+    Ok(salida)
+}
+
+/// Cuerpo de `armar_paquete_de_vuelta`. `trabajo` es una carpeta vacía que se borra al salir.
+fn armar_en(
+    home: &Path,
+    ida: &Path,
+    vuelta: &Path,
+    sesion: &str,
+    trabajo: &Path,
+) -> Result<PathBuf, ErrorOraculo> {
+    let ida_dir = trabajo.join("ida");
+    let vuelta_dir = trabajo.join("vuelta");
+    let staging = trabajo.join("staging");
+    for carpeta in [&ida_dir, &vuelta_dir, &staging] {
+        fs::create_dir_all(carpeta)
+            .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", carpeta.display())))?;
+    }
+    extraer_paquete(ida, &ida_dir)?;
+    extraer_paquete(vuelta, &vuelta_dir)?;
+    // Una vuelta con enlaces no se copia: `fs::copy` seguiría el enlace y leería fuera del paquete.
+    let enlaces = enlaces_simbolicos(&vuelta_dir)
+        .map_err(|e| ErrorOraculo::Infra(format!("revisar la vuelta: {e}")))?;
+    if !enlaces.is_empty() {
+        return Err(ErrorOraculo::Uso(format!(
+            "la vuelta trae enlaces simbólicos: {}",
+            enlaces.join(", ")
+        )));
+    }
+
+    let manifiesto_ida: Manifiesto = leer_json(&ida_dir.join(MANIFIESTO_IDA))?;
+    let filas_ida = filas_de_calibracion(&ida_dir.join(ARCHIVO_CALIBRACION))?;
+    let filas_vuelta = filas_de_calibracion(&vuelta_dir.join(ARCHIVO_CALIBRACION))?;
+    let nuevas: Vec<Fila> = filas_vuelta
+        .into_iter()
+        .filter(|f| !filas_ida.iter().any(|g| misma_fila_de_ida(f, g)))
+        .collect();
+
+    if let Some(texto) = leer_texto_si_existe(&vuelta_dir.join("verificacion.txt"))? {
+        escribir(&staging.join("verificacion.txt"), texto.as_bytes())?;
+    }
+    let casos_vuelta = vuelta_dir.join(CARPETA_CALIBRACION);
+    let mut nombres_casos = Vec::new();
+    if casos_vuelta.is_dir() {
+        let carpeta = staging.join(CARPETA_CALIBRACION);
+        fs::create_dir_all(&carpeta)
+            .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", carpeta.display())))?;
+        for entrada in fs::read_dir(&casos_vuelta)
+            .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", casos_vuelta.display())))?
+        {
+            let entrada = entrada.map_err(|e| {
+                ErrorOraculo::Infra(format!("leer {}: {e}", casos_vuelta.display()))
+            })?;
+            let nombre = entrada.file_name().to_string_lossy().into_owned();
+            let es_archivo = entrada.file_type().is_ok_and(|t| t.is_file());
+            if !es_archivo || !nombre_de_casos_valido(&nombre) {
+                continue;
+            }
+            fs::copy(entrada.path(), carpeta.join(&nombre))
+                .map_err(|e| ErrorOraculo::Infra(format!("copiar {nombre}: {e}")))?;
+            nombres_casos.push(nombre);
+        }
+    }
+
+    let filas_vuelta_json: Vec<FilaVuelta> = nuevas
+        .iter()
+        .map(|fila| {
+            let prefijo = format!(
+                "{}-{}-{}",
+                fila.tarea,
+                fila.dimension.clave(),
+                fila.ts as u64
+            );
+            FilaVuelta {
+                tarea: fila.tarea.clone(),
+                dimension: fila.dimension.clave().to_string(),
+                ts: fila.ts,
+                casos: nombres_casos
+                    .iter()
+                    .filter(|n| es_caso_de(n, &prefijo))
+                    .cloned()
+                    .collect(),
+            }
+        })
+        .collect();
+    let filas_json = serde_json::to_string(&nuevas)
+        .map_err(|e| ErrorOraculo::Infra(format!("serializar filas.json: {e}")))?;
+    escribir(&staging.join("filas.json"), filas_json.as_bytes())?;
+
+    // Los hashes se toman antes de escribir el manifiesto, que no se lista a sí mismo.
+    let archivos = archivos_de(&staging)
+        .map_err(|e| ErrorOraculo::Infra(format!("leer el paquete de vuelta: {e}")))?;
+    let manifiesto = ManifiestoVuelta {
+        v: 1,
+        commit_root: manifiesto_ida.commit_root,
+        archivos,
+        filas: filas_vuelta_json,
+        donde: DondeSeMidio {
+            lugar: "colab".into(),
+            runtime: "cpu".into(),
+        },
+    };
+    let json = serde_json::to_string_pretty(&manifiesto)
+        .map_err(|e| ErrorOraculo::Infra(format!("serializar el manifiesto de vuelta: {e}")))?;
+    escribir(
+        &staging.join(MANIFIESTO_VUELTA),
+        format!("{json}\n").as_bytes(),
+    )?;
+
+    let salida = std::path::absolute(home.join("tmp").join(format!("vuelta-{sesion}.tar.gz")))
+        .map_err(|e| ErrorOraculo::Infra(format!("ruta de la vuelta: {e}")))?;
+    let estado = Command::new("tar")
+        .arg("-czf")
+        .arg(&salida)
+        .arg("-C")
+        .arg(&staging)
+        .arg(".")
+        .output()
+        .map_err(|e| ErrorOraculo::Infra(format!("correr tar: {e}")))?;
+    if !estado.status.success() {
+        return Err(ErrorOraculo::Infra(format!(
+            "tar falló: {}",
+            String::from_utf8_lossy(&estado.stderr).trim()
+        )));
+    }
+    Ok(salida)
+}
+
+/// Filas de un `calibracion.json`. Un archivo que no existe no tiene filas.
+fn filas_de_calibracion(ruta: &Path) -> Result<Vec<Fila>, ErrorOraculo> {
+    let Some(texto) = leer_texto_si_existe(ruta)? else {
+        return Ok(Vec::new());
+    };
+    let calibracion: Calibraciones = serde_json::from_str(&texto)
+        .map_err(|e| ErrorOraculo::Uso(format!("{} ilegible: {e}", ruta.display())))?;
+    Ok(calibracion.filas)
+}
+
+/// Dos filas son la misma medición de ida si tienen tarea, dimensión y `ts` iguales.
+fn misma_fila_de_ida(a: &Fila, b: &Fila) -> bool {
+    a.tarea == b.tarea && a.dimension == b.dimension && a.ts == b.ts
+}
+
+/// Dice si ningún argumento lleva el valor de una variable cuyo nombre es secreto.
+/// Ignora los valores vacíos o de menos de 4 caracteres. Solo lo usan los tests: en producción,
+/// un valor corto de una variable como `GPG_KEY_HOME` coincidiría con rutas de Root.
+#[cfg(test)]
+pub fn argumentos_sin_secretos(args: &[String], entorno: &[(String, String)]) -> bool {
+    entorno
+        .iter()
+        .filter(|(clave, valor)| es_nombre_secreto(clave) && valor.chars().count() >= 4)
+        .all(|(_, valor)| args.iter().all(|arg| !arg.contains(valor.as_str())))
+}
+
+/// Ruta remota de un valor: `D_REMOTO/valor` si es una ruta relativa que existe en el paquete; si no, el valor.
+fn ruta_remota(valor: &str, archivos: &BTreeMap<String, String>) -> String {
+    let relativa =
+        !valor.is_empty() && !valor.starts_with('/') && !valor.split('/').any(|c| c == "..");
+    let prefijo = format!("{valor}/");
+    let existe = relativa
+        && (archivos.contains_key(valor) || archivos.keys().any(|k| k.starts_with(&prefijo)));
+    if existe {
+        format!("{D_REMOTO}/{valor}")
+    } else {
+        valor.to_string()
+    }
+}
+
+/// Literal de Python para un texto: el JSON de un string es un literal válido.
+fn literal_python(texto: &str) -> String {
+    serde_json::to_string(texto).expect("un texto siempre se serializa")
+}
+
+/// Script que corre un trabajo del paquete. El JSON del trabajo va como literal que `json.loads` lee.
+/// La salida del trabajo va a `trabajo-<indice>.log`. Un código distinto de cero no falla el script.
+fn script_trabajo(indice: usize, args: &[String], entorno: &BTreeMap<String, String>) -> String {
+    let cuerpo = serde_json::json!({
+        "indice": indice,
+        "args": args,
+        "entorno": entorno,
+    })
+    .to_string();
+    let literal = literal_python(&cuerpo);
+    format!(
+        r#"import json
+import os
+import subprocess
+
+TRABAJO = json.loads({literal})
+D = "{D_REMOTO}"
+entorno = dict(os.environ)
+entorno.update(TRABAJO["entorno"])
+entorno["ROOT_HOME"] = D
+ruta_log = os.path.join(D, "trabajo-%d.log" % TRABAJO["indice"])
+with open(ruta_log, "w") as log:
+    r = subprocess.run([os.path.join(D, "r00t")] + TRABAJO["args"], cwd=D, env=entorno, stdout=log, stderr=subprocess.STDOUT)
+print("ROOT_OK=trabajo-%d" % TRABAJO["indice"])
+print("ROOT_CODIGO=%d" % r.returncode)
+"#
+    )
+}
+
+/// Script que descomprime el paquete de ida y corre su preparación.
+fn script_preparar() -> String {
+    format!(
+        r#"import os
+import subprocess
+
+D = "{D_REMOTO}"
+os.makedirs(D, exist_ok=True)
+subprocess.run(["tar", "-xzf", "/content/{PAQUETE_REMOTO_IDA}", "-C", D], cwd="/content", check=True)
+subprocess.run(["bash", D + "/tools/colab/preparar-runtime.sh", D], check=True)
+print("ROOT_OK=preparar")
+"#
+    )
+}
+
+/// Script que verifica las versiones y empaqueta la vuelta. La verificación puede dar `mal`: la revisa la importación.
+fn script_cierre() -> String {
+    format!(
+        r#"import os
+import subprocess
+
+D = "{D_REMOTO}"
+with open(D + "/verificacion.txt", "w") as verificacion:
+    subprocess.run(["bash", D + "/tools/colab/verificar-versiones.sh", D], stdout=verificacion)
+partes = ["verificacion.txt"]
+if os.path.isfile(D + "/calibracion.json"):
+    partes.append("calibracion.json")
+if os.path.isdir(D + "/calibracion"):
+    partes.append("calibracion")
+subprocess.run(["tar", "-czf", "{VUELTA_REMOTA}", "-C", D] + partes, check=True)
+print("ROOT_OK=cierre")
+"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2353,5 +3137,630 @@ mod tests_importar {
             decidir_fila(&e),
             Decision::NoEntra("sin valores de base para comparar".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_calibrar {
+    use super::*;
+    use crate::oracle::colab::Espera;
+    use std::sync::{Condvar, Mutex};
+    use std::time::Instant;
+
+    const COMMIT: &str = "abc123";
+    const TOPE_PRUEBA: Duration = Duration::from_secs(600);
+    const ESPERA_MAXIMA: Duration = Duration::from_secs(10);
+
+    /// Espera con plazo a que lleguen `esperados` hilos. `std::sync::Barrier` no tiene plazo.
+    struct Barrera {
+        cuenta: Mutex<usize>,
+        cuando: Condvar,
+        esperados: usize,
+    }
+
+    impl Barrera {
+        fn nueva(esperados: usize) -> Self {
+            Barrera {
+                cuenta: Mutex::new(0),
+                cuando: Condvar::new(),
+                esperados,
+            }
+        }
+
+        fn llegar(&self) {
+            let mut cuenta = self.cuenta.lock().expect("barrera");
+            *cuenta += 1;
+            self.cuando.notify_all();
+            let limite = Instant::now() + ESPERA_MAXIMA;
+            while *cuenta < self.esperados {
+                let ahora = Instant::now();
+                if ahora >= limite {
+                    return;
+                }
+                let (nueva, _) = self
+                    .cuando
+                    .wait_timeout(cuenta, limite - ahora)
+                    .expect("barrera");
+                cuenta = nueva;
+            }
+        }
+    }
+
+    /// Doble de la CLI `colab`. Registra cada llamada y responde según el comando.
+    struct Falso {
+        home: PathBuf,
+        llamadas: Mutex<Vec<Vec<String>>>,
+        /// Sufijo de sesión cuyo `exec` devuelve código 1.
+        exec_falla_en: Option<String>,
+        /// Barrera del primer `exec` de cada sesión.
+        barrera: Option<Barrera>,
+        primer_exec: Mutex<BTreeSet<String>>,
+        /// `activo.json` tal como lo vio el primer `exec` tras la barrera.
+        activo_visto: Mutex<Option<String>>,
+        /// Vuelta que `download` copia al destino.
+        vuelta: PathBuf,
+    }
+
+    impl Falso {
+        fn nuevo(home: &Path, vuelta: &Path) -> Self {
+            Falso {
+                home: home.to_path_buf(),
+                llamadas: Mutex::new(Vec::new()),
+                exec_falla_en: None,
+                barrera: None,
+                primer_exec: Mutex::new(BTreeSet::new()),
+                activo_visto: Mutex::new(None),
+                vuelta: vuelta.to_path_buf(),
+            }
+        }
+
+        fn con_falla(mut self, sufijo: &str) -> Self {
+            self.exec_falla_en = Some(sufijo.to_string());
+            self
+        }
+
+        fn con_barrera(mut self, esperados: usize) -> Self {
+            self.barrera = Some(Barrera::nueva(esperados));
+            self
+        }
+
+        fn llamadas(&self) -> Vec<Vec<String>> {
+            self.llamadas.lock().expect("llamadas").clone()
+        }
+
+        /// Sesiones que recibieron `new`.
+        fn sesiones(&self) -> BTreeSet<String> {
+            self.llamadas()
+                .iter()
+                .filter(|a| a.first().is_some_and(|c| c == "new"))
+                .filter_map(|a| valor_de(a, "-s"))
+                .collect()
+        }
+
+        fn exec(&self, args: &[String]) -> SalidaColab {
+            let sesion = valor_de(args, "-s").unwrap_or_default();
+            let guion = fs::read_to_string(args.last().expect("ruta del guion")).expect("guion");
+            let primera = self
+                .primer_exec
+                .lock()
+                .expect("primer exec")
+                .insert(sesion.clone());
+            if let Some(barrera) = self.barrera.as_ref().filter(|_| primera) {
+                barrera.llegar();
+                let mut visto = self.activo_visto.lock().expect("visto");
+                if visto.is_none() {
+                    *visto = fs::read_to_string(self.home.join("colab/activo.json")).ok();
+                }
+            }
+            if self
+                .exec_falla_en
+                .as_deref()
+                .is_some_and(|sufijo| sesion.ends_with(sufijo))
+            {
+                return salida(1, "", "fallo simulado");
+            }
+            let stdout = if guion.contains("preparar-runtime.sh") {
+                "ROOT_OK=preparar\n"
+            } else if guion.contains("TRABAJO = json.loads") {
+                "ROOT_OK=trabajo-0\nROOT_CODIGO=0\n"
+            } else {
+                "ROOT_OK=cierre\n"
+            };
+            salida(0, stdout, "")
+        }
+    }
+
+    impl ColabCli for Falso {
+        fn ejecutar_con_plazo(
+            &self,
+            args: &[String],
+            _plazo: Duration,
+            _cancelar: &Senales,
+        ) -> Result<Espera, ErrorOraculo> {
+            self.llamadas.lock().expect("llamadas").push(args.to_vec());
+            let salida = match args.first().map(String::as_str) {
+                Some("exec") => self.exec(args),
+                Some("download") => {
+                    let destino = args.last().expect("destino");
+                    fs::copy(&self.vuelta, destino).expect("copia la vuelta");
+                    salida(0, "", "")
+                }
+                _ => salida(0, "", ""),
+            };
+            Ok(Espera::Termino(salida))
+        }
+    }
+
+    fn salida(codigo: i32, stdout: &str, stderr: &str) -> SalidaColab {
+        SalidaColab {
+            codigo,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    /// Valor que sigue a `flag` en `args`.
+    fn valor_de(args: &[String], flag: &str) -> Option<String> {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    }
+
+    /// Ejecuta `tar` con `argumentos` y falla si no sale bien.
+    fn tar(argumentos: &[&str]) {
+        let estado = Command::new("tar").args(argumentos).status().expect("tar");
+        assert!(estado.success(), "tar falló: {argumentos:?}");
+    }
+
+    /// Empaqueta `dir` en `tgz` con la misma forma que `colab empaquetar`.
+    fn empaquetar_dir(dir: &Path, tgz: &Path) {
+        tar(&[
+            "-czf",
+            tgz.to_str().expect("ruta"),
+            "-C",
+            dir.to_str().expect("ruta"),
+            ".",
+        ]);
+    }
+
+    /// Vuelta mínima: verificación en verde y un calibracion.json sin filas.
+    fn vuelta_minima(caja: &Path) -> PathBuf {
+        let dir = caja.join("vuelta-minima");
+        fs::create_dir_all(&dir).expect("carpeta");
+        fs::write(dir.join("verificacion.txt"), "ok tests\n").expect("verificación");
+        fs::write(dir.join("calibracion.json"), "{\"v\":1,\"filas\":[]}\n").expect("calibración");
+        let tgz = caja.join("vuelta-minima.tar.gz");
+        empaquetar_dir(&dir, &tgz);
+        tgz
+    }
+
+    /// Paquete de ida hecho a mano. El manifiesto sale de `armar_manifiesto`, como en el punto 1.
+    fn paquete_de_ida(caja: &Path, nombre: &str, calibracion: &str) -> PathBuf {
+        let staging = caja.join(format!("{nombre}-src"));
+        let archivos_base = [
+            ("r00t", "binario\n"),
+            ("entorno.env", "PATH=/usr/bin\n"),
+            ("tools/colab/preparar-runtime.sh", "exit 0\n"),
+            ("tools/colab/verificar-versiones.sh", "exit 0\n"),
+            ("repos/tarea-prueba/Cargo.toml", "[package]\n"),
+            ("calibracion.json", calibracion),
+        ];
+        for (ruta, texto) in archivos_base {
+            let destino = staging.join(ruta);
+            fs::create_dir_all(destino.parent().expect("padre")).expect("carpeta");
+            fs::write(destino, texto).expect("escribe");
+        }
+        let archivos = archivos_de(&staging).expect("archivos");
+        let datos = DatosManifiesto {
+            commit_root: COMMIT.into(),
+            binario_sha256: sha256_hex(b"binario\n"),
+            trabajos: vec![DatoTrabajo {
+                tarea: "tarea-prueba".into(),
+                dimension: Dimension::Seguridad,
+                tarea_hash: "hash".into(),
+                imagen_id: "imagen".into(),
+            }],
+            imagenes: BTreeMap::from([("tarea-prueba".to_string(), "imagen".to_string())]),
+        };
+        let manifiesto = armar_manifiesto(&datos, archivos);
+        let json = serde_json::to_string_pretty(&manifiesto).expect("manifiesto");
+        fs::write(staging.join("manifiesto.json"), json).expect("manifiesto");
+        let tgz = caja.join(format!("{nombre}.tar.gz"));
+        empaquetar_dir(&staging, &tgz);
+        tgz
+    }
+
+    /// Fila de la tarea de prueba con `ts`. Huella y hash no coinciden con ninguna laptop.
+    fn fila_json(ts: f64) -> serde_json::Value {
+        serde_json::json!({
+            "tarea": "tarea-prueba",
+            "dimension": "seguridad",
+            "n": 4,
+            "semilla": 7,
+            "ts": ts,
+            "huella": "huella-ajena",
+            "tarea_hash": "hash-ajeno",
+        })
+    }
+
+    fn correr(
+        cli: &Falso,
+        home: &Path,
+        paquetes: &[PathBuf],
+        tope: Duration,
+    ) -> Result<ResumenCalibrar, ErrorOraculo> {
+        calibrar_con(cli, home, paquetes, COMMIT, &Senales::default(), tope)
+    }
+
+    fn comandos_de(llamadas: &[Vec<String>], sesion: &str) -> Vec<String> {
+        llamadas
+            .iter()
+            .filter(|a| valor_de(a, "-s").as_deref() == Some(sesion))
+            .map(|a| a[0].clone())
+            .collect()
+    }
+
+    #[test]
+    fn dos_paquetes_dan_dos_sesiones_con_su_ciclo() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let p1 = paquete_de_ida(caja.path(), "ida-1", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr(&cli, home.path(), &[p0, p1], TOPE_PRUEBA).expect("calibra");
+
+        let sesiones = cli.sesiones();
+        assert_eq!(sesiones.len(), 2, "{sesiones:?}");
+        let llamadas = cli.llamadas();
+        for sesion in &sesiones {
+            assert_eq!(
+                comandos_de(&llamadas, sesion),
+                ["new", "upload", "exec", "exec", "exec", "download", "stop"],
+                "sesión {sesion}"
+            );
+            let nuevo = llamadas
+                .iter()
+                .find(|a| a[0] == "new" && valor_de(a, "-s").as_deref() == Some(sesion.as_str()))
+                .expect("new de la sesión");
+            assert_eq!(nuevo, &["new", "-s", sesion.as_str()]);
+        }
+        assert!(resumen.runtimes.iter().all(|r| r.resultado.is_ok()));
+    }
+
+    #[test]
+    fn ningun_new_lleva_gpu() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let llamadas = cli.llamadas();
+        assert!(
+            llamadas
+                .iter()
+                .all(|a| !a.iter().any(|x| x == "--gpu" || x == "T4")),
+            "{llamadas:?}"
+        );
+    }
+
+    #[test]
+    fn exec_que_falla_libera_su_sesion_y_la_otra_termina() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let p1 = paquete_de_ida(caja.path(), "ida-1", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_falla("-1");
+
+        let resumen = correr(&cli, home.path(), &[p0, p1], TOPE_PRUEBA).expect("calibra");
+
+        assert_eq!(resumen.runtimes.len(), 2);
+        let (fallida, ok) = (&resumen.runtimes[1], &resumen.runtimes[0]);
+        assert!(fallida.resultado.is_err(), "{:?}", fallida.resultado);
+        assert!(ok.resultado.is_ok(), "{:?}", ok.resultado);
+        let llamadas = cli.llamadas();
+        let comandos_fallida = comandos_de(&llamadas, &fallida.sesion);
+        assert_eq!(comandos_fallida.last().map(String::as_str), Some("stop"));
+        assert!(!comandos_fallida.contains(&"download".to_string()));
+        let comandos_ok = comandos_de(&llamadas, &ok.sesion);
+        assert!(comandos_ok.contains(&"download".to_string()));
+        assert_eq!(comandos_ok.last().map(String::as_str), Some("stop"));
+    }
+
+    #[test]
+    fn activo_lista_las_dos_sesiones_durante_el_ciclo_y_no_existe_al_terminar() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let p1 = paquete_de_ida(caja.path(), "ida-1", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_barrera(2);
+
+        let resumen = correr(&cli, home.path(), &[p0, p1], TOPE_PRUEBA).expect("calibra");
+
+        let visto = cli.activo_visto.lock().expect("visto").clone();
+        let texto = visto.expect("activo.json durante el ciclo");
+        let activo: serde_json::Value = serde_json::from_str(&texto).expect("json");
+        assert_eq!(activo["v"], 2);
+        let anotadas: BTreeSet<String> = activo["sesiones"]
+            .as_array()
+            .expect("lista")
+            .iter()
+            .map(|s| s["sesion"].as_str().expect("sesión").to_string())
+            .collect();
+        let esperadas: BTreeSet<String> =
+            resumen.runtimes.iter().map(|r| r.sesion.clone()).collect();
+        assert_eq!(anotadas, esperadas);
+        assert!(!home.path().join("colab/activo.json").exists());
+    }
+
+    #[test]
+    fn activo_v1_huerfano_se_libera_antes_de_lanzar() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        fs::create_dir_all(home.path().join("colab")).expect("carpeta");
+        fs::write(
+            home.path().join("colab/activo.json"),
+            "{\"v\":1,\"sesion\":\"root-vieja-1\",\"pedido_ts\":1,\"gpu_pedida\":\"T4\"}\n",
+        )
+        .expect("activo v1");
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let llamadas = cli.llamadas();
+        let stop = llamadas
+            .iter()
+            .position(|a| a[0] == "stop" && valor_de(a, "-s").as_deref() == Some("root-vieja-1"));
+        let primer_new = llamadas.iter().position(|a| a[0] == "new");
+        assert!(stop.is_some(), "{llamadas:?}");
+        assert!(stop < primer_new, "{llamadas:?}");
+        assert!(!home.path().join("colab/activo.json").exists());
+    }
+
+    #[test]
+    fn argumentos_sin_secretos_mira_solo_los_nombres_secretos() {
+        let entorno = vec![
+            (
+                "DEEPSEEK_API_KEY".to_string(),
+                "valor-secreto-123".to_string(),
+            ),
+            ("PATH".to_string(), "/usr/bin/zz".to_string()),
+        ];
+        let limpios = vec!["oraculo".to_string(), "/usr/bin/zz".to_string()];
+        let con_secreto = vec!["--token".to_string(), "valor-secreto-123".to_string()];
+        assert!(argumentos_sin_secretos(&limpios, &entorno));
+        assert!(!argumentos_sin_secretos(&con_secreto, &entorno));
+    }
+
+    #[test]
+    fn argumentos_del_ciclo_no_llevan_secretos_del_entorno() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+        correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+        let entorno = vec![(
+            "DEEPSEEK_API_KEY".to_string(),
+            "valor-secreto-123".to_string(),
+        )];
+
+        for args in cli.llamadas() {
+            assert!(argumentos_sin_secretos(&args, &entorno), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn argumentos_del_ciclo_pasan_con_el_entorno_real() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+        correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+        let real: Vec<(String, String)> = std::env::vars().collect();
+
+        for args in cli.llamadas() {
+            assert!(argumentos_sin_secretos(&args, &real), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn script_con_comillas_recupera_el_json_del_trabajo() {
+        let args: Vec<String> = ["a\"b", "c'd", "e\\f", "línea\nnueva", "{\"x\": [1, \"\"]}"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let entorno = BTreeMap::from([(
+            "ROOT_BWRAP_ENTORNO".to_string(),
+            format!("{D_REMOTO}/entorno.env"),
+        )]);
+
+        let script = script_trabajo(3, &args, &entorno);
+
+        let linea = script
+            .lines()
+            .find_map(|l| l.strip_prefix("TRABAJO = json.loads("))
+            .and_then(|l| l.strip_suffix(')'))
+            .expect("la línea TRABAJO = json.loads(...)");
+        let cuerpo: String = serde_json::from_str(linea).expect("literal de Python");
+        let trabajo: serde_json::Value = serde_json::from_str(&cuerpo).expect("JSON del trabajo");
+        assert_eq!(trabajo["indice"], 3);
+        assert_eq!(trabajo["args"], serde_json::json!(args));
+        assert_eq!(
+            trabajo["entorno"]["ROOT_BWRAP_ENTORNO"],
+            format!("{D_REMOTO}/entorno.env")
+        );
+    }
+
+    #[test]
+    fn tope_vencido_no_deja_la_sesion_anotada() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr(&cli, home.path(), &[p0], Duration::ZERO).expect("calibra");
+
+        let runtime = &resumen.runtimes[0];
+        assert!(runtime.resultado.is_err(), "{:?}", runtime.resultado);
+        assert!(!home.path().join("colab/activo.json").exists());
+        let llamadas = cli.llamadas();
+        assert!(
+            llamadas
+                .iter()
+                .any(|a| a[0] == "stop"
+                    && valor_de(a, "-s").as_deref() == Some(runtime.sesion.as_str())),
+            "{llamadas:?}"
+        );
+    }
+
+    #[test]
+    fn el_pedido_del_runtime_se_registra_como_cpu() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+        correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let eventos = fs::read_to_string(home.path().join("eventos.jsonl")).expect("eventos");
+        assert!(eventos.contains("\"gpu_pedida\":\"cpu\""), "{eventos}");
+        assert!(!eventos.contains("\"gpu_pedida\":\"T4\""), "{eventos}");
+    }
+
+    #[test]
+    fn armado_de_vuelta_solo_lleva_las_filas_nuevas() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let ida_cal = serde_json::json!({"v": 1, "filas": [fila_json(100.0)]}).to_string();
+        let ida = paquete_de_ida(caja.path(), "ida", &ida_cal);
+        let dir = caja.path().join("vuelta-src");
+        fs::create_dir_all(dir.join("calibracion")).expect("carpeta");
+        fs::write(dir.join("verificacion.txt"), "ok tests\n").expect("verificación");
+        let vuelta_cal = serde_json::json!({"v": 1, "filas": [fila_json(100.0), fila_json(200.0)]});
+        fs::write(dir.join("calibracion.json"), vuelta_cal.to_string()).expect("calibración");
+        fs::write(
+            dir.join("calibracion/tarea-prueba-seguridad-100.casos.jsonl"),
+            "{}\n",
+        )
+        .expect("casos viejos");
+        fs::write(
+            dir.join("calibracion/tarea-prueba-seguridad-200.casos.jsonl"),
+            "{}\n",
+        )
+        .expect("casos nuevos");
+        let vuelta = caja.path().join("vuelta.tar.gz");
+        empaquetar_dir(&dir, &vuelta);
+
+        let salida = armar_paquete_de_vuelta(home.path(), &ida, &vuelta, "root-x-1")
+            .expect("arma la vuelta");
+
+        assert_eq!(salida, home.path().join("tmp/vuelta-root-x-1.tar.gz"));
+        let entradas: Vec<String> = fs::read_dir(home.path().join("tmp"))
+            .expect("tmp")
+            .map(|e| {
+                e.expect("entrada")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(entradas, ["vuelta-root-x-1.tar.gz"]);
+        let extraido = extraer(&salida);
+        let manifiesto: ManifiestoVuelta = serde_json::from_str(
+            &fs::read_to_string(extraido.path().join(MANIFIESTO_VUELTA)).expect("manifiesto"),
+        )
+        .expect("manifiesto de vuelta");
+        assert_eq!(manifiesto.commit_root, COMMIT);
+        assert_eq!(manifiesto.donde.lugar, "colab");
+        assert_eq!(manifiesto.donde.runtime, "cpu");
+        assert_eq!(manifiesto.filas.len(), 1, "{manifiesto:?}");
+        assert_eq!(manifiesto.filas[0].ts, 200.0);
+        assert_eq!(
+            manifiesto.filas[0].casos,
+            ["tarea-prueba-seguridad-200.casos.jsonl"]
+        );
+        let filas: Vec<Fila> = serde_json::from_str(
+            &fs::read_to_string(extraido.path().join("filas.json")).expect("filas"),
+        )
+        .expect("filas.json");
+        assert_eq!(filas.len(), 1);
+        assert!(
+            extraido
+                .path()
+                .join("calibracion/tarea-prueba-seguridad-100.casos.jsonl")
+                .is_file()
+        );
+        let resumen = importar(home.path(), &salida, COMMIT).expect("la revisión pasa");
+        assert!(
+            resumen
+                .rechazadas
+                .iter()
+                .all(|r| !r.motivo.contains("revisión"))
+        );
+    }
+
+    #[test]
+    fn armado_rechaza_enlaces_simbolicos_en_la_vuelta() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let ida = paquete_de_ida(caja.path(), "ida", "{\"v\":1,\"filas\":[]}\n");
+        let dir = caja.path().join("vuelta-src");
+        fs::create_dir_all(&dir).expect("carpeta");
+        fs::write(dir.join("verificacion.txt"), "ok tests\n").expect("verificación");
+        fs::write(dir.join("calibracion.json"), "{\"v\":1,\"filas\":[]}\n").expect("calibración");
+        fs::write(caja.path().join("secreto"), "x\n").expect("secreto");
+        std::os::unix::fs::symlink(caja.path().join("secreto"), dir.join("enlace"))
+            .expect("enlace");
+        let vuelta = caja.path().join("vuelta.tar.gz");
+        empaquetar_dir(&dir, &vuelta);
+
+        let error = armar_paquete_de_vuelta(home.path(), &ida, &vuelta, "root-x-2");
+
+        assert!(error.is_err());
+        assert!(!home.path().join("tmp/vuelta-root-x-2.tar.gz").exists());
+    }
+
+    #[test]
+    fn args_del_trabajo_resuelven_solo_rutas_del_paquete() {
+        let archivos = BTreeMap::from([
+            ("entorno.env".to_string(), "x".to_string()),
+            ("repos/tarea-prueba/Cargo.toml".to_string(), "x".to_string()),
+        ]);
+
+        assert_eq!(
+            ruta_remota("repos/tarea-prueba", &archivos),
+            format!("{D_REMOTO}/repos/tarea-prueba")
+        );
+        assert_eq!(
+            ruta_remota("entorno.env", &archivos),
+            format!("{D_REMOTO}/entorno.env")
+        );
+        assert_eq!(ruta_remota("--json", &archivos), "--json");
+        assert_eq!(ruta_remota("../entorno.env", &archivos), "../entorno.env");
+        assert_eq!(ruta_remota("bwrap", &archivos), "bwrap");
+    }
+
+    /// Lee un tar.gz en una carpeta temporal nueva.
+    fn extraer(tgz: &Path) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("extraído");
+        tar(&[
+            "-xzf",
+            tgz.to_str().expect("ruta"),
+            "-C",
+            dir.path().to_str().expect("ruta"),
+        ]);
+        dir
     }
 }

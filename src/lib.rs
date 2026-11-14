@@ -641,6 +641,94 @@ fn colab_empaquetar(json: bool, pedido: colab_calibra::PedidoEmpaquetar) -> Resu
     Ok(())
 }
 
+/// `colab calibrar`: corre cada paquete en su runtime, importa cada vuelta e imprime el resumen de todos.
+/// Si algún runtime falla, el comando sale con error después de imprimir todo.
+fn colab_calibrar(
+    json: bool,
+    paquetes: Vec<PathBuf>,
+    raiz_root: Option<PathBuf>,
+) -> Result<(), Error> {
+    let resumen = colab_calibra::calibrar_cli(paquetes, raiz_root)?;
+    let fallidos = resumen
+        .runtimes
+        .iter()
+        .filter(|r| r.resultado.is_err())
+        .count();
+    if json {
+        let runtimes: Vec<serde_json::Value> =
+            resumen.runtimes.iter().map(runtime_a_json).collect();
+        println!(
+            "{}",
+            serde_json::json!({"runtimes": runtimes, "fallidos": fallidos})
+        );
+    } else {
+        for runtime in &resumen.runtimes {
+            imprimir_runtime(runtime);
+        }
+    }
+    if fallidos > 0 {
+        return Err(oracle::ErrorOraculo::Colab(format!(
+            "{fallidos} de {} runtimes fallaron",
+            resumen.runtimes.len()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Un runtime como objeto JSON: su paquete, su sesión, si terminó bien y su resumen o su error.
+fn runtime_a_json(runtime: &colab_calibra::ResultadoRuntime) -> serde_json::Value {
+    let (resumen, error) = match &runtime.resultado {
+        Ok(resumen) => (
+            serde_json::to_value(resumen).unwrap_or(serde_json::Value::Null),
+            serde_json::Value::Null,
+        ),
+        Err(motivo) => (serde_json::Value::Null, serde_json::json!(motivo)),
+    };
+    serde_json::json!({
+        "paquete": runtime.paquete.display().to_string(),
+        "sesion": runtime.sesion,
+        "ok": runtime.resultado.is_ok(),
+        "resumen": resumen,
+        "error": error,
+        "codigos_de_trabajos": runtime.codigos_de_trabajos,
+    })
+}
+
+/// Texto de un runtime: la importación o el motivo del fallo, y el código de cada trabajo.
+fn imprimir_runtime(runtime: &colab_calibra::ResultadoRuntime) {
+    println!("{} ({})", runtime.paquete.display(), runtime.sesion);
+    match &runtime.resultado {
+        Ok(resumen) => {
+            println!(
+                "  entraron {} filas; no entraron {}",
+                resumen.entraron,
+                resumen.rechazadas.len()
+            );
+            for rechazada in &resumen.rechazadas {
+                println!(
+                    "  no entra {} {}: {}",
+                    rechazada.tarea, rechazada.dimension, rechazada.motivo
+                );
+            }
+            println!("  casos copiados: {}", resumen.casos_copiados);
+            if let Some(respaldo) = &resumen.respaldo {
+                println!("  respaldo: {}", respaldo.display());
+            }
+            for aviso in &resumen.avisos {
+                println!("  {aviso}");
+            }
+        }
+        Err(motivo) => println!("  falló: {motivo}"),
+    }
+    for codigo in &runtime.codigos_de_trabajos {
+        println!(
+            "  trabajo {} {}: código {}",
+            codigo.tarea, codigo.dimension, codigo.codigo
+        );
+    }
+}
+
 /// `colab importar`: revisa el paquete de vuelta de Colab, importa lo que pasa e imprime el resumen.
 fn colab_importar(json: bool, pedido: colab_calibra::PedidoImportar) -> Result<(), Error> {
     let resumen = colab_calibra::importar_cli(pedido)?;
@@ -923,6 +1011,9 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                 raiz_root: raiz_root.clone(),
             },
         ),
+        Comando::Colab {
+            accion: ColabAccion::Calibrar { paquete, raiz_root },
+        } => colab_calibrar(cli.json, paquete.clone(), raiz_root.clone()),
         Comando::Observa { accion } => observa(cli.json, accion),
         Comando::Corre {
             tarea,
