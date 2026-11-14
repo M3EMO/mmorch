@@ -860,7 +860,7 @@ fn calibra_casos_todos_no_aplicables_escriben_el_archivo_con_sus_renglones() {
 }
 
 /// Motivo de la fila de una dimensión que la tarea no aplica.
-const MOTIVO_NO_APLICA: &str = "no aplica: la tarea no define [eficiencia]";
+const MOTIVO_NO_APLICA: &str = root::oracle::perfiles::herramientas::MOTIVO_SIN_ESTADO_INICIAL;
 
 /// Tarea con `[eficiencia]`: su comando nunca corre en estos tests, solo define que la dimensión aplica.
 const EFICIENCIA: &str = "\n[eficiencia]\ncmd = \"bench-eficiencia\"\npiso = 5000.0\n";
@@ -1053,7 +1053,7 @@ fn eficiencia_no_aplicable_cli_sale_con_0_e_imprime_el_motivo() {
     );
     let texto = String::from_utf8_lossy(&salida.stdout);
     assert!(
-        texto.contains("calibra-fixture/eficiencia: no aplica: la tarea no define [eficiencia]"),
+        texto.contains(&format!("calibra-fixture/eficiencia: {MOTIVO_NO_APLICA}")),
         "{texto}"
     );
 }

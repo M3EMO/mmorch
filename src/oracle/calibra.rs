@@ -2202,16 +2202,12 @@ pub fn calibrar_tarea_con_lector(
         .ok_or_else(|| ErrorOraculo::Uso(format!("dimensión desconocida: {dimension}")))?;
     let tarea = super::tarea::cargar_en(home, nombre)?;
     let tarea_hash = hash_de_tarea(&tarea)?;
-    // Eficiencia sin `[eficiencia]`: la tarea no la aplica. Ni la base ni los casos corren, y la fila lleva
-    // solo el motivo. Es el mismo criterio que la sonda usa para no medir.
-    if dim == Dimension::Eficiencia && tarea.eficiencia.is_none() {
-        let fila = fila_no_aplica(
-            &tarea,
-            &tarea_hash,
-            dim,
-            semilla,
-            MOTIVO_NO_APLICA_EFICIENCIA,
-        );
+    // Eficiencia sin `[eficiencia]` que la evaluación no mide: la fila lleva el motivo. Ni la base ni los
+    // casos corren. El criterio espeja `puntaje_de_eficiencia`.
+    if dim == Dimension::Eficiencia
+        && let Some(motivo) = motivo_eficiencia_no_aplica(&tarea)
+    {
+        let fila = fila_no_aplica(&tarea, &tarea_hash, dim, semilla, motivo);
         agregar(home, &fila)?;
         return Ok(Calibrada {
             fila,
@@ -2352,8 +2348,20 @@ pub fn calibrar_tarea_con_lector(
     })
 }
 
-/// Motivo de la fila de Eficiencia en una tarea sin `[eficiencia]`.
-const MOTIVO_NO_APLICA_EFICIENCIA: &str = "no aplica: la tarea no define [eficiencia]";
+/// Motivo de no aplicar Eficiencia, o `None` si la evaluación la mide. Espeja `puntaje_de_eficiencia`: con
+/// `[eficiencia]` siempre mide. Sin `[eficiencia]`, mide solo Rust con `bootstrap/` como estado inicial.
+fn motivo_eficiencia_no_aplica(tarea: &Tarea) -> Option<&'static str> {
+    if tarea.eficiencia.is_some() {
+        return None;
+    }
+    if tarea.lenguaje != "rust" {
+        return Some(super::perfiles::herramientas::MOTIVO_SIN_EFICIENCIA);
+    }
+    if !tarea.dir.join("bootstrap").is_dir() {
+        return Some(super::perfiles::herramientas::MOTIVO_SIN_ESTADO_INICIAL);
+    }
+    None
+}
 
 /// Motivo de la fila de Entrega en una tarea sin `[entrega]` y con un repo sin Dockerfile.
 const MOTIVO_NO_APLICA_ENTREGA: &str =
@@ -4284,6 +4292,147 @@ mod tests {
             assert_eq!(
                 calibrada.fila.no_aplica, None,
                 "con Dockerfile no hay no aplica"
+            );
+        }
+    }
+
+    /// Eficiencia en Rust con `bootstrap/` y sin `[eficiencia]`: la evaluación la mide. El evaluador corre.
+    #[test]
+    fn calibra_eficiencia_rust_con_bootstrap_sin_eficiencia_mide() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        std::fs::create_dir_all(carpeta.join("bootstrap")).expect("bootstrap");
+        let llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+            llamadas.fetch_add(1, Ordering::SeqCst);
+            Ok(Veredicto::default())
+        };
+        let resultado = calibrar_tarea_con_lector(
+            home.path(),
+            "calibra-fixture",
+            "eficiencia",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+            &digest_falso,
+        );
+        assert!(
+            llamadas.load(Ordering::SeqCst) > 0,
+            "con bootstrap/ el evaluador corre"
+        );
+        if let Ok(calibrada) = &resultado {
+            assert_eq!(
+                calibrada.fila.no_aplica, None,
+                "con bootstrap/ no hay no aplica"
+            );
+        }
+    }
+
+    /// Eficiencia en Python sin `[eficiencia]`: la fila es no aplicable con el motivo de la sonda. Nada corre.
+    #[test]
+    fn calibra_eficiencia_python_sin_eficiencia_es_no_aplica_por_lenguaje() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        let ruta_tarea = carpeta.join("tarea.toml");
+        let texto = std::fs::read_to_string(&ruta_tarea).expect("lee la tarea");
+        std::fs::write(
+            &ruta_tarea,
+            texto.replace("lenguaje = \"rust\"", "lenguaje = \"python\""),
+        )
+        .expect("escribe la tarea");
+        let llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+            llamadas.fetch_add(1, Ordering::SeqCst);
+            Ok(Veredicto::default())
+        };
+        let calibrada = calibrar_tarea_con_lector(
+            home.path(),
+            "calibra-fixture",
+            "eficiencia",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+            &digest_falso,
+        )
+        .expect("una eficiencia no aplicable sale con Ok");
+        assert_eq!(llamadas.load(Ordering::SeqCst), 0, "el evaluador no corre");
+        assert_eq!(
+            calibrada.fila.no_aplica.as_deref(),
+            Some(crate::oracle::perfiles::herramientas::MOTIVO_SIN_EFICIENCIA)
+        );
+        assert!(calibrada.casos.is_none(), "sin casos");
+    }
+
+    /// Eficiencia en Rust sin `[eficiencia]` ni `bootstrap/`: no hay estado inicial. La fila lleva ese motivo.
+    #[test]
+    fn calibra_eficiencia_rust_sin_bootstrap_es_no_aplica_por_estado_inicial() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+            llamadas.fetch_add(1, Ordering::SeqCst);
+            Ok(Veredicto::default())
+        };
+        let calibrada = calibrar_tarea_con_lector(
+            home.path(),
+            "calibra-fixture",
+            "eficiencia",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+            &digest_falso,
+        )
+        .expect("una eficiencia no aplicable sale con Ok");
+        assert_eq!(llamadas.load(Ordering::SeqCst), 0, "el evaluador no corre");
+        assert_eq!(
+            calibrada.fila.no_aplica.as_deref(),
+            Some(crate::oracle::perfiles::herramientas::MOTIVO_SIN_ESTADO_INICIAL)
+        );
+        assert!(calibrada.casos.is_none(), "sin casos");
+    }
+
+    /// Eficiencia con `[eficiencia]`: se calibra como siempre. El evaluador corre y no hay no aplica.
+    #[test]
+    fn calibra_eficiencia_con_eficiencia_declarada_mide_como_siempre() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        let ruta_tarea = carpeta.join("tarea.toml");
+        let texto = std::fs::read_to_string(&ruta_tarea).expect("lee la tarea");
+        std::fs::write(
+            &ruta_tarea,
+            format!("{texto}\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n"),
+        )
+        .expect("escribe la tarea");
+        let llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+            llamadas.fetch_add(1, Ordering::SeqCst);
+            Ok(Veredicto::default())
+        };
+        let resultado = calibrar_tarea_con_lector(
+            home.path(),
+            "calibra-fixture",
+            "eficiencia",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+            &digest_falso,
+        );
+        assert!(
+            llamadas.load(Ordering::SeqCst) > 0,
+            "con [eficiencia] el evaluador corre"
+        );
+        if let Ok(calibrada) = &resultado {
+            assert_eq!(
+                calibrada.fila.no_aplica, None,
+                "con [eficiencia] no hay no aplica"
             );
         }
     }
