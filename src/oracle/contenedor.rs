@@ -1,6 +1,7 @@
 //! Corre un comando en un contenedor de podman sin red y con un único directorio escribible.
 
 use std::io::{self, Read};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -380,8 +381,34 @@ fn error_de_plazo(timeout: Duration, nombre: &str) -> ErrorOraculo {
     }
 }
 
-/// Corre el comando en un contenedor nuevo y devuelve su resultado.
+/// Corre el comando en un contenedor nuevo y devuelve su resultado. El motor sale de `ROOT_CONTENEDOR_MODO`.
 pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
+    ejecutar_con(e, backend_actual(), "bwrap")
+}
+
+/// Corre el comando con el motor `backend`. `programa` es el binario de bwrap. Con podman no se usa.
+fn ejecutar_con(
+    e: &Ejecucion,
+    backend: Backend,
+    programa: &str,
+) -> Result<Resultado, ErrorOraculo> {
+    match backend {
+        Backend::Podman => ejecutar_podman(e),
+        Backend::Bwrap => {
+            validar_rutas(e)?;
+            let _turno = turno_de_contenedor();
+            let ruta = std::env::var(VARIABLE_BWRAP_ENTORNO).ok();
+            let (entorno, aviso) = entorno_de_imagen(ruta.as_deref());
+            if let Some(aviso) = aviso {
+                eprintln!("r00t oraculo: {aviso}");
+            }
+            ejecutar_bwrap(e, programa, &entorno)
+        }
+    }
+}
+
+/// Corre el comando en un contenedor de podman nuevo y devuelve su resultado.
+fn ejecutar_podman(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
     validar_rutas(e)?;
     let _turno = turno_de_contenedor();
     crate::limpieza::barrer_al_arrancar("podman");
@@ -402,11 +429,67 @@ pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
             return Err(err);
         }
     };
+    resultado_de(estado, salida, error, inicio, "podman")
+}
+
+/// Corre `programa` con los argumentos de bwrap y espera hasta `e.timeout`. Si vence, mata el grupo entero.
+/// No borra nada: bwrap no deja contenedor. Sin contenedor, el error de plazo no lleva nombre real.
+fn ejecutar_bwrap(
+    e: &Ejecucion,
+    programa: &str,
+    entorno: &[(String, String)],
+) -> Result<Resultado, ErrorOraculo> {
+    let args = argumentos_bwrap(e, entorno)?;
+    let inicio = Instant::now();
+    let mut hijo = Command::new(programa)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Grupo propio: al vencer el plazo, Root mata a bwrap y a los procesos que dejó.
+        .process_group(0)
+        .spawn()
+        .map_err(|err| ErrorOraculo::Infra(format!("no se pudo lanzar bwrap: {err}")))?;
+    let salida = hijo.stdout.take().map(leer_cola_en_hilo);
+    let error = hijo.stderr.take().map(leer_cola_en_hilo);
+    let estado = match esperar(&mut hijo, e.timeout) {
+        Ok(Some(estado)) => estado,
+        Ok(None) => {
+            matar_grupo(&mut hijo);
+            return Err(error_de_plazo(e.timeout, "bwrap"));
+        }
+        Err(err) => {
+            matar_grupo(&mut hijo);
+            return Err(err);
+        }
+    };
+    resultado_de(estado, salida, error, inicio, "bwrap")
+}
+
+/// Mata el grupo de procesos del hijo con SIGKILL, y luego al hijo. Así no queda ningún nieto vivo.
+/// Usa el `kill` del sistema: sin `libc` no hay otra forma. Los errores se ignoran.
+fn matar_grupo(hijo: &mut Child) {
+    let grupo = format!("-{}", hijo.id());
+    let mut kill = Command::new("kill");
+    kill.args(["-KILL", "--", grupo.as_str()]);
+    let _ = correr_comando(kill, "kill", PLAZO_LIMPIEZA);
+    matar(hijo);
+}
+
+/// Arma el `Resultado` de un comando que ya terminó. `etiqueta` nombra el motor en el error de señal.
+fn resultado_de(
+    estado: ExitStatus,
+    salida: Option<JoinHandle<Vec<u8>>>,
+    error: Option<JoinHandle<Vec<u8>>>,
+    inicio: Instant,
+    etiqueta: &str,
+) -> Result<Resultado, ErrorOraculo> {
     let stdout = recoger(salida);
     let stderr = recoger(error);
     let segundos = inicio.elapsed().as_secs_f64();
     let Some(codigo) = estado.code() else {
-        return Err(ErrorOraculo::Infra("podman terminó por una señal".into()));
+        return Err(ErrorOraculo::Infra(format!(
+            "{etiqueta} terminó por una señal"
+        )));
     };
     if let Some(error) = error_de_infra(codigo, &stderr) {
         return Err(error);
@@ -1844,5 +1927,187 @@ mod tests {
                 ("RUTA_CON_IGUAL".to_string(), "a=b".to_string()),
             ]
         );
+    }
+
+    /// Carpeta de prueba con `ro`, `oraculo` y `sal` creadas dentro de `dir`.
+    fn ejecucion_en(dir: &Path) -> Ejecucion {
+        let repo = dir.join("ro");
+        let oraculo = dir.join("oraculo");
+        let salida = dir.join("sal");
+        for carpeta in [&repo, &oraculo, &salida] {
+            std::fs::create_dir_all(carpeta).expect("crea carpeta");
+        }
+        Ejecucion {
+            imagen: "sin-imagen".into(),
+            repo: Some(repo),
+            oraculo: Some(oraculo),
+            oraculo_destino: None,
+            salida,
+            cmd: "true".into(),
+            env: Vec::new(),
+            timeout: Duration::from_secs(60),
+            red: false,
+            cache: None,
+            cache_rw: false,
+            rustsec: None,
+            trabajo: None,
+            secretos: Vec::new(),
+        }
+    }
+
+    /// Escribe un script `sh` ejecutable en `dir` y da su ruta.
+    fn script_falso(dir: &Path, nombre: &str, cuerpo: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let ruta = dir.join(nombre);
+        std::fs::write(&ruta, format!("#!/bin/sh\n{cuerpo}\n")).expect("escribe el script");
+        std::fs::set_permissions(&ruta, std::fs::Permissions::from_mode(0o755)).expect("permisos");
+        ruta.display().to_string()
+    }
+
+    #[test]
+    fn bwrap_ejecutar_lanza_el_programa_con_los_argumentos_de_bwrap() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let registro = dir.path().join("args.txt");
+        let cuerpo = format!("printf '%s\\n' \"$@\" > '{}'", registro.display());
+        let script = script_falso(dir.path(), "falso", &cuerpo);
+        let e = ejecucion_en(dir.path());
+        let resultado = ejecutar_bwrap(&e, &script, &[]);
+        assert!(resultado.is_ok(), "{resultado:?}");
+        let recibidos =
+            std::fs::read_to_string(&registro).expect("el script escribió sus argumentos");
+        let esperados = argumentos_bwrap(&e, &[]).expect("arma");
+        assert_eq!(recibidos, format!("{}\n", esperados.join("\n")));
+    }
+
+    /// Verdadero si el proceso sigue corriendo. Un zombi ya murió: cuenta como muerto.
+    fn vivo(pid: &str) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => {
+                let estado = stat.rsplit(')').next().unwrap_or("").trim_start();
+                !estado.starts_with('Z')
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn bwrap_ejecutar_plazo_vencido_mata_el_grupo_entero() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let archivo = dir.path().join("pids.txt");
+        let cuerpo = format!(
+            "echo $$ > '{p}'; sleep 30 & echo $! >> '{p}'; sleep 30",
+            p = archivo.display()
+        );
+        let script = script_falso(dir.path(), "falso", &cuerpo);
+        let mut e = ejecucion_en(dir.path());
+        e.timeout = Duration::from_secs(1);
+        let resultado = ejecutar_bwrap(&e, &script, &[]);
+        assert!(
+            matches!(resultado, Err(ErrorOraculo::PlazoVencido { .. })),
+            "{resultado:?}"
+        );
+        let texto = std::fs::read_to_string(&archivo).expect("el script escribió sus pids");
+        let pids: Vec<&str> = texto.lines().collect();
+        assert_eq!(pids.len(), 2, "{texto:?}");
+        let inicio = Instant::now();
+        while pids.iter().any(|p| vivo(p)) && inicio.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        for pid in &pids {
+            assert!(!vivo(pid), "el proceso {pid} sigue vivo tras el plazo");
+        }
+    }
+
+    #[test]
+    fn bwrap_ejecutar_devuelve_codigo_y_salida() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let script = script_falso(dir.path(), "falso", "echo hola; exit 3");
+        let e = ejecucion_en(dir.path());
+        let resultado = ejecutar_bwrap(&e, &script, &[]).expect("corre");
+        assert_eq!(resultado.codigo, 3, "{resultado:?}");
+        assert!(resultado.stdout.contains("hola"), "{resultado:?}");
+    }
+
+    #[test]
+    fn bwrap_ejecutar_con_secreto_no_lanza_el_programa() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let marca = dir.path().join("marca");
+        let cuerpo = format!("touch '{}'", marca.display());
+        let script = script_falso(dir.path(), "falso", &cuerpo);
+        let mut e = ejecucion_en(dir.path());
+        e.secretos = vec![("DEEPSEEK_API_KEY".into(), "sk-xyz".into())];
+        match ejecutar_bwrap(&e, &script, &[]) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("secretos"), "{mensaje}");
+                assert!(!mensaje.contains("sk-xyz"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra: {otro:?}"),
+        }
+        assert!(!marca.exists(), "el programa no debió correr");
+    }
+
+    #[test]
+    fn bwrap_ejecutar_con_valida_rutas_antes_de_lanzar() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let marca = dir.path().join("marca");
+        let cuerpo = format!("touch '{}'", marca.display());
+        let script = script_falso(dir.path(), "falso", &cuerpo);
+        let mut e = ejecucion_en(dir.path());
+        e.repo = Some(dir.path().join("no-existe"));
+        match ejecutar_con(&e, Backend::Bwrap, &script) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("no existe"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra: {otro:?}"),
+        }
+        assert!(!marca.exists(), "el programa no debió correr");
+    }
+
+    /// Verdadero si `bwrap` está en el PATH.
+    fn hay_bwrap() -> bool {
+        std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|carpeta| carpeta.join("bwrap").is_file())
+        })
+    }
+
+    #[test]
+    fn bwrap_ejecutar_real_aisla_repo_salida_y_red() {
+        if !hay_bwrap() {
+            eprintln!("SALTEADO: no hay bwrap");
+            return;
+        }
+        // `--ro-bind / /` deja la raíz de solo lectura: bwrap no crea `/repo` ni `/salida`.
+        // El runtime de Colab los trae. Aquí el host tiene que traerlos.
+        if !Path::new("/repo").exists() || !Path::new("/salida").exists() {
+            eprintln!(
+                "SALTEADO: el host no tiene /repo y /salida, y bwrap no los crea en una raíz ro"
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().expect("temporal");
+        let mut e = ejecucion_en(dir.path());
+        e.oraculo = None;
+        std::fs::write(dir.path().join("ro").join("a"), "hola").expect("escribe");
+        // La red se mira en /proc/net/dev: /sys/class/net muestra las interfaces del host.
+        e.cmd = "cat /repo/a; touch /repo/b 2>/dev/null && echo escribe_repo || echo repo_ro; \
+                 touch /salida/c && echo escribe_salida; \
+                 tail -n +3 /proc/net/dev | grep -vq '^ *lo:' && echo red_abierta || echo red_cerrada"
+            .into();
+        let entorno = [("PATH".to_string(), "/usr/bin:/bin".to_string())];
+        let resultado = ejecutar_bwrap(&e, "bwrap", &entorno).expect("corre bwrap");
+        if resultado.stderr.contains("Operation not permitted")
+            || resultado.stderr.contains("namespace")
+        {
+            eprintln!(
+                "SALTEADO: bwrap no crea namespaces aquí: {}",
+                resultado.stderr
+            );
+            return;
+        }
+        assert_eq!(resultado.codigo, 0, "{resultado:?}");
+        for esperado in ["hola", "repo_ro", "escribe_salida", "red_cerrada"] {
+            assert!(resultado.stdout.contains(esperado), "{resultado:?}");
+        }
+        assert!(dir.path().join("sal").join("c").exists(), "{resultado:?}");
     }
 }
