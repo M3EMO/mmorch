@@ -10145,3 +10145,97 @@ y le pregunta al usuario antes de tocar `calibracion/`.
 - La identidad con copias de `defectos_distintos` (pregunta 3 de la 128).
 
 **Preguntas al usuario:** P107 sigue abierta.
+
+## Vuelta del 2026-11-14 (48): la recalibración de oráculo, Eficiencia bloqueada, y lo que falta
+
+**Estado.**
+- La suite con podman de `laptop/cadena-110-129` (5409dbe) dio verde, sola: 3563, 0 y 5.
+- **La recalibración de oráculo de t1 a t3 corrió en el `ROOT_HOME` real,** con respaldo en `recal-oraculo/`. Duró 38 minutos.
+- Las Tareas 130 (9b118cf) y 131 (18c677e) terminaron en verde sin podman. `laptop/cadena-110-131` (9b967e3) las junta. Su suite con podman dio verde, sola: 3578, 0 y 5.
+- **El reparto 5, con la 130:** Pruebas con n=4 tardó 271 s. Al principio tardaba 527 s. Las cinco mutaciones montaron la misma carpeta. La base tardó 112 s, y cada caso entre 36 y 40 s.
+- **La calibración de Eficiencia de s2-t1 no midió nada:** "no aplica: la tarea no define [eficiencia]".
+- P107 espera la respuesta del usuario.
+- El disco está al 98 %, con 11 GB libres.
+
+## 1. Las seis preguntas de la 131
+
+1. **Un caso con tests comunes distintos de la base queda sin valor en tiempo y memoria:** acepto. La serie guardada midió otros tests, y compararlas no mide eficiencia. Ningún defecto de Eficiencia cambia los tests.
+2. **Con la serie de la base en error, el caso mide igual su repo:** acepto por ahora. Gasta corridas, pero el resultado es correcto. Va a la lista de limpiezas.
+3. **`en_cambio` queda en falso:** acepto. Igual que en la 129.
+4. **64 MB por llamada:** acepto. Se suelta al salir de la función.
+5. **Tres inyectores repiten la inserción al principio de una función:** va a la lista de limpiezas. Un solo helper los debe servir.
+6. **El costo de clonar las series:** acepto.
+
+## 2. Por qué la calibración de Eficiencia exige `[eficiencia]`
+
+**La causa, en `src/oracle/calibra.rs:2207`.** Antes de la base, `calibrar_tarea_con_lector` corta si la dimensión es Eficiencia y la tarea no trae `[eficiencia]`. Escribe una fila `no_aplica` con `MOTIVO_NO_APLICA_EFICIENCIA` y sale. Ni la base ni los casos corren. Su comentario dice: "Es el mismo criterio que la sonda usa para no medir."
+
+**Ese criterio quedó viejo con la Tarea 115.** Desde la 115, la evaluación mide Eficiencia sin `[eficiencia]` si la tarea es de Rust y trae `bootstrap/`. Lo hace `puntaje_de_eficiencia` (`src/oracle/mod.rs:1931`). Sin esas dos cosas, da `no_aplica` con su motivo. La calibración debe usar la misma condición.
+
+**Un segundo hueco.** `de_dimension(Eficiencia)` trae `BucleCuadratico` y `LastreDeMemoria`. `BucleCuadratico` necesita el camino caliente de `[eficiencia]`. Sin esa sección, cada caso que lo elige queda no aplicable. La mitad de los defectos se perdería.
+
+**El arreglo es la Tarea 132.**
+1. La calibración de Eficiencia corta solo si la evaluación tampoco la mediría: sin `[eficiencia]`, y además fuera de Rust o sin `bootstrap/`. El motivo es el mismo que da la evaluación.
+2. Un defecto que la tarea no puede recibir sale de la rotación antes de elegir. Hoy, `BucleCuadratico` sin `[eficiencia]`.
+
+El brief es `docs/builds/brief-local-132.md`. Toca solo `src/oracle/calibra.rs`.
+
+## 3. La recalibración de oráculo
+
+**Leí `resumen.jsonl` y los `.casos.jsonl` de Completitud y Funciona de t1 y t2.**
+
+**Completitud de t1 dio 0,5.**
+- Caso 0: `cuerpo_vaciado` en `src/pattern/composite_pattern.rs:125`, dentro del cambio. El valor quedó en 1,0: ningún test oculto falló.
+- Caso 2: `cuerpo_vaciado` en la línea 86. Se detectó por `test_malo_nuevo`, con el valor en 0,067.
+- **Los tests ocultos de t1 no pasan por la función de la línea 125,** o el cuerpo vacío devuelve lo mismo para sus entradas. Es un límite real del oráculo, no un error de Root. Completitud solo ve lo que los tests prueban.
+
+**Funciona de t1 no tiene defectos.**
+- Los dos casos con defecto quedaron "no aplica: candidatos distintos agotados".
+- `comportamiento_roto` cambia un operador en una línea del cambio que los tests recorren. Desde la Tarea 105, los defectos de línea van al cambio cuando hay `bootstrap/`. El equivalente de t1 (`composite_pattern.rs:113`) sale de los candidatos.
+- **En el cambio de t1 no queda ningún candidato.**
+
+**Algunas filas tienen un solo defecto.**
+- Completitud de t2 y t3, y Funciona de t2: el segundo caso con defecto quedó "candidatos distintos agotados".
+- **El cambio de cada tarea es chico, y da un solo lugar distinto.** La calibración no repite una inyección, así que el segundo defecto no tiene dónde ir.
+
+**P102 a, con las tareas juntas.** Para una dimensión de oráculo, P102 a pide al menos un defecto detectado, al menos un limpio con veredicto, todos los limpios bien, y no más de 20 % sin veredicto en cada clase.
+
+| Dimensión | Defectos detectados | Limpios bien | Sin veredicto | ¿Cumple P102 a? |
+|---|---|---|---|---|
+| Seguridad | 6 de 6 | 6 de 6 | 0 | Sí |
+| Pruebas | 6 de 6 | 6 de 6 | 0 | Sí |
+| Completitud | 3 de 4 | 6 de 6 | 0 | Sí |
+| Funciona | 3 de 3 | 6 de 6 | 0 | Sí |
+
+**Las cuatro cumplen P102 a.** La salvedad honesta: son pocos casos. Con 3 o 4 defectos por dimensión, la sensibilidad es una estimación gruesa. P102 a no pide más para las dimensiones de oráculo.
+
+**¿Pide una tarea de código? No para P102 a.** Para una sensibilidad más fina, haría falta más lugares de defecto en un cambio chico. Una idea: tomar los defectos de comportamiento de los mutantes de cargo-mutants del cambio, elegidos sin mirar si los tests los matan. Va a la lista de ideas, sin número.
+
+## 4. Lo que falta para que Root esté calibrado del todo
+
+**Calibrado del todo** quiere decir: cada dimensión que aplica a las tareas de S2 cumple P102 a, con la versión de Root que se va a usar.
+
+| Paso | Qué | Depende de | API |
+|---|---|---|---|
+| 1 | La mezcla de la cadena 110 a 131 | La orden del usuario | No |
+| 2 | La Tarea 132 | Nada | No |
+| 3 | La calibración de Eficiencia de t1 a t3, con n=4, en el `ROOT_HOME` real con respaldo | La 132 | No |
+| 4 | Una prueba de dos casos de Diseño en t1, para ver que la 128 y la 129 andan con el juez real | **P107** | Sí, cerca de 0,35 USD |
+| 5 | La calibración de Diseño, Arquitectura y Estructura de t1 a t3, hasta 16 defectos detectados y 16 limpios bien por dimensión | **P107** | Sí, cerca de 17 USD |
+| 6 | Congelar la versión: ningún cambio de rúbricas, prompt del juez ni versión de sondas después del paso 5 | Nada | No |
+| 7 | P97 c: la reserva nueva, con los 5 arreglos de broot | Nada | No |
+| 8 | P98 c: el final abre con 15 defectos reales | El paso 7 | No |
+| 9 | La validez sobre el final sellado | Los pasos 1 a 8 | Según el final |
+
+**Tres huecos que la tabla no cierra:**
+- **Entrega no se puede calibrar con S2.** Ninguna de las tres tareas trae `[entrega]`. Hace falta una tarea con Dockerfile. La reserva del paso 7 puede traerla. Si no la trae, Entrega queda sin calibrar.
+- **El paso 4 cuesta aunque P107 sea "c".** Con 0,45 USD del tope de 7, alcanza justo para la prueba de dos casos. No alcanza para calibrar.
+- **El paso 6 importa.** La huella de cada fila sale de las rúbricas, el prompt del juez y la versión de sondas. Si cambian, todas las filas de esa dimensión dejan de contar. Hay que recalibrar.
+
+**Lo que depende de P107:** los pasos 4 y 5. Sin más tope, Diseño, Arquitectura y Estructura quedan sin calibrar. Por P103 a, igual dan veredicto, y Root igual puede decir "listo". Pero no entran al global ni a los mínimos.
+
+**Lista de limpiezas, nuevas entradas:**
+- El caso con la serie de la base en error (pregunta 2 de la 131).
+- Un solo helper para insertar al principio de una función (pregunta 5 de la 131).
+
+**Preguntas al usuario:** P107 sigue abierta.
