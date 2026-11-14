@@ -10759,3 +10759,156 @@ El brief es `docs/builds/brief-local-139.md`. La 140, el modo sin contenedor, so
 | 12 | La validez sobre el final sellado | Los pasos 1 a 11 | Colab | Según el final |
 
 **Preguntas al usuario:** P108.
+
+## Vuelta del 2026-11-14 (53): la Prueba 0, varios runtimes, y lo que Colab puede calibrar
+
+**Pregunta del usuario, textual:** "No se puede multiples en colab?"
+
+**La Prueba 0 corrió en Colab:** CPU, Ubuntu 24.04, 2 núcleos, 12 GB, root con `CAP_SYS_ADMIN` y sin `CAP_NET_ADMIN`. Gastó 0,01 unidades. Saldo: 769,72 unidades.
+
+## 1. La respuesta: sí, varios runtimes a la vez andan
+
+Con dos sesiones abiertas, `colab usage` dio "Active assignments: 2" y 0,16 unidades por hora. Cada runtime de CPU cuesta 0,08 unidades por hora. El límite de sesiones a la vez no se probó más allá de dos. La sección 5 propone probar con cuatro.
+
+## 2. Lo que dijo la Prueba 0 sobre podman
+
+| Variante | Qué se probó | Resultado |
+|---|---|---|
+| Base | Las opciones de Root | `crun` no puede escribir `/sys/fs/cgroup/cgroup.subtree_control`: es de solo lectura |
+| v1 | Remontar `/sys/fs/cgroup` con escritura | El remontaje anda, pero `subtree_control` da "device or resource busy" |
+| v2 | `--cgroups=disabled` con `--network none` | Falla al levantar la interfaz de loopback: `ioctl(SIOCSIFFLAGS)`, falta `CAP_NET_ADMIN` |
+| v3 | El truco de docker-in-docker para los cgroups | Los cgroups quedan bien, pero la red falla, y `crun` no escribe el `cgroup.procs` del contenedor |
+| v4 | podman sin root | `ping_group_range` es de solo lectura, y falla igual |
+
+**Lo que eso enseña.** Dos cosas fallan, y por separado: la red aislada, por falta de `CAP_NET_ADMIN`, y los cgroups, por el `/sys/fs/cgroup` de solo lectura. **Ninguna variante probó a la vez `--cgroups=disabled` y `--network host`.** Esa combinación no pide ninguna de las dos cosas que faltan.
+
+**Los secretos.** Un proceso de `colab exec` no lee Colab Secrets: `userdata` da un error de kernel. Desde el kernel, `userdata.get` dio `TimeoutException`. Colab Secrets pide la ventana del notebook en el navegador, y la CLI no la tiene.
+
+## 3. La decisión: podman sin red aislada y sin cgroups, si la Prueba 0b lo confirma
+
+**Tres salidas, comparadas:**
+
+| Salida | Aislamiento que queda | Imagen igual a la de la laptop | Costo en código |
+|---|---|---|---|
+| podman con `--network host` y `--cgroups=disabled` | Sistema de archivos: repo de solo lectura, `/tmp` propio, sin capacidades, sin ganar privilegios | Sí: es la misma `root-oraculo-rust:4` | Chico: un modo de opciones en `contenedor.rs` |
+| udocker | Casi nada. Usa `proot`, que no aísla la red ni pone límites | Sí | Grande, y `proot` hace lenta cada llamada al sistema, como las de cargo |
+| Sin contenedor (el camino B de la vuelta 52) | Ninguno dentro del runtime | No: las herramientas se instalan a mano | Grande: un modo nativo para cada ejecución |
+
+**Elijo podman sin red aislada y sin cgroups.** Es la salida que deja más aislamiento con menos código, y usa la misma imagen que la laptop. Antes, la Prueba 0b la confirma.
+
+**La Prueba 0b,** en un runtime de CPU, unos 5 minutos:
+
+```bash
+#!/usr/bin/env bash
+# Prueba 0b: podman sin red aislada y sin cgroups, con el resto de las opciones de Root.
+set -u
+apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq podman >/dev/null 2>&1
+mkdir -p /content/p/ro && echo hola > /content/p/ro/a
+podman run --rm --network host --cgroups=disabled --cap-drop=all --security-opt=no-new-privileges \
+  --tmpfs /tmp:rw -v /content/p/ro:/repo:ro docker.io/library/alpine:3.20 \
+  sh -c 'cat /repo/a; id; touch /repo/b 2>&1 | head -1' 2>&1 | tail -4
+echo "rc=${PIPESTATUS[0]}"
+```
+
+**Lo que debe dar:** `hola`, el `id` de root del contenedor, un error de solo lectura al tocar `/repo/b`, y `rc=0`.
+
+**Lo que se pierde, y el riesgo que acepto:**
+- **La red:** el código del contenedor puede salir a internet. En la calibración, ese código es broot con los defectos que inyecta Root. No es código de un builder. En el runtime no hay ninguna clave: el juez no corre ahí (sección 4). El riesgo aceptado: un test de broot que salga a la red da un resultado distinto que en la laptop. Los limpios lo mostrarían como falso positivo.
+- **Los límites de memoria y de procesos:** un caso que se desborde mata el runtime. El runtime es de un solo uso, y la laptop no se entera. La calibración de ese runtime queda sin terminar, y el orquestador la repite.
+- **Este modo vale solo para calibrar en Colab.** Una evaluación de código de un builder sigue en la laptop, con la red apagada y con límites.
+
+**Qué dimensiones pueden calibrarse en Colab:**
+
+| Dimensión | ¿En Colab? | Por qué |
+|---|---|---|
+| Seguridad, Funciona, Completitud, Pruebas | Sí | No usan el juez ni el cgroup |
+| Eficiencia | No | `memory.peak` sale del cgroup del contenedor, y en este modo no hay cgroup |
+| Diseño, Arquitectura, Estructura | No | Necesitan la clave del juez, y `exec` no lee Colab Secrets |
+| Entrega | No se calibra con S2 | Ninguna tarea trae `[entrega]` |
+
+**Lo honesto:** Colab sirve para las cuatro dimensiones de oráculo, que ya cumplen P102 a. Su valor llega al congelar la versión: ahí las doce calibraciones de oráculo se repiten, y en Colab no cargan la laptop.
+
+## 4. Las claves del juez
+
+**No hay forma de leer Colab Secrets sin el navegador.** `exec` no los lee, y el kernel se cuelga esperando la ventana del notebook.
+
+**Lo que respeta la regla "las claves solo por Colab Secrets":** el juez no corre en Colab. Las calibraciones con juez corren en la laptop. Casi todo su tiempo es espera de la API, así que cargan poco la máquina.
+
+**Una variante, para más adelante:** un notebook abierto por el usuario en el navegador, con `colab-mcp`, sí puede leer Secrets. Pide al usuario frente a la pantalla. No la planeo ahora.
+
+**Esto cambia P108.** La opción "b) espera a Colab" ya no es posible para el juez. Retiro P108, y pregunto P109 en la sección 8.
+
+## 5. El reparto en varios runtimes
+
+**La unidad de trabajo es una calibración: una tarea y una dimensión.** No se parte entre runtimes.
+
+**Para las doce calibraciones de oráculo, cuatro runtimes a la vez:**
+
+| Runtime | Calibraciones | Tiempo en la laptop | Tiempo estimado en Colab |
+|---|---|---|---|
+| 1 | Pruebas de t1, Seguridad de t1 a t3 | 395 + 26 s | 15 a 25 min |
+| 2 | Pruebas de t2 | 516 s | 20 a 30 min |
+| 3 | Pruebas de t3 | 534 s | 20 a 30 min |
+| 4 | Funciona y Completitud de t1 a t3 | 822 s | 30 a 45 min |
+
+- Los tiempos de la laptop son los de la recalibración de oráculo de la vuelta (47), antes de la 130. Colab tiene 2 núcleos contra 8, así que estimo de 2 a 3 veces más.
+- **Cada runtime prepara lo suyo:** instala podman, construye la imagen y baja el binario. Estimo de 15 a 20 minutos.
+- **El costo:** unas 4 horas de runtime en total, 0,32 unidades.
+- **Cuatro a la vez no se probó.** El primer uso real lanza cuatro, y anota cuántas asignaciones da `colab usage`.
+
+**Cómo se juntan las filas.**
+- Cada runtime vuelve con su paquete, que trae solo sus filas nuevas.
+- `r00t colab importar` los importa de a uno, en la laptop. Cada importación guarda su respaldo.
+- Las filas no chocan: cada una es de otra tarea o de otra dimensión. Un `.casos.jsonl` lleva la tarea, la dimensión y la hora en el nombre, así que tampoco choca.
+- El gasto es cero, porque las dimensiones de oráculo no usan API.
+
+## 6. El brief 139: qué cambia
+
+El builder 139 no arrancó. Reescribí `docs/builds/brief-local-139.md` con estos cambios:
+1. **El binario se compila en la laptop, dentro de `docker.io/library/rust:1`.** Esa imagen es Debian bookworm, con glibc 2.36. Colab usa Ubuntu 24.04, con glibc 2.39. El binario corre ahí. Ya no se compila desde un `git bundle` en el runtime.
+2. **La imagen `root-oraculo-rust:4` se construye en cada runtime** desde `imagenes/oraculo-rust/Containerfile`. La red de Google la baja rápido, y el paquete no carga varios GB.
+3. **Varios runtimes a la vez.** `r00t colab calibrar` recibe varios paquetes, uno por runtime. `activo.json` pasa a guardar una lista de sesiones, y sigue leyendo el formato viejo de una sola.
+4. **Solo dimensiones de oráculo.** El comando rechaza Eficiencia y las dimensiones con juez, con un motivo claro.
+5. **El paso de las claves sale.** Ninguna calibración en Colab usa API.
+6. **El modo de contenedor.** El comando del runtime corre `r00t` con el modo de Colab de la Tarea 140.
+
+**Su base sigue siendo la punta de `laptop/cadena-110-136`.** El builder arranca después de la serie 138, como ya planeó el orquestador. No choca con la 140.
+
+## 7. La Tarea 140: el modo de contenedor de Colab
+
+| Tarea | Qué | Archivos |
+|---|---|---|
+| 140 | Un modo de opciones de podman para Colab: `--network host` y `--cgroups=disabled`, sin `--pids-limit` ni `--memory` | `src/oracle/contenedor.rs` |
+
+- **Arranca solo si la Prueba 0b da `rc=0`.** Si falla, el brief no corre, y vuelvo a decidir.
+- **No choca con la 137, la 138 ni la 139.** Ninguna toca `contenedor.rs`.
+- El brief es `docs/builds/brief-local-140.md`, con base en la punta de `laptop/cadena-110-136`.
+
+## 8. Una pregunta para el usuario
+
+**P109: las calibraciones con juez, ¿dónde corren?** `exec` no lee Colab Secrets, y la regla dice que las claves entran solo por ahí.
+- **a)** En la laptop. Son las etapas 1 a 5 de P107 a. Casi todo su tiempo es espera de la API. *(Recomendada: es la única forma de calibrar el juez sin romper la regla de las claves.)*
+- **b)** En Colab, desde un notebook abierto por el usuario en el navegador, con `colab-mcp`. Pide al usuario frente a la pantalla en cada calibración.
+- **c)** No se calibran. Diseño, Arquitectura y Estructura quedan sin calibrar.
+
+## 9. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | La Prueba 0b | Nada | Colab, CPU | No |
+| 2 | La serie 138: la 137, la 138, su suite y Eficiencia | Nada; ya corre | Laptop | No |
+| 3 | La Tarea 140 | El paso 1 | Laptop, sin podman | No |
+| 4 | La Tarea 139 | El paso 2 | Laptop, sin podman | No |
+| 5 | La etapa 1 de P107 a: dos casos de Diseño | **P109** | Laptop | 0,35 USD |
+| 6 | Las etapas 2 a 5 de P107 a | El paso 5 y **P109** | Laptop | Hasta 18,45 USD |
+| 7 | La mezcla de la cadena 110 a 140 | La orden del usuario | — | No |
+| 8 | Si Eficiencia no cumple con la serie 138, su calibración otra vez | El paso 2 | Laptop | No |
+| 9 | Congelar la versión | El paso 6 | — | No |
+| 10 | Las doce calibraciones de oráculo con la versión congelada, en cuatro runtimes | Los pasos 3, 4 y 9 | Colab | No |
+| 11 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 12 | P98 c: el final con 15 defectos reales | El paso 11 | — | No |
+| 13 | La validez sobre el final sellado | Los pasos 1 a 12 | Laptop si usa el juez | Según el final |
+
+**Una nota:** la CLI de Colab avisa una versión nueva, 0.8.0. La laptop tiene 0.7.4. Actualizarla es un cambio de herramienta del usuario. El orquestador lo puede proponer aparte.
+
+**Preguntas al usuario:** P109. P108 queda retirada.
