@@ -7550,6 +7550,7 @@ mod tests {
                 huella,
                 inestables: inestables.iter().map(|i| (*i).into()).collect(),
                 extractos_base: Vec::new(),
+                juicios_base: Vec::new(),
             }],
         }
     }
@@ -8276,6 +8277,7 @@ mod tests {
             huella: Some(calibra::huella_de(dimension)),
             inestables: Vec::new(),
             extractos_base: Vec::new(),
+            juicios_base: Vec::new(),
         })
         .collect();
         let calibracion = Calibraciones {
@@ -8352,6 +8354,7 @@ mod tests {
             huella: Some(calibra::huella_de(Dimension::Funciona)),
             inestables: Vec::new(),
             extractos_base: Vec::new(),
+            juicios_base: Vec::new(),
         };
         let calibracion = Calibraciones {
             v: calibra::VERSION,

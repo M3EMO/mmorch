@@ -32,7 +32,9 @@ use crate::config::Config;
 use crate::goal::calcular_hash;
 use crate::observe;
 use crate::proveedores::{LimiteCalibracion, con_caso, con_limite, rechazo_en_este_hilo};
-use crate::tipos::{Dimension, Eleccion, Evento, Fuente, Hallazgo, Puntaje, Veredicto};
+use crate::tipos::{
+    Dimension, Eleccion, Evento, Fuente, Hallazgo, ItemFaltante, NivelItem, Puntaje, Veredicto,
+};
 
 /// Nombre del archivo de calibración dentro de `ROOT_HOME`.
 pub const ARCHIVO: &str = "calibracion.json";
@@ -65,6 +67,20 @@ fn plazos_de_base(duraciones: DuracionesSuites) -> PlazosSuites {
         contrato: plazo_de_suite(duraciones.contrato.map(|s| s.ceil() as u64)),
         oculto: plazo_de_suite(duraciones.oculto.map(|s| s.ceil() as u64)),
     }
+}
+
+/// Lo que dijo un juicio de la base sobre una dimensión: niveles, faltantes y sin veredicto.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct JuicioBase {
+    /// Nivel de cada ítem de la dimensión que puntuó el juez, en orden.
+    #[serde(default)]
+    pub niveles: Vec<NivelItem>,
+    /// Ítems de la dimensión que ninguna sonda mide para el lenguaje de la tarea, con su motivo.
+    #[serde(default)]
+    pub faltantes: Vec<ItemFaltante>,
+    /// Motivo por el que el juicio no dio veredicto de la dimensión. `None` si lo dio.
+    #[serde(default)]
+    pub sin_veredicto: Option<String>,
 }
 
 /// Una medición de una dimensión de una tarea, con su muestra.
@@ -144,6 +160,9 @@ pub struct Fila {
     /// la base. Una fila sin el campo vale vacía.
     #[serde(default)]
     pub extractos_base: Vec<Vec<ExtractoGuardado>>,
+    /// Lo que dijo cada juicio de la base sobre la dimensión, en orden. Una fila sin el campo vale vacía.
+    #[serde(default)]
+    pub juicios_base: Vec<JuicioBase>,
     /// Plazo fijo en segundos que usaron los casos de mutación. Sale de la duración de la base.
     /// `None` si la base no trajo duración. Una fila sin el campo vale `None`.
     #[serde(default)]
@@ -1553,6 +1572,11 @@ fn calibrar_medida_con_hilos(
     }
     let extractos_base: Vec<Vec<ExtractoGuardado>> =
         juicios.iter().map(|j| j.extractos.clone()).collect();
+    // Lo que dijo cada juicio de la base sobre la dimensión, en orden: un elemento por juicio.
+    let juicios_base: Vec<JuicioBase> = juicios
+        .iter()
+        .map(|j| juicio_base_de(j, dimension))
+        .collect();
     let refs: Vec<&Veredicto> = juicios.iter().collect();
     let inestables = inestables::inestables_de(&refs, dimension, &pesos.del_juez);
     // Una dimensión cuyos ítems estables pesan menos de la mitad no mide casos: ahorra el gasto del juez.
@@ -1563,6 +1587,7 @@ fn calibrar_medida_con_hilos(
             no_aplica: None,
             inestables: inestables.iter().cloned().collect(),
             extractos_base,
+            juicios_base,
             ..fila_no_aplica(tarea, &tarea_hash, dimension, semilla, &motivo)
         };
         return Ok(Medida {
@@ -1736,6 +1761,7 @@ fn calibrar_medida_con_hilos(
             ruidosos: ruidosos.into_iter().collect(),
             inestables: inestables.iter().cloned().collect(),
             extractos_base,
+            juicios_base,
             tarea_hash: Some(tarea_hash.clone()),
             ..fila_de(
                 tarea,
@@ -1861,6 +1887,7 @@ fn fila_de(
         inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
+        juicios_base: Vec::new(),
         plazo_mutantes: None,
         duracion_contrato: None,
         duracion_oculto: None,
@@ -2221,6 +2248,7 @@ fn fila_no_aplica(
         inestables: Vec::new(),
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
+        juicios_base: Vec::new(),
         plazo_mutantes: None,
         duracion_contrato: None,
         duracion_oculto: None,
@@ -2891,6 +2919,17 @@ fn puntaje_de(veredicto: &Veredicto, dimension: Dimension) -> Option<&Puntaje> {
     veredicto.puntajes.iter().find(|p| p.dimension == dimension)
 }
 
+/// Lo que dijo `veredicto` sobre `dimension`. Sin puntaje de la dimensión, sale vacío.
+fn juicio_base_de(veredicto: &Veredicto, dimension: Dimension) -> JuicioBase {
+    puntaje_de(veredicto, dimension)
+        .map(|puntaje| JuicioBase {
+            niveles: puntaje.items.clone(),
+            faltantes: puntaje.faltantes.clone(),
+            sin_veredicto: puntaje.sin_veredicto.clone(),
+        })
+        .unwrap_or_default()
+}
+
 fn nivel_de(puntaje: &Puntaje, item: &str) -> Option<u8> {
     puntaje
         .items
@@ -3000,6 +3039,7 @@ mod tests {
             inestables: Vec::new(),
             huella: Some(huella_de(dimension)),
             extractos_base: Vec::new(),
+            juicios_base: Vec::new(),
         }
     }
 
@@ -9485,6 +9525,108 @@ mod tests {
         let fila = medida.fila.expect("hay fila");
         assert_eq!(fila.extractos_base.len(), 3, "{:?}", fila.extractos_base);
         assert!(fila.extractos_base.iter().all(|e| e.len() == 1));
+    }
+
+    /// Calibración de Diseño con tres juicios: cada juicio de la base queda en `juicios_base`, con sus niveles.
+    #[test]
+    fn diseno_con_tres_juicios_guarda_tres_juicios_base_con_sus_niveles() {
+        let juicio = |nivel: u8| Veredicto {
+            puntajes: vec![Puntaje {
+                items: vec![NivelItem {
+                    item: "diseno.acoplamiento".into(),
+                    nivel,
+                    evidencia: vec![],
+                    fuente: Fuente::Juez {
+                        modelo: "deepseek-reasoner".into(),
+                    },
+                }],
+                ..puntaje(Dimension::Diseno, 1.0)
+            }],
+            ..Veredicto::default()
+        };
+        let juicios = [juicio(1), juicio(2), juicio(3)];
+        let turno = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| {
+            let veredicto = match tipo {
+                TipoCaso::Base | TipoCaso::BaseRepetida => {
+                    juicios[turno.fetch_add(1, Ordering::SeqCst)].clone()
+                }
+                _ => juicios[0].clone(),
+            };
+            Ok(veredicto)
+        };
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("calibra");
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(fila.juicios_base.len(), 3, "{:?}", fila.juicios_base);
+        for (i, juicio_base) in fila.juicios_base.iter().enumerate() {
+            let niveles: Vec<u8> = juicio_base.niveles.iter().map(|n| n.nivel).collect();
+            assert_eq!(niveles, vec![i as u8 + 1], "juicio {i}: {juicio_base:?}");
+        }
+    }
+
+    /// Un juicio de la base con un faltante guarda el ítem y su motivo en `juicios_base`.
+    #[test]
+    fn juicio_base_con_faltante_guarda_el_item_y_su_motivo() {
+        let mut base = veredicto_de(Dimension::Estructura, 1.0, None);
+        base.puntajes[0].faltantes = vec![ItemFaltante {
+            item: "estructura.modulos".into(),
+            motivo: "ninguna sonda mide el lenguaje".into(),
+        }];
+        let evaluador = |_: &Path, _: TipoCaso, _: Target| Ok(base.clone());
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("calibra");
+        let fila = medida.fila.expect("hay fila");
+        let primero = fila.juicios_base.first().expect("hay un juicio de la base");
+        assert_eq!(
+            primero.faltantes,
+            vec![ItemFaltante {
+                item: "estructura.modulos".into(),
+                motivo: "ninguna sonda mide el lenguaje".into(),
+            }],
+            "{primero:?}"
+        );
+    }
+
+    /// Una fila de antes de `juicios_base` se lee con lista vacía.
+    #[test]
+    fn fila_vieja_sin_juicios_base_lee_lista_vacia() {
+        let mut texto =
+            serde_json::to_value(fila("t", Dimension::Estructura, 1.0, None)).expect("json");
+        texto
+            .as_object_mut()
+            .expect("objeto")
+            .remove("juicios_base");
+        let leida: Fila = serde_json::from_value(texto).expect("fila vieja");
+        assert!(leida.juicios_base.is_empty(), "{:?}", leida.juicios_base);
     }
 
     /// Una fila de antes de `extractos_base` se lee con lista vacía.

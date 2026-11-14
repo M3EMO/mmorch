@@ -752,6 +752,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           },
           "default": {}
         },
+        "juicios_base": {
+          "description": "Lo que dijo cada juicio de la base sobre la dimensión, en orden. Una fila sin el campo vale vacía.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/JuicioBase"
+          }
+        },
         "limpios": {
           "description": "Copias sin alterar medidas. La especificidad sale de ellas.",
           "type": "integer",
@@ -864,6 +872,119 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "n",
         "semilla",
         "ts"
+      ]
+    },
+    "Fuente": {
+      "description": "Quién produjo un hallazgo: una sonda determinista o un juez con modelo.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Sonda": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Sonda"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Juez": {
+              "type": "object",
+              "properties": {
+                "modelo": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "modelo"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Juez"
+          ]
+        }
+      ]
+    },
+    "ItemFaltante": {
+      "description": "Un ítem de rúbrica que ninguna sonda mide para el lenguaje de la tarea, con el motivo (Tarea 31).",
+      "type": "object",
+      "properties": {
+        "item": {
+          "type": "string"
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "motivo"
+      ]
+    },
+    "JuicioBase": {
+      "description": "Lo que dijo un juicio de la base sobre una dimensión: niveles, faltantes y sin veredicto.",
+      "type": "object",
+      "properties": {
+        "faltantes": {
+          "description": "Ítems de la dimensión que ninguna sonda mide para el lenguaje de la tarea, con su motivo.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ItemFaltante"
+          }
+        },
+        "niveles": {
+          "description": "Nivel de cada ítem de la dimensión que puntuó el juez, en orden.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NivelItem"
+          }
+        },
+        "sin_veredicto": {
+          "description": "Motivo por el que el juicio no dio veredicto de la dimensión. `None` si lo dio.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "NivelItem": {
+      "description": "Nivel de un ítem de rúbrica. `nivel` va de 0 a 3.",
+      "type": "object",
+      "properties": {
+        "evidencia": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fuente": {
+          "$ref": "#/$defs/Fuente"
+        },
+        "item": {
+          "type": "string"
+        },
+        "nivel": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "item",
+        "nivel",
+        "evidencia",
+        "fuente"
       ]
     }
   }
