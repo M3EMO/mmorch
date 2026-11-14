@@ -220,6 +220,7 @@ fn detecta_defecto(e: &Ensayo) -> bool {
     finalizar_casos(
         &e.base,
         e.inyeccion.defecto.dimension(),
+        &inyectar::de_dimension(e.inyeccion.defecto.dimension()),
         &[],
         &e.muertos,
         &mut casos,

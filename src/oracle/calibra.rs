@@ -462,6 +462,8 @@ const MOTIVO_OTRO_JUEZ: &str = "calibración de otro juez";
 
 /// Motivo de una dimensión sin filas que cuenten en ninguna tarea medida.
 const MOTIVO_SIN_CASOS: &str = "ningún caso aplicable en las tareas medidas";
+/// Motivo de la fila de una dimensión cuyos defectos inyectables no aplican a la tarea (Tarea 132).
+const MOTIVO_SIN_DEFECTOS_APLICABLES: &str = "ningún defecto aplica a la tarea";
 
 /// Prefijo del motivo de una dimensión inestable. Las filas viejas lo guardaban en `no_aplica`.
 const PREFIJO_INESTABLE: &str = "inestable en esta tarea";
@@ -1285,6 +1287,20 @@ fn defecto_de(rotacion: &[Defecto], i: usize) -> Defecto {
     rotacion[(i / 2) % rotacion.len()]
 }
 
+/// Defectos de `dimension` que aplican a `tarea`. Sin `[eficiencia]` el bucle no aplica: necesita el camino
+/// caliente de esa sección, así que sale de la lista.
+fn defectos_aplicables(tarea: &Tarea, dimension: Dimension) -> Vec<Defecto> {
+    filtrar_aplicables(tarea, inyectar::de_dimension(dimension))
+}
+
+/// Quita de `defectos` los que `tarea` no puede recibir. Hoy solo el bucle, que pide `[eficiencia]`.
+fn filtrar_aplicables(tarea: &Tarea, defectos: Vec<Defecto>) -> Vec<Defecto> {
+    defectos
+        .into_iter()
+        .filter(|d| !(*d == Defecto::BucleCuadratico && tarea.eficiencia.is_none()))
+        .collect()
+}
+
 /// Defectos que rota `defecto_de`: primero los que pueden bajar su ítem, en el orden de `defectos`. Si ninguno
 /// puede, todos. Un defecto sin nivel base para su ítem puede bajar: `en_piso` da `false` en ese caso.
 fn defectos_a_rotar(
@@ -1592,18 +1608,67 @@ fn calibrar_medida_con_hilos(
     compartidos: Option<&Compartidos>,
     home: Option<&Path>,
 ) -> Result<Medida, ErrorOraculo> {
-    let tarea_hash = hash_de_tarea(tarea)?;
-    let defectos = inyectar::de_dimension(dimension);
-    if defectos.is_empty() {
+    if inyectar::de_dimension(dimension).is_empty() {
         return Err(ErrorOraculo::Uso(format!(
             "la dimensión {} no tiene defectos inyectables",
             dimension.clave()
         )));
     }
+    let defectos = defectos_aplicables(tarea, dimension);
+    calibrar_medida_con_defectos(
+        tarea,
+        dimension,
+        n,
+        semilla,
+        repo_bueno,
+        evaluador,
+        tope,
+        muertos_de_la_base,
+        leer_digest,
+        hilos,
+        compartidos,
+        home,
+        defectos,
+    )
+}
+
+/// Cuerpo de `calibrar_medida_con_hilos` con los defectos ya filtrados por tarea. Sin defectos aplicables, da la
+/// fila `no_aplica` antes de evaluar nada: ni base ni temporales.
+#[allow(clippy::too_many_arguments)]
+fn calibrar_medida_con_defectos(
+    tarea: &Tarea,
+    dimension: Dimension,
+    n: usize,
+    semilla: u64,
+    repo_bueno: &Path,
+    evaluador: &(dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
+    tope: Option<&Tope>,
+    muertos_de_la_base: &dyn Fn() -> Vec<MutanteMuerto>,
+    leer_digest: &(dyn Fn() -> Option<String> + Sync),
+    hilos: usize,
+    compartidos: Option<&Compartidos>,
+    home: Option<&Path>,
+    defectos: Vec<Defecto>,
+) -> Result<Medida, ErrorOraculo> {
+    let tarea_hash = hash_de_tarea(tarea)?;
     if n == 0 {
         return Err(ErrorOraculo::Uso(
             "oraculo calibrar necesita n de 1 o más".into(),
         ));
+    }
+    if defectos.is_empty() {
+        return Ok(Medida {
+            fila: Some(fila_no_aplica(
+                tarea,
+                &tarea_hash,
+                dimension,
+                semilla,
+                MOTIVO_SIN_DEFECTOS_APLICABLES,
+            )),
+            detencion: None,
+            casos: Vec::new(),
+            no_aplicables: Vec::new(),
+        });
     }
     // La carpeta temporal va antes de la base: la base deja ahí su `target` (Tarea 59). Con `home` cae en
     // `home/tmp`, no en el `/tmp` del sistema (RAM en Fedora). Se borra al salir, también con error.
@@ -1882,7 +1947,7 @@ fn calibrar_medida_con_hilos(
         inestables::sin_inestables(&mut caso.veredicto, dimension, &inestables, &pesos.todos);
     }
     // La detección se decide después de medir todos los casos, en orden de índice (Tarea 63, puntos 2 a 4).
-    let ruidosos = finalizar_casos(&base, dimension, &items, &muertos, &mut casos);
+    let ruidosos = finalizar_casos(&base, dimension, &defectos, &items, &muertos, &mut casos);
     if let Some(d) = detencion.as_mut() {
         d.casos = casos.len() as u32;
     }
@@ -2856,16 +2921,17 @@ fn item_y_lugar_de(
 /// `regla::detecta_con_juez`, con el ítem y el lugar de `item_y_lugar_de`. Pruebas con `AssertBorrado` usa
 /// `motivo_de_mutante_vivo`, con `muertos` de la base. Las demás dimensiones usan `motivo_de_deteccion`.
 /// También calcula los niveles, el `sin_veredicto` y los `items` de cada caso. Devuelve los tests ruidosos,
-/// para que la fila los guarde.
+/// para que la fila los guarde. `defectos` son los aplicables a la tarea: fijan la rotación de `defectos_a_rotar`.
 fn finalizar_casos(
     base: &Veredicto,
     dimension: Dimension,
+    defectos: &[Defecto],
     items: &[&'static str],
     muertos: &[MutanteMuerto],
     casos: &mut [Caso],
 ) -> BTreeSet<String> {
     let rotacion = defectos_a_rotar(
-        &inyectar::de_dimension(dimension),
+        defectos,
         &niveles_de(puntaje_de(base, dimension)),
         dimension,
     );
@@ -3303,6 +3369,16 @@ mod tests {
         (dir, tarea)
     }
 
+    /// Tarea de prueba con `[eficiencia]`, en un directorio temporal que se devuelve para que viva con el test.
+    fn tarea_prueba_con_eficiencia() -> (TempDir, Tarea) {
+        let dir = tempfile::tempdir().expect("temporal");
+        let tarea = tarea_en(
+            dir.path(),
+            "\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n",
+        );
+        (dir, tarea)
+    }
+
     fn calibrar(
         base_dir: &Path,
         base: &Veredicto,
@@ -3673,9 +3749,10 @@ mod tests {
             }],
             ..Veredicto::default()
         };
+        // Con `[eficiencia]` el bucle entra a la rotación. Sin función en el camino, sus casos siguen no aplicables.
         let tarea = tarea_en(
             dir.path(),
-            "\n[calibracion]\ncamino_caliente = [\"no_existe\"]\n",
+            "\n[calibracion]\ncamino_caliente = [\"no_existe\"]\n\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n",
         );
         let ev = falso(dir.path(), &base, |_, _, base| base.clone());
         let fila = calibrar_con(&tarea, Dimension::Eficiencia, 10, 42, dir.path(), &ev)
@@ -3709,13 +3786,159 @@ mod tests {
         };
         let tarea = tarea_en(
             dir.path(),
-            "\n[calibracion]\ncamino_caliente = [\"ejecutar\"]\n",
+            "\n[calibracion]\ncamino_caliente = [\"ejecutar\"]\n\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n",
         );
         let ev = falso(dir.path(), &base, |_, _, base| base.clone());
         let fila =
             calibrar_con(&tarea, Dimension::Eficiencia, 10, 42, dir.path(), &ev).expect("hay fila");
         // El bucle aplica una vez: la única función del camino se agota. El lastre aplica en sus dos casos.
         assert_eq!((fila.defectos, fila.no_aplicable), (3, 2));
+    }
+
+    /// Veredicto base de Eficiencia sin ítems: lo mínimo para que la dimensión tenga puntaje.
+    fn eficiencia_base() -> Veredicto {
+        Veredicto {
+            puntajes: vec![Puntaje {
+                inestables: Vec::new(),
+                motivo_sin_calibrar: None,
+                dimension: Dimension::Eficiencia,
+                valor: 1.0,
+                calibrada: false,
+                exactitud_balanceada: None,
+                items: vec![],
+                sin_veredicto: None,
+                no_aplica: None,
+                faltantes: Vec::new(),
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Medida de Eficiencia con el evaluador falso, un hilo y sin tope. Sirve a los tests de la rotación.
+    fn medir_eficiencia(tarea: &Tarea, repo: &Path) -> Medida {
+        let base = eficiencia_base();
+        let ev = falso(repo, &base, |_, _, base| base.clone());
+        let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| ev(ruta);
+        calibrar_medida_con_hilos(
+            tarea,
+            Dimension::Eficiencia,
+            10,
+            42,
+            repo,
+            &sin_tipo,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide")
+    }
+
+    /// Tarea 132: sin `[eficiencia]` el bucle no aplica. Los casos con defecto usan solo el lastre.
+    #[test]
+    fn calibra_sin_eficiencia_el_bucle_no_entra_a_la_rotacion() {
+        let dir = copia_fixture();
+        let tarea = tarea_en(
+            dir.path(),
+            "\n[calibracion]\ncamino_caliente = [\"ejecutar\"]\n",
+        );
+        let medida = medir_eficiencia(&tarea, dir.path());
+        let usados: BTreeSet<Defecto> = medida
+            .casos
+            .iter()
+            .filter_map(|c| c.inyeccion.as_ref().map(|i| i.defecto))
+            .collect();
+        assert_eq!(
+            usados,
+            BTreeSet::from([Defecto::LastreDeMemoria]),
+            "sin [eficiencia] solo entra el lastre"
+        );
+        assert!(
+            medida.no_aplicables.is_empty(),
+            "ningún caso queda no aplicable por el bucle: {:?}",
+            medida.no_aplicables
+        );
+    }
+
+    /// Tarea 132: con `[eficiencia]` el bucle entra a la rotación junto al lastre, como en la Tarea 128.
+    #[test]
+    fn calibra_con_eficiencia_el_bucle_entra_a_la_rotacion() {
+        let dir = copia_fixture();
+        let tarea = tarea_en(
+            dir.path(),
+            "\n[calibracion]\ncamino_caliente = [\"ejecutar\"]\n\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n",
+        );
+        let medida = medir_eficiencia(&tarea, dir.path());
+        let usados: BTreeSet<Defecto> = medida
+            .casos
+            .iter()
+            .filter_map(|c| c.inyeccion.as_ref().map(|i| i.defecto))
+            .collect();
+        assert_eq!(
+            usados,
+            BTreeSet::from([Defecto::BucleCuadratico, Defecto::LastreDeMemoria]),
+            "con [eficiencia] la rotación usa los dos defectos"
+        );
+    }
+
+    /// Tarea 132: sin defectos aplicables, la fila dice por qué y la base no se evalúa.
+    #[test]
+    fn calibra_lista_vacia_de_defectos_da_fila_no_aplica_sin_evaluar() {
+        let dir = copia_fixture();
+        let tarea = tarea_en(dir.path(), "");
+        let llamadas = AtomicUsize::new(0);
+        let base = eficiencia_base();
+        let evaluador = |_: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            llamadas.fetch_add(1, Ordering::SeqCst);
+            Ok(base.clone())
+        };
+        let medida = calibrar_medida_con_defectos(
+            &tarea,
+            Dimension::Eficiencia,
+            10,
+            42,
+            dir.path(),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("hay fila");
+        let fila = medida.fila.expect("fila");
+        assert_eq!(
+            fila.no_aplica.as_deref(),
+            Some(MOTIVO_SIN_DEFECTOS_APLICABLES)
+        );
+        assert_eq!(llamadas.load(Ordering::SeqCst), 0, "no llama al evaluador");
+        assert!(medida.casos.is_empty() && medida.no_aplicables.is_empty());
+    }
+
+    /// Tarea 132: el filtro quita el bucle de una tarea sin `[eficiencia]` y deja el lastre.
+    #[test]
+    fn filtrar_aplicables_quita_el_bucle_sin_eficiencia() {
+        let (_sin, sin) = tarea_prueba();
+        assert_eq!(
+            filtrar_aplicables(&sin, vec![Defecto::BucleCuadratico]),
+            Vec::<Defecto>::new()
+        );
+        assert_eq!(
+            filtrar_aplicables(
+                &sin,
+                vec![Defecto::BucleCuadratico, Defecto::LastreDeMemoria]
+            ),
+            vec![Defecto::LastreDeMemoria]
+        );
+        let (_con_dir, con) = tarea_prueba_con_eficiencia();
+        assert_eq!(
+            filtrar_aplicables(&con, vec![Defecto::BucleCuadratico]),
+            vec![Defecto::BucleCuadratico]
+        );
     }
 
     /// Ejecutor que cuenta sus llamadas y responde como un lado sano de Eficiencia: un paquete `app` y un test `a`.
@@ -8651,6 +8874,7 @@ mod tests {
             finalizar_casos(
                 &base,
                 Dimension::Arquitectura,
+                &inyectar::de_dimension(Dimension::Arquitectura),
                 &[ITEM_ARQUITECTURA],
                 &[],
                 &mut casos,
@@ -8674,6 +8898,7 @@ mod tests {
         finalizar_casos(
             &base,
             Dimension::Arquitectura,
+            &inyectar::de_dimension(Dimension::Arquitectura),
             &[ITEM_ARQUITECTURA],
             &[],
             &mut casos,
@@ -8691,6 +8916,7 @@ mod tests {
         finalizar_casos(
             &base,
             Dimension::Seguridad,
+            &inyectar::de_dimension(Dimension::Seguridad),
             &["seguridad.secretos"],
             &[],
             &mut casos,
@@ -8715,6 +8941,7 @@ mod tests {
         finalizar_casos(
             &base,
             Dimension::Diseno,
+            &inyectar::de_dimension(Dimension::Diseno),
             &[ITEM_MODULARIDAD, ITEM_ROBUSTEZ],
             &[],
             &mut casos,
@@ -8730,6 +8957,7 @@ mod tests {
         finalizar_casos(
             &base,
             Dimension::Diseno,
+            &inyectar::de_dimension(Dimension::Diseno),
             &[ITEM_MODULARIDAD, ITEM_ROBUSTEZ],
             &[],
             &mut casos,
@@ -8747,6 +8975,7 @@ mod tests {
             finalizar_casos(
                 &base,
                 Dimension::Seguridad,
+                &inyectar::de_dimension(Dimension::Seguridad),
                 &["seguridad.secretos"],
                 &[],
                 &mut casos,
@@ -8765,6 +8994,7 @@ mod tests {
         finalizar_casos(
             &base,
             Dimension::Seguridad,
+            &inyectar::de_dimension(Dimension::Seguridad),
             &["seguridad.inexistente"],
             &[],
             &mut casos,
@@ -8875,6 +9105,7 @@ mod tests {
         finalizar_casos(
             &base,
             Dimension::Seguridad,
+            &inyectar::de_dimension(Dimension::Seguridad),
             &["seguridad.secretos", "seguridad.panico_en_entrada"],
             &[],
             &mut casos,
@@ -8943,6 +9174,7 @@ mod tests {
         finalizar_casos(
             &base,
             Dimension::Diseno,
+            &inyectar::de_dimension(Dimension::Diseno),
             &[ITEM_MODULARIDAD, ITEM_ROBUSTEZ],
             &[],
             &mut casos,
@@ -9147,6 +9379,7 @@ mod tests {
             finalizar_casos(
                 &base,
                 Dimension::Arquitectura,
+                &inyectar::de_dimension(Dimension::Arquitectura),
                 &[ITEM_ARQUITECTURA],
                 &[],
                 &mut casos,
@@ -9201,6 +9434,7 @@ mod tests {
         finalizar_casos(
             &base,
             Dimension::Seguridad,
+            &inyectar::de_dimension(Dimension::Seguridad),
             &["seguridad.secretos"],
             &[],
             &mut casos,
@@ -9240,7 +9474,14 @@ mod tests {
             ..Veredicto::default()
         };
         let mut casos = vec![Caso::nuevo(1, None, limpio)];
-        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Completitud,
+            &inyectar::de_dimension(Dimension::Completitud),
+            &[],
+            &[],
+            &mut casos,
+        );
         assert_eq!(
             casos[0].motivo, None,
             "un test ruidoso no detecta en un limpio"
@@ -9259,7 +9500,14 @@ mod tests {
             Caso::nuevo(0, Some(inyeccion_modulo()), defecto),
             Caso::nuevo(1, None, base.clone()),
         ];
-        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Completitud,
+            &inyectar::de_dimension(Dimension::Completitud),
+            &[],
+            &[],
+            &mut casos,
+        );
         assert!(
             casos[0].detectado,
             "un test estable nuevo que falla sí detecta"
@@ -9284,7 +9532,14 @@ mod tests {
             Caso::nuevo(0, Some(inyeccion_modulo()), defecto),
             Caso::nuevo(1, None, limpio),
         ];
-        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Completitud,
+            &inyectar::de_dimension(Dimension::Completitud),
+            &[],
+            &[],
+            &mut casos,
+        );
         assert!(
             !casos[0].detectado,
             "el test ruidoso no cuenta en el defecto"
@@ -9308,7 +9563,14 @@ mod tests {
             Caso::nuevo(0, Some(inyeccion_modulo()), defecto),
             Caso::nuevo(1, None, limpio),
         ];
-        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Completitud,
+            &inyectar::de_dimension(Dimension::Completitud),
+            &[],
+            &[],
+            &mut casos,
+        );
         assert!(
             !casos[0].detectado,
             "el contrato ruidoso no cuenta en el defecto"
@@ -9345,7 +9607,14 @@ mod tests {
             Caso::nuevo(0, Some(inyeccion), defecto),
             Caso::nuevo(1, None, limpio),
         ];
-        finalizar_casos(&base, Dimension::Seguridad, &[], &[], &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Seguridad,
+            &inyectar::de_dimension(Dimension::Seguridad),
+            &[],
+            &[],
+            &mut casos,
+        );
         assert!(
             casos[0].detectado,
             "Seguridad no aplica la regla de ruidosos"
@@ -9407,7 +9676,14 @@ mod tests {
         let base = pruebas_con(1.0, vec![]);
         let muertos = vec![muerto_de_base("src/lib.rs", "reemplaza suma -> 0")];
         let mut casos = vec![caso_assert_borrado(0, pruebas_con(0.5, vec![]))];
-        finalizar_casos(&base, Dimension::Pruebas, &[], &muertos, &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Pruebas,
+            &inyectar::de_dimension(Dimension::Pruebas),
+            &[],
+            &muertos,
+            &mut casos,
+        );
         assert!(
             !casos[0].detectado,
             "valor menor no cuenta sin mutante vivo"
@@ -9421,7 +9697,14 @@ mod tests {
         let muertos = vec![muerto_de_base("src/lib.rs", "reemplaza suma -> 0")];
         let vivo = mutante_vivo("src/otro.rs", "reemplaza resta -> 0");
         let mut casos = vec![caso_assert_borrado(0, pruebas_con(1.0, vec![vivo]))];
-        finalizar_casos(&base, Dimension::Pruebas, &[], &muertos, &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Pruebas,
+            &inyectar::de_dimension(Dimension::Pruebas),
+            &[],
+            &muertos,
+            &mut casos,
+        );
         assert!(
             !casos[0].detectado,
             "el mutante vivo no era muerto en la base"
@@ -9435,7 +9718,14 @@ mod tests {
         let muertos = vec![muerto_de_base("src/lib.rs", "reemplaza suma -> 0")];
         let vivo = mutante_vivo("src/lib.rs", "reemplaza suma -> 0");
         let mut casos = vec![caso_assert_borrado(0, pruebas_con(0.9, vec![vivo]))];
-        finalizar_casos(&base, Dimension::Pruebas, &[], &muertos, &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Pruebas,
+            &inyectar::de_dimension(Dimension::Pruebas),
+            &[],
+            &muertos,
+            &mut casos,
+        );
         assert!(
             casos[0].detectado,
             "el mutante muerto en la base vive en el caso"
@@ -9457,7 +9747,14 @@ mod tests {
             tests: vec!["db::tests::zset".into(), "red::zset".into()],
         }];
         let mut casos = vec![caso_assert_borrado(0, pruebas_con(0.5, vec![]))];
-        finalizar_casos(&base, Dimension::Pruebas, &[], &muertos, &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Pruebas,
+            &inyectar::de_dimension(Dimension::Pruebas),
+            &[],
+            &muertos,
+            &mut casos,
+        );
         assert!(!casos[0].detectado, "el mutante sigue muerto: no cuenta");
         assert_eq!(casos[0].motivo, None);
     }
@@ -9468,7 +9765,14 @@ mod tests {
         let muertos = vec![muerto_de_base("src/lib.rs", "reemplaza suma -> 0")];
         let vivo = mutante_vivo("./src/lib.rs", "reemplaza suma -> 0");
         let mut casos = vec![caso_assert_borrado(0, pruebas_con(1.0, vec![vivo]))];
-        finalizar_casos(&base, Dimension::Pruebas, &[], &muertos, &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Pruebas,
+            &inyectar::de_dimension(Dimension::Pruebas),
+            &[],
+            &muertos,
+            &mut casos,
+        );
         assert_eq!(
             casos[0].motivo.as_deref(),
             Some("mutante_vivo:reemplaza suma -> 0")
@@ -11401,7 +11705,14 @@ mod tests {
             ..Veredicto::default()
         };
         let mut casos = vec![Caso::nuevo(1, None, limpio)];
-        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Completitud,
+            &inyectar::de_dimension(Dimension::Completitud),
+            &[],
+            &[],
+            &mut casos,
+        );
         assert!(
             !casos[0].detectado,
             "el hallazgo de un test ruidoso no cuenta: {:?}",
@@ -11422,7 +11733,14 @@ mod tests {
             ..Veredicto::default()
         };
         let mut casos = vec![Caso::nuevo(1, None, limpio)];
-        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
+        finalizar_casos(
+            &base,
+            Dimension::Completitud,
+            &inyectar::de_dimension(Dimension::Completitud),
+            &[],
+            &[],
+            &mut casos,
+        );
         assert!(casos[0].detectado, "un hallazgo nuevo sin ruido sí cuenta");
     }
 
