@@ -11596,3 +11596,114 @@ ROOT_HOME="$P/home" "$R" colab calibrar --paquete "$P/paquete-t1-seguridad.tar.g
 **Una nota sobre la 142:** su base era "la punta de la cadena que suma la 139 a la 141". Con la 145, conviene que salga de la cadena que suma también la 145, porque las dos tocan `colab_calibra.rs` y `cli.rs`. El brief de la 142 no cambia: el orquestador elige esa cadena como base.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (59): las preguntas de la 143 a la 145, y qué cierra Eficiencia
+
+**Estado.**
+- Las Tareas 143, 144 y 145 terminaron en verde sin podman: 3679/0/5, 3692/0/5 y 3757/0/5.
+- `laptop/cadena-110-145` (9a6a10a) las suma sobre `laptop/cadena-110-141`, sin conflictos. Su suite con podman corre ahora. Después, el orquestador calibra Eficiencia de t1 a t3, con n=4 y semilla 42.
+- La 145 dejó tres puntos sin hacer: el mensaje de plazo en `src/oracle/mod.rs`, el mismo texto en `descarga.rs:756`, y las banderas `--n` y `--semilla` de `colab empaquetar`, que piden `src/lib.rs` y `cli.rs`.
+- El paso 0 de las pruebas de Colab y la Prueba 1 esperan al usuario.
+
+## 1. Las cinco preguntas de la 143
+
+**La causa, según el informe.** El test de punta a punta dio verde con el código de la base. La lista no se perdía en el camino que recorre. Una mutación que vacía `corridas` lo pone en rojo, así que el test sí ve una pérdida. La causa más probable es la que el planner encontró en la vuelta (57): la sonda miraba `bootstrap/`, y sus funciones no coincidían con las del repo. Desde la 143, sin lista, el caso queda no aplicable con su motivo. Una pérdida futura ya no queda escondida.
+
+1. **Un filtro `""` vale como "todos los tests son comunes":** acepto. Solo `None` o un error dan error.
+2. **La regla de la 136 no se usa en producción: se quita.** Solo Eficiencia tiene lastre, y siempre pide la sonda. Código que nunca corre es superficie que alguien tiene que leer. Va en la Tarea 147.
+3. **Una sonda que no corrió (`None`) no avisa: debe avisar.** El motivo "la sonda no corrió" queda en la fila y llega a los avisos de la calibración, como un error. Va en la 147.
+4. **El aviso sale de `fila.sonda_lastre.motivo`:** acepto. Una sola fuente.
+5. **El cambio de la regla de la 134 va en el commit del punto 3:** acepto.
+
+## 2. Las siete preguntas de la 144
+
+1. **Si no se puede leer la carga, las medidas de tiempo quedan sin valor:** acepto. Falla cerrado.
+2. **4,00 con 8 núcleos no es carga; solo una carga mayor que la mitad:** acepto.
+3. **El motivo muestra la mayor de las dos lecturas:** acepto.
+4. **La base cargada guarda su motivo en un campo privado:** acepto.
+5. **Un ancla de compilación que falla deja la medida sin valor:** acepto.
+6. **El repo corre primero en cada par de un caso:** acepto.
+7. **Un caso cargado en la primera lectura igual corre:** acepto. Cuesta unos 80 s. Va a la lista de limpiezas: si la primera lectura ya da carga, el caso puede saltar sus corridas.
+
+**Dos notas del informe:**
+- **`comparar_con_ancla` es pública y solo la usan dos tests: se borra.** Va en la 147.
+- **El control de carga de los tests de `tests/` lee el `/proc/loadavg` real.** Si la laptop está cargada durante una suite, esos tests pueden fallar. La ruta de la carga se debe poder cambiar desde el entorno, para los tests. Va en la 147.
+
+## 3. Las siete preguntas de la 145
+
+1. **Editar `src/oracle/mod.rs` para el mensaje de plazo: sí, ahora.** Ningún builder corre. `ErrorOraculo::PlazoVencido` suma un campo `motor`, con "contenedor" en podman y "proceso bwrap" en `bwrap`. El texto queda "timeout tras N s; <motor> <nombre> eliminado". En podman, el texto no cambia: el test de la Tarea 109 lo fija. Va en la Tarea 146, con `descarga.rs:756`.
+2. **Editar `src/lib.rs` y `cli.rs` para `--n` y `--semilla`: sí, ahora,** con el cambio que propone el informe. Va en la 146.
+3. **Los repos entran sin `target` ni `.env*`:** acepto. Los repos de S2 no tienen ningún `.env*`.
+4. **Los enlaces simbólicos de un repo no se copian: deben dar error.** Los repos de S2 no tienen enlaces. Pero un repo con enlaces daría una calibración distinta en Colab, en silencio. `colab empaquetar` falla y nombra el enlace. Va en la 147.
+5. **Una vuelta sin `manifiesto-vuelta.json` se rechaza:** acepto.
+6. **El SHA-256 del tar entero también viaja por `exec`:** sí. Cuesta una línea, `ROOT_SHA_VUELTA=`, en el guion de cierre, y cubre un tar reemplazado con su manifiesto. Va en la 147.
+7. **Sin test que ejecute `crear_carpetas`:** acepto. La prueba de la 140 en Colab lo cubre.
+
+**Dos notas del informe:**
+- **Un paquete de ida viejo no se lee con `colab calibrar`:** acepto. Ningún paquete viejo sirve: hay que armar los paquetes con la cadena nueva.
+- **El parámetro `excluir` de `copiar_dir` quedó sin uso: se borra.** Va en la 147.
+
+## 4. Las Tareas 146 y 147
+
+| Tarea | Qué | Archivos |
+|---|---|---|
+| 146 | El mensaje de plazo con su motor, y las banderas `--n` y `--semilla` de `colab empaquetar` | `src/oracle/mod.rs`, `src/oracle/contenedor.rs`, `src/oracle/descarga.rs`, `src/lib.rs`, `src/cli.rs` |
+| 147 | Las limpiezas: la regla de la 136, el aviso de la sonda que no corrió, `comparar_con_ancla`, la ruta de la carga para los tests, los enlaces simbólicos, el SHA-256 del tar, y `excluir` de `copiar_dir` | `src/oracle/calibra/inyectar.rs`, `src/oracle/calibra.rs`, `src/oracle/eficiencia.rs`, `src/colab_calibra.rs` |
+
+- **Las dos corren a la vez.** No comparten archivos.
+- **Su base es la punta de `laptop/cadena-110-145`.**
+- **Arrancan después de la calibración de Eficiencia.** Esa calibración necesita la laptop sin otro trabajo. Un builder que compila la carga, y el control de la 144 dejaría casos sin veredicto.
+
+Los briefs son `docs/builds/brief-local-146.md` y `docs/builds/brief-local-147.md`.
+
+## 5. La Tarea 142, con la 145
+
+**Su diseño no cambia.** Cambian dos cosas de su base y de su punto 2:
+- **La base pasa a ser la punta de la cadena que suma la 146 y la 147.** La 142 toca `cli.rs`, como la 146, y `colab_calibra.rs`, como la 147.
+- **Las líneas de gasto viajan en la vuelta que arma el runtime.** Desde la 145, el paquete de vuelta y su manifiesto se arman en el runtime. La 142 suma las líneas de gasto a ese guion de cierre, con su SHA-256.
+- **Las etapas del juez usan `n` y `semilla` por trabajo,** con la forma `tarea:dimension:n` de la 145.
+
+Actualizo esas tres líneas en `docs/builds/brief-local-142.md`. Ningún builder la está construyendo.
+
+## 6. Qué cierra P102 a para Eficiencia
+
+**La regla de P102 a para una dimensión de oráculo,** con las tres tareas juntas:
+1. Al menos un defecto detectado.
+2. Al menos un limpio con veredicto.
+3. Todos los limpios con veredicto dan bien.
+4. No más de 20 % de defectos sin veredicto, ni de limpios sin veredicto.
+
+**Un control más, para que la detección valga.** El defecto es un lastre de memoria. Una detección cuenta solo si `memoria_pico` marcó regresión en ese caso. Una detección por el tiempo o la compilación es ruido, como en t2 de la vuelta (57). El orquestador lo revisa en las medidas de cada renglón de caso.
+
+**Lo que hace el orquestador si una tarea falla:**
+
+| Lo que pasa | Qué mira | Qué hace |
+|---|---|---|
+| Un limpio queda detectado | Su medida con regresión y el motivo de carga | Si hubo carga, repite esa tarea en otra ventana sin trabajo. Si no hubo carga, no repite: informa las medidas |
+| Más de 20 % de casos sin veredicto por carga | El motivo "la máquina estaba cargada" | Repite esa tarea en otra ventana sin trabajo |
+| Un defecto no detectado, con `lugar_por: sonda` y la memoria igual | El lugar, y si los tests comunes llaman a esa función | No repite. Informa el lugar y las medidas |
+| Un defecto no aplicable por la sonda | El motivo en `sonda_lastre` de la fila | No repite. Informa el motivo |
+| Una detección solo por tiempo o compilación | Las medidas del caso | No la cuenta. Informa las medidas |
+
+**Una sola tarea que detecte por memoria alcanza,** si los limpios de las tres dan bien.
+
+## 7. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | La suite con podman de `laptop/cadena-110-145` | Nada; ya corre | Laptop | No |
+| 2 | La calibración de Eficiencia de t1 a t3, en una ventana sin otro trabajo | El paso 1 | Laptop | No |
+| 3 | Las Tareas 146 y 147, a la vez | El paso 2 | Laptop | No |
+| 4 | El paso 0 y las pruebas de Colab de la 140 y la 139 | El usuario | Laptop (con `nice`) y Colab | No |
+| 5 | La prueba de la 141 | Los pasos 3 y 4 | Colab | No |
+| 6 | La Prueba 1 | El usuario | Colab, notebook | No |
+| 7 | La Tarea 142 | Los pasos 3 y 6 | Laptop | No |
+| 8 | Las cinco etapas de P107 a, en una sesión del notebook | Los pasos 5 y 7 | Colab, notebook | Hasta 18,45 USD |
+| 9 | La mezcla de la cadena 110 a 147 | La orden del usuario | — | No |
+| 10 | Congelar la versión | Los pasos 2 y 8 | — | No |
+| 11 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 5 y 10 | Colab, cuatro runtimes | No |
+| 12 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 13 | P98 c: el final con 15 defectos reales | El paso 12 | — | No |
+| 14 | La validez sobre el final sellado | Los pasos 1 a 13 | Colab, notebook si usa el juez | Según el final |
+
+**Preguntas al usuario:** ninguna nueva.

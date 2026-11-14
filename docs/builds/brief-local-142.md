@@ -10,7 +10,8 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 ## Base, rama y roles
 
-- Arrancá desde la punta de la cadena que suma la 139, la 140 y la 141. El orquestador te da su nombre.
+- Arrancá desde la punta de la cadena que suma la 146 y la 147 sobre `laptop/cadena-110-145`. El orquestador te da su nombre. Esa cadena trae la 139 a la 141, la 143 a la 147, y la 127b.
+- **Desde la Tarea 145, el paquete de vuelta y su manifiesto se arman en el runtime,** en el guion de cierre de `src/colab_calibra.rs`. Cada trabajo lleva su `n` y su semilla, con la forma `tarea:dimension:n`.
 - **El punto 3 espera la Prueba 1 del orquestador.** Los puntos 1, 2 y 4 no la esperan. Si la Prueba 1 no terminó, hacé el 1, el 2 y el 4, y dejá el 3 para el final.
 - No uses `isolation: "worktree"` para tus subagentes.
 - Trabajá en tu propio worktree, en una rama nueva: `laptop/tarea-142`. Después de `git worktree add`, fijá `git config --worktree core.hooksPath .githooks`.
@@ -85,7 +86,7 @@ La regla que manda: **una calibración con juez corre en el runtime del notebook
 2. **Eficiencia se sigue rechazando,** con o sin `--juez`.
 3. **El manifiesto suma el tope de S2:** `25 − gastado`. El gastado sale de sumar en `eventos.jsonl` de la laptop las líneas de gasto de las tareas `s2-*`. El 25 va en una constante, con su motivo: la decisión P107 a del usuario.
 4. **Cada trabajo con juez** corre con `--tope-usd` igual a lo que queda, según el manifiesto.
-5. **El paquete de vuelta trae las líneas de gasto** de `eventos.jsonl` del runtime: las de tipo `llamada` y `reserva`.
+5. **El paquete de vuelta trae las líneas de gasto** de `eventos.jsonl` del runtime: las de tipo `llamada` y `reserva`. Las suma el guion de cierre del runtime de la Tarea 145, con su SHA-256 en el manifiesto de vuelta.
 6. **La importación las agrega** a `eventos.jsonl` de la laptop, con `"origen": "colab"` en su `extra`. No duplica una línea que ya está: misma corrida, misma reserva y mismo `ts`.
 7. **El paquete nunca lleva una clave.** La lista de exclusiones de la 141 sigue.
 
@@ -115,7 +116,7 @@ La regla que manda: **una calibración con juez corre en el runtime del notebook
 2. **CELDA 2:** lee la clave con `userdata.get`. El usuario aprueba en pantalla. Imprime solo si la clave está.
 3. **CELDA 3:** corre las etapas de P107 a en orden. Cada calibración lanza `r00t` con la clave por descriptor, como en el punto 1. Antes de cada etapa, aplica la regla de parada: si la sensibilidad con las tareas juntas de la etapa anterior da menos de 0,85, salta las etapas de esa dimensión. Imprime una línea por calibración: tarea, dimensión, sensibilidad, especificidad y gasto.
 4. **CELDA 4:** arma el paquete de vuelta con las filas, los casos y las líneas de gasto. Imprime su ruta y su SHA-256.
-5. **Las etapas y sus `n` vienen del manifiesto,** no del guion. El guion no decide nada de producto.
+5. **Las etapas y sus `n` vienen del manifiesto,** no del guion. Cada trabajo trae su `n` y su semilla, como desde la Tarea 145. El guion no decide nada de producto.
 6. **El guion nunca imprime la clave,** ni la escribe en un archivo. La variable se borra con `del` después de entregarla.
 7. **Una calibración que falla** no frena las demás de su etapa. La celda la anota y sigue.
 8. **Una sesión cortada** se puede retomar: la CELDA 3 salta las calibraciones cuya fila ya está en el runtime.
