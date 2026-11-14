@@ -287,12 +287,8 @@ pub struct Orden {
     pub entorno: BTreeMap<String, String>,
 }
 
-/// Punto de entrada del comando. Usa las repeticiones y la semilla por defecto.
-pub fn empaquetar_cli(pedido: PedidoEmpaquetar) -> Result<Resumen, ErrorOraculo> {
-    empaquetar_cli_con(pedido, N_POR_DEFECTO, SEMILLA_POR_DEFECTO)
-}
-
-/// Lee ROOT_HOME, git y podman, y arma el paquete. `n` es el valor por defecto de cada trabajo.
+/// Punto de entrada de `colab empaquetar`. Lee ROOT_HOME, git y podman, y arma el paquete.
+/// `n` es el valor por defecto de cada trabajo; `semilla` es la del sorteo.
 pub fn empaquetar_cli_con(
     pedido: PedidoEmpaquetar,
     n: u32,

@@ -623,26 +623,14 @@ fn oraculo_liberar(json: bool, home: &Path) -> Result<(), Error> {
 }
 
 /// `colab empaquetar`: arma el paquete para Colab e imprime dónde quedó.
+/// `n` y `semilla` llegan de la CLI, con sus valores por defecto. Siempre va por `empaquetar_cli_con`.
 fn colab_empaquetar(
     json: bool,
     pedido: colab_calibra::PedidoEmpaquetar,
     n: u32,
     semilla: u64,
 ) -> Result<(), Error> {
-    // Con los valores por defecto se usa `empaquetar_cli`, que sigue siendo el punto de entrada.
-    let armar = |pedido, n, semilla| {
-        if (n, semilla)
-            == (
-                colab_calibra::N_POR_DEFECTO,
-                colab_calibra::SEMILLA_POR_DEFECTO,
-            )
-        {
-            colab_calibra::empaquetar_cli(pedido)
-        } else {
-            colab_calibra::empaquetar_cli_con(pedido, n, semilla)
-        }
-    };
-    colab_empaquetar_con(json, pedido, n, semilla, &armar)
+    colab_empaquetar_con(json, pedido, n, semilla, &colab_calibra::empaquetar_cli_con)
 }
 
 /// Igual que `colab_empaquetar`, pero la función que arma el paquete se inyecta para testear.
@@ -1760,6 +1748,48 @@ mod tests {
             &registrar,
         )
         .expect("empaquetar con defectos");
+        assert_eq!(*recibidos.borrow(), vec![(4, 42)]);
+    }
+
+    #[test]
+    fn colab_empaquetar_sin_banderas_pasa_4_y_42_desde_la_cli() {
+        // Parsea la CLI sin `--n` ni `--semilla` y sigue los valores hasta el armador.
+        let args: Vec<String> = [
+            "r00t",
+            "colab",
+            "empaquetar",
+            "--binario",
+            "b",
+            "--trabajos",
+            "t:d",
+            "--repo",
+            "t=r",
+            "--rustup-sha256",
+            &"0".repeat(64),
+            "--salida",
+            "s.tar.gz",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let cli = Cli::try_parse_from(args).expect("colab empaquetar sin banderas parsea");
+        let (n, semilla) = match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { n, semilla, .. },
+            } => (n, semilla),
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        };
+        let recibidos = std::cell::RefCell::new(Vec::new());
+        let registrar = |_pedido: colab_calibra::PedidoEmpaquetar, n: u32, semilla: u64| {
+            recibidos.borrow_mut().push((n, semilla));
+            Ok(colab_calibra::Resumen {
+                salida: PathBuf::from("s.tar.gz"),
+                archivos: 1,
+                trabajos: 1,
+            })
+        };
+        colab_empaquetar_con(false, pedido_empaquetar(), n, semilla, &registrar)
+            .expect("empaquetar sin banderas");
         assert_eq!(*recibidos.borrow(), vec![(4, 42)]);
     }
 }
