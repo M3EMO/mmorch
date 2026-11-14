@@ -4,12 +4,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use root::corre::dir_corridas;
 use root::goal::calcular_hash;
+
+#[path = "comun/ejecutable.rs"]
+mod ejecutable;
+use ejecutable::escribir_ejecutable;
 
 const GOAL: &str = "# GOAL de prueba\n\nContenido de fixture.\n";
 
@@ -231,37 +234,17 @@ fn credencial_falsa(usuario: &Path) {
 }
 
 /// `podman` falso: `ps` no imprime nada y cualquier otro comando anota su pid en `bin/hijo.pid` y duerme 30 s.
-/// Con `--sonda` sale con 0 sin tocar nada. Tras escribirlo, lo prueba con `--sonda`.
-/// Linux da ETXTBSY (errno 26) si un ejecutable tiene un descriptor de escritura abierto. Un fork
-/// concurrente hereda ese descriptor hasta su `exec`. Por eso la sonda reintenta hasta 50 veces.
+/// `escribir_ejecutable` lo escribe con permisos y lo prueba: la sentinela sale antes del cuerpo.
 /// Original: `src/limpieza.rs::podman_falso`.
 fn podman_falso(bin: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    const ETXTBSY: i32 = 26;
     fs::create_dir_all(bin).expect("bin");
-    let ruta = bin.join("podman");
-    fs::write(
-        &ruta,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = --sonda ]; then exit 0; fi\nif [ \"$1\" = ps ]; then exit 0; fi\necho $$ > '{}'\nexec sleep 30\n",
+    escribir_ejecutable(
+        &bin.join("podman"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = ps ]; then exit 0; fi\necho $$ > '{}'\nexec sleep 30\n",
             bin.join("hijo.pid").display()
         ),
-    )
-    .expect("podman falso");
-    fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
-    for _ in 0..50 {
-        match Command::new(&ruta).arg("--sonda").status() {
-            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            resultado => {
-                let estado = resultado.expect("sonda del podman falso");
-                assert!(estado.success(), "la sonda sale con 0");
-                return;
-            }
-        }
-    }
-    panic!("el podman falso sigue con ETXTBSY tras 50 intentos");
+    );
 }
 
 /// Copias `.credentials.json` que hay bajo las carpetas de corridas de `usuario`.
@@ -397,78 +380,4 @@ fn corre_sigterm_quita_la_copia_de_la_credencial_y_sale_con_143() {
 #[test]
 fn corre_sigint_quita_la_copia_de_la_credencial_y_sale_con_130() {
     senal_quita_la_copia_y_sale_con("-INT", 130);
-}
-
-/// Sonda: el `podman` falso sale con 0 rápido con `--sonda` y no anota pid.
-/// Original: `src/limpieza.rs::sonda_de_podman_falso_no_deja_marca`.
-#[test]
-fn podman_falso_sonda_sale_con_0_rapido_y_no_deja_pid() {
-    let tmp = tempfile::TempDir::new().expect("tmp");
-    let bin = tmp.path().join("bin");
-    podman_falso(&bin);
-    let mut hijo = Command::new(bin.join("podman"))
-        .arg("--sonda")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("lanza el podman falso");
-    let limite = Instant::now() + Duration::from_secs(2);
-    let estado = loop {
-        if let Some(estado) = hijo.try_wait().expect("try_wait") {
-            break estado;
-        }
-        if Instant::now() >= limite {
-            // Mata el proceso para no dejarlo corriendo tras el fallo.
-            let _ = hijo.kill();
-            let _ = hijo.wait();
-            panic!("podman --sonda no salió en 2 s: cae en la rama que duerme 30 s");
-        }
-        thread::sleep(Duration::from_millis(20));
-    };
-    assert!(estado.success(), "--sonda sale con 0: {estado}");
-    assert!(
-        !bin.join("hijo.pid").exists(),
-        "--sonda no debe anotar el pid en bin/hijo.pid"
-    );
-}
-
-/// Carrera ETXTBSY: 200 helpers mientras 4 hilos hacen fork. Cada `ps` debe lanzar sin error.
-/// Original: `src/limpieza.rs::podman_falso_no_da_etxtbsy_con_fork_concurrente`.
-#[test]
-fn podman_falso_no_da_etxtbsy_con_fork_concurrente() {
-    /// Pone la bandera al salir, también por pánico. Sin esto, los hilos de fork no terminarían.
-    struct Parar<'a>(&'a AtomicBool);
-    impl Drop for Parar<'_> {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Relaxed);
-        }
-    }
-
-    let parar = AtomicBool::new(false);
-    let mut errores = Vec::new();
-    thread::scope(|s| {
-        let _parar = Parar(&parar);
-        // Hilos que hacen fork en bucle: su hijo hereda el descriptor de escritura del script.
-        for _ in 0..4 {
-            s.spawn(|| {
-                while !parar.load(Ordering::Relaxed) {
-                    let _ = Command::new("true").status();
-                }
-            });
-        }
-        for _ in 0..200 {
-            let tmp = tempfile::TempDir::new().expect("tmp");
-            let bin = tmp.path().join("bin");
-            podman_falso(&bin);
-            if let Err(e) = Command::new(bin.join("podman")).arg("ps").status() {
-                errores.push(e);
-            }
-        }
-    });
-    assert!(
-        errores.is_empty(),
-        "lanzar el podman falso falló {} de 200 veces: {errores:?}",
-        errores.len()
-    );
 }
