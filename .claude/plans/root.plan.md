@@ -10471,3 +10471,121 @@ Los briefs son `docs/builds/brief-local-135.md` y `docs/builds/brief-local-136.m
 **Entrega:** no se puede calibrar con S2.
 
 **Preguntas al usuario:** P107 sigue abierta.
+
+## Vuelta del 2026-11-14 (51): los limpios bien, los lastres sin efecto, y el ruido de 10 corridas
+
+**Estado.**
+- Las Tareas 135 y 136 terminaron en verde sin podman. `laptop/cadena-110-136` (c038b0e) las suma sobre eed1225. Su suite con podman dio verde, sola: 3627, 0 y 5.
+- **La calibración de Eficiencia corrió otra vez en el `ROOT_HOME` real,** con n=4, semilla 42 y el binario de c038b0e. Respaldo en `efi-real-3/`.
+- **Especificidad 1,0 en t1, t2 y t3. Sensibilidad 0 en las tres.** Ningún lastre movió la memoria pico: razones entre 0,997 y 1,009.
+- Una tarea tarda entre 27 y 35 minutos. Eran 36 a 45.
+- P107 espera la respuesta del usuario. El disco está al 98 %, con 10 GB libres.
+
+## 1. Las preguntas de la 135 y la 136
+
+**La 135:**
+1. **Dos líneas en `src/oracle/mod.rs`, fuera de la tabla:** acepto. Sin ellas, las corridas guardadas quedaban vacías. El error fue del brief.
+2. **Un ancla atípica sube mucho el ruido:** se resuelve en la Tarea 138, sin tope. Con la mediana y los cuartiles, una corrida suelta casi no mueve la dispersión. Ver la sección 3.
+3. **`corridas_referencia` guarda la base y después el ancla:** acepto.
+4. **Dos tests con nombres que ya no describen su caso:** van a la lista de limpiezas.
+5. **Un aviso por medida cuando el ancla falla:** acepto.
+
+**La 136:**
+1. **Solo `#[test]` cuenta como test:** acepto por ahora. broot no usa `#[tokio::test]`.
+2. **Un nombre llamado solo dentro de un test cuenta:** la regla queda reemplazada en la Tarea 137. Ver la sección 2.
+3. **La base de 3036 tests es una resta:** acepto.
+
+## 2. Por qué la regla de la 136 falló, y cómo elegir con una medición
+
+**La regla de la 136 elige por nombre.** `new` y `from` aparecen llamados en casi cualquier test. Los lastres cayeron en `fn new` de `content_pattern.rs:28`, en `fn from` de `hex/byte.rs:19`, y en un constructor de `mount_space_display.rs:33`. Ningún test común corre esas funciones en particular. En t2, la 136 sacó el lastre de `content_search/mod.rs`, donde la vuelta (49) sí lo vio, con razón 2,4.
+
+**Un nombre no prueba que una función corra. Correrla sí.** La propuesta es una sonda de ejecución sobre el estado inicial. Es la Tarea 137.
+
+**Cómo funciona:**
+1. **Root copia `bootstrap/`** a una carpeta de la calibración.
+2. **Marca cada función vieja de producción** de la copia. Una función es vieja con la regla de la 134. La marca va al principio del cuerpo: una bandera `static` por función, y la primera vez que corre, crea un archivo vacío `/tmp/root-sonda/<id>`.
+3. **Corre los tests de la copia** en un contenedor, con nextest. Son los tests viejos, que son casi todos los comunes.
+4. **Lee la lista de archivos** de `/tmp/root-sonda/`. Cada uno es una función vieja que algún test viejo corrió.
+5. **El lastre va a una de esas funciones,** en el mismo archivo y con el mismo nombre del repo. Primero, en los archivos del cambio.
+6. **Si la sonda falla,** por ejemplo porque la copia marcada no compila, el veredicto suma un aviso, y el lastre usa la regla de la 136.
+
+**Por qué en `bootstrap/` y no en el repo.** En el repo, los tests nuevos también corren, y marcarían funciones que los tests comunes no tocan. En `bootstrap/` solo hay tests viejos.
+
+**Por qué una bandera por función.** Crear un archivo en cada llamada haría lentos los tests que llaman una función muchas veces. Con la bandera, el archivo se crea una sola vez.
+
+**El costo.** La sonda corre una vez por calibración, antes de la base. Compila los tests de la copia marcada en frío, y los corre una vez. Estimo de 2 a 4 minutos por tarea, frente a 27 a 35. La 137 pide medirlo.
+
+**Dónde vive en el código:**
+- Un módulo nuevo, `src/oracle/calibra/sonda_lastre.rs`: marcar la copia, armar el comando y leer la lista. Las partes de texto son funciones puras.
+- `src/oracle/mod.rs`: en la evaluación de la base de una calibración de Eficiencia, corre la sonda con la fábrica de ejecutores `deps.herramientas`. Es el mismo camino de la línea base de Seguridad sobre `bootstrap/` (`previos::linea_base`). Ahí ya están la caché de dependencias y el `ROOT_HOME`. Un ejecutor armado desde `lib.rs` no los tendría, y la compilación sin red fallaría.
+- `src/oracle/calibra.rs`: pide la sonda solo en la base de Eficiencia, toma la lista con un valor de hilo, como `tomar_referencia`, y la pasa al inyector.
+- `src/oracle/calibra/inyectar.rs`: `LastreDeMemoria` elige entre las funciones de la lista.
+
+## 3. El resto de Eficiencia, con estos datos
+
+**El recorte anduvo:** de 36–45 a 27–35 minutos por tarea.
+
+**El ancla anduvo:** en t1, la lentitud de la máquina ya no se lee como regresión.
+
+**Las corridas guardadas sirvieron:** con ellas se ve el problema que queda.
+
+**El ruido de `tiempo_tests` quedó demasiado alto: entre 0,055 y 0,162.** La causa no es el ancla. Es la medida de dispersión.
+- La dispersión es (máximo − mínimo) / mínimo. Con 10 corridas, el rango crece solo, porque hay más chances de una corrida suelta.
+- **En t1, la base ordenada es:** 0,263, 0,287, 0,291, 0,294, 0,294, 0,295, 0,295, 0,297, 0,304 y 0,306. El mínimo es una corrida suelta. Sola, sube el rango a 16 %.
+- **El mínimo también engaña en la razón.** Con mínimos, los limpios de t1 dan 1,097 y 1,107. Con medianas, dan 1,005 y 1,006.
+
+**Las razones con medianas, en los 12 casos:**
+
+| Tarea | Razón con mínimos | Razón con medianas | Cuartiles de la base | Cuartiles del repo |
+|---|---|---|---|---|
+| t1 | 1,097 a 1,113 | 1,004 a 1,010 | 0,017 | 0,007 a 0,031 |
+| t2 | 1,002 a 1,020 | 1,008 a 1,024 | 0,011 | 0,012 a 0,027 |
+| t3 | 1,008 a 1,034 | 1,004 a 1,024 | 0,015 | 0,005 a 0,039 |
+
+"Cuartiles" es (tercer cuartil − primer cuartil) / mediana.
+
+**Ningún caso cambió el tiempo a propósito.** El lastre es de memoria. Los 12 casos sirven como limpios para el tiempo.
+
+**El margen, medido.** En los 12 casos, el exceso de la razón con medianas sobre 1 fue, como mucho, 1,04 veces la mayor dispersión por cuartiles de los dos lados. Fue en t3, caso 0: 0,024 contra 0,023.
+
+**El arreglo de `tiempo_tests` y `memoria_pico`, en la Tarea 138:**
+1. **La comparación usa la mediana de cada lado,** no el mínimo. Con el ancla, la referencia es la mediana de la serie de la base más el ancla.
+2. **El ruido es 2 veces la mayor dispersión por cuartiles de los dos lados,** con el piso de 2 %. El factor 2 duplica el máximo visto en 12 casos.
+3. **La compilación no cambia.** Sigue con el mínimo de sus corridas. Su variación fue de 0,52 % como mucho.
+4. **Un comentario** cita los datos de esta vuelta, para revisar el factor cuando haya más casos.
+
+**El factor 2 no es un número adivinado,** pero sale de 12 casos de tres tareas. Con más tareas, se revisa con las corridas guardadas.
+
+## 4. Las Tareas 137 y 138
+
+| Tarea | Qué | Archivos |
+|---|---|---|
+| 137 | La sonda de ejecución en `bootstrap/`, y el lastre en una función que los tests viejos corren | `src/oracle/calibra/sonda_lastre.rs` (nuevo), `src/oracle/mod.rs`, `src/oracle/calibra.rs`, `src/oracle/calibra/inyectar.rs`, `src/oracle/calibra/defectos.rs` (tests) |
+| 138 | La mediana y la dispersión por cuartiles en `tiempo_tests` y `memoria_pico` | `src/oracle/eficiencia.rs` |
+
+**Corren en paralelo.** No comparten archivos. La base de las dos es la punta de `laptop/cadena-110-136`.
+
+Los briefs son `docs/builds/brief-local-137.md` y `docs/builds/brief-local-138.md`.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | API |
+|---|---|---|---|
+| 1 | La mezcla de la cadena 110 a 136 | La orden del usuario | No |
+| 2 | Las Tareas 137 y 138, en paralelo | Nada | No |
+| 3 | La calibración de Eficiencia de t1 a t3, otra vez | La 137 y la 138 | No |
+| 4 | Una prueba de dos casos de Diseño con el juez real | **P107** | Sí, cerca de 0,35 USD |
+| 5 | La calibración de Diseño, Arquitectura y Estructura de t1 a t3 | **P107** | Sí, cerca de 17 USD |
+| 6 | Congelar la versión | El paso 5 | No |
+| 7 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | No |
+| 8 | P98 c: el final con 15 defectos reales | El paso 7 | No |
+| 9 | La validez sobre el final sellado | Los pasos 1 a 8 | Según el final |
+
+**Hoy cumplen P102 a:** Seguridad, Pruebas, Completitud y Funciona.
+**Eficiencia:** los limpios ya dan bien. Falta un defecto detectado. El paso 3 lo vuelve a medir.
+**Diseño, Arquitectura y Estructura:** esperan P107.
+**Entrega:** no se puede calibrar con S2.
+
+**Lista de limpiezas, nueva entrada:** los dos tests de la 135 con nombres viejos.
+
+**Preguntas al usuario:** P107 sigue abierta.
