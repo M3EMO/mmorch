@@ -641,6 +641,34 @@ fn colab_empaquetar(json: bool, pedido: colab_calibra::PedidoEmpaquetar) -> Resu
     Ok(())
 }
 
+/// `colab importar`: revisa el paquete de vuelta de Colab, importa lo que pasa e imprime el resumen.
+fn colab_importar(json: bool, pedido: colab_calibra::PedidoImportar) -> Result<(), Error> {
+    let resumen = colab_calibra::importar_cli(pedido)?;
+    if json {
+        println!("{}", serde_json::to_string(&resumen)?);
+        return Ok(());
+    }
+    println!(
+        "entraron {} filas; no entraron {}",
+        resumen.entraron,
+        resumen.rechazadas.len()
+    );
+    for rechazada in &resumen.rechazadas {
+        println!(
+            "no entra {} {}: {}",
+            rechazada.tarea, rechazada.dimension, rechazada.motivo
+        );
+    }
+    println!("casos copiados: {}", resumen.casos_copiados);
+    if let Some(respaldo) = &resumen.respaldo {
+        println!("respaldo: {}", respaldo.display());
+    }
+    for aviso in &resumen.avisos {
+        println!("{aviso}");
+    }
+    Ok(())
+}
+
 /// `oraculo pendientes`: arma el paquete de los tests pendientes, o importa el junit de Colab.
 fn oraculo_pendientes(
     json: bool,
@@ -883,6 +911,15 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                 repos: repo.clone(),
                 rustup_sha256: rustup_sha256.clone(),
                 salida: salida.clone(),
+                raiz_root: raiz_root.clone(),
+            },
+        ),
+        Comando::Colab {
+            accion: ColabAccion::Importar { archivo, raiz_root },
+        } => colab_importar(
+            cli.json,
+            colab_calibra::PedidoImportar {
+                archivo: archivo.clone(),
                 raiz_root: raiz_root.clone(),
             },
         ),

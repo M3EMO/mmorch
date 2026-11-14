@@ -195,6 +195,14 @@ pub enum ColabAccion {
         #[arg(long)]
         raiz_root: Option<PathBuf>,
     },
+    /// Importa la vuelta de una calibración de Colab: revisa el paquete y agrega sus filas.
+    Importar {
+        /// Paquete `.tar.gz` de vuelta que trajo Colab.
+        archivo: PathBuf,
+        /// Repo de Root: de ahí sale el commit de la laptop. Por defecto, el directorio actual.
+        #[arg(long)]
+        raiz_root: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -429,6 +437,7 @@ impl Comando {
             },
             Comando::Colab { accion } => match accion {
                 ColabAccion::Empaquetar { .. } => "colab empaquetar",
+                ColabAccion::Importar { .. } => "colab importar",
             },
             Comando::Observa { accion } => match accion {
                 ObservaAccion::Claude { .. } => "observa claude",
