@@ -2,6 +2,7 @@
 //! tiempo de tests, pico de memoria, tiempo de compilación y tamaño de los binarios.
 //! Cada lado corre en su propio ejecutor. `comparar` hace toda la aritmética.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -159,6 +160,8 @@ struct Listas {
 
 /// Motivo que da la medida de tests cuando no hay tests comunes.
 const MOTIVO_SIN_COMUNES: &str = "ningún test pasa en los dos lados";
+/// Motivo de los tests cuando el filtro del caso no es el de la referencia: la serie guardada midió otros tests.
+const MOTIVO_OTROS_TESTS: &str = "los tests comunes del caso difieren de los de la base";
 
 /// Dice si `nombre` no está vacío y solo tiene letras, dígitos y los `extra` permitidos.
 fn cabe(nombre: &str, extra: &[char]) -> bool {
@@ -373,39 +376,38 @@ fn compilar_tests(lado: &Lado) -> Result<(), String> {
     }
 }
 
-/// Mide tiempo y memoria de los tests. Compila los tests de cada lado, y luego corre los dos lados
-/// alternados, `CORRIDAS` veces. Un lado que no compila no corre.
+/// Mide tiempo y memoria de los tests. Compila los tests de cada lado que corre, y luego corre esos lados
+/// alternados, `CORRIDAS` veces. Un lado que no compila no corre. Si `lados[k]` es `None`, ese lado no corre:
+/// su serie ya viene en `tiempo[k]` y `memoria[k]`. Con `filtro` con error, los dos lados quedan con ese error.
 fn medir_tests(
-    inicial: &Lado,
-    repo: &Lado,
-    lista_i: &Result<Listas, String>,
-    lista_r: &Result<Listas, String>,
-) -> (ResultadoMedida, ResultadoMedida) {
-    let filtro = match preparar_filtro(lista_i, lista_r) {
+    lados: [Option<&Lado>; 2],
+    filtro: &Result<String, String>,
+    tiempo: &mut [Serie; 2],
+    memoria: &mut [Serie; 2],
+) {
+    let filtro = match filtro {
         Ok(filtro) => filtro,
         Err(motivo) => {
-            return (
-                sin_valor(Medida::TiempoTests, motivo.clone()),
-                sin_valor(Medida::MemoriaPico, motivo),
-            );
+            *tiempo = [Err(motivo.clone()), Err(motivo.clone())];
+            *memoria = [Err(motivo.clone()), Err(motivo.clone())];
+            return;
         }
     };
-    let lados = [inicial, repo];
-    let mut tiempo: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
-    let mut memoria: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
-    for (k, lado) in lados.iter().enumerate() {
+    for (k, lado) in lados.into_iter().enumerate() {
+        let Some(lado) = lado else { continue };
         if let Err(motivo) = compilar_tests(lado) {
             anotar(&mut tiempo[k], Err(motivo.clone()));
             anotar(&mut memoria[k], Err(motivo));
         }
     }
     for _ in 0..CORRIDAS {
-        for (k, lado) in lados.iter().enumerate() {
+        for (k, lado) in lados.into_iter().enumerate() {
+            let Some(lado) = lado else { continue };
             let nombre = lado.nombre;
             if tiempo[k].is_err() && memoria[k].is_err() {
                 continue;
             }
-            match lado.ejecutar(&cmd_tests(&filtro)) {
+            match lado.ejecutar(&cmd_tests(filtro)) {
                 Err(e) => {
                     let motivo = format!("{nombre}: {e}");
                     anotar(&mut tiempo[k], Err(motivo.clone()));
@@ -430,20 +432,18 @@ fn medir_tests(
             }
         }
     }
-    (
-        combinar(Medida::TiempoTests, &tiempo[0], &tiempo[1]),
-        combinar(Medida::MemoriaPico, &memoria[0], &memoria[1]),
-    )
 }
 
 /// Mide la compilación y el tamaño de los binarios. Usa los paquetes y binarios del lado `repo`.
 /// Los dos lados tienen los mismos nombres de paquete, así que el comando sirve para ambos.
+/// `lados[k]` `None` como en `medir_tests`: ese lado no corre y su serie ya viene en `compilacion[k]`.
 fn medir_compilacion(
-    inicial: &Lado,
-    repo: &Lado,
+    lados: [Option<&Lado>; 2],
     meta_i: &Result<Metadatos, String>,
     meta_r: &Result<Metadatos, String>,
-) -> (ResultadoMedida, ResultadoMedida) {
+    compilacion: &mut [Serie; 2],
+    tamano: &mut [Serie; 2],
+) {
     let (Ok(_), Ok(meta)) = (meta_i, meta_r) else {
         let motivo = unir_motivos(
             [meta_i.as_ref().err(), meta_r.as_ref().err()]
@@ -451,29 +451,26 @@ fn medir_compilacion(
                 .flatten()
                 .cloned(),
         );
-        return (
-            sin_valor(Medida::TiempoCompilacion, motivo.clone()),
-            sin_valor(Medida::TamanoBinario, motivo),
-        );
+        *compilacion = [Err(motivo.clone()), Err(motivo.clone())];
+        *tamano = [Err(motivo.clone()), Err(motivo)];
+        return;
     };
     let sin = |motivo: &str| -> [Serie; 2] { [Err(motivo.into()), Err(motivo.into())] };
-    let lados = [inicial, repo];
-    let mut compilacion: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
-    let mut tamano: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     if meta.paquetes.is_empty() {
-        compilacion = sin("sin paquetes");
-        tamano = sin(if meta.binarios.is_empty() {
+        *compilacion = sin("sin paquetes");
+        *tamano = sin(if meta.binarios.is_empty() {
             "sin binarios"
         } else {
             "sin paquetes"
         });
     } else {
         if meta.binarios.is_empty() {
-            tamano = sin("sin binarios");
+            *tamano = sin("sin binarios");
         }
         let comando = cmd_compilacion(&meta.paquetes, &meta.binarios);
         for corrida in 0..CORRIDAS {
-            for (k, lado) in lados.iter().enumerate() {
+            for (k, lado) in lados.into_iter().enumerate() {
+                let Some(lado) = lado else { continue };
                 let nombre = lado.nombre;
                 if compilacion[k].is_err() {
                     continue;
@@ -512,10 +509,21 @@ fn medir_compilacion(
             }
         }
     }
-    (
+}
+
+/// Une las series de los dos lados en las cuatro medidas, en orden de `Medida`.
+fn combinar_medidas(
+    tiempo: &[Serie; 2],
+    memoria: &[Serie; 2],
+    compilacion: &[Serie; 2],
+    tamano: &[Serie; 2],
+) -> Vec<ResultadoMedida> {
+    vec![
+        combinar(Medida::TiempoTests, &tiempo[0], &tiempo[1]),
+        combinar(Medida::MemoriaPico, &memoria[0], &memoria[1]),
         combinar(Medida::TiempoCompilacion, &compilacion[0], &compilacion[1]),
         combinar(Medida::TamanoBinario, &tamano[0], &tamano[1]),
-    )
+    ]
 }
 
 /// Una medida con sus dos valores comparados, o el motivo por el que no tiene valor.
@@ -526,6 +534,53 @@ pub struct ResultadoMedida {
     pub repo: Option<f64>,
     pub comparacion: Option<Comparacion>,
     pub motivo: Option<String>,
+}
+
+/// Lo que midió el lado inicial de una medición. Una calibración la mide una vez y sus casos la reusan.
+/// `filtro` es el resultado de `preparar_filtro` de ese lado. Las series son las del lado inicial.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Referencia {
+    meta: Result<Metadatos, String>,
+    lista: Result<Listas, String>,
+    filtro: Result<String, String>,
+    tiempo: Serie,
+    memoria: Serie,
+    compilacion: Serie,
+    tamano: Serie,
+}
+
+thread_local! {
+    /// Referencia que midió la última medición de dos lados de este hilo. La toma `tomar_referencia`.
+    static ULTIMA_REFERENCIA: RefCell<Option<Referencia>> = const { RefCell::new(None) };
+    /// Referencia fijada que usa `medir_lados` en este hilo. `None`: mide los dos lados.
+    static REFERENCIA_FIJA: RefCell<Option<Referencia>> = const { RefCell::new(None) };
+}
+
+/// Saca la referencia que midió la última medición de dos lados de este hilo. Deja el valor vacío.
+pub(crate) fn tomar_referencia() -> Option<Referencia> {
+    ULTIMA_REFERENCIA.with(|u| u.borrow_mut().take())
+}
+
+/// Corre `f` con `referencia` como el lado inicial. Sin referencia, la medición mide los dos lados.
+/// Al salir, también ante pánico, vuelve la referencia anterior.
+pub(crate) fn con_referencia<T>(referencia: Option<Referencia>, f: impl FnOnce() -> T) -> T {
+    /// Devuelve la referencia anterior al salir del ámbito.
+    struct Restaura(Option<Referencia>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = self.0.take();
+            REFERENCIA_FIJA.with(|r| *r.borrow_mut() = anterior);
+        }
+    }
+    let anterior = REFERENCIA_FIJA.with(|r| r.replace(referencia));
+    let _restaura = Restaura(anterior);
+    f()
+}
+
+/// Referencia fijada que ve este hilo. Solo para los tests.
+#[cfg(test)]
+fn referencia_fijada_actual() -> Option<Referencia> {
+    REFERENCIA_FIJA.with(|r| r.borrow().clone())
 }
 
 /// Mide el repo contra el estado inicial. Siempre devuelve cuatro resultados, en orden de `Medida`.
@@ -588,15 +643,78 @@ fn aviso_de_borrado(raiz: &Path, e: &std::io::Error) -> String {
     )
 }
 
-/// Las cuatro medidas de dos lados. Primero la metadata y las listas de tests de cada lado. Luego las corridas.
+/// Las cuatro medidas de dos lados. Con referencia fijada, solo mide el repo. Si no, mide los dos lados y
+/// guarda lo que midió el inicial para `tomar_referencia`.
 fn medir_lados(inicial: &Lado, repo: &Lado) -> Vec<ResultadoMedida> {
+    let fijada = REFERENCIA_FIJA.with(|r| r.borrow().clone());
+    match fijada {
+        Some(referencia) => medir_contra_referencia(&referencia, repo),
+        None => {
+            let (resultados, referencia) = medir_los_dos_lados(inicial, repo);
+            ULTIMA_REFERENCIA.with(|u| *u.borrow_mut() = Some(referencia));
+            resultados
+        }
+    }
+}
+
+/// Mide la metadata, las listas y las corridas de los dos lados. Devuelve las cuatro medidas y lo que
+/// midió el lado inicial. Primero la metadata y las listas de cada lado. Luego las corridas.
+fn medir_los_dos_lados(inicial: &Lado, repo: &Lado) -> (Vec<ResultadoMedida>, Referencia) {
     let meta_i = leer_metadata(inicial).map_err(|m| format!("inicial: {m}"));
     let meta_r = leer_metadata(repo).map_err(|m| format!("repo: {m}"));
     let lista_i = leer_listas(inicial).map_err(|m| format!("inicial: {m}"));
     let lista_r = leer_listas(repo).map_err(|m| format!("repo: {m}"));
-    let (tiempo, memoria) = medir_tests(inicial, repo, &lista_i, &lista_r);
-    let (compilacion, tamano) = medir_compilacion(inicial, repo, &meta_i, &meta_r);
-    vec![tiempo, memoria, compilacion, tamano]
+    let filtro = preparar_filtro(&lista_i, &lista_r);
+    let lados = [Some(inicial), Some(repo)];
+    let mut tiempo: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
+    let mut memoria: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
+    let mut compilacion: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
+    let mut tamano: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
+    medir_tests(lados, &filtro, &mut tiempo, &mut memoria);
+    medir_compilacion(lados, &meta_i, &meta_r, &mut compilacion, &mut tamano);
+    let referencia = Referencia {
+        meta: meta_i,
+        lista: lista_i,
+        filtro,
+        tiempo: tiempo[0].clone(),
+        memoria: memoria[0].clone(),
+        compilacion: compilacion[0].clone(),
+        tamano: tamano[0].clone(),
+    };
+    let resultados = combinar_medidas(&tiempo, &memoria, &compilacion, &tamano);
+    (resultados, referencia)
+}
+
+/// Mide solo el repo y lo compara con la referencia. El lado inicial no corre: sus series son las de la
+/// referencia. Si el filtro del repo no es el de la referencia, los tests no tienen valor.
+fn medir_contra_referencia(referencia: &Referencia, repo: &Lado) -> Vec<ResultadoMedida> {
+    let meta_r = leer_metadata(repo).map_err(|m| format!("repo: {m}"));
+    let lista_r = leer_listas(repo).map_err(|m| format!("repo: {m}"));
+    let filtro = preparar_filtro(&referencia.lista, &lista_r).and_then(|f| {
+        if referencia
+            .filtro
+            .as_ref()
+            .is_ok_and(|guardado| *guardado == f)
+        {
+            Ok(f)
+        } else {
+            Err(MOTIVO_OTROS_TESTS.into())
+        }
+    });
+    let lados = [None, Some(repo)];
+    let mut tiempo: [Serie; 2] = [referencia.tiempo.clone(), Ok(vec![])];
+    let mut memoria: [Serie; 2] = [referencia.memoria.clone(), Ok(vec![])];
+    let mut compilacion: [Serie; 2] = [referencia.compilacion.clone(), Ok(vec![])];
+    let mut tamano: [Serie; 2] = [referencia.tamano.clone(), Ok(vec![])];
+    medir_tests(lados, &filtro, &mut tiempo, &mut memoria);
+    medir_compilacion(
+        lados,
+        &referencia.meta,
+        &meta_r,
+        &mut compilacion,
+        &mut tamano,
+    );
+    combinar_medidas(&tiempo, &memoria, &compilacion, &tamano)
 }
 
 /// Crea la carpeta de trabajo dentro de `tmp` y una subcarpeta por lado. Si falla a medias, borra lo creado.
@@ -1144,5 +1262,157 @@ mod tests {
         assert!(sin_fallo.is_empty(), "{sin_fallo:?}");
         assert_eq!(con_fallo.len(), 1, "{con_fallo:?}");
         assert_eq!(medidas_sin_fallo, medidas_con_fallo);
+    }
+
+    /// Mide una vez con `inicial` y `repo` y devuelve la referencia que dejó el lado inicial.
+    fn referencia_de(inicial: &Falso, repo: &Falso) -> Referencia {
+        let _ = medir_de_prueba(inicial, repo);
+        tomar_referencia().expect("la medición dejó una referencia")
+    }
+
+    #[test]
+    fn con_referencia_el_lado_inicial_no_recibe_llamadas() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        assert_eq!(resultados.len(), 4);
+        let entradas = log.borrow();
+        assert!(
+            entradas.iter().all(|e| !e.starts_with("inicial ")),
+            "{entradas:?}"
+        );
+        assert!(
+            entradas.iter().any(|e| e.starts_with("repo ")),
+            "{entradas:?}"
+        );
+    }
+
+    #[test]
+    fn con_referencia_la_razon_usa_la_serie_guardada() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        // El lado inicial de esta prueba tiene otros números. Si se midiera, la razón cambiaría.
+        let log = RefCell::new(Vec::new());
+        let inicial = Falso {
+            tests: "ROOT_NS 9000000000\nROOT_MEM 9000\n".into(),
+            build: "ROOT_NS 9000000000\nROOT_BUILD 0\nROOT_SIZE 9000\n".into(),
+            ..sano("inicial", &log, &["a"])
+        };
+        let repo = Falso {
+            tests: "ROOT_NS 3000000000\nROOT_MEM 2000\n".into(),
+            build: "ROOT_NS 4000000000\nROOT_BUILD 0\nROOT_SIZE 1000\n".into(),
+            ..sano("repo", &log, &["a"])
+        };
+        let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        let casos = [
+            (Medida::TiempoTests, 1.5, 3.0),
+            (Medida::MemoriaPico, 1000.0, 2000.0),
+            (Medida::TiempoCompilacion, 2.0, 4.0),
+            (Medida::TamanoBinario, 500.0, 1000.0),
+        ];
+        for (medida, referencia, repo) in casos {
+            let r = por_medida(&resultados, medida);
+            assert_eq!(r.referencia, Some(referencia), "{medida:?}");
+            assert_eq!(r.repo, Some(repo), "{medida:?}");
+            let razon = r.comparacion.as_ref().map(|c| c.razon);
+            assert!(razon.is_some_and(|x| cerca(x, 2.0)), "{medida:?}: {r:?}");
+        }
+        assert!(log.borrow().iter().all(|e| !e.starts_with("inicial ")));
+    }
+
+    #[test]
+    fn referencia_con_serie_fallida_deja_la_medida_sin_valor_con_el_motivo_de_la_base() {
+        let log_base = RefCell::new(Vec::new());
+        let sin_pico = "ROOT_NS 1500000000\nROOT_MEM \n";
+        let referencia = referencia_de(
+            &Falso {
+                tests: sin_pico.into(),
+                ..sano("inicial", &log_base, &["a"])
+            },
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        let memoria = por_medida(&resultados, Medida::MemoriaPico);
+        assert_eq!(memoria.motivo.as_deref(), Some("sin memory.peak"));
+        assert_eq!(memoria.referencia, None);
+        let tiempo = por_medida(&resultados, Medida::TiempoTests);
+        assert!(tiempo.referencia.is_some());
+        assert!(tiempo.motivo.is_none());
+    }
+
+    #[test]
+    fn referencia_con_filtro_distinto_deja_tests_sin_valor() {
+        let log_base = RefCell::new(Vec::new());
+        // La base: los dos lados pasan `a` y `b`. Su filtro no excluye nada.
+        let referencia = referencia_de(
+            &Falso {
+                lista: lista(&[("a", true), ("b", true)]),
+                ..sano("inicial", &log_base, &[])
+            },
+            &Falso {
+                lista: lista(&[("a", true), ("b", true)]),
+                ..sano("repo", &log_base, &[])
+            },
+        );
+        // El caso: `b` falla en el repo. Su filtro excluye `b`, y el de la base no.
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &[]);
+        let repo = Falso {
+            lista: lista(&[("a", true), ("b", false)]),
+            ..sano("repo", &log, &[])
+        };
+        let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        for medida in [Medida::TiempoTests, Medida::MemoriaPico] {
+            let r = por_medida(&resultados, medida);
+            assert_eq!(
+                r.motivo.as_deref(),
+                Some("los tests comunes del caso difieren de los de la base"),
+                "{medida:?}"
+            );
+        }
+        let entradas = log.borrow();
+        assert!(
+            entradas.iter().all(|e| !e.starts_with("repo tests ")),
+            "{entradas:?}"
+        );
+        assert!(
+            por_medida(&resultados, Medida::TamanoBinario)
+                .referencia
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn con_referencia_restaura_la_anterior_tambien_con_panico() {
+        let log = RefCell::new(Vec::new());
+        let a = referencia_de(&sano("inicial", &log, &["a"]), &sano("repo", &log, &["a"]));
+        let b = referencia_de(
+            &Falso {
+                tests: "ROOT_NS 9000000000\nROOT_MEM 9\n".into(),
+                ..sano("inicial", &log, &["a"])
+            },
+            &sano("repo", &log, &["a"]),
+        );
+        assert_eq!(referencia_fijada_actual(), None);
+        con_referencia(Some(a.clone()), || {
+            let corte = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                con_referencia(Some(b.clone()), || panic!("corte de prueba"))
+            }));
+            assert!(corte.is_err());
+            assert_eq!(referencia_fijada_actual(), Some(a.clone()));
+        });
+        assert_eq!(referencia_fijada_actual(), None);
     }
 }

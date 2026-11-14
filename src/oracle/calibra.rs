@@ -1008,6 +1008,9 @@ struct Ronda<'a> {
     curadas: Excluidos,
     /// Ítems inestables de la base. Cada caso los excluye, como una evaluación normal (Tarea 83, punto 2).
     inestables: &'a [String],
+    /// Lo que midió el lado inicial de Eficiencia en la base. Cada caso lo fija y no mide ese lado (Tarea 131).
+    /// `None` en las otras dimensiones y si la base no lo midió.
+    referencia_eficiencia: Option<super::eficiencia::Referencia>,
 }
 
 impl Ronda<'_> {
@@ -1074,6 +1077,8 @@ fn evaluar_copia(
     // Vacía la muestra de una evaluación anterior: lo que quede en el hilo es de esta evaluación.
     let _ = super::mutacion::tomar_muestra();
     let _ = super::mutacion::tomar_filtro();
+    // Vacía la referencia pendiente de una medición anterior: lo que quede en el hilo es de esta evaluación.
+    let _ = super::eficiencia::tomar_referencia();
     // Los casos corren con el plazo de la base: un plazo automático cambiaría con los tests que se apagan.
     // Un test más débil no mata más mutantes. Por eso los vivos de la base no aportan.
     // Solo corren los muertos y vencidos de la base.
@@ -1082,8 +1087,10 @@ fn evaluar_copia(
             super::mutacion::con_carpeta_de_mutacion(r.carpeta_mutacion, || {
                 super::mutacion::con_muestra_de_base(r.mutantes_base, || {
                     super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
-                        con_plazos_suites(Some(r.plazos_suites), || {
-                            en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+                        super::eficiencia::con_referencia(r.referencia_eficiencia.clone(), || {
+                            con_plazos_suites(Some(r.plazos_suites), || {
+                                en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+                            })
                         })
                     })
                 })
@@ -1616,6 +1623,8 @@ fn calibrar_medida_con_hilos(
     // Vacía la muestra de mutación del hilo: lo que quede después es de la base.
     let _ = super::mutacion::tomar_muestra();
     let _ = super::mutacion::tomar_base_segundos();
+    // Vacía la referencia de Eficiencia del hilo: lo que quede después es de la base (Tarea 131).
+    let _ = super::eficiencia::tomar_referencia();
     // Vacía las duraciones de las suites del hilo: lo que quede después es de la base (Tarea 107).
     let _ = tomar_duraciones_suites();
     // La base corre con el límite activo: su juez también cuenta. Una base rechazada no mide nada.
@@ -1630,6 +1639,9 @@ fn calibrar_medida_con_hilos(
     });
     // Los casos comparan su muestra con la de la base. Las bases repetidas no la pisan.
     let mutantes_base = super::mutacion::tomar_muestra();
+    // Solo Eficiencia fija la referencia de su lado inicial en los casos. Las bases repetidas no la usan.
+    let referencia_eficiencia =
+        super::eficiencia::tomar_referencia().filter(|_| dimension == Dimension::Eficiencia);
     // Plazo de los casos: el de la base, sin tocar. La base y las repetidas corren con el automático.
     let plazo_mutantes = super::mutacion::tomar_base_segundos().map(super::mutacion::plazo_de_base);
     // Duración de cada suite en la base: fija el plazo de sus casos y queda en la fila.
@@ -1777,6 +1789,7 @@ fn calibrar_medida_con_hilos(
         agotado: Vec::new(),
         curadas: identidades_de_equivalentes(equivalentes_de(tarea)),
         inestables: &inestables_casos,
+        referencia_eficiencia,
     };
     // Las elecciones de los casos se hacen antes de lanzar los hilos: así cada caso ya tiene su lista fija.
     let pre = preelegir(&ronda, n)?;
@@ -3695,6 +3708,115 @@ mod tests {
             calibrar_con(&tarea, Dimension::Eficiencia, 10, 42, dir.path(), &ev).expect("hay fila");
         // El bucle aplica una vez: la única función del camino se agota. El lastre aplica en sus dos casos.
         assert_eq!((fila.defectos, fila.no_aplicable), (3, 2));
+    }
+
+    /// Ejecutor que cuenta sus llamadas y responde como un lado sano de Eficiencia: un paquete `app` y un test `a`.
+    struct Contado<'a> {
+        llamadas: &'a AtomicUsize,
+    }
+
+    impl EjecutorHerramienta for Contado<'_> {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            self.llamadas.fetch_add(1, Ordering::SeqCst);
+            let mut salida = SalidaHerramienta::default();
+            if cmd.contains("cargo metadata") {
+                salida.archivos.insert(
+                    "metadata.json".into(),
+                    r#"{"packages":[{"name":"app","targets":[{"kind":["bin"],"name":"app"}]}]}"#
+                        .into(),
+                );
+            } else if cmd.contains("junit.xml") {
+                salida.archivos.insert(
+                    "lista.xml".into(),
+                    r#"<testsuites><testsuite name="x"><testcase name="a" classname="c"/></testsuite></testsuites>"#
+                        .into(),
+                );
+            } else if cmd.contains("cargo clean") {
+                salida.stdout = "ROOT_NS 2000000000\nROOT_BUILD 0\nROOT_SIZE 500\n".into();
+            } else if cmd.contains("--no-run") {
+                salida.stdout = "ROOT_COMPILAR 0\n".into();
+            } else if cmd.contains("ROOT_NS") {
+                salida.stdout = "ROOT_NS 1500000000\nROOT_MEM 1000\n".into();
+            }
+            Ok(salida)
+        }
+    }
+
+    /// Tarea 131, punto 4: la base mide los dos lados de Eficiencia y cada caso mide solo el repo.
+    #[test]
+    fn calibra_eficiencia_la_base_mide_los_dos_lados_y_cada_caso_mide_uno() {
+        let dir = copia_fixture();
+        let tmp = tempfile::tempdir().expect("temporal");
+        let base = Veredicto {
+            puntajes: vec![Puntaje {
+                inestables: Vec::new(),
+                motivo_sin_calibrar: None,
+                dimension: Dimension::Eficiencia,
+                valor: 1.0,
+                calibrada: false,
+                exactitud_balanceada: None,
+                items: vec![],
+                sin_veredicto: None,
+                no_aplica: None,
+                faltantes: Vec::new(),
+            }],
+            ..Veredicto::default()
+        };
+        let tarea = tarea_en(
+            dir.path(),
+            "\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n\n[calibracion]\ncamino_caliente = [\"ejecutar\"]\n",
+        );
+        let ini_base = AtomicUsize::new(0);
+        let rep_base = AtomicUsize::new(0);
+        let ini_casos = AtomicUsize::new(0);
+        let rep_casos = AtomicUsize::new(0);
+        let ev_falso = falso(dir.path(), &base, |_, _, base| base.clone());
+        let evaluador = |ruta: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            // La base es la ruta del repo bueno. Los casos son copias en otra carpeta.
+            let (ini, rep) = if ruta == dir.path() {
+                (&ini_base, &rep_base)
+            } else {
+                (&ini_casos, &rep_casos)
+            };
+            let mut avisos = Vec::new();
+            crate::oracle::eficiencia::medir(
+                &Contado { llamadas: ini },
+                &Contado { llamadas: rep },
+                tmp.path(),
+                &mut avisos,
+            );
+            ev_falso(ruta)
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Eficiencia,
+            10,
+            42,
+            dir.path(),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        assert!(medida.fila.is_some());
+        assert!(
+            ini_base.load(Ordering::SeqCst) > 0,
+            "la base mide el lado inicial"
+        );
+        assert!(rep_base.load(Ordering::SeqCst) > 0, "la base mide el repo");
+        assert!(
+            rep_casos.load(Ordering::SeqCst) > 0,
+            "los casos miden el repo"
+        );
+        assert_eq!(
+            ini_casos.load(Ordering::SeqCst),
+            0,
+            "los casos no llaman al lado inicial"
+        );
     }
 
     /// Punto 2 de la Tarea 121: una base sin veredicto da fila sin casos. Antes era `ErrorOraculo::Infra`.
