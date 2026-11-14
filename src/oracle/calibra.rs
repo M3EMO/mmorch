@@ -160,6 +160,10 @@ pub struct Fila {
     /// dimensión. Una fila sin el campo vale vacía.
     #[serde(default)]
     pub inestables: Vec<String>,
+    /// Guarda la causa de cada ítem de `inestables`. Dice qué juicio no lo trajo o cuánto varió. Una fila sin el
+    /// campo vale vacía.
+    #[serde(default)]
+    pub causas_inestables: BTreeMap<String, String>,
     /// Extractos que leyó el juez en cada juicio de la base, en orden. Una sola lista si la dimensión no repite
     /// la base. Una fila sin el campo vale vacía.
     #[serde(default)]
@@ -1600,6 +1604,7 @@ fn calibrar_medida_con_hilos(
     }
     let refs: Vec<&Veredicto> = juicios.iter().collect();
     let inestables = inestables::inestables_de(&refs, dimension, &pesos.del_juez);
+    let causas = inestables::causas_de(&refs, dimension, &pesos.del_juez);
     // Una dimensión cuyos ítems estables pesan menos de la mitad no mide casos: ahorra el gasto del juez.
     if inestables::dimension_inestable(&pesos, &inestables) {
         let motivo = inestables::motivo(&inestables);
@@ -1607,6 +1612,7 @@ fn calibrar_medida_con_hilos(
             inestable: Some(motivo.clone()),
             no_aplica: None,
             inestables: inestables.iter().cloned().collect(),
+            causas_inestables: causas,
             extractos_base,
             juicios_base,
             ..fila_no_aplica(tarea, &tarea_hash, dimension, semilla, &motivo)
@@ -1781,6 +1787,7 @@ fn calibrar_medida_con_hilos(
             duracion_oculto: duraciones_base.oculto,
             ruidosos: ruidosos.into_iter().collect(),
             inestables: inestables.iter().cloned().collect(),
+            causas_inestables: causas,
             extractos_base,
             juicios_base,
             tarea_hash: Some(tarea_hash.clone()),
@@ -1910,6 +1917,7 @@ fn fila_de(
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
         juicios_base: Vec::new(),
+        causas_inestables: BTreeMap::new(),
         plazo_mutantes: None,
         duracion_contrato: None,
         duracion_oculto: None,
@@ -2272,6 +2280,7 @@ fn fila_no_aplica(
         huella: Some(huella_de(dimension)),
         extractos_base: Vec::new(),
         juicios_base: Vec::new(),
+        causas_inestables: BTreeMap::new(),
         plazo_mutantes: None,
         duracion_contrato: None,
         duracion_oculto: None,
@@ -3072,6 +3081,7 @@ mod tests {
             huella: Some(huella_de(dimension)),
             extractos_base: Vec::new(),
             juicios_base: Vec::new(),
+            causas_inestables: BTreeMap::new(),
         }
     }
 
@@ -9639,6 +9649,76 @@ mod tests {
             let niveles: Vec<u8> = juicio_base.niveles.iter().map(|n| n.nivel).collect();
             assert_eq!(niveles, vec![i as u8 + 1], "juicio {i}: {juicio_base:?}");
         }
+    }
+
+    /// Con tres juicios de niveles 1, 2 y 3, la fila dice que `diseno.robustez` varía de 1 a 3.
+    #[test]
+    fn diseno_con_tres_juicios_que_varian_guarda_la_causa_del_item() {
+        let juicio = |nivel: u8| Veredicto {
+            puntajes: vec![Puntaje {
+                items: vec![NivelItem {
+                    item: "diseno.robustez".into(),
+                    nivel,
+                    evidencia: vec![],
+                    fuente: Fuente::Juez {
+                        modelo: "deepseek-reasoner".into(),
+                    },
+                }],
+                ..puntaje(Dimension::Diseno, 1.0)
+            }],
+            ..Veredicto::default()
+        };
+        let juicios = [juicio(1), juicio(2), juicio(3)];
+        let turno = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| {
+            let veredicto = match tipo {
+                TipoCaso::Base | TipoCaso::BaseRepetida => {
+                    juicios[turno.fetch_add(1, Ordering::SeqCst)].clone()
+                }
+                _ => juicios[0].clone(),
+            };
+            Ok(veredicto)
+        };
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("calibra");
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(
+            fila.causas_inestables,
+            BTreeMap::from([("diseno.robustez".to_string(), "varía de 1 a 3".to_string())]),
+            "{:?}",
+            fila.causas_inestables
+        );
+    }
+
+    /// Una fila de antes de `causas_inestables` se lee con mapa vacío.
+    #[test]
+    fn fila_vieja_sin_causas_inestables_lee_mapa_vacio() {
+        let mut texto =
+            serde_json::to_value(fila("t", Dimension::Estructura, 1.0, None)).expect("json");
+        texto
+            .as_object_mut()
+            .expect("objeto")
+            .remove("causas_inestables");
+        let leida: Fila = serde_json::from_value(texto).expect("fila vieja");
+        assert!(
+            leida.causas_inestables.is_empty(),
+            "{:?}",
+            leida.causas_inestables
+        );
     }
 
     /// Un juicio de la base con un faltante guarda el ítem y su motivo en `juicios_base`.

@@ -643,6 +643,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 0,
           "minimum": 0
         },
+        "causas_inestables": {
+          "description": "Guarda la causa de cada ítem de `inestables`. Dice qué juicio no lo trajo o cuánto varió. Una fila sin el\ncampo vale vacía.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
         "defectos": {
           "description": "Defectos aplicados y medidos. La sensibilidad sale de ellos.",
           "type": "integer",

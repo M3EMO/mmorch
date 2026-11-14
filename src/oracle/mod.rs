@@ -7552,6 +7552,7 @@ mod tests {
                 inestables: inestables.iter().map(|i| (*i).into()).collect(),
                 extractos_base: Vec::new(),
                 juicios_base: Vec::new(),
+                causas_inestables: BTreeMap::new(),
             }],
         }
     }
@@ -8280,6 +8281,7 @@ mod tests {
             inestables: Vec::new(),
             extractos_base: Vec::new(),
             juicios_base: Vec::new(),
+            causas_inestables: BTreeMap::new(),
         })
         .collect();
         let calibracion = Calibraciones {
@@ -8358,6 +8360,7 @@ mod tests {
             inestables: Vec::new(),
             extractos_base: Vec::new(),
             juicios_base: Vec::new(),
+            causas_inestables: BTreeMap::new(),
         };
         let calibracion = Calibraciones {
             v: calibra::VERSION,

@@ -954,6 +954,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
     // Seguridad calibrada en la misma tarea: `global` la cuenta y Eficiencia no.
     let seguridad = Fila {
         base_sin_veredicto: None,
+        causas_inestables: std::collections::BTreeMap::new(),
         tarea_hash: Some(String::new()),
         plazo_mutantes: None,
         defectos_en_piso: 0,
@@ -1126,6 +1127,7 @@ fn eficiencia_con_bloque_mantiene_la_medicion_previa() {
 fn fila_vieja_sin_no_aplica_se_lee() {
     let fila = Fila {
         base_sin_veredicto: None,
+        causas_inestables: std::collections::BTreeMap::new(),
         tarea_hash: None,
         plazo_mutantes: None,
         defectos_en_piso: 0,
@@ -1172,6 +1174,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
     let home = home_con_tarea("");
     let antes = Fila {
         base_sin_veredicto: None,
+        causas_inestables: std::collections::BTreeMap::new(),
         tarea_hash: None,
         plazo_mutantes: None,
         defectos_en_piso: 0,
