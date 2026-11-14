@@ -11122,3 +11122,137 @@ Bubblewrap cumple lo que pide la sección 5 para seguir. P110 sigue siendo del u
 | 12 | La validez sobre el final sellado | Los pasos 1 a 11 | Laptop si usa el juez | Según el final |
 
 **Preguntas al usuario:** P109.
+
+## Vuelta del 2026-11-14 (56): el juez en un notebook de Colab
+
+**Respuesta del usuario, textual:** P109 "b) Notebook de Colab".
+
+**Estado.**
+- La vuelta (55) está en el commit a98cbd4. Los builders 139, 140 y 141 esperan a que la serie 138 termine. Sus briefs no cambian.
+- El orquestador tiene el MCP `colab-mcp`, con la herramienta `open_colab_browser_connection`. Maneja un notebook abierto en el navegador del usuario. Desde ahí, `google.colab.userdata.get` lee Colab Secrets con la aprobación del usuario en pantalla.
+- La regla: las claves de API entran a Colab solo por Colab Secrets, y nunca se imprimen.
+- S2 lleva cerca de 6,55 USD de 25.
+
+**Lo que no sé.** Esta sesión del planner no tiene `colab-mcp`. No conozco sus otras herramientas. En particular, no sé si sube un archivo al runtime del notebook. La sección 3 lo resuelve con una prueba.
+
+## 1. Cómo recibe Root la clave sin que la vea nadie más
+
+**El problema de hoy.** `Claves::del_entorno` (`src/proveedores/mod.rs:208`) lee `DEEPSEEK_API_KEY` y `ANTHROPIC_API_KEY` del entorno. Si la clave está en el entorno de `r00t`, cada proceso que `r00t` lanza la hereda, salvo que alguien limpie el entorno a propósito.
+
+**El diseño: la clave viaja por un descriptor de archivo, no por el entorno.**
+1. **La celda que lee la clave** corre en el kernel del notebook:
+   ```python
+   import os, subprocess
+   from google.colab import userdata
+   clave = userdata.get("DEEPSEEK_API_KEY")   # el usuario aprueba en pantalla
+   r, w = os.pipe()
+   entorno = {k: v for k, v in os.environ.items() if not k.endswith(("_KEY", "_TOKEN"))}
+   entorno["ROOT_CLAVES_FD"] = str(r)
+   p = subprocess.Popen(["/content/root/r00t", ...], env=entorno, pass_fds=(r,))
+   os.close(r)
+   os.write(w, f"DEEPSEEK_API_KEY={clave}\n".encode()); os.close(w)
+   del clave
+   print("clave entregada:", True)
+   ```
+2. **`r00t` lee el descriptor al arrancar,** antes de lanzar cualquier proceso. Guarda la clave en memoria y cierra el descriptor. Ningún hijo hereda el descriptor ni la clave.
+3. **Los procesos del repo corren dentro de `bwrap`,** que empieza con `--clearenv` (Tarea 139). Aunque la clave estuviera en el entorno, no llegaría.
+4. **Nunca se imprime.** La celda solo imprime verdadero o falso. `Clave` ya se muestra como `Clave(***)` en Root.
+
+**Esto es la Tarea 142, punto 1.** Toca `src/proveedores/mod.rs` y `src/main.rs`.
+
+## 2. Cómo se cuenta el gasto contra el tope de S2
+
+1. **El tope del runtime** sale de la laptop. Al armar el paquete, la laptop suma el gasto de S2 de `eventos.jsonl`. El manifiesto lleva `25 − gastado` como tope.
+2. **Cada calibración del runtime** corre con `--tope-usd` igual a lo que queda. El control por llamada de la Tarea 83 frena antes de pasarlo.
+3. **Las líneas de gasto vuelven** en el paquete de vuelta. La importación las agrega a `eventos.jsonl` de la laptop, con `"origen": "colab"`. Así el gasto de S2 se sigue sumando en un solo lugar.
+4. **La Tarea 141 no lleva las líneas de gasto,** porque las dimensiones de oráculo no usan API. La 142 las suma.
+
+## 3. El paquete en el runtime del notebook: la Prueba 1
+
+**La duda.** La Tarea 141 sube el paquete con `colab upload`, a un runtime que la CLI abrió. El runtime del notebook lo abre el navegador, no la CLI. No sé si la CLI lo alcanza, ni si `colab-mcp` sube archivos.
+
+**La Prueba 1, del orquestador,** con el notebook abierto. Prueba tres formas, en este orden, y se queda con la primera que ande:
+1. **¿`colab-mcp` sube un archivo local al runtime del notebook?** Un archivo de prueba de 50 MB.
+2. **¿La CLI `colab` alcanza el runtime del notebook?** `colab exec` con la sesión del notebook, si la CLI la lista.
+3. **¿El notebook monta Google Drive?** Pide otra aprobación del usuario. Después, el orquestador deja el paquete en una carpeta de Drive. Esta forma necesita una herramienta en la laptop para escribir en Drive.
+
+**La Prueba 1 también revisa el aislamiento de la clave, sin la clave real:**
+- El usuario crea un secreto de prueba, `ROOT_PRUEBA`, con un valor cualquiera que no sirve para nada.
+- La celda de la sección 1 lo pasa por un descriptor a un proceso.
+- Ese proceso lanza un hijo dentro de `bwrap --clearenv`. El hijo imprime si ve `ROOT_PRUEBA` en su entorno, y si ve el descriptor abierto.
+- Lo esperado: el proceso recibe el valor, y el hijo no ve ninguna de las dos cosas.
+
+**La forma de subir el paquete que salga de la Prueba 1** entra en la 142, en su punto 3.
+
+## 4. Qué hace el usuario, y cuántas veces
+
+**Una sola sesión para las cinco etapas de P107 a.** Las reglas de parada de la vuelta (52), sección 6, son mecánicas: "la sensibilidad con las tareas juntas da menos de 0,85". El notebook las aplica solo, entre etapa y etapa.
+
+**Lo que hace el usuario, al empezar:**
+1. Abre la conexión del notebook, cuando `colab-mcp` la pide.
+2. Aprueba el acceso a `DEEPSEEK_API_KEY` en Colab Secrets.
+3. Si la Prueba 1 eligió Drive, aprueba también montar Drive.
+4. Deja la pestaña abierta.
+
+Son unos 3 minutos frente a la pantalla. Después, las etapas corren solas.
+
+**Cuánto dura la sesión.** Las cinco etapas tardan de 4 a 7 horas, casi todo en espera de la API.
+
+**El riesgo de la desconexión.** Colab puede cortar una sesión larga del navegador. Lo mitigan dos cosas:
+- **Cada calibración termina antes de que empiece la otra,** y su fila queda en el runtime.
+- **Si la sesión se corta,** el orquestador baja lo hecho, lo importa, y abre otra sesión que sigue desde la calibración que faltaba. Esa sesión pide otra vez los pasos 1 y 2 al usuario.
+
+**En el peor caso,** son tantas sesiones como cortes. En el caso normal, una.
+
+## 5. Qué se apoya en las Tareas 139 a 141, y qué falta
+
+| Pieza | Viene de |
+|---|---|
+| El backend de `bwrap` y su `--clearenv` | La 139 |
+| Las herramientas del runtime y su verificación | La 140 |
+| El paquete, la importación y el control de la base | La 141 |
+| Las dimensiones con juez en el paquete | **Falta: la 141 las rechaza** |
+| La clave por descriptor | **Falta** |
+| Las líneas de gasto en el paquete de vuelta | **Falta** |
+| El tope de S2 en el manifiesto | **Falta** |
+| La subida al runtime del notebook | **Falta: sale de la Prueba 1** |
+| El guion de celdas del notebook, con las reglas de parada | **Falta** |
+
+**Todo lo que falta es la Tarea 142.** Su base es la punta de la cadena que suma la 139, la 140 y la 141, porque cambia piezas de la 141.
+
+| Tarea | Archivos |
+|---|---|
+| 142 | `src/proveedores/mod.rs`, `src/main.rs`, `tests/claves_fd.rs` (nuevo), `src/colab_calibra.rs`, `src/cli.rs`, `tools/colab/notebook-juez.py` (nuevo) |
+
+El brief es `docs/builds/brief-local-142.md`. **Su punto 3 espera la Prueba 1.** Los puntos 1, 2 y 4 no la esperan.
+
+## 6. ¿La etapa 1 puede correr antes?
+
+**En Colab, no.** Lo que existe hoy en Colab no corre Root:
+- podman no corre ahí, y el backend de `bwrap` es la 139, todavía sin construir.
+- No hay paquete ni importación: son la 141.
+- Root lee la clave del entorno, y la celda tendría que ponerla ahí. Cualquier proceso hijo la vería.
+
+**En la laptop, sí, pero el usuario eligió el notebook de Colab en P109.** No la corro en la laptop sin que el usuario lo diga.
+
+**Lo que sí puede correr antes: la Prueba 1.** No usa la clave real ni gasta API. Su resultado deja listo el punto 3 de la 142.
+
+## 7. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | La serie 138: la 137, la 138, su suite y Eficiencia | Nada; ya corre | Laptop | No |
+| 2 | La Prueba 1: la subida al notebook y el aislamiento de la clave | Nada | Colab, notebook | No |
+| 3 | Las Tareas 139, 140 y 141, en paralelo | El paso 1 | Laptop, sin podman | No |
+| 4 | Las pruebas de Colab de la 140, la 139 y la 141 | El paso 3 | Colab, CPU | No |
+| 5 | La Tarea 142 | Los pasos 2 y 3 | Laptop, sin podman | No |
+| 6 | Las cinco etapas de P107 a, en una sesión del notebook | Los pasos 4 y 5 | Colab, notebook | Hasta 18,45 USD |
+| 7 | La mezcla de la cadena 110 a 142 | La orden del usuario | — | No |
+| 8 | Si Eficiencia no cumple con la serie 138, su calibración otra vez | El paso 1 | Laptop | No |
+| 9 | Congelar la versión | El paso 6 | — | No |
+| 10 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 4 y 9 | Colab, cuatro runtimes | No |
+| 11 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 12 | P98 c: el final con 15 defectos reales | El paso 11 | — | No |
+| 13 | La validez sobre el final sellado | Los pasos 1 a 12 | Colab, notebook si usa el juez | Según el final |
+
+**Preguntas al usuario:** ninguna nueva.
