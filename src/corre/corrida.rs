@@ -934,6 +934,7 @@ fn resultado_exitoso(stdout: &[u8]) -> Result<String, String> {
 }
 
 /// Medidas de `eficiencia_auto` con regresión que justifican una vuelta. Vacío quiere decir: no hay vuelta.
+/// Una medida sin valor no entra: necesita regresión, razón, referencia y repo.
 fn regresiones_de_vuelta(
     veredicto: &Veredicto,
     roles: &[Rol],
@@ -953,7 +954,12 @@ fn regresiones_de_vuelta(
     veredicto
         .eficiencia_auto
         .iter()
-        .filter(|medida| medida.regresion)
+        .filter(|medida| {
+            medida.regresion
+                && medida.razon.is_some()
+                && medida.referencia.is_some()
+                && medida.repo.is_some()
+        })
         .cloned()
         .collect()
 }
@@ -2596,6 +2602,31 @@ mod tests {
         let vuelta = regresiones_de_vuelta(&veredicto, &roles, &lanzados);
         assert_eq!(vuelta.len(), 1, "solo la medida con regresión: {vuelta:?}");
         assert_eq!(vuelta[0].medida, "tiempo_tests");
+    }
+
+    #[test]
+    fn regresiones_de_vuelta_medida_sin_valor_no_entra_en_la_instruccion() {
+        let sin_valor = MedidaEficiencia {
+            medida: "memoria_pico".into(),
+            referencia: None,
+            repo: None,
+            razon: None,
+            ruido: None,
+            regresion: true,
+            motivo: Some("sin medida".into()),
+        };
+        let veredicto =
+            veredicto_con_eficiencia(vec![medida_eficiencia("tiempo_tests", true), sin_valor]);
+        let roles = [Rol::Planifica];
+        let lanzados = [lanzado_de(1, Rol::Planifica, 0)];
+        let regresiones = regresiones_de_vuelta(&veredicto, &roles, &lanzados);
+        let instruccion = prompt_de_eficiencia(&regresiones, "haz hecho");
+        assert!(!instruccion.contains("sin valor"), "{instruccion}");
+        assert!(
+            instruccion
+                .contains("- tiempo_tests: 1.30 veces la referencia (referencia 10, repo 13)"),
+            "{instruccion}"
+        );
     }
 
     #[test]
