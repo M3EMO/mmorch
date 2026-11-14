@@ -912,6 +912,43 @@ fn calibrar_medida(
     )
 }
 
+/// Nombre de la carpeta de mutación dentro de la temporal de una medición de Pruebas.
+const NOMBRE_CARPETA_MUTACION: &str = "mutacion";
+
+/// Carpeta de mutación de una medición de Pruebas, dentro de `raiz`. Pruebas es la única dimensión con mutación:
+/// otras dimensiones no tienen carpeta. Al soltarse borra la carpeta, también al salir por error o pánico.
+/// Declararlo después de la temporal hace que se suelte antes que ella.
+struct CarpetaMutacion<'a> {
+    raiz: &'a Path,
+    ruta: Option<PathBuf>,
+}
+
+impl<'a> CarpetaMutacion<'a> {
+    fn nueva(raiz: &'a Path, dimension: Dimension) -> Result<Self, ErrorOraculo> {
+        let ruta = if dimension == Dimension::Pruebas {
+            let ruta = raiz.join(NOMBRE_CARPETA_MUTACION);
+            fs::create_dir_all(&ruta).map_err(|e| super::infra("carpeta de mutación", e))?;
+            Some(ruta)
+        } else {
+            None
+        };
+        Ok(CarpetaMutacion { raiz, ruta })
+    }
+
+    fn ruta(&self) -> Option<&Path> {
+        self.ruta.as_deref()
+    }
+}
+
+impl Drop for CarpetaMutacion<'_> {
+    fn drop(&mut self) {
+        // Ignora el error: en Drop no hay a quién devolverlo.
+        if let Some(ruta) = self.ruta.take() {
+            let _ = borrado::borrar_dir_dentro(self.raiz, &ruta);
+        }
+    }
+}
+
 /// Lo que comparten los casos de una medición. Solo se lee: los casos corren en hilos distintos.
 struct Ronda<'a> {
     semilla: u64,
@@ -920,6 +957,8 @@ struct Ronda<'a> {
     repo_bueno: &'a Path,
     /// Carpeta temporal de la medición. Cada caso usa `caso-{i}` dentro.
     tmp: &'a Path,
+    /// Carpeta de mutación de la medición (solo Pruebas). Los casos corren en otros hilos: por eso va aquí.
+    carpeta_mutacion: Option<&'a Path>,
     capas: &'a [Vec<String>],
     camino: &'a [String],
     muertos: &'a [MutanteMuerto],
@@ -1024,10 +1063,12 @@ fn evaluar_copia(
     // Un test más débil no mata más mutantes. Por eso los vivos de la base no aportan.
     // Solo corren los muertos y vencidos de la base.
     let resultado = con_caso(&id, || {
-        super::mutacion::con_muestra_de_base(r.mutantes_base, || {
-            super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
-                con_plazos_suites(Some(r.plazos_suites), || {
-                    en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+        super::mutacion::con_carpeta_de_mutacion(r.carpeta_mutacion, || {
+            super::mutacion::con_muestra_de_base(r.mutantes_base, || {
+                super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
+                    con_plazos_suites(Some(r.plazos_suites), || {
+                        en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+                    })
                 })
             })
         })
@@ -1532,6 +1573,9 @@ fn calibrar_medida_con_hilos(
         }
         None => tempfile::tempdir().map_err(|e| super::infra("carpeta temporal", e))?,
     };
+    // Pruebas: la carpeta de mutación va dentro de la temporal. Se borra al salir, también con error. Sin ella
+    // (otras dimensiones) no se crea nada.
+    let carpeta_mutacion = CarpetaMutacion::nueva(tmp.path(), dimension)?;
     let destino_target = tmp.path().join(NOMBRE_TARGET_BASE);
     // Vacía la muestra de mutación del hilo: lo que quede después es de la base.
     let _ = super::mutacion::tomar_muestra();
@@ -1540,11 +1584,13 @@ fn calibrar_medida_con_hilos(
     let _ = tomar_duraciones_suites();
     // La base corre con el límite activo: su juez también cuenta. Una base rechazada no mide nada.
     let base = en_limite(tope, || {
-        evaluador(
-            repo_bueno,
-            TipoCaso::Base,
-            Target::Guardar(destino_target.clone()),
-        )
+        super::mutacion::con_carpeta_de_mutacion(carpeta_mutacion.ruta(), || {
+            evaluador(
+                repo_bueno,
+                TipoCaso::Base,
+                Target::Guardar(destino_target.clone()),
+            )
+        })
     });
     // Los casos comparan su muestra con la de la base. Las bases repetidas no la pisan.
     let mutantes_base = super::mutacion::tomar_muestra();
@@ -1568,7 +1614,9 @@ fn calibrar_medida_con_hilos(
     if fallo.is_none() && juez_corre {
         for _ in 0..inestables::JUICIOS_EXTRA {
             let repetida = en_limite(tope, || {
-                evaluador(repo_bueno, TipoCaso::BaseRepetida, Target::Ninguno)
+                super::mutacion::con_carpeta_de_mutacion(carpeta_mutacion.ruta(), || {
+                    evaluador(repo_bueno, TipoCaso::BaseRepetida, Target::Ninguno)
+                })
             });
             let veredicto = match (repetida, detencion_de_rechazo(tope)) {
                 (_, Some(detencion)) => return Ok(medida_detenida(detencion)),
@@ -1662,6 +1710,7 @@ fn calibrar_medida_con_hilos(
         defectos: &defectos,
         repo_bueno,
         tmp: tmp.path(),
+        carpeta_mutacion: carpeta_mutacion.ruta(),
         capas,
         camino,
         muertos: &muertos,
@@ -4522,6 +4571,219 @@ mod tests {
             .iter()
             .filter(|c| c.contains("--output /salida/mutants"))
             .count()
+    }
+
+    /// Registro de una llamada del evaluador de una calibración: si era la base, la carpeta de mutación que
+    /// veía el hilo, si esa carpeta existía y la temporal de la medición.
+    struct VistaMutacion {
+        base: bool,
+        carpeta: Option<PathBuf>,
+        existe: bool,
+        tmp: PathBuf,
+    }
+
+    /// Evaluador que anota la carpeta de mutación de cada llamada. La base guarda su `target` en la temporal;
+    /// cada caso corre en `temporal/caso-i`. En los dos casos la temporal es la carpeta padre.
+    fn evaluador_que_mira_la_carpeta(
+        vistas: &Mutex<Vec<VistaMutacion>>,
+        veredicto: fn() -> Veredicto,
+    ) -> impl Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync + '_ {
+        move |ruta: &Path, tipo: TipoCaso, target: Target| {
+            let tmp = match &target {
+                Target::Guardar(destino) if tipo == TipoCaso::Base => destino.parent(),
+                _ => ruta.parent(),
+            }
+            .expect("la temporal es el padre")
+            .to_path_buf();
+            vistas.lock().expect("lock").push(VistaMutacion {
+                base: tipo == TipoCaso::Base,
+                carpeta: crate::oracle::mutacion::carpeta_de_mutacion_actual(),
+                existe: tmp.join("mutacion").is_dir(),
+                tmp,
+            });
+            Ok(veredicto())
+        }
+    }
+
+    /// Pruebas: la base y cada caso reciben la misma carpeta de mutación, dentro de la temporal y ya creada.
+    #[test]
+    fn calibra_pruebas_la_base_y_los_casos_reciben_la_misma_carpeta_de_mutacion() {
+        let home = tempfile::tempdir().expect("home");
+        let (_t, tarea) = tarea_prueba();
+        let vistas = Mutex::new(Vec::<VistaMutacion>::new());
+        let evaluador =
+            evaluador_que_mira_la_carpeta(&vistas, || veredicto_de(Dimension::Pruebas, 1.0, None));
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Pruebas,
+            4,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            CASOS_EN_PARALELO,
+            None,
+            Some(home.path()),
+        )
+        .expect("calibra");
+        let vistas = vistas.lock().expect("lock");
+        let base = vistas.iter().find(|v| v.base).expect("hay base");
+        let carpeta = base
+            .carpeta
+            .clone()
+            .expect("la base corre con carpeta de mutación");
+        assert_eq!(carpeta, base.tmp.join("mutacion"));
+        assert!(base.existe, "la carpeta existe mientras corre la base");
+        let casos: Vec<&VistaMutacion> = vistas.iter().filter(|v| !v.base).collect();
+        assert!(!casos.is_empty(), "hay casos que llaman al evaluador");
+        for caso in casos {
+            assert_eq!(caso.carpeta.as_ref(), Some(&carpeta), "misma carpeta");
+            assert!(caso.existe, "la carpeta existe mientras corre el caso");
+        }
+    }
+
+    /// Pruebas: al terminar la calibración la carpeta de mutación ya no existe.
+    #[test]
+    fn calibra_pruebas_borra_la_carpeta_de_mutacion_al_terminar() {
+        let home = tempfile::tempdir().expect("home");
+        let (_t, tarea) = tarea_prueba();
+        let vistas = Mutex::new(Vec::<VistaMutacion>::new());
+        let evaluador =
+            evaluador_que_mira_la_carpeta(&vistas, || veredicto_de(Dimension::Pruebas, 1.0, None));
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Pruebas,
+            4,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            CASOS_EN_PARALELO,
+            None,
+            Some(home.path()),
+        )
+        .expect("calibra");
+        let vistas = vistas.lock().expect("lock");
+        let base = vistas.iter().find(|v| v.base).expect("hay base");
+        assert!(base.existe, "la carpeta existió durante la base");
+        assert!(
+            !base.tmp.join("mutacion").exists(),
+            "tras la calibración no queda"
+        );
+    }
+
+    /// Pruebas: si un caso devuelve error, la calibración falla y la carpeta de mutación no queda.
+    #[test]
+    fn calibra_pruebas_no_deja_la_carpeta_de_mutacion_tras_un_error_de_caso() {
+        let home = tempfile::tempdir().expect("home");
+        let (_t, tarea) = tarea_prueba();
+        let vistas = Mutex::new(Vec::<VistaMutacion>::new());
+        let mira =
+            evaluador_que_mira_la_carpeta(&vistas, || veredicto_de(Dimension::Pruebas, 1.0, None));
+        let evaluador = |ruta: &Path, tipo: TipoCaso, target: Target| {
+            if tipo != TipoCaso::Base {
+                return Err(ErrorOraculo::Infra("caso roto".into()));
+            }
+            mira(ruta, tipo, target)
+        };
+        let resultado = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Pruebas,
+            4,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            CASOS_EN_PARALELO,
+            None,
+            Some(home.path()),
+        );
+        assert!(
+            resultado.is_err(),
+            "el error del caso llega a la calibración"
+        );
+        let vistas = vistas.lock().expect("lock");
+        let base = vistas.iter().find(|v| v.base).expect("hay base");
+        assert!(base.existe, "la carpeta existió durante la base");
+        assert!(
+            !base.tmp.join("mutacion").exists(),
+            "tras el error no queda"
+        );
+    }
+
+    /// Completitud no mide mutación: el evaluador no recibe carpeta y la carpeta no se crea.
+    #[test]
+    fn calibra_completitud_no_recibe_carpeta_de_mutacion_ni_la_crea() {
+        let home = tempfile::tempdir().expect("home");
+        let (_t, tarea) = tarea_prueba();
+        let vistas = Mutex::new(Vec::<VistaMutacion>::new());
+        let evaluador = evaluador_que_mira_la_carpeta(&vistas, || {
+            veredicto_de(Dimension::Completitud, 1.0, None)
+        });
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Completitud,
+            4,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            CASOS_EN_PARALELO,
+            None,
+            Some(home.path()),
+        )
+        .expect("calibra");
+        let vistas = vistas.lock().expect("lock");
+        assert!(!vistas.is_empty(), "la base llama al evaluador");
+        for v in vistas.iter() {
+            assert!(v.carpeta.is_none(), "Completitud no recibe carpeta");
+            assert!(!v.existe, "Completitud no crea mutacion");
+        }
+    }
+
+    /// El guardia crea la carpeta `mutacion` de la raíz en Pruebas y la borra al soltarse. La raíz queda.
+    #[test]
+    fn guardia_de_mutacion_borra_su_carpeta_al_soltarse_y_deja_la_raiz() {
+        let raiz = tempfile::tempdir().expect("raiz");
+        let ruta = raiz.path().join("mutacion");
+        {
+            let guardia = CarpetaMutacion::nueva(raiz.path(), Dimension::Pruebas).expect("guardia");
+            assert_eq!(guardia.ruta(), Some(ruta.as_path()));
+            assert!(ruta.is_dir(), "la carpeta existe mientras vive el guardia");
+        }
+        assert!(!ruta.exists(), "al soltarse, la carpeta se borra");
+        assert!(raiz.path().is_dir(), "la raíz no se toca");
+    }
+
+    /// El guardia también borra su carpeta si el ámbito sale por pánico.
+    #[test]
+    fn guardia_de_mutacion_borra_su_carpeta_tambien_con_panico() {
+        let raiz = tempfile::tempdir().expect("raiz");
+        let ruta = raiz.path().join("mutacion");
+        let panico = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guardia =
+                CarpetaMutacion::nueva(raiz.path(), Dimension::Pruebas).expect("guardia");
+            panic!("a propósito");
+        }));
+        assert!(panico.is_err());
+        assert!(!ruta.exists(), "tras el pánico la carpeta se borra");
+    }
+
+    /// Fuera de Pruebas el guardia no tiene carpeta y no crea nada.
+    #[test]
+    fn guardia_de_mutacion_fuera_de_pruebas_no_crea_nada() {
+        let raiz = tempfile::tempdir().expect("raiz");
+        let guardia = CarpetaMutacion::nueva(raiz.path(), Dimension::Completitud).expect("guardia");
+        assert_eq!(guardia.ruta(), None);
+        assert!(!raiz.path().join("mutacion").exists());
     }
 
     /// Un caso de Diseño toma la mutación de la base y corre otra vez las sondas estáticas y el juez.

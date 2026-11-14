@@ -118,8 +118,6 @@ pub(crate) fn con_plazo_fijo<T>(segundos: Option<u64>, f: impl FnOnce() -> T) ->
 
 /// Corre `f` con `carpeta` como la carpeta de la calibración de mutación. Sin carpeta, los comandos son los
 /// de hoy. Al salir, también ante pánico, vuelve el valor anterior.
-// Sin llamador hasta el punto 2 (la calibración); el punto 2 quita este `expect`.
-#[expect(dead_code)]
 pub(crate) fn con_carpeta_de_mutacion<T>(carpeta: Option<&Path>, f: impl FnOnce() -> T) -> T {
     /// Devuelve la carpeta anterior al salir del ámbito.
     struct Restaura(Option<PathBuf>);
@@ -132,6 +130,12 @@ pub(crate) fn con_carpeta_de_mutacion<T>(carpeta: Option<&Path>, f: impl FnOnce(
     let anterior = CARPETA_DE_MUTACION.with(|c| c.replace(carpeta.map(Path::to_path_buf)));
     let _restaura = Restaura(anterior);
     f()
+}
+
+/// Carpeta de mutación que ve este hilo. Solo para los tests de la calibración.
+#[cfg(test)]
+pub(crate) fn carpeta_de_mutacion_actual() -> Option<PathBuf> {
+    CARPETA_DE_MUTACION.with(|c| c.borrow().clone())
 }
 
 /// Hay carpeta fija en este hilo: la calibración corre en `/salida` sin copia extra.
