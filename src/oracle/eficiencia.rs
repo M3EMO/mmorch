@@ -100,12 +100,6 @@ pub fn comparar(referencia: &[f64], repo: &[f64]) -> Option<Comparacion> {
     })
 }
 
-/// Como `comparar`, pero la referencia suma el `ancla`: una corrida del lado inicial, si hay.
-pub fn comparar_con_ancla(base: &[f64], ancla: Option<f64>, repo: &[f64]) -> Option<Comparacion> {
-    let referencia: Vec<f64> = base.iter().copied().chain(ancla).collect();
-    comparar(&referencia, repo)
-}
-
 /// Compara el repo contra el `ancla`: una corrida del lado inicial en el mismo caso. La razón es el mínimo
 /// del repo sobre el ancla. El ruido es la mayor dispersión de la base y del repo, con el piso `PISO_RUIDO`.
 /// `None` si el ancla no es positiva o falta el repo.
@@ -976,12 +970,21 @@ fn fuente_vigente() -> Option<FuenteDeCarga> {
     FUENTE_DE_CARGA.with(|c| c.borrow().clone())
 }
 
-/// Fuente de carga que ve este hilo. En producción siempre es `/proc/loadavg` del host y los núcleos de
-/// `available_parallelism`.
+/// Ruta del archivo de carga. Sin `ROOT_LOADAVG` (o vacía), es `/proc/loadavg`.
+/// Existe para los tests de `tests/`, que no ven el `cfg(test)` del crate.
+fn ruta_de_carga() -> PathBuf {
+    match std::env::var_os("ROOT_LOADAVG") {
+        Some(ruta) if !ruta.is_empty() => PathBuf::from(ruta),
+        _ => PathBuf::from("/proc/loadavg"),
+    }
+}
+
+/// Fuente de carga que ve este hilo. En producción siempre es `/proc/loadavg` del host, salvo `ROOT_LOADAVG`,
+/// y los núcleos de `available_parallelism`.
 #[cfg(not(test))]
 fn fuente_vigente() -> Option<FuenteDeCarga> {
     Some(FuenteDeCarga {
-        ruta: PathBuf::from("/proc/loadavg"),
+        ruta: ruta_de_carga(),
         nucleos: std::thread::available_parallelism()
             .map(|n| n.get())
             .map_err(|e| e.to_string()),
@@ -1368,22 +1371,54 @@ mod tests {
         assert_eq!(comparar_contra_ancla(&[1.0], 1.0, &[]), None);
     }
 
+    /// Restaura `ROOT_LOADAVG` al salir del ámbito, también ante pánico.
+    struct RestauraLoadavg(Option<std::ffi::OsString>);
+    impl Drop for RestauraLoadavg {
+        fn drop(&mut self) {
+            // SAFETY: el test sostiene `CERROJO_LOADAVG` mientras vive esta guarda.
+            unsafe {
+                match self.0.take() {
+                    Some(valor) => std::env::set_var("ROOT_LOADAVG", valor),
+                    None => std::env::remove_var("ROOT_LOADAVG"),
+                }
+            }
+        }
+    }
+
     #[test]
-    fn ancla_sube_el_ruido_y_quita_la_falsa_regresion() {
+    fn ruta_de_carga_obedece_root_loadavg() {
+        static CERROJO_LOADAVG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _cerrojo = CERROJO_LOADAVG.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ruta = dir.path().join("loadavg");
+        fs::write(&ruta, "9.00 9.00 9.00 1/100 1\n").expect("escribe la carga");
+        let _restaura = RestauraLoadavg(std::env::var_os("ROOT_LOADAVG"));
+        // SAFETY: el cerrojo de arriba serializa a los tests que tocan `ROOT_LOADAVG`.
+        unsafe { std::env::set_var("ROOT_LOADAVG", &ruta) };
+        let fuente = FuenteDeCarga {
+            ruta: ruta_de_carga(),
+            nucleos: Ok(2),
+        };
+        let carga = leer_carga(&fuente).expect("lee la carga");
+        assert_eq!(carga.uno_minuto, 9.0);
+    }
+
+    #[test]
+    fn contra_ancla_el_mismo_repo_cambia_de_veredicto_con_el_ancla() {
         let base = [1.00, 1.01, 1.00];
         let repo = [1.04, 1.05, 1.04];
-        let sin = comparar(&base, &repo).expect("comparable");
+        let sin = comparar_contra_ancla(&base, 1.00, &repo).expect("comparable");
         assert!(cerca(sin.razon, 1.04), "razon {}", sin.razon);
-        assert!(cerca(sin.ruido, 0.02), "ruido {}", sin.ruido);
-        assert!(sin.regresion);
-        let con = comparar_con_ancla(&base, Some(1.05), &repo).expect("comparable");
-        assert!(cerca(con.ruido, 0.05), "ruido {}", con.ruido);
+        assert!(sin.regresion, "{sin:?}");
+        let con = comparar_contra_ancla(&base, 1.05, &repo).expect("comparable");
+        assert!(cerca(con.razon, 1.04 / 1.05), "razon {}", con.razon);
+        assert!(cerca(con.ruido, 0.02), "ruido {}", con.ruido);
         assert!(!con.regresion, "{con:?}");
     }
 
     #[test]
-    fn ancla_no_tapa_una_regresion_real() {
-        let con = comparar_con_ancla(&[1.00, 1.01, 1.00], Some(1.00), &[2.40, 2.41, 2.42])
+    fn contra_ancla_regresion_real_sigue_siendo_regresion() {
+        let con = comparar_contra_ancla(&[1.00, 1.01, 1.00], 1.00, &[2.40, 2.41, 2.42])
             .expect("comparable");
         assert!(con.regresion, "{con:?}");
         assert!(cerca(con.razon, 2.4), "razon {}", con.razon);
