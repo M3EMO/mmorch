@@ -455,13 +455,11 @@ fn armar_y_empaquetar(
     copiar_dir(
         &paquete.raiz_root.join("tools/colab"),
         &staging.join("tools/colab"),
-        &[],
     )?;
     for nombre in tareas.keys() {
         copiar_dir(
             &paquete.home.join("oraculos").join(nombre),
             &staging.join("oraculos").join(nombre),
-            &[],
         )?;
     }
     for (nombre, tarea) in tareas {
@@ -470,12 +468,12 @@ fn armar_y_empaquetar(
             let relativa = cache.strip_prefix(&paquete.home).map_err(|_| {
                 ErrorOraculo::Infra(format!("la caché {} no está en ROOT_HOME", cache.display()))
             })?;
-            copiar_dir(&cache, &staging.join(relativa), &[])?;
+            copiar_dir(&cache, &staging.join(relativa))?;
         }
     }
     let rustsec = paquete.home.join("cache/rustsec");
     if rustsec.is_dir() {
-        copiar_dir(&rustsec, &staging.join("cache/rustsec"), &[])?;
+        copiar_dir(&rustsec, &staging.join("cache/rustsec"))?;
     }
     copiar_archivo_si_existe(
         &paquete.home.join("calibracion.json"),
@@ -483,7 +481,7 @@ fn armar_y_empaquetar(
     )?;
     let configs = paquete.home.join("configs");
     if configs.is_dir() {
-        copiar_dir(&configs, &staging.join("configs"), &[])?;
+        copiar_dir(&configs, &staging.join("configs"))?;
     }
     copiar_archivo_si_existe(&paquete.home.join("root.toml"), &staging.join("root.toml"))?;
     for nombre in tareas.keys() {
@@ -841,9 +839,9 @@ fn commit_de(raiz: &Path) -> Result<String, ErrorOraculo> {
     Ok(String::from_utf8_lossy(&salida.stdout).trim().to_string())
 }
 
-/// Copia el contenido de `origen` a `destino`. Omite los nombres de `EXCLUIDOS` y los de `excluir`.
+/// Copia el contenido de `origen` a `destino`. Omite los nombres de `EXCLUIDOS`.
 /// En archivos, omite los `.env*` y los nombres secretos. Los enlaces simbólicos no se copian.
-fn copiar_dir(origen: &Path, destino: &Path, excluir: &[&str]) -> Result<(), ErrorOraculo> {
+fn copiar_dir(origen: &Path, destino: &Path) -> Result<(), ErrorOraculo> {
     let error = |e: io::Error| ErrorOraculo::Infra(format!("copiar {}: {e}", origen.display()));
     fs::create_dir_all(destino)
         .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", destino.display())))?;
@@ -851,14 +849,14 @@ fn copiar_dir(origen: &Path, destino: &Path, excluir: &[&str]) -> Result<(), Err
         let entrada = entrada.map_err(error)?;
         let nombre_os = entrada.file_name();
         let nombre = nombre_os.to_string_lossy();
-        if EXCLUIDOS.iter().any(|(n, _)| *n == &*nombre) || excluir.contains(&&*nombre) {
+        if EXCLUIDOS.iter().any(|(n, _)| *n == &*nombre) {
             continue;
         }
         let tipo = entrada.file_type().map_err(error)?;
         let ruta = entrada.path();
         let destino_entrada = destino.join(&*nombre);
         if tipo.is_dir() {
-            copiar_dir(&ruta, &destino_entrada, excluir)?;
+            copiar_dir(&ruta, &destino_entrada)?;
         } else if tipo.is_file() && !(nombre.starts_with(".env") || es_nombre_secreto(&nombre)) {
             fs::copy(&ruta, &destino_entrada)
                 .map_err(|e| ErrorOraculo::Infra(format!("copiar {}: {e}", ruta.display())))?;
@@ -868,7 +866,8 @@ fn copiar_dir(origen: &Path, destino: &Path, excluir: &[&str]) -> Result<(), Err
 }
 
 /// Copia el código de un repo a `destino`. Omite `.git` y `target` en cualquier nivel.
-/// Omite los archivos `.env*` y los enlaces simbólicos. No aplica `EXCLUIDOS` ni nombres secretos.
+/// Omite los archivos `.env*`. No aplica `EXCLUIDOS` ni nombres secretos.
+/// Un enlace simbólico no se copia ni se salta: falla con `Uso` que nombra su ruta.
 fn copiar_repo(origen: &Path, destino: &Path) -> Result<(), ErrorOraculo> {
     let error = |e: io::Error| ErrorOraculo::Infra(format!("copiar {}: {e}", origen.display()));
     fs::create_dir_all(destino)
@@ -877,11 +876,18 @@ fn copiar_repo(origen: &Path, destino: &Path) -> Result<(), ErrorOraculo> {
         let entrada = entrada.map_err(error)?;
         let nombre_os = entrada.file_name();
         let nombre = nombre_os.to_string_lossy();
+        let tipo = entrada.file_type().map_err(error)?;
+        let ruta = entrada.path();
+        // Antes de omitir nada: un enlace no se copia ni se salta en silencio.
+        if tipo.is_symlink() {
+            return Err(ErrorOraculo::Uso(format!(
+                "el repo trae un enlace simbólico: {}; no se copia, quítalo del repo",
+                ruta.display()
+            )));
+        }
         if nombre == ".git" || nombre == "target" {
             continue;
         }
-        let tipo = entrada.file_type().map_err(error)?;
-        let ruta = entrada.path();
         let destino_entrada = destino.join(&*nombre);
         if tipo.is_dir() {
             copiar_repo(&ruta, &destino_entrada)?;
@@ -2005,8 +2011,30 @@ fn correr_runtime<C: ColabCli>(
             bajada.stderr.trim()
         )));
     }
+    // Antes de abrir la vuelta: su SHA-256 debe coincidir con el que dijo el cierre.
+    verificar_sha_de_la_vuelta(
+        colab::marcador(&cierre.stdout, "ROOT_SHA_VUELTA=").as_deref(),
+        &vuelta,
+    )?;
     verificar_vuelta_del_runtime(&vuelta, tmp)?;
     Ok(vuelta)
+}
+
+/// Compara el SHA-256 de la vuelta con `ROOT_SHA_VUELTA=` del cierre.
+/// Sin marcador o con SHA distinto, la vuelta no se abre.
+fn verificar_sha_de_la_vuelta(esperado: Option<&str>, vuelta: &Path) -> Result<(), ErrorOraculo> {
+    let bytes =
+        fs::read(vuelta).map_err(|e| ErrorOraculo::Infra(format!("leer la vuelta bajada: {e}")))?;
+    let real = sha256_hex(&bytes);
+    match esperado {
+        Some(sha) if sha == real => Ok(()),
+        Some(sha) => Err(ErrorOraculo::Infra(format!(
+            "el SHA-256 de la vuelta es {real}, el cierre dijo {sha}; la vuelta no se abre"
+        ))),
+        None => Err(ErrorOraculo::Infra(format!(
+            "el cierre no dio ROOT_SHA_VUELTA (SHA-256 de la vuelta bajada: {real}); la vuelta no se abre"
+        ))),
+    }
 }
 
 /// Revisa la vuelta bajada del runtime antes de usarla. Cada archivo debe coincidir con su SHA-256.
@@ -2519,7 +2547,9 @@ for parte in partes:
 with open(os.path.join(D, MANIFIESTO), "w") as manifiesto:
     json.dump({{"v": 1, "archivos": archivos}}, manifiesto, sort_keys=True)
 partes.append(MANIFIESTO)
-subprocess.run(["tar", "-czf", {vuelta}, "-C", D] + partes, check=True)
+V = {vuelta}
+subprocess.run(["tar", "-czf", V, "-C", D] + partes, check=True)
+print("ROOT_SHA_VUELTA=" + sha256(V))
 print("ROOT_OK=cierre")
 "#
     )
@@ -2809,6 +2839,71 @@ mod tests {
             }),
             "{nombres:?}"
         );
+    }
+
+    #[test]
+    fn copiar_dir_copia_archivos_normales_y_filtra_secretos_y_excluidos() {
+        // Guarda del cambio de firma de `copiar_dir`: lo que copia hoy, lo sigue copiando.
+        let origen = tempfile::tempdir().expect("origen");
+        let destino = tempfile::tempdir().expect("destino");
+        let o = origen.path();
+        fs::create_dir_all(o.join("sub")).expect("dir");
+        fs::write(o.join("normal.txt"), "n\n").expect("escribe");
+        fs::write(o.join("sub/anidado.txt"), "a\n").expect("escribe");
+        fs::write(o.join(".env"), "CLAVE=v\n").expect("escribe");
+        fs::write(o.join("api_key"), "v\n").expect("escribe");
+        fs::write(o.join("eventos.jsonl"), "{}\n").expect("escribe");
+        fs::create_dir_all(o.join("evidencia")).expect("dir");
+        fs::write(o.join("evidencia/x.json"), "{}\n").expect("escribe");
+
+        copiar_dir(o, destino.path()).expect("copia");
+
+        let d = destino.path();
+        assert_eq!(
+            fs::read_to_string(d.join("normal.txt")).expect("normal"),
+            "n\n"
+        );
+        assert_eq!(
+            fs::read_to_string(d.join("sub/anidado.txt")).expect("anidado"),
+            "a\n"
+        );
+        assert!(!d.join(".env").exists());
+        assert!(!d.join("api_key").exists());
+        assert!(!d.join("eventos.jsonl").exists());
+        assert!(!d.join("evidencia").exists());
+    }
+
+    #[test]
+    fn repo_con_enlace_simbolico_no_empaqueta_y_nombra_el_enlace() {
+        let e = Escenario::con_contrato("cargo test");
+        std::os::unix::fs::symlink(
+            e.raiz.path().join("tools/colab/prepara.py"),
+            e.repo.path().join("enlace"),
+        )
+        .expect("enlace");
+        let Err(error) = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+        else {
+            panic!("un enlace del repo debía frenar el empaquetado");
+        };
+        let mensaje = error.to_string();
+        assert!(mensaje.contains("enlace"), "{mensaje}");
+        assert!(mensaje.contains("no se copia"), "{mensaje}");
+    }
+
+    #[test]
+    fn copiar_repo_rechaza_enlace_simbolico_con_uso() {
+        let origen = tempfile::tempdir().expect("origen");
+        let destino = tempfile::tempdir().expect("destino");
+        fs::write(origen.path().join("a.txt"), "a\n").expect("escribe");
+        std::os::unix::fs::symlink(origen.path().join("a.txt"), origen.path().join("enlace"))
+            .expect("enlace");
+
+        let error = copiar_repo(origen.path(), &destino.path().join("repo"))
+            .expect_err("un enlace no se copia ni se salta");
+
+        let mensaje = error.to_string();
+        assert!(matches!(error, ErrorOraculo::Uso(_)), "{mensaje}");
+        assert!(mensaje.contains("enlace"), "{mensaje}");
     }
 
     #[test]
@@ -3599,6 +3694,8 @@ mod tests_calibrar {
         vuelta: PathBuf,
         /// Si `stop` devuelve código 1: la sesión no se confirma como parada.
         stop_falla: bool,
+        /// SHA que el cierre imprime en `ROOT_SHA_VUELTA=`. Sin valor, el SHA real de `vuelta`.
+        sha_de_cierre: Option<String>,
     }
 
     impl Falso {
@@ -3612,7 +3709,13 @@ mod tests_calibrar {
                 activo_visto: Mutex::new(None),
                 vuelta: vuelta.to_path_buf(),
                 stop_falla: false,
+                sha_de_cierre: None,
             }
+        }
+
+        fn con_sha_de_cierre(mut self, sha: &str) -> Self {
+            self.sha_de_cierre = Some(sha.to_string());
+            self
         }
 
         fn con_falla(mut self, sufijo: &str) -> Self {
@@ -3666,13 +3769,15 @@ mod tests_calibrar {
                 return salida(1, "", "fallo simulado");
             }
             let stdout = if guion.contains("preparar-runtime.sh") {
-                "ROOT_OK=preparar\n"
+                "ROOT_OK=preparar\n".to_string()
             } else if guion.contains("TRABAJO = json.loads") {
-                "ROOT_OK=trabajo-0\nROOT_CODIGO=0\n"
+                "ROOT_OK=trabajo-0\nROOT_CODIGO=0\n".to_string()
             } else {
-                "ROOT_OK=cierre\n"
+                let real = sha256_hex(&fs::read(&self.vuelta).unwrap_or_default());
+                let sha = self.sha_de_cierre.clone().unwrap_or(real);
+                format!("ROOT_OK=cierre\nROOT_SHA_VUELTA={sha}\n")
             };
-            salida(0, stdout, "")
+            salida(0, &stdout, "")
         }
     }
 
@@ -4271,12 +4376,20 @@ mod tests_calibrar {
         let texto = script_cierre_en(raiz.to_str().expect("ruta"), vuelta.to_str().expect("ruta"));
         fs::write(&guion, texto).expect("guion");
 
-        let estado = Command::new("python3")
+        let salida = Command::new("python3")
             .arg("-I")
             .arg(&guion)
-            .status()
+            .output()
             .expect("python3");
-        assert!(estado.success(), "el guion de cierre falló");
+        assert!(salida.status.success(), "el guion de cierre falló");
+        // El SHA del tar sale por stdout, fuera del tar, para que la laptop lo compare al bajarlo.
+        let stdout = String::from_utf8_lossy(&salida.stdout);
+        let del_tar = sha256_hex(&fs::read(&vuelta).expect("lee la vuelta"));
+        assert_eq!(
+            colab::marcador(&stdout, "ROOT_SHA_VUELTA="),
+            Some(del_tar),
+            "{stdout}"
+        );
 
         let extraido = tempfile::tempdir().expect("extraído");
         extraer_paquete(&vuelta, extraido.path()).expect("extrae la vuelta");
@@ -4367,6 +4480,30 @@ mod tests_calibrar {
     }
 
     #[test]
+    fn vuelta_con_sha_del_cierre_distinto_no_se_importa() {
+        let caja = tempfile::tempdir().expect("caja");
+        let escenario = Escenario::con_contrato("cargo test");
+        let home = escenario.home.path();
+        laptop_con_fila_base(home);
+        let antes = fs::read_to_string(home.join(ARCHIVO_CALIBRACION)).expect("calibración");
+        let vuelta = vuelta_con_fila_nueva(caja.path(), home);
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let otro = "0".repeat(64);
+        let cli = Falso::nuevo(home, &vuelta).con_sha_de_cierre(&otro);
+
+        let resumen = correr(&cli, home, &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let motivo = resumen.runtimes[0]
+            .resultado
+            .as_ref()
+            .expect_err("una vuelta con otro SHA no se importa");
+        assert!(motivo.contains(&otro), "{motivo}");
+        assert!(motivo.contains("no se abre"), "{motivo}");
+        let despues = fs::read_to_string(home.join(ARCHIVO_CALIBRACION)).expect("calibración");
+        assert_eq!(antes, despues, "la importación no debía correr");
+    }
+
+    #[test]
     fn stop_que_falla_tras_bajar_la_vuelta_importa_y_avisa() {
         let caja = tempfile::tempdir().expect("caja");
         let escenario = Escenario::con_contrato("cargo test");
@@ -4392,6 +4529,50 @@ mod tests_calibrar {
         assert!(aviso.contains("oraculo pendientes --liberar"), "{aviso}");
         let activo = fs::read_to_string(home.join("colab/activo.json")).expect("activo.json");
         assert!(activo.contains(&runtime.sesion), "{activo}");
+    }
+
+    #[test]
+    fn sha_de_la_vuelta_distinto_no_se_abre() {
+        let caja = tempfile::tempdir().expect("caja");
+        let vuelta = caja.path().join("vuelta.tar.gz");
+        fs::write(&vuelta, b"tar\n").expect("escribe");
+        let real = sha256_hex(b"tar\n");
+        let otro = "0".repeat(64);
+
+        let Err(error) = verificar_sha_de_la_vuelta(Some(&otro), &vuelta) else {
+            panic!("un SHA distinto debía frenar la vuelta");
+        };
+        let mensaje = error.to_string();
+        assert!(matches!(error, ErrorOraculo::Infra(_)), "{mensaje}");
+        assert!(mensaje.contains(&otro), "{mensaje}");
+        assert!(mensaje.contains(&real), "{mensaje}");
+        assert!(mensaje.contains("no se abre"), "{mensaje}");
+    }
+
+    #[test]
+    fn sha_de_la_vuelta_correcto_se_abre() {
+        let caja = tempfile::tempdir().expect("caja");
+        let vuelta = caja.path().join("vuelta.tar.gz");
+        fs::write(&vuelta, b"tar\n").expect("escribe");
+        let real = sha256_hex(b"tar\n");
+
+        verificar_sha_de_la_vuelta(Some(&real), &vuelta).expect("el SHA correcto abre la vuelta");
+    }
+
+    #[test]
+    fn sha_ausente_en_el_cierre_no_se_abre() {
+        let caja = tempfile::tempdir().expect("caja");
+        let vuelta = caja.path().join("vuelta.tar.gz");
+        fs::write(&vuelta, b"tar\n").expect("escribe");
+        let real = sha256_hex(b"tar\n");
+
+        let Err(error) = verificar_sha_de_la_vuelta(None, &vuelta) else {
+            panic!("sin marcador la vuelta no se abre");
+        };
+        let mensaje = error.to_string();
+        assert!(mensaje.contains("ROOT_SHA_VUELTA"), "{mensaje}");
+        assert!(mensaje.contains(&real), "{mensaje}");
+        assert!(mensaje.contains("no se abre"), "{mensaje}");
     }
 
     #[test]
