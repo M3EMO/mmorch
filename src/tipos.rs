@@ -378,6 +378,17 @@ pub struct MedidaEficiencia {
     pub motivo: Option<String>,
 }
 
+/// La vuelta de eficiencia de una corrida (Tarea 116): la primera regresión y si la vuelta corrió.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct VueltaEficiencia {
+    /// Medidas con regresión de la primera evaluación: cada una con su razón y sus dos números.
+    pub regresiones: Vec<MedidaEficiencia>,
+    /// Verdadero si el rol de la vuelta se lanzó al menos una vez.
+    pub corrio: bool,
+    /// Por qué la fila se quedó con la primera evaluación. `None` si la segunda evaluación cuenta.
+    pub motivo: Option<String>,
+}
+
 /// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del
 /// `Veredicto`, salvo `evidencia_visible`, que también lee la tarea.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -638,6 +649,9 @@ pub struct Fila {
     /// Commit con el que se compiló el binario `r00t`. Las filas anteriores la leen vacía.
     #[serde(default)]
     pub commit_binario: String,
+    /// Una corrida sin vuelta, y las filas anteriores a este campo, la leen en `None`.
+    #[serde(default)]
+    pub vuelta_eficiencia: Option<VueltaEficiencia>,
 }
 
 impl Default for Fila {
@@ -656,6 +670,7 @@ impl Default for Fila {
             reanudada: false,
             vueltas: 0,
             commit_binario: String::new(),
+            vuelta_eficiencia: None,
         }
     }
 }
@@ -798,6 +813,7 @@ mod tests {
             reanudada: false,
             vueltas: 0,
             commit_binario: String::new(),
+            vuelta_eficiencia: None,
         }
     }
 
@@ -1259,6 +1275,42 @@ mod tests {
         assert_eq!(Fila::default().commit_binario, "");
         let json = serde_json::to_value(Fila::default()).expect("serializa");
         assert_eq!(json["commit_binario"], json!(""), "{json}");
+    }
+
+    /// Fila anterior a `vuelta_eficiencia`: se lee con `None` (Tarea 116).
+    #[test]
+    fn fila_vieja_sin_vuelta_eficiencia_se_lee() {
+        let mut json = serde_json::to_value(Fila::default()).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("vuelta_eficiencia");
+        let vieja: Fila = serde_json::from_value(json).expect("lee");
+        assert_eq!(vieja.vuelta_eficiencia, None);
+    }
+
+    /// La vuelta de eficiencia sale y vuelve completa en el JSON de la fila.
+    #[test]
+    fn fila_con_vuelta_eficiencia_hace_round_trip() {
+        let vuelta = VueltaEficiencia {
+            regresiones: vec![MedidaEficiencia {
+                medida: "tiempo_tests".into(),
+                referencia: Some(10.0),
+                repo: Some(13.0),
+                razon: Some(1.3),
+                ruido: Some(0.05),
+                regresion: true,
+                motivo: None,
+            }],
+            corrio: true,
+            motivo: Some("sin cupo".into()),
+        };
+        let fila = Fila {
+            vuelta_eficiencia: Some(vuelta.clone()),
+            ..Fila::default()
+        };
+        let json = serde_json::to_value(&fila).expect("serializa");
+        let leida: Fila = serde_json::from_value(json).expect("lee");
+        assert_eq!(leida.vuelta_eficiencia, Some(vuelta));
     }
 
     /// Fila anterior a `commit_binario`: se lee con cadena vacía.

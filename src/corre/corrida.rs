@@ -38,6 +38,7 @@ use crate::route::comando::{etiqueta_via, rutear_en};
 use crate::route::politica::nombre_rol;
 use crate::tipos::{
     Decision, Eleccion, Evento, Fila, MedidaEficiencia, Rol, TipoEvento, Veredicto, Via,
+    VueltaEficiencia,
 };
 use crate::track;
 
@@ -156,8 +157,7 @@ struct Avance {
 
 /// Lo que deja la vuelta de eficiencia. `veredicto` va a la fila: la segunda evaluación, o la primera
 /// si la vuelta no salió bien. `corrio` vale si hubo algún lanzamiento. `motivo` dice por qué se
-/// quedó con la primera. La fila no los lee todavía: los lleva el punto 3 de la Tarea 116.
-#[allow(dead_code)]
+/// quedó con la primera. La fila guarda `corrio` y `motivo` en `VueltaEficiencia`.
 struct ResultadoVuelta {
     veredicto: Veredicto,
     corrio: bool,
@@ -384,10 +384,16 @@ fn correr_interno(
     };
     // Vuelta de eficiencia: si la evaluación marca regresión, un lanzamiento más y una evaluación más.
     let regresiones = regresiones_de_vuelta(&primera, &config_cargada.roles, &av.lanzados);
-    let veredicto = if regresiones.is_empty() {
-        primera
+    let (veredicto, vuelta_eficiencia) = if regresiones.is_empty() {
+        (primera, None)
     } else {
-        correr_vuelta_eficiencia(&c, &mut av, primera, &regresiones)?.veredicto
+        let vuelta = correr_vuelta_eficiencia(&c, &mut av, primera, &regresiones)?;
+        let registro = VueltaEficiencia {
+            regresiones,
+            corrio: vuelta.corrio,
+            motivo: vuelta.motivo,
+        };
+        (vuelta.veredicto, Some(registro))
     };
 
     // j) La fila. El resumen sale de los eventos de esta corrida.
@@ -413,6 +419,7 @@ fn correr_interno(
         forma: config_cargada.forma(config),
         vueltas: av.lanzamientos,
         reanudada: reanuda.is_some(),
+        vuelta_eficiencia,
         ..Fila::default()
     };
     track::agregar_en(&deps.home.join("runs.jsonl"), &fila).map_err(|fuente| ErrorCorre::Io {
@@ -4332,5 +4339,96 @@ mod tests {
             motivos[0].contains("segunda evaluación rota"),
             "{motivos:?}"
         );
+    }
+
+    #[test]
+    fn corre_eficiencia_la_fila_lleva_la_primera_regresion_en_la_fila_y_en_runs_jsonl() {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        // La primera trae razón 1.3. La segunda trae otra regresión, con razón 1.7, que no debe ganar.
+        let evaluar =
+            |_r: &Path, _t: &Tarea, _o: &OpcionesOraculo| -> Result<Veredicto, ErrorOraculo> {
+                llamadas.set(llamadas.get() + 1);
+                let razon = if llamadas.get() == 1 { 1.3 } else { 1.7 };
+                let marca = format!("evaluacion-{}", llamadas.get());
+                Ok(Veredicto {
+                    commit: marca,
+                    informe: Some(informe()),
+                    eficiencia_auto: vec![MedidaEficiencia {
+                        razon: Some(razon),
+                        ..medida_eficiencia("tiempo_tests", true)
+                    }],
+                    ..Veredicto::default()
+                })
+            };
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(
+            fila.veredicto.commit, "evaluacion-2",
+            "la segunda evaluación cuenta"
+        );
+        assert_eq!(fila.vueltas, 3, "planifica, construye y la vuelta");
+        let vuelta = fila.vuelta_eficiencia.clone().expect("hubo vuelta");
+        assert_eq!(
+            vuelta.regresiones,
+            vec![MedidaEficiencia {
+                razon: Some(1.3),
+                ..medida_eficiencia("tiempo_tests", true)
+            }],
+            "la primera evaluación"
+        );
+        assert!(vuelta.corrio, "la vuelta se lanzó");
+        assert_eq!(vuelta.motivo, None, "la segunda evaluación cuenta");
+
+        let filas = track::filas_de(&e.home.join("runs.jsonl"), &Filtro::default()).expect("runs");
+        assert_eq!(filas.len(), 1, "una fila por corrida");
+        assert_eq!(filas[0].vuelta_eficiencia, fila.vuelta_eficiencia);
+    }
+
+    #[test]
+    fn corre_eficiencia_sin_cupo_para_la_vuelta_lleva_corrio_falso_y_el_motivo() {
+        let e = entorno();
+        let builder = Builder::default();
+        let agota = AgotaCupoTrasLanzamiento {
+            interno: &builder,
+            home: &e.home,
+            tras: 2,
+            lanzamientos: Cell::new(0),
+        };
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_regresion_hasta(&llamadas, 1);
+        let fila =
+            correr_con_eval(&e, &agota, &[], CONFIG, &evaluar).expect("la corrida llega a la fila");
+        let vuelta = fila
+            .vuelta_eficiencia
+            .expect("hubo regresión aunque la vuelta no corrió");
+        assert!(!vuelta.corrio, "la vuelta no se lanzó");
+        assert_eq!(vuelta.regresiones.len(), 1, "{:?}", vuelta.regresiones);
+        let motivos = gates(&e, FASE_EFICIENCIA);
+        assert_eq!(motivos.len(), 1, "{motivos:?}");
+        assert_eq!(
+            vuelta.motivo.as_deref(),
+            Some(motivos[0].as_str()),
+            "el motivo es el del gate"
+        );
+        assert!(
+            vuelta
+                .motivo
+                .as_deref()
+                .is_some_and(|m| m.contains("sin cupo para la vuelta de eficiencia")),
+            "{:?}",
+            vuelta.motivo
+        );
+    }
+
+    #[test]
+    fn corre_eficiencia_sin_regresion_la_fila_no_lleva_vuelta() {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_regresion_hasta(&llamadas, 0);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(fila.vuelta_eficiencia, None);
+        assert_eq!(fila.vueltas, 2, "sin vuelta no suma lanzamientos");
     }
 }
