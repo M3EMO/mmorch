@@ -825,6 +825,7 @@ fn evaluar_con(
     };
     // La medición automática de Eficiencia: Rust con `bootstrap/`, si la partes pide. Sus dos ejecutores son
     // nuevos, sin memo ni reuso (Tarea 115).
+    let mut avisos_eficiencia = Vec::new();
     let eficiencia_auto =
         if partes.mide(Dimension::Eficiencia) && tarea.lenguaje == "rust" && bootstrap.is_dir() {
             let ej_inicial = (deps.herramientas)(&Preparada {
@@ -837,10 +838,16 @@ fn evaluar_con(
                 cache: cache.clone(),
                 rustsec: rustsec.clone(),
             });
-            eficiencia::medir(ej_inicial.as_ref(), ej_del_repo.as_ref(), &home.join("tmp"))
+            eficiencia::medir(
+                ej_inicial.as_ref(),
+                ej_del_repo.as_ref(),
+                &home.join("tmp"),
+                &mut avisos_eficiencia,
+            )
         } else {
             Vec::new()
         };
+    avisos.extend(avisos_eficiencia);
     let preparada = Preparada {
         repo: repo_copia.clone(),
         cache,

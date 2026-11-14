@@ -531,12 +531,25 @@ pub struct ResultadoMedida {
 /// Mide el repo contra el estado inicial. Siempre devuelve cuatro resultados, en orden de `Medida`.
 /// `tmp` es la carpeta padre (`home/tmp`): `medir` crea ahí su carpeta de trabajo y la borra al terminar,
 /// también con error. Cada lado tiene su subcarpeta: todas sus llamadas usan la misma `/salida`.
+/// Si el borrado de esa carpeta falla, `avisos` recibe un aviso con la ruta y el error. Las medidas no cambian.
 pub fn medir(
     inicial: &dyn EjecutorHerramienta,
     repo: &dyn EjecutorHerramienta,
     tmp: &Path,
+    avisos: &mut Vec<String>,
 ) -> Vec<ResultadoMedida> {
-    let raiz = match crear_trabajo(tmp) {
+    medir_con(inicial, repo, tmp, &borrado::borrar_dir_dentro, avisos)
+}
+
+/// `medir` con el borrado por parámetro. Los tests inyectan un borrado que falla para ver el aviso.
+fn medir_con(
+    inicial: &dyn EjecutorHerramienta,
+    repo: &dyn EjecutorHerramienta,
+    tmp: &Path,
+    borrar: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+    avisos: &mut Vec<String>,
+) -> Vec<ResultadoMedida> {
+    let raiz = match crear_trabajo(tmp, borrar, avisos) {
         Ok(raiz) => raiz,
         Err(e) => {
             let motivo = format!("carpeta de trabajo: {e}");
@@ -561,8 +574,18 @@ pub fn medir(
     };
     let resultados = medir_lados(&lado_i, &lado_r);
     // Un fallo de borrado no cambia las medidas: la carpeta queda y el siguiente `medir` la ignora.
-    let _ = borrado::borrar_dir_dentro(tmp, &raiz);
+    if let Err(e) = borrar(tmp, &raiz) {
+        avisos.push(aviso_de_borrado(&raiz, &e));
+    }
     resultados
+}
+
+/// Aviso del veredicto cuando no se puede borrar la carpeta de trabajo. Dice la ruta y el error.
+fn aviso_de_borrado(raiz: &Path, e: &std::io::Error) -> String {
+    format!(
+        "eficiencia: carpeta de trabajo sin borrar {}: {e}",
+        raiz.display()
+    )
 }
 
 /// Las cuatro medidas de dos lados. Primero la metadata y las listas de tests de cada lado. Luego las corridas.
@@ -577,13 +600,19 @@ fn medir_lados(inicial: &Lado, repo: &Lado) -> Vec<ResultadoMedida> {
 }
 
 /// Crea la carpeta de trabajo dentro de `tmp` y una subcarpeta por lado. Si falla a medias, borra lo creado.
-fn crear_trabajo(tmp: &Path) -> std::io::Result<PathBuf> {
+fn crear_trabajo(
+    tmp: &Path,
+    borrar: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+    avisos: &mut Vec<String>,
+) -> std::io::Result<PathBuf> {
     let raiz = carpeta_de_salida(tmp)?.keep();
     let subcarpetas = ["inicial", "repo"]
         .iter()
         .try_for_each(|lado| fs::create_dir(raiz.join(lado)));
     if let Err(e) = subcarpetas {
-        let _ = borrado::borrar_dir_dentro(tmp, &raiz);
+        if let Err(e_borrado) = borrar(tmp, &raiz) {
+            avisos.push(aviso_de_borrado(&raiz, &e_borrado));
+        }
         return Err(e);
     }
     Ok(raiz)
@@ -875,7 +904,7 @@ mod tests {
         repo: &dyn EjecutorHerramienta,
     ) -> Vec<ResultadoMedida> {
         let tmp = tempfile::tempdir().expect("temp dir");
-        medir(inicial, repo, tmp.path())
+        medir(inicial, repo, tmp.path(), &mut Vec::new())
     }
 
     /// Ejecutor que anota la carpeta de `/salida` de cada llamada en `ejecutar_en` y responde con `Falso`.
@@ -921,7 +950,7 @@ mod tests {
         let log = RefCell::new(Vec::new());
         let inicial = con_carpeta("inicial", &log, None);
         let repo = con_carpeta("repo", &log, None);
-        medir(&inicial, &repo, tmp.path());
+        medir(&inicial, &repo, tmp.path(), &mut Vec::new());
         let carpetas_i = inicial.carpetas.borrow();
         assert!(carpetas_i.len() > CORRIDAS, "{carpetas_i:?}");
         assert!(
@@ -936,7 +965,7 @@ mod tests {
         let log = RefCell::new(Vec::new());
         let inicial = con_carpeta("inicial", &log, None);
         let repo = con_carpeta("repo", &log, None);
-        medir(&inicial, &repo, tmp.path());
+        medir(&inicial, &repo, tmp.path(), &mut Vec::new());
         let carpetas_i = inicial.carpetas.borrow().clone();
         let carpetas_r = repo.carpetas.borrow().clone();
         assert_ne!(carpetas_i[0], carpetas_r[0]);
@@ -950,7 +979,7 @@ mod tests {
             let log = RefCell::new(Vec::new());
             let inicial = con_carpeta("inicial", &log, error_en);
             let repo = con_carpeta("repo", &log, None);
-            medir(&inicial, &repo, tmp.path());
+            medir(&inicial, &repo, tmp.path(), &mut Vec::new());
             let usadas: Vec<PathBuf> = inicial
                 .carpetas
                 .borrow()
@@ -991,7 +1020,7 @@ mod tests {
         let log = RefCell::new(Vec::new());
         let inicial = sano("inicial", &log, &["a"]);
         let repo = sano("repo", &log, &["a"]);
-        medir(&inicial, &repo, tmp.path());
+        medir(&inicial, &repo, tmp.path(), &mut Vec::new());
         let vistas: Vec<String> = log
             .borrow()
             .iter()
@@ -1018,7 +1047,7 @@ mod tests {
             tests: format!("   Compiling foo v0.1.0 (/repo)\n{TESTS_OK}"),
             ..sano("repo", &log, &["a"])
         };
-        let resultados = medir(&inicial, &repo, tmp.path());
+        let resultados = medir(&inicial, &repo, tmp.path(), &mut Vec::new());
         for medida in [Medida::TiempoTests, Medida::MemoriaPico] {
             let r = por_medida(&resultados, medida);
             assert_eq!(
@@ -1040,7 +1069,7 @@ mod tests {
             compilar: "ROOT_COMPILAR 101\n".into(),
             ..sano("repo", &log, &["a"])
         };
-        let resultados = medir(&inicial, &repo, tmp.path());
+        let resultados = medir(&inicial, &repo, tmp.path(), &mut Vec::new());
         for medida in [Medida::TiempoTests, Medida::MemoriaPico] {
             let r = por_medida(&resultados, medida);
             assert_eq!(
@@ -1054,5 +1083,66 @@ mod tests {
             "{:?}",
             log.borrow()
         );
+    }
+
+    /// Borrado falso que siempre falla. Simula una carpeta de trabajo que no se puede borrar.
+    fn borrado_que_falla(_raiz: &Path, _ruta: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permiso denegado de prueba",
+        ))
+    }
+
+    #[test]
+    fn medir_con_borrado_que_falla_deja_aviso_con_carpeta_y_error() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let log = RefCell::new(Vec::new());
+        let inicial = con_carpeta("inicial", &log, None);
+        let repo = con_carpeta("repo", &log, None);
+        let mut avisos = Vec::new();
+        medir_con(&inicial, &repo, tmp.path(), &borrado_que_falla, &mut avisos);
+        let raiz = inicial.carpetas.borrow()[0]
+            .parent()
+            .expect("carpeta de trabajo")
+            .to_path_buf();
+        assert_eq!(avisos.len(), 1, "{avisos:?}");
+        assert!(
+            avisos[0].contains(&raiz.display().to_string()),
+            "{avisos:?}"
+        );
+        assert!(
+            avisos[0].contains("permiso denegado de prueba"),
+            "{avisos:?}"
+        );
+    }
+
+    #[test]
+    fn medir_con_borrado_que_anda_no_deja_aviso_y_la_medida_no_cambia() {
+        let log = RefCell::new(Vec::new());
+        let mut con_fallo = Vec::new();
+        let mut sin_fallo = Vec::new();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let inicial = con_carpeta("inicial", &log, None);
+        let repo = con_carpeta("repo", &log, None);
+        let medidas_sin_fallo = medir_con(
+            &inicial,
+            &repo,
+            tmp.path(),
+            &borrado::borrar_dir_dentro,
+            &mut sin_fallo,
+        );
+        let tmp_fallo = tempfile::tempdir().expect("temp dir");
+        let inicial_f = con_carpeta("inicial", &log, None);
+        let repo_f = con_carpeta("repo", &log, None);
+        let medidas_con_fallo = medir_con(
+            &inicial_f,
+            &repo_f,
+            tmp_fallo.path(),
+            &borrado_que_falla,
+            &mut con_fallo,
+        );
+        assert!(sin_fallo.is_empty(), "{sin_fallo:?}");
+        assert_eq!(con_fallo.len(), 1, "{con_fallo:?}");
+        assert_eq!(medidas_sin_fallo, medidas_con_fallo);
     }
 }
