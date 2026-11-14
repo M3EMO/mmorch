@@ -171,16 +171,6 @@ pub fn comparar_por_mediana(referencia: &[f64], repo: &[f64]) -> Option<Comparac
     })
 }
 
-/// Como `comparar_por_mediana`, pero la referencia suma el `ancla`: una corrida del lado inicial, si hay.
-pub fn comparar_con_ancla_por_mediana(
-    base: &[f64],
-    ancla: Option<f64>,
-    repo: &[f64],
-) -> Option<Comparacion> {
-    let referencia: Vec<f64> = base.iter().copied().chain(ancla).collect();
-    comparar_por_mediana(&referencia, repo)
-}
-
 /// Una serie de valores de un lado. Un error deja la serie sin valores y con su motivo.
 type Serie = Result<Vec<f64>, String>;
 
@@ -220,19 +210,15 @@ fn sin_valor(medida: Medida, motivo: String) -> ResultadoMedida {
     }
 }
 
-/// Series de la corrida del lado inicial que ancla la referencia. Sin ancla quedan vacías y sin error.
+/// Serie de la corrida del lado inicial que ancla la compilación de la referencia. Sin ancla queda vacía y sin error.
 /// Un ancla con error no hace fallar la medida: `combinar` usa solo la base.
 struct Ancla {
-    tiempo: Serie,
-    memoria: Serie,
     compilacion: Serie,
 }
 
 impl Ancla {
     fn vacia() -> Self {
         Ancla {
-            tiempo: Ok(vec![]),
-            memoria: Ok(vec![]),
             compilacion: Ok(vec![]),
         }
     }
@@ -243,20 +229,13 @@ fn valor_del_ancla(ancla: &Serie) -> Option<f64> {
     ancla.as_ref().ok()?.first().copied()
 }
 
-/// Un aviso por cada serie de ancla con error. La referencia sigue con la serie de la base.
+/// Un aviso si la serie de ancla de compilación tiene error. La referencia sigue con la serie de la base.
 fn avisar_ancla(ancla: &Ancla, avisos: &mut Vec<String>) {
-    let series = [
-        (Medida::TiempoTests, &ancla.tiempo),
-        (Medida::MemoriaPico, &ancla.memoria),
-        (Medida::TiempoCompilacion, &ancla.compilacion),
-    ];
-    for (medida, serie) in series {
-        if let Err(motivo) = serie {
-            avisos.push(format!(
-                "eficiencia: el ancla de {} falló y la referencia sigue con la base: {motivo}",
-                medida.id()
-            ));
-        }
+    if let Err(motivo) = &ancla.compilacion {
+        avisos.push(format!(
+            "eficiencia: el ancla de {} falló y la referencia sigue con la base: {motivo}",
+            Medida::TiempoCompilacion.id()
+        ));
     }
 }
 
@@ -270,18 +249,18 @@ fn minimo(valores: &[f64]) -> Option<f64> {
     valores.iter().copied().reduce(f64::min)
 }
 
-/// Compara las dos series de una medida. El ancla suma a la referencia. Si un lado falla, la medida no tiene valor.
-fn combinar(medida: Medida, referencia: &Serie, ancla: &Serie, repo: &Serie) -> ResultadoMedida {
+/// Compara las dos series de una medida. `ancla` suma a la referencia, si hay. Si un lado falla, la medida no tiene valor.
+fn combinar(
+    medida: Medida,
+    referencia: &Serie,
+    ancla: Option<f64>,
+    repo: &Serie,
+) -> ResultadoMedida {
     match (referencia, repo) {
         (Ok(r), Ok(p)) => {
-            let ancla = valor_del_ancla(ancla);
             let completa: Vec<f64> = r.iter().copied().chain(ancla).collect();
             let (comparacion, valor_referencia, valor_repo) = if por_mediana(medida) {
-                (
-                    comparar_con_ancla_por_mediana(r, ancla, p),
-                    mediana(&completa),
-                    mediana(p),
-                )
+                (comparar_por_mediana(r, p), mediana(r), mediana(p))
             } else {
                 (
                     comparar_con_ancla(r, ancla, p),
@@ -578,17 +557,15 @@ fn correr_tests(lado: &Lado, filtro: &str, tiempo: &mut Serie, memoria: &mut Ser
     }
 }
 
-/// Mide tiempo y memoria de los tests. Compila los tests de cada lado que corre, y luego corre esos lados
-/// alternados, `CORRIDAS_TESTS` veces. Un lado que no compila no corre. Si `lados[k]` es `None`, ese lado
-/// no corre: su serie ya viene en `tiempo[k]` y `memoria[k]`. Con `filtro` con error, los dos lados quedan con ese error.
-/// Si `ancla_lado` es `Some`, corre una vez tras la primera corrida de `lados`. Su serie va a `ancla`.
+/// Mide tiempo y memoria de los tests. Compila los tests de cada lado y luego corre los dos lados,
+/// alternados, `CORRIDAS_TESTS` veces. En cada par corre primero el lado `orden[0]`. Un lado que no compila
+/// no corre. Con `filtro` con error, los dos lados quedan con ese error.
 fn medir_tests(
-    lados: [Option<&Lado>; 2],
-    ancla_lado: Option<&Lado>,
+    lados: [&Lado; 2],
+    orden: [usize; 2],
     filtro: &Result<String, String>,
     tiempo: &mut [Serie; 2],
     memoria: &mut [Serie; 2],
-    ancla: &mut Ancla,
 ) {
     let filtro = match filtro {
         Ok(filtro) => filtro,
@@ -598,32 +575,18 @@ fn medir_tests(
             return;
         }
     };
-    if let Some(lado) = ancla_lado
-        && let Err(motivo) = compilar_tests(lado)
-    {
-        anotar(&mut ancla.tiempo, Err(motivo.clone()));
-        anotar(&mut ancla.memoria, Err(motivo));
-    }
     for (k, lado) in lados.into_iter().enumerate() {
-        let Some(lado) = lado else { continue };
         if let Err(motivo) = compilar_tests(lado) {
             anotar(&mut tiempo[k], Err(motivo.clone()));
             anotar(&mut memoria[k], Err(motivo));
         }
     }
-    for corrida in 0..CORRIDAS_TESTS {
-        for (k, lado) in lados.into_iter().enumerate() {
-            let Some(lado) = lado else { continue };
+    for _ in 0..CORRIDAS_TESTS {
+        for k in orden {
             if tiempo[k].is_err() && memoria[k].is_err() {
                 continue;
             }
-            correr_tests(lado, filtro, &mut tiempo[k], &mut memoria[k]);
-        }
-        if corrida == 0
-            && let Some(lado) = ancla_lado
-            && (ancla.tiempo.is_ok() || ancla.memoria.is_ok())
-        {
-            correr_tests(lado, filtro, &mut ancla.tiempo, &mut ancla.memoria);
+            correr_tests(lados[k], filtro, &mut tiempo[k], &mut memoria[k]);
         }
     }
 }
@@ -738,8 +701,8 @@ fn medir_compilacion(
     }
 }
 
-/// Une las series de los dos lados en las cuatro medidas, en orden de `Medida`. El ancla suma a la
-/// referencia de tiempo, memoria y compilación. El tamaño no tiene ancla. Ver `combinar` para la estadística.
+/// Une las series de los dos lados en las cuatro medidas, en orden de `Medida`. El ancla suma solo a la
+/// referencia de compilación. Ver `combinar` para la estadística.
 fn combinar_medidas(
     tiempo: &[Serie; 2],
     memoria: &[Serie; 2],
@@ -747,22 +710,16 @@ fn combinar_medidas(
     tamano: &[Serie; 2],
     ancla: &Ancla,
 ) -> Vec<ResultadoMedida> {
-    let sin_ancla: Serie = Ok(vec![]);
     vec![
-        combinar(Medida::TiempoTests, &tiempo[0], &ancla.tiempo, &tiempo[1]),
-        combinar(
-            Medida::MemoriaPico,
-            &memoria[0],
-            &ancla.memoria,
-            &memoria[1],
-        ),
+        combinar(Medida::TiempoTests, &tiempo[0], None, &tiempo[1]),
+        combinar(Medida::MemoriaPico, &memoria[0], None, &memoria[1]),
         combinar(
             Medida::TiempoCompilacion,
             &compilacion[0],
-            &ancla.compilacion,
+            valor_del_ancla(&ancla.compilacion),
             &compilacion[1],
         ),
-        combinar(Medida::TamanoBinario, &tamano[0], &sin_ancla, &tamano[1]),
+        combinar(Medida::TamanoBinario, &tamano[0], None, &tamano[1]),
     ]
 }
 
@@ -783,14 +740,13 @@ pub struct ResultadoMedida {
 }
 
 /// Lo que midió el lado inicial de una medición. Una calibración la mide una vez y sus casos la reusan.
-/// `filtro` es el resultado de `preparar_filtro` de ese lado. Las series son las del lado inicial.
+/// `filtro` es el resultado de `preparar_filtro` de ese lado. Las series de compilación y tamaño son las
+/// del lado inicial. El tiempo y la memoria no se guardan: cada caso los mide en vivo.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Referencia {
     meta: Result<Metadatos, String>,
     lista: Result<Listas, String>,
     filtro: Result<String, String>,
-    tiempo: Serie,
-    memoria: Serie,
     compilacion: Serie,
     tamano: Serie,
 }
@@ -864,7 +820,7 @@ fn referencia_fijada_actual() -> Option<Referencia> {
 /// también con error. Cada lado tiene su subcarpeta: todas sus llamadas usan la misma `/salida`.
 /// Con carpeta fija (`con_carpeta_de_eficiencia`), usa esa carpeta y no crea ni borra la suya.
 /// Si el borrado de esa carpeta falla, `avisos` recibe un aviso con la ruta y el error. Las medidas no cambian.
-/// Con referencia fijada, un ancla con error suma un aviso por medida. La medida sigue con la base.
+/// Con referencia fijada, un ancla de compilación con error suma un aviso. La medida sigue con la base.
 pub fn medir(
     inicial: &dyn EjecutorHerramienta,
     repo: &dyn EjecutorHerramienta,
@@ -965,7 +921,7 @@ fn medir_los_dos_lados(inicial: &Lado, repo: &Lado) -> (Vec<ResultadoMedida>, Re
     let mut compilacion: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut tamano: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut ancla = Ancla::vacia();
-    medir_tests(lados, None, &filtro, &mut tiempo, &mut memoria, &mut ancla);
+    medir_tests([inicial, repo], [0, 1], &filtro, &mut tiempo, &mut memoria);
     medir_compilacion(
         lados,
         None,
@@ -979,8 +935,6 @@ fn medir_los_dos_lados(inicial: &Lado, repo: &Lado) -> (Vec<ResultadoMedida>, Re
         meta: meta_i,
         lista: lista_i,
         filtro,
-        tiempo: tiempo[0].clone(),
-        memoria: memoria[0].clone(),
         compilacion: compilacion[0].clone(),
         tamano: tamano[0].clone(),
     };
@@ -988,9 +942,10 @@ fn medir_los_dos_lados(inicial: &Lado, repo: &Lado) -> (Vec<ResultadoMedida>, Re
     (resultados, referencia)
 }
 
-/// Mide el repo y lo compara con la referencia. Además corre el lado inicial una vez por medida: su
-/// corrida ancla la referencia. El repo compila `CORRIDAS_COMPILACION_DE_CASO` veces: su ruido sale de la
-/// serie de la base y del ancla, con el piso. Si el filtro del repo no es el de la referencia, los tests no tienen valor.
+/// Mide el repo y el lado inicial en vivo, en tests. Tiempo y memoria salen de esas dos series, alternadas.
+/// Compilación y tamaño usan la serie de la base. El lado inicial compila una vez más: su corrida ancla la
+/// compilación. El repo compila `CORRIDAS_COMPILACION_DE_CASO` veces. Si el filtro del repo no es el de la
+/// referencia, los tests no tienen valor.
 fn medir_contra_referencia(
     referencia: &Referencia,
     inicial: &Lado,
@@ -1010,22 +965,15 @@ fn medir_contra_referencia(
             Err(MOTIVO_OTROS_TESTS.into())
         }
     });
-    let lados = [None, Some(repo)];
-    let mut tiempo: [Serie; 2] = [referencia.tiempo.clone(), Ok(vec![])];
-    let mut memoria: [Serie; 2] = [referencia.memoria.clone(), Ok(vec![])];
+    let mut tiempo: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
+    let mut memoria: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut compilacion: [Serie; 2] = [referencia.compilacion.clone(), Ok(vec![])];
     let mut tamano: [Serie; 2] = [referencia.tamano.clone(), Ok(vec![])];
     let mut ancla = Ancla::vacia();
-    medir_tests(
-        lados,
-        Some(inicial),
-        &filtro,
-        &mut tiempo,
-        &mut memoria,
-        &mut ancla,
-    );
+    // El orden [1, 0] hace que el repo corra primero en cada par de tests.
+    medir_tests([inicial, repo], [1, 0], &filtro, &mut tiempo, &mut memoria);
     medir_compilacion(
-        lados,
+        [None, Some(repo)],
         Some(inicial),
         CORRIDAS_COMPILACION_DE_CASO,
         [&referencia.meta, &meta_r],
@@ -1812,7 +1760,7 @@ mod tests {
     }
 
     #[test]
-    fn con_referencia_el_inicial_solo_recibe_su_ancla() {
+    fn con_referencia_el_inicial_no_pide_metadata_ni_lista() {
         let log_base = RefCell::new(Vec::new());
         let referencia = referencia_de(
             &sano("inicial", &log_base, &["a"]),
@@ -1824,11 +1772,11 @@ mod tests {
         let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
         assert_eq!(resultados.len(), 4);
         let entradas = log.borrow();
-        // Sin metadata ni lista: esas vienen de la referencia.
-        assert_eq!(
-            tipos_de(&entradas, "inicial"),
-            ["compilar_tests", "tests", "build"]
-        );
+        // Sin metadata ni lista: esas vienen de la referencia. Tests: CORRIDAS_TESTS veces. Build: su ancla.
+        let mut esperado = vec!["compilar_tests"];
+        esperado.extend(vec!["tests"; CORRIDAS_TESTS]);
+        esperado.push("build");
+        assert_eq!(tipos_de(&entradas, "inicial"), esperado);
         assert!(
             entradas.iter().any(|e| e.starts_with("repo ")),
             "{entradas:?}"
@@ -1836,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn con_referencia_el_inicial_recibe_una_llamada_por_medida_de_tiempo() {
+    fn con_referencia_el_inicial_compila_una_vez_y_una_su_ancla() {
         let log_base = RefCell::new(Vec::new());
         let referencia = referencia_de(
             &sano("inicial", &log_base, &["a"]),
@@ -1847,9 +1795,9 @@ mod tests {
         let repo = sano("repo", &log, &["a"]);
         con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
         let entradas = log.borrow();
+        // Las llamadas de tests del inicial las cuenta `con_referencia_el_inicial_corre_sus_tests_corridas_tests_veces`.
         let tipos = tipos_de(&entradas, "inicial");
         let cuenta = |tipo: &str| tipos.iter().filter(|t| *t == tipo).count();
-        assert_eq!(cuenta("tests"), 1, "{tipos:?}");
         assert_eq!(cuenta("build"), 1, "{tipos:?}");
         assert_eq!(cuenta("compilar_tests"), 1, "{tipos:?}");
     }
@@ -1875,6 +1823,71 @@ mod tests {
     }
 
     #[test]
+    fn con_referencia_el_inicial_corre_sus_tests_corridas_tests_veces() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        let entradas = log.borrow();
+        let tipos = tipos_de(&entradas, "inicial");
+        let cuenta = tipos.iter().filter(|t| *t == "tests").count();
+        assert_eq!(cuenta, CORRIDAS_TESTS, "{tipos:?}");
+    }
+
+    #[test]
+    fn con_referencia_el_doble_en_ambos_lados_da_razon_uno_y_sin_regresion() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        // Los dos lados tardan el doble que la base (1,5 s) y usan el doble de memoria (1000 bytes).
+        let lento = "ROOT_NS 3000000000\nROOT_MEM 2000\n";
+        let inicial = Falso {
+            tests: lento.into(),
+            ..sano("inicial", &log, &["a"])
+        };
+        let repo = Falso {
+            tests: lento.into(),
+            ..sano("repo", &log, &["a"])
+        };
+        let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        for medida in [Medida::TiempoTests, Medida::MemoriaPico] {
+            let c = por_medida(&resultados, medida)
+                .comparacion
+                .as_ref()
+                .expect("comparable");
+            assert!(cerca(c.razon, 1.0), "{medida:?}: razon {}", c.razon);
+            assert!(!c.regresion, "{medida:?}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn con_referencia_los_tests_alternan_repo_e_inicial_en_cada_par() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        let entradas = log.borrow();
+        let esperado: Vec<String> = (0..CORRIDAS_TESTS)
+            .flat_map(|_| ["repo", "inicial"])
+            .map(String::from)
+            .collect();
+        assert_eq!(lados_de(&entradas, "tests"), esperado, "{entradas:?}");
+    }
+
+    #[test]
     fn sin_referencia_cada_lado_compila_tres_veces() {
         let log = RefCell::new(Vec::new());
         let inicial = sano("inicial", &log, &["a"]);
@@ -1889,7 +1902,7 @@ mod tests {
     }
 
     #[test]
-    fn con_referencia_el_orden_de_las_corridas_es_repo_inicial_repo_repo() {
+    fn con_referencia_el_orden_de_las_compilaciones_es_repo_inicial() {
         let log_base = RefCell::new(Vec::new());
         let referencia = referencia_de(
             &sano("inicial", &log_base, &["a"]),
@@ -1900,11 +1913,7 @@ mod tests {
         let repo = sano("repo", &log, &["a"]);
         con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
         let entradas = log.borrow();
-        // Tests: el repo corre en cada corrida y el ancla del inicial corre tras la primera.
-        let mut esperado_tests = vec!["repo", "inicial"];
-        esperado_tests.extend(vec!["repo"; CORRIDAS_TESTS - 1]);
-        let esperado_tests: Vec<String> = esperado_tests.into_iter().map(String::from).collect();
-        assert_eq!(lados_de(&entradas, "tests"), esperado_tests, "{entradas:?}");
+        // El orden de los tests lo cubre `con_referencia_los_tests_alternan_repo_e_inicial_en_cada_par`.
         // Build: el repo compila CORRIDAS_COMPILACION_DE_CASO vez y el ancla del inicial corre tras ella.
         let esperado_build: Vec<String> =
             ["repo", "inicial"].into_iter().map(String::from).collect();
@@ -1939,8 +1948,8 @@ mod tests {
             &sano("repo", &log_base, &["a"]),
         );
         let log = RefCell::new(Vec::new());
+        // Solo falla el build del ancla. Los tests del inicial son sanos: su serie es viva, no un ancla.
         let inicial = Falso {
-            tests: "sin marcas\n".into(),
             build: "ROOT_BUILD 1\n".into(),
             ..sano("inicial", &log, &["a"])
         };
@@ -1958,9 +1967,9 @@ mod tests {
         }
     }
 
-    /// Un ancla con error deja un aviso por medida, con el id de la medida y el motivo.
+    /// Un ancla de compilación con error deja un aviso, con el id de la medida y el motivo.
     #[test]
-    fn con_referencia_el_ancla_con_error_deja_aviso_por_medida() {
+    fn con_referencia_el_ancla_con_error_deja_aviso_de_compilacion() {
         let log_base = RefCell::new(Vec::new());
         let referencia = referencia_de(
             &sano("inicial", &log_base, &["a"]),
@@ -1968,7 +1977,6 @@ mod tests {
         );
         let log = RefCell::new(Vec::new());
         let inicial = Falso {
-            tests: "sin marcas\n".into(),
             build: "ROOT_BUILD 1\n".into(),
             ..sano("inicial", &log, &["a"])
         };
@@ -1984,14 +1992,8 @@ mod tests {
                 &mut avisos,
             )
         });
-        assert!(
-            avisos.iter().any(|a| a.contains("tiempo_tests")),
-            "{avisos:?}"
-        );
-        assert!(
-            avisos.iter().any(|a| a.contains("tiempo_compilacion")),
-            "{avisos:?}"
-        );
+        assert_eq!(avisos.len(), 1, "{avisos:?}");
+        assert!(avisos[0].contains("tiempo_compilacion"), "{avisos:?}");
     }
 
     /// Un ancla sana no deja aviso de ancla.
@@ -2029,8 +2031,8 @@ mod tests {
             &sano("inicial", &log_base, &["a"]),
             &sano("repo", &log_base, &["a"]),
         );
-        // El ancla del lado inicial mide más que la base. El mínimo sigue siendo el de la base.
-        // La razón no cambia: el ruido sí, pero esta prueba no lo mira.
+        // Compilación y tamaño: el ancla del lado inicial mide más que la base, y el mínimo sigue siendo el
+        // de la base. Tiempo y memoria: el lado inicial vivo mide 9 s y 9000, así que esas razones salen de él.
         let log = RefCell::new(Vec::new());
         let inicial = Falso {
             tests: "ROOT_NS 9000000000\nROOT_MEM 9000\n".into(),
@@ -2044,38 +2046,42 @@ mod tests {
         };
         let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
         let casos = [
-            (Medida::TiempoTests, 1.5, 3.0),
-            (Medida::MemoriaPico, 1000.0, 2000.0),
-            (Medida::TiempoCompilacion, 2.0, 4.0),
-            (Medida::TamanoBinario, 500.0, 1000.0),
+            (Medida::TiempoTests, 9.0, 3.0, 3.0 / 9.0),
+            (Medida::MemoriaPico, 9000.0, 2000.0, 2000.0 / 9000.0),
+            (Medida::TiempoCompilacion, 2.0, 4.0, 2.0),
+            (Medida::TamanoBinario, 500.0, 1000.0, 2.0),
         ];
-        for (medida, referencia, repo) in casos {
+        for (medida, referencia, repo, razon_esperada) in casos {
             let r = por_medida(&resultados, medida);
             assert_eq!(r.referencia, Some(referencia), "{medida:?}");
             assert_eq!(r.repo, Some(repo), "{medida:?}");
             let razon = r.comparacion.as_ref().map(|c| c.razon);
-            assert!(razon.is_some_and(|x| cerca(x, 2.0)), "{medida:?}: {r:?}");
+            assert!(
+                razon.is_some_and(|x| cerca(x, razon_esperada)),
+                "{medida:?}: {r:?}"
+            );
         }
-        // Solo el ancla del lado inicial: compilación de tests, una corrida de tests y una de build.
-        assert_eq!(
-            tipos_de(&log.borrow(), "inicial"),
-            ["compilar_tests", "tests", "build"]
-        );
+        // El lado inicial corre sus tests cada corrida y su compilación una vez: el ancla.
+        let mut esperado = vec!["compilar_tests"];
+        esperado.extend(vec!["tests"; CORRIDAS_TESTS]);
+        esperado.push("build");
+        assert_eq!(tipos_de(&log.borrow(), "inicial"), esperado);
     }
 
     #[test]
-    fn referencia_con_serie_fallida_deja_la_medida_sin_valor_con_el_motivo_de_la_base() {
+    fn con_referencia_serie_viva_fallida_deja_la_medida_sin_valor_con_su_motivo() {
         let log_base = RefCell::new(Vec::new());
-        let sin_pico = "ROOT_NS 1500000000\nROOT_MEM \n";
         let referencia = referencia_de(
-            &Falso {
-                tests: sin_pico.into(),
-                ..sano("inicial", &log_base, &["a"])
-            },
+            &sano("inicial", &log_base, &["a"]),
             &sano("repo", &log_base, &["a"]),
         );
+        // El lado inicial vivo no da memoria: su serie falla y la medida queda sin valor.
+        let sin_pico = "ROOT_NS 1500000000\nROOT_MEM \n";
         let log = RefCell::new(Vec::new());
-        let inicial = sano("inicial", &log, &["a"]);
+        let inicial = Falso {
+            tests: sin_pico.into(),
+            ..sano("inicial", &log, &["a"])
+        };
         let repo = sano("repo", &log, &["a"]);
         let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
         let memoria = por_medida(&resultados, Medida::MemoriaPico);
@@ -2151,14 +2157,14 @@ mod tests {
     }
 
     #[test]
-    fn con_referencia_corridas_referencia_son_la_serie_mas_el_ancla() {
+    fn con_referencia_corridas_referencia_son_las_vivas_del_inicial() {
         let log_base = RefCell::new(Vec::new());
         let referencia = referencia_de(
             &sano("inicial", &log_base, &["a"]),
             &sano("repo", &log_base, &["a"]),
         );
         let log = RefCell::new(Vec::new());
-        // El ancla mide 9 segundos: va al final de las corridas de referencia.
+        // El lado inicial vivo mide 9 segundos en cada corrida: esas son sus corridas de referencia.
         let inicial = Falso {
             tests: "ROOT_NS 9000000000\nROOT_MEM 9000\n".into(),
             ..sano("inicial", &log, &["a"])
@@ -2169,8 +2175,7 @@ mod tests {
         };
         let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
         let tiempo = por_medida(&resultados, Medida::TiempoTests);
-        let mut esperado = vec![1.5; CORRIDAS_TESTS];
-        esperado.push(9.0);
+        let esperado = vec![9.0; CORRIDAS_TESTS];
         assert_eq!(tiempo.corridas_referencia, esperado, "{tiempo:?}");
         assert_eq!(
             tiempo.corridas_repo,
@@ -2297,18 +2302,6 @@ mod tests {
         assert_eq!(comparar_por_mediana(&[], &[1.0]), None);
         assert_eq!(comparar_por_mediana(&[1.0], &[]), None);
         assert_eq!(comparar_por_mediana(&[0.0, 0.0, 1.0], &[1.0]), None);
-    }
-
-    #[test]
-    fn ancla_entra_a_la_mediana_de_la_referencia() {
-        let base = [1.0; 10];
-        let repo = [1.5; 10];
-        // El ancla es menor que la base. El mínimo de la referencia sería 0,5. La mediana sigue en 1,0.
-        let c = comparar_con_ancla_por_mediana(&base, Some(0.5), &repo).expect("comparable");
-        assert!(cerca(c.razon, 1.5), "razon {}", c.razon);
-        assert!(c.regresion, "{c:?}");
-        let viejo = comparar_con_ancla(&base, Some(0.5), &repo).expect("comparable");
-        assert!(cerca(viejo.razon, 3.0), "razon {}", viejo.razon);
     }
 
     #[test]
