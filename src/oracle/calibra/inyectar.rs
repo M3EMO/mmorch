@@ -29,10 +29,11 @@ pub enum Defecto {
     CuerpoVaciado,
     EstadoGlobal,
     EfectoEnNucleo,
+    LastreDeMemoria,
 }
 
 /// Todos los defectos, en el orden de `Defecto`.
-pub const TODOS: [Defecto; 13] = [
+pub const TODOS: [Defecto; 14] = [
     Defecto::SecretoEnCodigo,
     Defecto::PanicoEnEntrada,
     Defecto::BucleCuadratico,
@@ -46,6 +47,7 @@ pub const TODOS: [Defecto; 13] = [
     Defecto::CuerpoVaciado,
     Defecto::EstadoGlobal,
     Defecto::EfectoEnNucleo,
+    Defecto::LastreDeMemoria,
 ];
 
 impl Defecto {
@@ -64,6 +66,7 @@ impl Defecto {
             Defecto::CuerpoVaciado => Dimension::Completitud,
             Defecto::EstadoGlobal => Dimension::Diseno,
             Defecto::EfectoEnNucleo => Dimension::Arquitectura,
+            Defecto::LastreDeMemoria => Dimension::Eficiencia,
         }
     }
 
@@ -83,6 +86,7 @@ impl Defecto {
             Defecto::CuerpoVaciado => "completitud.alcance",
             Defecto::EstadoGlobal => "diseno.estado",
             Defecto::EfectoEnNucleo => "arquitectura.adecuacion",
+            Defecto::LastreDeMemoria => "eficiencia.capacidad",
         }
     }
 }
@@ -191,6 +195,7 @@ impl Inyeccion {
             | Defecto::ErrorTragado
             | Defecto::EstadoGlobal
             | Defecto::EfectoEnNucleo
+            | Defecto::LastreDeMemoria
             | Defecto::CuerpoVaciado => {
                 identidad_de_lugar(self.defecto, &self.archivo, self.linea, "")
             }
@@ -290,6 +295,7 @@ pub fn inyectar_con(
         }
         Defecto::EstadoGlobal => estado_global(dir, &mut rng, contexto.cambios, ex)?,
         Defecto::EfectoEnNucleo => efecto_en_nucleo(dir, &mut rng, contexto.cambios, ex)?,
+        Defecto::LastreDeMemoria => lastre_de_memoria(dir, &mut rng, contexto.cambios, ex)?,
     };
     // Con `cambios`, un defecto de línea o de módulo solo cae dentro del cambio: toda elección lo está.
     // Un cuerpo vaciado sin estado inicial puede caer fuera: su marca sale de `cuerpo_vaciado`.
@@ -1141,6 +1147,42 @@ fn efecto_en_nucleo(
     lineas.insert(
         cuerpo.abre + 1,
         format!("{sangria}    let _ = std::env::var(\"ROOT_EFECTO\");"),
+    );
+    escribir(dir, &archivo, &unir(&lineas))?;
+    Ok(Some((archivo, cuerpo.abre as u32 + 2)))
+}
+
+/// Bytes que `LastreDeMemoria` reserva en cada llamada. 64 MB más sobre los 42 MB de pico de s2-t1 dan una
+/// razón cercana a 2,5, que pasa el umbral 1,5 (`UMBRAL_NO_LISTO`).
+const LASTRE_BYTES: usize = 64 << 20;
+/// Texto de `LASTRE_BYTES` en el código inyectado. Debe decir lo mismo que la constante.
+const LASTRE_TEXTO: &str = "64 << 20";
+// Si la constante cambia, el texto inyectado cambia con ella: el compilador avisa si no coinciden.
+const _: () = assert!(LASTRE_BYTES == 64 << 20);
+
+/// Agrega una reserva de memoria que el compilador no puede quitar, al inicio de una función de producción del
+/// cambio: lastre de memoria. La línea reportada es la de la reserva, `abre + 2` (1-based), justo debajo de la `{`.
+fn lastre_de_memoria(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
+    let candidatos = funciones_de_efecto(dir, cambios)?;
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, c)| {
+        identidad_de_lugar(Defecto::LastreDeMemoria, a, c.abre as u32 + 2, "")
+    });
+    let Some((archivo, cuerpo)) = libre else {
+        return Ok(None);
+    };
+    let mut lineas = partir(&leer(dir, &archivo)?);
+    let sangria: String = lineas[cuerpo.firma]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    lineas.insert(
+        cuerpo.abre + 1,
+        format!("{sangria}    let _lastre = std::hint::black_box(vec![1u8; {LASTRE_TEXTO}]);"),
     );
     escribir(dir, &archivo, &unir(&lineas))?;
     Ok(Some((archivo, cuerpo.abre as u32 + 2)))
@@ -4060,7 +4102,7 @@ pub fn dos(x: u32) -> bool {
             de_dimension(Dimension::Diseno),
             vec![Defecto::ErrorTragado, Defecto::EstadoGlobal]
         );
-        assert_eq!(TODOS.len(), 13);
+        assert_eq!(TODOS.len(), 14);
     }
 
     #[test]
@@ -4192,7 +4234,7 @@ pub fn dos(x: u32) -> bool {
             de_dimension(Dimension::Arquitectura),
             vec![Defecto::CicloEntreCapas, Defecto::EfectoEnNucleo]
         );
-        assert_eq!(TODOS.len(), 13);
+        assert_eq!(TODOS.len(), 14);
     }
 
     #[test]
@@ -4210,5 +4252,85 @@ pub fn dos(x: u32) -> bool {
             assert!(r.is_none(), "semilla {semilla}: {r:?}");
         }
         assert_eq!(leer(dir.path(), "src/lib.rs").expect("lee"), codigo);
+    }
+
+    /// Línea que deja `LastreDeMemoria`: con la sangría del cuerpo, justo debajo de la `{`.
+    const LINEA_LASTRE: &str = "    let _lastre = std::hint::black_box(vec![1u8; 64 << 20]);";
+
+    #[test]
+    fn lastre_de_memoria_pone_la_linea_en_una_funcion_del_cambio() {
+        let dir = repo_con_a_y_b();
+        let b_antes = leer(dir.path(), "src/b.rs").expect("lee b");
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let inyeccion = con_cambios(Defecto::LastreDeMemoria, dir.path(), Some(&cambios), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.defecto, Defecto::LastreDeMemoria);
+        assert_eq!(inyeccion.archivo, "src/a.rs");
+        let a = leer(dir.path(), "src/a.rs").expect("lee a");
+        let lineas: Vec<&str> = a.lines().collect();
+        let i = inyeccion.linea as usize - 1;
+        assert_eq!(lineas[i], LINEA_LASTRE, "{a}");
+        assert!(
+            lineas[i - 1].ends_with('{'),
+            "no va dentro de una función: {a}"
+        );
+        assert_eq!(leer(dir.path(), "src/b.rs").expect("lee b"), b_antes);
+    }
+
+    #[test]
+    fn lastre_de_memoria_la_copia_del_fixture_compila() {
+        let dir = copia_fixture();
+        inyectar(Defecto::LastreDeMemoria, dir.path(), &capas_fixture(), 42)
+            .expect("E/S")
+            .expect("aplica");
+        let objetivo = tempfile::tempdir().expect("temporal");
+        if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
+            panic!("la copia del fixture no compila:\n{stderr}");
+        }
+    }
+
+    #[test]
+    fn lastre_de_memoria_es_de_eficiencia_con_su_item() {
+        assert_eq!(Defecto::LastreDeMemoria.dimension(), Dimension::Eficiencia);
+        assert_eq!(Defecto::LastreDeMemoria.item(), "eficiencia.capacidad");
+        assert_eq!(
+            de_dimension(Dimension::Eficiencia),
+            vec![Defecto::BucleCuadratico, Defecto::LastreDeMemoria]
+        );
+        assert_eq!(TODOS.len(), 14);
+    }
+
+    #[test]
+    fn lastre_de_memoria_no_elige_const_fn_ni_tests() {
+        let codigo = "pub const fn c() -> u32 {\n    1\n}\n\npub unsafe fn u() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(1, 1);\n    }\n}\n";
+        let dir = repo_con_lib(codigo);
+        for semilla in 1..=20u64 {
+            let r = inyectar(
+                Defecto::LastreDeMemoria,
+                dir.path(),
+                &capas_fixture(),
+                semilla,
+            )
+            .expect("E/S");
+            assert!(r.is_none(), "semilla {semilla}: {r:?}");
+        }
+        assert_eq!(leer(dir.path(), "src/lib.rs").expect("lee"), codigo);
+    }
+
+    #[test]
+    fn lastre_de_memoria_sin_cambios_cae_en_cualquier_funcion_de_produccion() {
+        let dir = repo_con_lib("pub fn f() -> u32 {\n    1\n}\n");
+        let inyeccion = inyectar(Defecto::LastreDeMemoria, dir.path(), &capas_fixture(), 7)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.linea, 2);
+        let nuevo = leer(dir.path(), "src/lib.rs").expect("lee");
+        assert!(
+            nuevo.contains(
+                "pub fn f() -> u32 {\n    let _lastre = std::hint::black_box(vec![1u8; 64 << 20]);"
+            ),
+            "{nuevo}"
+        );
     }
 }

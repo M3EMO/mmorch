@@ -3659,10 +3659,12 @@ mod tests {
         let ev = falso(dir.path(), &base, |_, _, base| base.clone());
         let fila = calibrar_con(&tarea, Dimension::Eficiencia, 10, 42, dir.path(), &ev)
             .expect("sin función del camino igual hay fila");
+        // Eficiencia rota entre el bucle y el lastre. El bucle no tiene dónde caer: sus casos son no aplicables.
+        // El lastre sí aplica en los suyos.
         assert_eq!(
             (fila.defectos, fila.limpios, fila.no_aplicable),
-            (0, 5, 5),
-            "el bucle no tiene dónde caer: cada caso con defecto es no aplicable"
+            (2, 5, 3),
+            "el bucle no tiene dónde caer: sus casos son no aplicables"
         );
     }
 
@@ -3691,7 +3693,8 @@ mod tests {
         let ev = falso(dir.path(), &base, |_, _, base| base.clone());
         let fila =
             calibrar_con(&tarea, Dimension::Eficiencia, 10, 42, dir.path(), &ev).expect("hay fila");
-        assert_eq!((fila.defectos, fila.no_aplicable), (1, 4));
+        // El bucle aplica una vez: la única función del camino se agota. El lastre aplica en sus dos casos.
+        assert_eq!((fila.defectos, fila.no_aplicable), (3, 2));
     }
 
     /// Punto 2 de la Tarea 121: una base sin veredicto da fila sin casos. Antes era `ErrorOraculo::Infra`.
