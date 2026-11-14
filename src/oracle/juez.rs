@@ -65,6 +65,10 @@ Sin hallazgos: \"hallazgos\":[].";
 
 /// Versión de la forma de elegir los extractos. Cambiarla cambia la huella: los limpios con la lectura vieja no se reusan.
 const VERSION_LECTURA: &str = "lectura-guiada-1";
+/// Inicio de la causa de una respuesta que no parsea. Lo usa `leer_json` y el reintento por JSON.
+const PREFIJO_JSON_INVALIDO: &str = "JSON inválido";
+/// Línea que el reintento por JSON inválido agrega al final del usuario. No entra a la huella del prompt.
+const LINEA_REINTENTO_JSON: &str = "La respuesta anterior no era JSON válido. Respondé SOLO el objeto JSON, sin texto antes ni después.";
 
 /// Huella de los textos fijos del prompt del juez. Cambiar uno cambia la huella: los limpios guardados con el
 /// prompt viejo ya no se reusan.
@@ -714,6 +718,24 @@ fn pedir(modelo: &dyn ModeloJuez, prompt: &Prompt) -> Result<Respuesta, String> 
     parsear(&salida.texto)
 }
 
+/// Pide el juicio. Si la respuesta no es JSON válido, repite la llamada una vez con `LINEA_REINTENTO_JSON`.
+/// Si el reintento también falla, la causa nombra los dos errores. Otras causas no se reintentan.
+fn pedir_con_reintento_json(modelo: &dyn ModeloJuez, prompt: &Prompt) -> Result<Respuesta, String> {
+    let causa = match pedir(modelo, prompt) {
+        Ok(respuesta) => return Ok(respuesta),
+        Err(causa) if !causa.starts_with(PREFIJO_JSON_INVALIDO) => return Err(causa),
+        Err(causa) => causa,
+    };
+    let mut reintento = prompt.clone();
+    reintento.usuario.push('\n');
+    reintento.usuario.push_str(LINEA_REINTENTO_JSON);
+    reintento.reintento_juez = true;
+    if exceso_de_entrada(&reintento).is_some() {
+        return Err(causa);
+    }
+    pedir(modelo, &reintento).map_err(|otra| format!("{causa}; reintento: {otra}"))
+}
+
 /// Pide el juicio al modelo y aplica el parseo estricto y el gate. Hace como mucho un reintento.
 pub fn juzgar(
     e: &EntradaJuez,
@@ -729,7 +751,7 @@ pub fn juzgar(
     if let Some(motivo) = exceso_de_entrada(&prompt) {
         return sin_veredicto(motivo, &pedidos, guardados);
     }
-    let respuesta = match pedir(modelo, &prompt) {
+    let respuesta = match pedir_con_reintento_json(modelo, &prompt) {
         Ok(respuesta) => respuesta,
         Err(causa) => return sin_veredicto(causa, &pedidos, guardados),
     };
@@ -1145,7 +1167,7 @@ fn leer_json(texto: &str) -> Result<(Value, Vec<Descarte>), String> {
                 valor,
                 vec![descarte("respuesta del juez", MOTIVO_JSON_REPARADO)],
             )),
-            Err(_) => Err(format!("JSON inválido: {estricto}")),
+            Err(_) => Err(format!("{PREFIJO_JSON_INVALIDO}: {estricto}")),
         },
     }
 }
@@ -3425,6 +3447,111 @@ mod tests {
         assert_eq!(visto.len(), 2);
         assert!(!visto[0].reintento_juez, "la 1ª llamada no es reintento");
         assert!(visto[1].reintento_juez, "la 2ª llamada es el reintento");
+    }
+
+    // Reintento por JSON inválido: la llamada entera se repite una vez.
+
+    #[test]
+    fn juez_json_cortado_reintenta_y_juzga_con_la_segunda_respuesta() {
+        let c = caso();
+        let completa = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 1, json!([real()])),
+            ]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok("{\"items\": [".into()), Ok(completa)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2, "un reintento por JSON");
+        assert_eq!(r.estado, EstadoJuez::Ok, "{r:?}");
+        assert_eq!(r.niveles.get(MODULARIDAD), Some(&2));
+        assert_eq!(r.niveles.get(TOPE), Some(&1));
+    }
+
+    #[test]
+    fn juez_reintento_por_json_marca_el_prompt_y_agrega_la_linea() {
+        let c = caso();
+        let completa = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 1, json!([real()])),
+            ]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok("{\"items\": [".into()), Ok(completa)]);
+        juzgar_secuencia(&c, &modelo);
+        let visto = modelo.visto.borrow();
+        assert_eq!(visto.len(), 2);
+        assert!(!visto[0].usuario.contains(LINEA_REINTENTO_JSON));
+        assert!(!visto[0].reintento_juez, "la 1ª llamada no es reintento");
+        assert!(visto[1].usuario.contains(LINEA_REINTENTO_JSON));
+        assert!(visto[1].usuario.ends_with(LINEA_REINTENTO_JSON));
+        assert!(visto[1].reintento_juez, "la 2ª llamada es el reintento");
+    }
+
+    #[test]
+    fn juez_dos_json_cortados_dan_sin_veredicto_con_las_dos_causas() {
+        let c = caso();
+        let modelo =
+            FalsoSecuencia::nueva(vec![Ok("{\"items\": [".into()), Ok("{\"items\": [".into())]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2, "exactamente un reintento");
+        assert_sin_veredicto(&r);
+        match &r.estado {
+            EstadoJuez::SinVeredicto(causa) => {
+                assert!(causa.starts_with("JSON inválido"), "{causa}");
+                assert!(causa.contains("; reintento: JSON inválido"), "{causa}");
+            }
+            otro => panic!("esperaba SinVeredicto, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn juez_error_de_proveedor_no_reintenta_por_json() {
+        let c = caso();
+        let modelo = FalsoSecuencia::nueva(vec![Err("tiempo agotado".into())]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(
+            modelo.visto.borrow().len(),
+            1,
+            "el error de proveedor no se reintenta"
+        );
+        match &r.estado {
+            EstadoJuez::SinVeredicto(causa) => {
+                assert!(causa.starts_with("el modelo falló"), "{causa}");
+            }
+            otro => panic!("esperaba SinVeredicto, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn juez_truncada_no_reintenta_por_json() {
+        let c = caso();
+        let modelo = Falso::truncada_con("{\"items\": [".into());
+        let r = juzgar(&c.entrada(), &modelo, MODELO, &LimitesPrompt::default());
+        assert_eq!(
+            modelo.visto.borrow().len(),
+            1,
+            "la truncada no se reintenta por JSON"
+        );
+        assert_eq!(
+            r.estado,
+            EstadoJuez::SinVeredicto("tope de salida alcanzado (32000 tokens)".into())
+        );
+    }
+
+    #[test]
+    fn huella_del_juez_no_cambia_con_el_reintento() {
+        assert_eq!(huella_del_prompt(), "9263145aa4df4c7a");
+        assert_eq!(
+            crate::oracle::calibra::huella_de(Dimension::Diseno),
+            "19b81dea4119d429"
+        );
+        assert_eq!(
+            crate::oracle::calibra::huella_de(Dimension::Arquitectura),
+            "60c5fb9b0d576398"
+        );
     }
 
     // Reintento: un solo por juicio, solo para los ids rotos o sin gate.
