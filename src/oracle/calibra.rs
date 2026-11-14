@@ -2981,11 +2981,10 @@ fn motivo_sin_funciones_de_la_sonda(
 }
 
 /// Dónde cayó el lastre de un caso con `defecto` (Tarea 143). Con la sonda pedida, cae en una función que la
-/// sonda vio correr: `sonda`. Sin sonda, cae por la regla de la 136: `nombre`. Los demás defectos no tienen lugar.
+/// sonda vio correr: `sonda`. Los demás casos no tienen lugar. Las filas viejas pueden traer `nombre`.
 fn lugar_por_de(defecto: Defecto, sonda_pedida: bool) -> Option<&'static str> {
     match defecto {
         Defecto::LastreDeMemoria if sonda_pedida => Some("sonda"),
-        Defecto::LastreDeMemoria => Some("nombre"),
         _ => None,
     }
 }
@@ -4489,10 +4488,7 @@ mod tests {
     #[test]
     fn sonda_lastre_lugar_por_nombra_quien_eligio_el_lastre() {
         assert_eq!(lugar_por_de(Defecto::LastreDeMemoria, true), Some("sonda"));
-        assert_eq!(
-            lugar_por_de(Defecto::LastreDeMemoria, false),
-            Some("nombre")
-        );
+        assert_eq!(lugar_por_de(Defecto::LastreDeMemoria, false), None);
         assert_eq!(lugar_por_de(Defecto::BucleCuadratico, true), None);
         assert_eq!(lugar_por_de(Defecto::CuerpoVaciado, false), None);
     }
