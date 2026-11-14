@@ -6,7 +6,7 @@ Todo con `ROOT_SIN_PODMAN=1` y `tools/test-seguro.sh`, sumados todos los binario
 
 - Base (ea04410): 3471 verdes, 0 fallas, 5 ignorados. El dato sale del informe de la Tarea 120.
 - Final: 3484 verdes, 0 fallas, 5 ignorados.
-- El hook corrió en cada commit. Ningún test de tiempo falló, así que no hubo reintentos.
+- El hook corrió en cada commit. En el commit del informe falló `corre::ejecutor::tests::vencimiento_sigue_borrando_el_contenedor_por_nombre`, un test de tiempo. El reintento pasó.
 - Cada punto lo construyó un subagente Haiku, en serie, en este worktree. Los tres tocan `calibra.rs`.
 - No se corrió podman, ninguna API ni `~/.local/share/root/`.
 
