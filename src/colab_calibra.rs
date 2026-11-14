@@ -1865,6 +1865,8 @@ fn ciclo_de_runtime<C: ColabCli + Sync>(
         Err(_) => colab::Fin::Fallo(Some(CAUSA_CALIBRACION_FALLO)),
     };
     let liberado = liberar_calibracion(cli, home, &sesion, senales, fin);
+    // Antes de limpiar: sin archivo de vuelta, el paquete de vuelta no llegó.
+    let vuelta_no_bajo = !tmp.join("vuelta.tar.gz").is_file();
 
     let resultado = match (fase, liberado) {
         (Ok(vuelta), Ok(())) => {
@@ -1881,8 +1883,12 @@ fn ciclo_de_runtime<C: ColabCli + Sync>(
                 Err(e) => Err(format!("{e}; {}", aviso_de_liberacion_pendiente(&sesion))),
             }
         }
-        (Err(e), Ok(())) => Err(format!("{e}; su paquete de vuelta no llegó")),
-        (Err(e), Err(l)) => Err(format!("{e}; además, {l}; su paquete de vuelta no llegó")),
+        (Err(e), Ok(())) if vuelta_no_bajo => Err(format!("{e}; su paquete de vuelta no llegó")),
+        (Err(e), Ok(())) => Err(e.to_string()),
+        (Err(e), Err(l)) if vuelta_no_bajo => {
+            Err(format!("{e}; además, {l}; su paquete de vuelta no llegó"))
+        }
+        (Err(e), Err(l)) => Err(format!("{e}; además, {l}")),
     };
     let resultado = match (resultado, limpiar_temporales(home, &tmp, &sesion)) {
         (Ok(mut resumen), Err(e)) => {
@@ -2016,7 +2022,7 @@ fn verificar_sha_de_la_vuelta(esperado: Option<&str>, vuelta: &Path) -> Result<(
     match esperado {
         Some(sha) if sha == real => Ok(()),
         Some(sha) => Err(ErrorOraculo::Infra(format!(
-            "el SHA-256 de la vuelta es {real}, el cierre dijo {sha}; la vuelta no se abre"
+            "el SHA-256 de la vuelta es {real}, el cierre dijo {sha}; su paquete de vuelta llegó con otro SHA-256 y no se abrió"
         ))),
         None => Err(ErrorOraculo::Infra(format!(
             "el cierre no dio ROOT_SHA_VUELTA (SHA-256 de la vuelta bajada: {real}); la vuelta no se abre"
@@ -4553,8 +4559,14 @@ mod tests_calibrar {
             .resultado
             .as_ref()
             .expect_err("una vuelta con otro SHA no se importa");
+        let real = sha256_hex(&fs::read(&vuelta).expect("vuelta bajada"));
         assert!(motivo.contains(&otro), "{motivo}");
-        assert!(motivo.contains("no se abre"), "{motivo}");
+        assert!(motivo.contains(&real), "{motivo}");
+        assert!(
+            motivo.contains("su paquete de vuelta llegó con otro SHA-256 y no se abrió"),
+            "{motivo}"
+        );
+        assert!(!motivo.contains("no llegó"), "{motivo}");
         let despues = fs::read_to_string(home.join(ARCHIVO_CALIBRACION)).expect("calibración");
         assert_eq!(antes, despues, "la importación no debía correr");
     }
@@ -4602,7 +4614,10 @@ mod tests_calibrar {
         assert!(matches!(error, ErrorOraculo::Infra(_)), "{mensaje}");
         assert!(mensaje.contains(&otro), "{mensaje}");
         assert!(mensaje.contains(&real), "{mensaje}");
-        assert!(mensaje.contains("no se abre"), "{mensaje}");
+        assert!(
+            mensaje.contains("su paquete de vuelta llegó con otro SHA-256 y no se abrió"),
+            "{mensaje}"
+        );
     }
 
     #[test]
@@ -4629,6 +4644,47 @@ mod tests_calibrar {
         assert!(mensaje.contains("ROOT_SHA_VUELTA"), "{mensaje}");
         assert!(mensaje.contains(&real), "{mensaje}");
         assert!(mensaje.contains("no se abre"), "{mensaje}");
+    }
+
+    #[test]
+    fn falla_de_subida_termina_con_paquete_de_vuelta_no_llego() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_falla_upload("root-paq.00");
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let motivo = resumen.runtimes[0]
+            .resultado
+            .as_ref()
+            .expect_err("la subida falló");
+        assert!(motivo.contains("Upload failed"), "{motivo}");
+        assert!(
+            motivo.ends_with("; su paquete de vuelta no llegó"),
+            "{motivo}"
+        );
+    }
+
+    #[test]
+    fn vuelta_que_no_baja_termina_con_paquete_de_vuelta_no_llego() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_falla("-0");
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let motivo = resumen.runtimes[0]
+            .resultado
+            .as_ref()
+            .expect_err("el trabajo falló");
+        assert!(
+            motivo.ends_with("; su paquete de vuelta no llegó"),
+            "{motivo}"
+        );
     }
 
     #[test]
