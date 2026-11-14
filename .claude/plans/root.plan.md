@@ -11378,3 +11378,221 @@ Los briefs son `docs/builds/brief-local-143.md` y `docs/builds/brief-local-144.m
 **Preguntas al usuario:** ninguna nueva.
 
 **Nota del orquestador sobre la sección 3.** Los builders 139 a 141 arrancaron a las 15:11, después de la serie 138, así que no cargaron t1 ni t2. El journal de systemd del usuario no muestra otro builder, suite ni planner pesado entre las 12:59 y las 14:30. Solo muestra actividad del escritorio del usuario (GNOME) desde las 13:01. La causa de la carga queda sin confirmar. El control de carga de la 144 es justo lo que falta para verla.
+
+## Vuelta del 2026-11-14 (58): las preguntas de la 139 a la 141, y las pruebas en Colab
+
+**Estado.**
+- Las Tareas 139, 140 y 141 terminaron en verde sin podman. `laptop/cadena-110-141` (799e48c) las suma sobre `laptop/cadena-110-138`.
+- La suite con podman espera a la 143 y la 144, que corren en serie en `local120`.
+- El orquestador ya usó en Colab: `colab new -s <s>` (CPU), `colab upload -s <s> <local> <remoto>`, `colab exec -s <s> --timeout N -f <archivo.py>` y `colab stop -s <s>`. No usó `download`.
+- La Prueba 1 espera al usuario.
+
+## 1. Las siete preguntas de la 139
+
+1. **La raíz de solo lectura no deja crear `/repo` ni `/salida`:** el armado de `bwrap` queda como está. La Prueba 0d anduvo porque el orquestador creó esas carpetas antes. **El arreglo es crearlas en el runtime,** en `preparar-runtime.sh`. Va en la Tarea 145. Si en Colab falla igual, se pasa a `--tmpfs /` con `--ro-bind` de `/usr` y `/etc`.
+2. **Un secreto en modo `bwrap` da error:** acepto. En Colab no entra ninguna clave por esta vía.
+3. **`argumentos_separado` devuelve un vector vacío en modo `bwrap`:** acepto. Entrega no se calibra en Colab. La firma no cambia ahora.
+4. **`bwrap` pasa `CARGO_PROFILE_*_DEBUG=0`:** acepto. Así iguala a podman, y la compilación mide lo mismo.
+5. **La descarga sin caché corta con `Infra`:** acepto. En Colab, la caché viene en el paquete. Sin caché, la calibración debe parar, no seguir a medias.
+6. **Los mensajes que dicen "contenedor" o "podman" en modo `bwrap`:** se corrigen en la 145. Un mensaje que nombra otra herramienta confunde al leer un error.
+7. **`entorno_de_imagen` descarta las claves vacías:** acepto.
+
+## 2. Las tres preguntas de la 140
+
+1. **`nextest.toml` en dos scripts, con un test que compara las dos copias y el Containerfile:** acepto.
+2. **`RUSTUP_BASE` copia `BASE_RUSTUP`:** acepto.
+3. **`ROOT_BIN_DIR` y `ROOT_ETC_DIR` también en la preparación:** acepto.
+
+## 3. Las nueve preguntas de la 141
+
+1. **Las constantes de la 139 repetidas:** acepto. El orquestador deja una sola al encadenar, como dijo el brief.
+2. **Una fila con otra huella o `tarea_hash` no entra, y las demás sí:** acepto.
+3. **`--rustup-sha256` obligatorio:** acepto. El orquestador lo saca del archivo `.sha256` que publica rustup, y lo comprueba bajando el instalador. Ver la sección 5.
+4. **Una imagen por paquete:** acepto.
+5. **Los archivos con nombre de clave se omiten también en los repos: no se acepta.** Un repo con `token.rs` deja de compilar en Colab, y la calibración mediría otra cosa. **La regla nueva:** el filtro por nombre vale para lo que sale del `ROOT_HOME` y para las variables. Los repos entran enteros, sin `.git`. Un repo bueno es parte del conjunto de datos, no un lugar de claves. Va en la 145.
+6. **Sin `valor_base` en ningún lado, la fila no entra:** acepto.
+7. **Un `stop` que falla después de bajar la vuelta: se importa igual.** Los datos ya están bien bajados. La sesión queda en `activo.json`, con un aviso, y `--vigilar` o `--liberar` la limpian. Va en la 145.
+8. **El paquete de vuelta se arma en el runtime,** con sus SHA-256 calculados ahí. Así la laptop detecta un archivo que cambió en el viaje. Va en la 145.
+9. **`new` sin `--gpu`:** acepto. El orquestador ya lo usó para pedir una CPU.
+
+**Un hueco más, que encontré al leer `comando_de_trabajo` (`src/colab_calibra.rs`):** cada trabajo corre `r00t oraculo calibrar` sin `--n` ni `--semilla`. Toma `n=20` por defecto. En la laptop, las dimensiones de oráculo se calibraron con `n=4` y semilla 42. Con 20, una calibración de Pruebas tarda unas cinco veces más. **La 145 deja elegir `n` y `semilla` por trabajo,** con `n=4` y semilla 42 por defecto.
+
+## 4. La Tarea 145
+
+| Tarea | Qué | Archivos |
+|---|---|---|
+| 145 | Los puntos de montaje en el runtime; los mensajes de `bwrap`; los repos enteros; importar aunque falle el `stop`; el paquete de vuelta con sus SHA-256 armado en el runtime; `n` y `semilla` por trabajo | `tools/colab/preparar-runtime.sh`, `tools/colab/verificar-versiones.sh`, `tests/colab_preparar.rs`, `src/colab_calibra.rs`, `src/cli.rs`, `src/oracle/contenedor.rs` (solo los textos de los mensajes) |
+
+- **No toca los archivos de la 143 ni de la 144:** `sonda_lastre.rs`, `oracle/mod.rs`, `calibra.rs`, `inyectar.rs`, `eficiencia.rs` y `docs/interfaces.md`.
+- **Su base es la punta de `laptop/cadena-110-141`.**
+- El brief es `docs/builds/brief-local-145.md`.
+
+## 5. Las pruebas en Colab, paso por paso
+
+**Lo que puede correr ya, y lo que espera:**
+
+| Prueba | ¿Corre con la cadena 141? | Por qué |
+|---|---|---|
+| La de la 140 | Sí | Solo pide el paquete y el script de preparación |
+| La de la 139 | Sí, si el orquestador crea los puntos de montaje a mano | Es lo que hizo en la Prueba 0d |
+| La de la 141 | **No: espera a la 145** | `colab calibrar` corre la preparación sin crear los puntos de montaje, y `bwrap` falla |
+
+### Paso 0, en la laptop: el binario y el paquete
+
+```bash
+set -euo pipefail
+RAIZ=/home/mpera/.claude/orchestration
+P=$HOME/.cache/root-wt/colab-pruebas
+mkdir -p "$P/target" "$P/registro"
+
+# 1. Un worktree de la cadena 141.
+git -C "$RAIZ" worktree add --detach "$P/wt" laptop/cadena-110-141
+git -C "$P/wt" config --worktree core.hooksPath .githooks
+
+# 2. El binario, compilado dentro de rust:1 (Debian bookworm, glibc 2.36). Con baja prioridad.
+nice -n 19 podman run --rm \
+  -v "$P/wt:/src:ro,z" -v "$P/target:/target:z" -v "$P/registro:/usr/local/cargo/registry:z" \
+  -w /src docker.io/library/rust:1 \
+  cargo build --release --locked --target-dir /target
+R="$P/target/release/r00t"
+file "$R"
+
+# 3. El binario corre en Ubuntu 24.04, como Colab.
+podman run --rm -v "$P/target/release:/b:ro,z" docker.io/library/ubuntu:24.04 /b/r00t --version
+
+# 4. El SHA-256 de rustup-init: el publicado, comprobado contra el archivo bajado.
+SHA=$(curl -fsSL https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256 | cut -d' ' -f1)
+curl -fsSL -o "$P/rustup-init" https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+echo "$SHA  $P/rustup-init" | sha256sum -c -
+
+# 5. El paquete de una sola calibración: Seguridad de s2-t1. Lee el ROOT_HOME real, sin escribirlo.
+"$R" colab empaquetar --binario "$R" --trabajos s2-t1:seguridad \
+  --repo "s2-t1=$HOME/.cache/root-wt/mineria/s2/rep/t1-ref" \
+  --rustup-sha256 "$SHA" --salida "$P/paquete-t1-seguridad.tar.gz" --raiz-root "$P/wt"
+ls -lh "$P/paquete-t1-seguridad.tar.gz"
+tar -xzf "$P/paquete-t1-seguridad.tar.gz" -O manifiesto.json | python3 -I -m json.tool | head -40
+```
+
+**Lo que espera:**
+- `file` dice "ELF 64-bit LSB pie executable, x86-64".
+- El binario responde `--version` en Ubuntu 24.04.
+- `sha256sum -c` dice "OK".
+- El paquete existe, y su manifiesto trae el trabajo `s2-t1:seguridad` y el id de la imagen.
+- **El orquestador anota el tamaño del paquete,** porque define cuánto tarda la subida.
+
+**El gasto:** nada en Colab. En la laptop, una compilación de Root de 5 a 10 minutos, con `nice`.
+
+### Prueba de la 140: preparar el runtime
+
+El orquestador escribe dos guiones en `$P/`.
+
+`$P/p140.py`:
+```python
+import os, subprocess, time
+D = "/content/root-paquete"
+os.makedirs(D, exist_ok=True)
+t = time.time()
+subprocess.run(["tar", "-xzf", "/content/paquete.tar.gz", "-C", D], check=True)
+r = subprocess.run(["bash", D + "/tools/colab/preparar-runtime.sh", D])
+print("preparar rc", r.returncode, "segundos", int(time.time() - t))
+for m in ["/repo", "/salida", "/oraculo", "/cache", "/rustsec", "/trabajo"]:
+    os.makedirs(m, exist_ok=True)
+v = subprocess.run(["bash", D + "/tools/colab/verificar-versiones.sh", D], capture_output=True, text=True)
+print(v.stdout)
+print("verificar rc", v.returncode)
+```
+
+Los comandos:
+```bash
+colab new -s root-p140
+colab upload -s root-p140 "$P/paquete-t1-seguridad.tar.gz" paquete.tar.gz
+colab exec -s root-p140 --timeout 2400 -f "$P/p140.py"
+```
+
+**Lo que espera:** `preparar rc 0`, `verificar rc 0`, y solo líneas `ok`. **El orquestador anota** los segundos y las unidades antes y después.
+
+**Si `upload` no deja el archivo en `/content/paquete.tar.gz`,** el orquestador corre `ls /content` con otro `exec`, y anota dónde quedó. La 141 supone esa ruta.
+
+### Prueba de la 139: Seguridad de s2-t1 con `bwrap`, en el mismo runtime
+
+`$P/p139.py`, con el id de la imagen del manifiesto:
+```python
+import json, os, subprocess, time
+D = "/content/root-paquete"
+m = json.load(open(D + "/manifiesto.json"))
+imagen_id = m["imagen_id"]   # usar el nombre de campo que traiga el manifiesto
+env = dict(os.environ, ROOT_HOME=D, ROOT_CONTENEDOR_MODO="bwrap",
+           ROOT_BWRAP_ENTORNO="entorno.env", ROOT_BWRAP_IMAGEN_ID=imagen_id)
+t = time.time()
+r = subprocess.run([D + "/r00t", "oraculo", "calibrar", "--tarea", "s2-t1", "--dimension", "seguridad",
+                    "--n", "4", "--semilla", "42", "--repo", "repos/s2-t1", "--json"],
+                   cwd=D, env=env, capture_output=True, text=True)
+print("calibrar rc", r.returncode, "segundos", int(time.time() - t))
+print(r.stdout[-3000:])
+print(r.stderr[-2000:])
+```
+
+Los comandos:
+```bash
+colab exec -s root-p140 --timeout 1800 -f "$P/p139.py"
+colab download -s root-p140 /content/root-paquete/calibracion.json "$P/calibracion-colab.json"
+colab stop -s root-p140
+```
+
+**Lo que espera:**
+- `calibrar rc 0`, y una fila con 2 defectos detectados y 2 limpios bien, como en la laptop: sensibilidad 1,0 y especificidad 1,0.
+- **El `valor_base` de los casos coincide con el de la laptop** para Seguridad de s2-t1. Es el control de la base, hecho a mano.
+- **`download` deja el archivo en `$P/calibracion-colab.json`.** Así se verifica el orden de sus argumentos, que la 141 supone.
+
+**El gasto de las dos pruebas:** unos 30 a 40 minutos de un runtime de CPU, cerca de 0,05 unidades.
+
+### Prueba de la 141: el ciclo entero, después de la 145
+
+Con el binario de la cadena que suma la 145, compilado igual que en el paso 0:
+
+```bash
+# Una copia del ROOT_HOME, para que la importación no escriba en el real todavía.
+mkdir -p "$P/home"
+for x in root.toml cache oraculos configs calibracion.json calibracion previos; do
+  cp -a --reflink=always "$HOME/.local/share/root/$x" "$P/home/"
+done
+ROOT_HOME="$P/home" "$R" colab calibrar --paquete "$P/paquete-t1-seguridad.tar.gz" --raiz-root "$P/wt"
+```
+
+**Lo que espera:** la fila de Seguridad de s2-t1 entra en `$P/home/calibracion.json`, con su control de la base en verde, y `activo.json` queda sin sesiones.
+
+**Después, las doce calibraciones de oráculo en cuatro runtimes,** con el reparto de la vuelta (53), sección 5. Cada paquete lleva sus trabajos. Esa corrida va recién al congelar la versión.
+
+**El gasto:** la prueba de una calibración, cerca de 0,05 unidades. Las doce en cuatro runtimes, cerca de 0,35 unidades.
+
+## 6. ¿Pueden correr mientras la 143 y la 144 compilan?
+
+**Las pruebas en Colab, sí.** Corren en el runtime, no en la laptop. Desde la laptop solo salen la subida y los comandos de `colab`.
+
+**El paso 0, con cuidado.** La compilación de Root dentro de `rust:1` carga la laptop de 5 a 10 minutos. No hay ninguna calibración de Eficiencia corriendo, así que no ensucia ninguna medida. Pero los hooks de los builders corren tests de plazo, y bajo carga pueden fallar por tiempo. Por eso va con `nice -n 19`. Si un hook de la 143 o la 144 falla por tiempo mientras compila, el orquestador lo repite.
+
+**La calibración de Eficiencia, no.** Espera a que la 143 y la 144 terminen, y corre en una ventana sin otro trabajo.
+
+## 7. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | Las Tareas 143 y 144, en serie | Nada; ya corren | Laptop | No |
+| 2 | El paso 0 y las pruebas de la 140 y la 139 | Nada | Laptop (con `nice`) y Colab | No |
+| 3 | La Tarea 145 | Nada | Laptop | No |
+| 4 | La prueba de la 141 | Los pasos 2 y 3 | Colab | No |
+| 5 | La Prueba 1 | El usuario | Colab, notebook | No |
+| 6 | La Tarea 142 | Los pasos 3 y 5 | Laptop | No |
+| 7 | La suite con podman de la cadena con la 143, la 144 y la 145 | Los pasos 1 y 3 | Laptop | No |
+| 8 | La calibración de Eficiencia de t1 a t3, en una ventana sin otro trabajo | Los pasos 1 y 7 | Laptop | No |
+| 9 | Las cinco etapas de P107 a, en una sesión del notebook | Los pasos 4 y 6 | Colab, notebook | Hasta 18,45 USD |
+| 10 | La mezcla de la cadena 110 a 145 | La orden del usuario | — | No |
+| 11 | Congelar la versión | Los pasos 8 y 9 | — | No |
+| 12 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 4 y 11 | Colab, cuatro runtimes | No |
+| 13 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 14 | P98 c: el final con 15 defectos reales | El paso 13 | — | No |
+| 15 | La validez sobre el final sellado | Los pasos 1 a 14 | Colab, notebook si usa el juez | Según el final |
+
+**Una nota sobre la 142:** su base era "la punta de la cadena que suma la 139 a la 141". Con la 145, conviene que salga de la cadena que suma también la 145, porque las dos tocan `colab_calibra.rs` y `cli.rs`. El brief de la 142 no cambia: el orquestador elige esa cadena como base.
+
+**Preguntas al usuario:** ninguna nueva.
