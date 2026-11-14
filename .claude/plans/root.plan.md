@@ -9674,3 +9674,100 @@ La Tarea 124 toca solo `src/lib.rs`. No comparte archivos con la 123. El brief e
 - El ítem `diseno.acoplamiento` en un test de la 121.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (44): P101 a con la 121, el JSON roto del juez, y la regla de inestables
+
+**Estado.**
+- La suite con podman de `laptop/cadena-110-122` (b6245d9) dio verde, sola: 3491, 0 y 5.
+- Los builders 123 y 124 corren desde b6245d9, en los worktrees `local121` y `local122`.
+- **P101 a corrió otra vez con la 121,** en un `ROOT_HOME` copiado. Costó 1,376 USD. S2 suma 4,9569 USD, de un tope de 7.
+- El disco está al 98 %, con 14 GB libres.
+
+## 1. Lo que dicen los dos JSON de `p101-121`
+
+**Diseño de s2-t1: n=0, por un solo juicio roto.**
+
+| Ítem | Juicio 1 | Juicio 2 | Juicio 3 |
+|---|---|---|---|
+| `diseno.modularidad` | 0 | 0 | — |
+| `diseno.robustez` | 3 | 3 | — |
+| `diseno.errores` | 1 | 0 | — |
+| `diseno.estado` | 3 | 3 | — |
+| `diseno.operabilidad` | 3 | 3 | — |
+| `diseno.documentacion` | 1 | 0 | — |
+
+- Los juicios 1 y 2 varían como mucho 1 nivel. Ningún ítem llega a la diferencia de 2 que lo vuelve inestable.
+- El juicio 3 quedó sin veredicto: "JSON inválido: trailing comma at line 11 column 9". Cobertura 0 de 13.
+- **La 121 hizo lo correcto:** antes, ese juicio habría marcado los seis ítems como inestables. Ahora la fila dice `base_sin_veredicto`, y no cuenta.
+- **Sin esa coma, Diseño se habría medido.**
+
+**Arquitectura de s2-t1: medida, con un ítem inestable.**
+
+| Ítem | Juicio 1 | Juicio 2 | Juicio 3 |
+|---|---|---|---|
+| `arquitectura.adecuacion` | 2 | 3 | 3 |
+| `arquitectura.extensibilidad` | 3 | 1 | 1 |
+| `arquitectura.interfaces` | 1 | 2 | 1 |
+
+- `extensibilidad` varía de 1 a 3: es inestable, y sale de la medición.
+- Lo estable pesa 8 de 10: `dependencias` (sonda, 3), `adecuacion` (3) e `interfaces` (2). Pasa la mitad, así que la dimensión mide casos.
+- n=10, con 5 defectos y 5 limpios. Sensibilidad, especificidad y exactitud balanceada dieron 1,0.
+- Ningún juicio de los dos JSON trae `faltantes`. No faltó ningún ítem dentro de un juicio con veredicto.
+
+## 2. El JSON roto del juez
+
+**Lo que hace hoy `src/oracle/juez.rs`.**
+- `pedir` (línea 706) llama al modelo y después a `parsear` (línea 1099).
+- `parsear` usa `serde_json::from_str`, que es estricto. Una coma final antes de `}` o `]` es un error.
+- **Un JSON inválido no tiene reintento.** `juzgar` devuelve sin veredicto enseguida. El reintento de la línea 754 solo pide de nuevo los ítems rotos o frenados por el gate, en una respuesta que ya se leyó.
+- El proveedor no pide el modo JSON del modelo. No hay `response_format` en `src/`.
+
+**La decisión: reparar solo la coma final, y reintentar una vez el resto.**
+1. **La coma final se repara.** Una coma seguida de espacios y de `}` o `]`, fuera de un texto entre comillas, se quita. La reparación no cambia el contenido: un objeto con coma final dice lo mismo que sin ella.
+2. **Primero va el parseo estricto.** La reparación solo corre si el estricto falla. Si la reparación anda, la respuesta se usa, y queda un descarte "JSON reparado: coma final". Así se ve cuántas veces pasa.
+3. **Ninguna otra reparación.** Un texto cortado, una comilla que falta o un comentario no se reparan. Adivinar el contenido de un juez es peor que no tener juicio.
+4. **Si el JSON sigue inválido, se reintenta la llamada entera una vez.** El reintento lleva una línea que dice que la respuesta anterior no era JSON válido. Pasa por el mismo control de gasto que el reintento de hoy (`reintento_juez`).
+5. **La huella no cambia.** `huella_del_prompt` (`src/oracle/juez.rs:71`) suma `PROMPT_SISTEMA`, `MARCA_RECORTE` y `VERSION_LECTURA`. La línea del reintento va en otra constante. Así, la fila de Arquitectura sigue valiendo.
+
+**El modo JSON del proveedor no va ahora.** No sé si `deepseek-v4-pro` con razonamiento lo acepta. Probarlo pide una llamada real, y cambia `src/proveedores/`.
+
+**El brief es `docs/builds/brief-local-125.md`.** Toca solo `src/oracle/juez.rs`. No toca `calibra.rs` de la 123 ni `lib.rs` de la 124. Corre en paralelo con las dos.
+
+## 3. La regla de inestables
+
+**La pregunta abierta de la vuelta (42):** un ítem que falta en un solo juicio con veredicto, por el gate o por `sin_evidencia`, ¿es inestable?
+
+**La evidencia.** En los seis juicios con veredicto de `p101-121`, ningún ítem faltó. La única falta fue un juicio entero, y la 121 ya lo trata aparte. La única inestabilidad vista es un nivel que varía: `extensibilidad`, de 1 a 3.
+
+**La decisión: la regla queda como está.**
+- Un nivel que varía 2 o más es inestable. Los datos lo confirman.
+- Un ítem que falta en un juicio con veredicto también es inestable. Si el juez a veces no encuentra evidencia para un ítem, ese ítem no mide bien la tarea. No hay datos contra esto.
+- `causas_inestables` dice cuál de las dos causas pasó. Si un día aparecen faltas por el gate, se revisa con esos datos.
+
+## 4. Qué significa Arquitectura 1,0 en t1
+
+**Lo que sí dice.** En t1, los tres ítems estables detectaron los 5 defectos inyectados, y no marcaron ninguno de los 5 limpios.
+
+**Lo que no dice:**
+- **No dice que Arquitectura esté calibrada.** P102 a pide una cota inferior de Wilson de 0,8 en cada clase, con los casos de todas las tareas juntos. 5 de 5 da 0,57. Faltan 11 casos sin fallos por clase, en t1, t2 o t3.
+- **No dice nada de `extensibilidad`.** En t1 queda fuera de toda evaluación, porque `inestables_de` la excluye.
+- **Una evaluación de t1 con juez** mide Arquitectura con 8 de 10 de peso. El puntaje lleva `calibrada` en falso. No entra al global ni a los mínimos, pero sí cuenta como veredicto para P103 a.
+
+**¿Se puede pasar al `ROOT_HOME` real? Sí.** Revisé las dos condiciones.
+- **El `tarea_hash` coincide.** La fila trae `2b0c433f0a6779aa`. El `tarea.toml` real y el copiado tienen el mismo SHA-256, que empieza igual.
+- **La huella vale** mientras no cambien el prompt del juez, las rúbricas ni la versión de sondas. La 123, la 124 y la 125 no las cambian. La 125 lo prueba con una guarda.
+
+**Cómo se pasa.** El orquestador agrega la fila de `t1-arquitectura.json` a `filas` de `calibracion.json` real, y copia su `.casos.jsonl` a `calibracion/`. Antes, guarda un respaldo de `calibracion.json`. La fila de Diseño con `base_sin_veredicto` no se pasa: no aporta nada.
+
+**Un aviso sobre el `ROOT_HOME` real.** Su fila más reciente de Diseño de s2-t1 es la del error viejo, con los seis ítems inestables (ts 1794616987). Hoy `inestables_de` la usa. Una evaluación de t1 con juez excluye los seis ítems de Diseño. No la borro. La próxima medición de Diseño con veredicto la reemplaza, porque gana la fila más reciente.
+
+## 5. ¿P101 a otra vez para Diseño?
+
+**Sí, después de la 125.**
+- Los juicios 1 y 2 muestran que Diseño es estable en t1. Solo faltó un juicio por una coma.
+- **El costo.** Arquitectura con n=10 costó unos 1,15 USD, sin contar sus juicios de la base. Diseño debería costar parecido, entre 1,2 y 1,4 USD. Su prompt es algo más largo.
+- **El tope.** S2 suma 4,9569 USD. Después quedaría entre 6,2 y 6,4 USD, de 7.
+- **El comando** usa `--tope-usd` igual a lo que queda de los 7 USD. Así, el control por llamada frena antes de pasarlo.
+- Corre con el binario de la cadena con la 125, en un `ROOT_HOME` copiado, como esta vez.
+
+**Preguntas al usuario:** ninguna nueva.
