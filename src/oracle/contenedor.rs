@@ -475,7 +475,7 @@ fn matar_grupo(hijo: &mut Child) {
     matar(hijo);
 }
 
-/// Arma el `Resultado` de un comando que ya terminó. `etiqueta` nombra el motor en el error de señal.
+/// Arma el `Resultado` de un comando que ya terminó. `etiqueta` nombra el motor en los errores de señal e infra.
 fn resultado_de(
     estado: ExitStatus,
     salida: Option<JoinHandle<Vec<u8>>>,
@@ -491,7 +491,7 @@ fn resultado_de(
             "{etiqueta} terminó por una señal"
         )));
     };
-    if let Some(error) = error_de_infra(codigo, &stderr) {
+    if let Some(error) = error_de_infra(etiqueta, codigo, &stderr) {
         return Err(error);
     }
     Ok(Resultado {
@@ -957,10 +957,11 @@ fn cola(texto: &str) -> String {
 }
 
 /// Da `Infra` si el código de salida indica un fallo del entorno y no del comando evaluado.
-fn error_de_infra(codigo: i32, stderr: &str) -> Option<ErrorOraculo> {
+/// `motor` nombra el programa que falló: "podman" o "bwrap".
+fn error_de_infra(motor: &str, codigo: i32, stderr: &str) -> Option<ErrorOraculo> {
     if CODIGOS_DE_INFRA.contains(&codigo) {
         return Some(ErrorOraculo::Infra(format!(
-            "podman falló ({codigo}): {}",
+            "{motor} falló ({codigo}): {}",
             cola(stderr)
         )));
     }
@@ -978,7 +979,7 @@ mod tests {
 
     /// Mensaje de `Infra` para un código, o `None` si el código no es de infraestructura.
     fn infra_de(codigo: i32) -> Option<String> {
-        match error_de_infra(codigo, "detalle") {
+        match error_de_infra("podman", codigo, "detalle") {
             Some(ErrorOraculo::Infra(mensaje)) => Some(mensaje),
             _ => None,
         }
@@ -1004,6 +1005,36 @@ mod tests {
     fn error_de_infra_deja_pasar_0_1_y_2() {
         for codigo in [0, 1, 2] {
             assert!(infra_de(codigo).is_none(), "código {codigo}");
+        }
+    }
+
+    /// Mensaje de `Infra` que `resultado_de` arma para un código de salida y un motor.
+    fn infra_de_motor(motor: &str, codigo: i32) -> Option<String> {
+        // El estado crudo de espera lleva el código de salida en el byte alto.
+        let estado = <std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(
+            codigo << 8,
+        );
+        let error = Some(std::thread::spawn(|| b"detalle".to_vec()));
+        match resultado_de(estado, None, error, Instant::now(), motor) {
+            Err(ErrorOraculo::Infra(mensaje)) => Some(mensaje),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn error_de_infra_bwrap_no_nombra_podman() {
+        for codigo in [125, 126, 127, 137] {
+            let mensaje = infra_de_motor("bwrap", codigo).expect("código de infraestructura");
+            assert!(!mensaje.contains("podman"), "{mensaje}");
+            assert!(mensaje.starts_with("bwrap falló ("), "{mensaje}");
+        }
+    }
+
+    #[test]
+    fn error_de_infra_podman_conserva_su_mensaje() {
+        for codigo in [125, 126, 127, 137] {
+            let mensaje = infra_de_motor("podman", codigo).expect("código de infraestructura");
+            assert!(mensaje.starts_with("podman falló ("), "{mensaje}");
         }
     }
 
