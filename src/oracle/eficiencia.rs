@@ -38,6 +38,10 @@ pub const FACTOR_RUIDO_CUARTILES: f64 = 2.0;
 /// Corridas mínimas por lado para usar cuartiles. Con menos corridas, el lado usa (max-min)/min, como antes.
 /// Base: 12 casos de t1 a t3 (Tarea 135), el exceso de la razón con medianas sobre 1 fue como máximo 1,04 veces la mayor dispersión por cuartiles (t3 caso 0: 0,024 contra 0,023). Con más datos, se revisa.
 pub const MIN_CORRIDAS_CUARTILES: usize = 4;
+/// Fracción de los núcleos a partir de la cual la máquina está cargada: con una carga de un minuto mayor que
+/// esta mitad, los tiempos no valen. Motivo: la carga de otro trabajo dobló los tiempos de t1 en la calibración
+/// de la cadena 110 a 138 (casos 2 y 3 de t1: tiempo_tests 0,71 a 0,99 s contra 0,4 s de la base).
+pub const FRACCION_DE_NUCLEOS_CARGADA: f64 = 0.5;
 
 /// Las cuatro medidas. El orden del enum es el orden de salida de `medir`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -785,6 +789,15 @@ pub(crate) struct Referencia {
     filtro: Result<String, String>,
     compilacion: Serie,
     tamano: Serie,
+    /// Motivo de carga de la base. Sin carga, `None`. Los casos que usan esta referencia heredan el motivo.
+    carga: Option<String>,
+}
+
+/// De dónde sale la carga de la máquina y cuántos núcleos tiene. Un error de núcleos llega como `Err`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FuenteDeCarga {
+    ruta: PathBuf,
+    nucleos: Result<usize, String>,
 }
 
 thread_local! {
@@ -794,6 +807,9 @@ thread_local! {
     static REFERENCIA_FIJA: RefCell<Option<Referencia>> = const { RefCell::new(None) };
     /// Carpeta fija de Eficiencia que usa `medir_con` en este hilo. `None`: `medir` crea y borra la suya.
     static CARPETA_DE_EFICIENCIA: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// Fuente de carga fijada por `con_fuente_de_carga` en este hilo. `None`: el control está apagado. Solo tests.
+    #[cfg(test)]
+    static FUENTE_DE_CARGA: RefCell<Option<FuenteDeCarga>> = const { RefCell::new(None) };
 }
 
 /// Corre `f` con `carpeta` como la carpeta de trabajo fija de Eficiencia. Sin carpeta, `medir` crea y borra la suya.
@@ -827,6 +843,23 @@ pub(crate) fn tomar_referencia() -> Option<Referencia> {
 /// la referencia: `tomar_referencia` la sigue necesitando. `None` si no hubo esa medición.
 pub(crate) fn filtro_de_tests_comunes() -> Option<Result<String, String>> {
     ULTIMA_REFERENCIA.with(|u| u.borrow().as_ref().map(|r| r.filtro.clone()))
+}
+
+/// Corre `f` con `fuente` como la fuente de carga de este hilo. Sin fuente, el control queda apagado. Al salir,
+/// también ante pánico, vuelve la fuente anterior. Solo para los tests.
+#[cfg(test)]
+pub(crate) fn con_fuente_de_carga<T>(fuente: Option<FuenteDeCarga>, f: impl FnOnce() -> T) -> T {
+    /// Devuelve la fuente anterior al salir del ámbito.
+    struct Restaura(Option<FuenteDeCarga>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = self.0.take();
+            FUENTE_DE_CARGA.with(|c| *c.borrow_mut() = anterior);
+        }
+    }
+    let anterior = FUENTE_DE_CARGA.with(|c| c.replace(fuente));
+    let _restaura = Restaura(anterior);
+    f()
 }
 
 /// Corre `f` con `referencia` como el lado inicial. Sin referencia, la medición mide los dos lados.
@@ -929,6 +962,107 @@ fn aviso_de_borrado(raiz: &Path, e: &std::io::Error) -> String {
     )
 }
 
+/// Carga de un minuto y núcleos de una lectura. Ambos salen de la misma fuente.
+#[derive(Debug, Clone, PartialEq)]
+struct Carga {
+    uno_minuto: f64,
+    nucleos: usize,
+}
+
+/// Fuente de carga que ve este hilo. En tests, sin fuente fijada, es `None`: el control está apagado y no lee
+/// el host. Así la suite no depende de la carga de la máquina.
+#[cfg(test)]
+fn fuente_vigente() -> Option<FuenteDeCarga> {
+    FUENTE_DE_CARGA.with(|c| c.borrow().clone())
+}
+
+/// Fuente de carga que ve este hilo. En producción siempre es `/proc/loadavg` del host y los núcleos de
+/// `available_parallelism`.
+#[cfg(not(test))]
+fn fuente_vigente() -> Option<FuenteDeCarga> {
+    Some(FuenteDeCarga {
+        ruta: PathBuf::from("/proc/loadavg"),
+        nucleos: std::thread::available_parallelism()
+            .map(|n| n.get())
+            .map_err(|e| e.to_string()),
+    })
+}
+
+/// Motivo de una lectura de carga que falla.
+fn no_se_leyo(detalle: impl std::fmt::Display) -> String {
+    format!("no se pudo leer la carga: {detalle}")
+}
+
+/// Lee la carga de un minuto de la fuente y sus núcleos. Un archivo sin número o sin núcleos da error.
+fn leer_carga(fuente: &FuenteDeCarga) -> Result<Carga, String> {
+    let ruta = fuente.ruta.display();
+    let texto = fs::read_to_string(&fuente.ruta).map_err(|e| no_se_leyo(format!("{ruta}: {e}")))?;
+    let uno_minuto = texto
+        .split_whitespace()
+        .next()
+        .and_then(|campo| campo.parse::<f64>().ok())
+        .filter(|carga| carga.is_finite())
+        .ok_or_else(|| no_se_leyo(format!("{ruta}: sin carga de un minuto")))?;
+    let nucleos = fuente.nucleos.clone().map_err(no_se_leyo)?;
+    Ok(Carga {
+        uno_minuto,
+        nucleos,
+    })
+}
+
+/// Motivo de carga de una medición, según sus dos lecturas: antes y después de sus corridas. Un error de lectura
+/// da ese error. Si la carga de un minuto supera `FRACCION_DE_NUCLEOS_CARGADA` por los núcleos en alguna de las dos,
+/// da el motivo de carga con la mayor de las dos. `None` si la medición vale.
+fn motivo_de_carga(
+    antes: &Result<Carga, String>,
+    despues: &Result<Carga, String>,
+) -> Option<String> {
+    let (Ok(a), Ok(d)) = (antes, despues) else {
+        return Some(unir_motivos(
+            [antes.as_ref().err(), despues.as_ref().err()]
+                .into_iter()
+                .flatten()
+                .cloned(),
+        ));
+    };
+    let mayor = a.uno_minuto.max(d.uno_minuto);
+    let limite = FRACCION_DE_NUCLEOS_CARGADA * a.nucleos as f64;
+    (mayor > limite).then(|| {
+        format!(
+            "la máquina estaba cargada: carga {mayor:.2} con {} núcleos",
+            a.nucleos
+        )
+    })
+}
+
+/// Corre `f` entre dos lecturas de la fuente de carga vigente y devuelve el motivo de carga de esa medición.
+/// Sin fuente vigente, no lee nada: `f` corre y no hay motivo.
+fn con_control_de_carga(f: impl FnOnce()) -> Option<String> {
+    let Some(fuente) = fuente_vigente() else {
+        f();
+        return None;
+    };
+    let antes = leer_carga(&fuente);
+    f();
+    let despues = leer_carga(&fuente);
+    motivo_de_carga(&antes, &despues)
+}
+
+/// Deja sin valor el tiempo de tests y el de compilación, con `motivo`. Memoria y tamaño no cambian. Sin
+/// motivo, devuelve los resultados tal cual.
+fn aplicar_carga(resultados: Vec<ResultadoMedida>, motivo: Option<String>) -> Vec<ResultadoMedida> {
+    let Some(motivo) = motivo else {
+        return resultados;
+    };
+    resultados
+        .into_iter()
+        .map(|r| match r.medida {
+            Medida::TiempoTests | Medida::TiempoCompilacion => sin_valor(r.medida, motivo.clone()),
+            Medida::MemoriaPico | Medida::TamanoBinario => r,
+        })
+        .collect()
+}
+
 /// Las cuatro medidas de dos lados. Con referencia fijada, solo mide el repo. Si no, mide los dos lados y
 /// guarda lo que midió el inicial para `tomar_referencia`.
 fn medir_lados(inicial: &Lado, repo: &Lado, avisos: &mut Vec<String>) -> Vec<ResultadoMedida> {
@@ -957,25 +1091,28 @@ fn medir_los_dos_lados(inicial: &Lado, repo: &Lado) -> (Vec<ResultadoMedida>, Re
     let mut compilacion: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut tamano: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut ancla = Ancla::vacia();
-    medir_tests([inicial, repo], [0, 1], &filtro, &mut tiempo, &mut memoria);
-    medir_compilacion(
-        lados,
-        None,
-        CORRIDAS,
-        [&meta_i, &meta_r],
-        &mut compilacion,
-        &mut tamano,
-        &mut ancla,
-    );
+    let carga = con_control_de_carga(|| {
+        medir_tests([inicial, repo], [0, 1], &filtro, &mut tiempo, &mut memoria);
+        medir_compilacion(
+            lados,
+            None,
+            CORRIDAS,
+            [&meta_i, &meta_r],
+            &mut compilacion,
+            &mut tamano,
+            &mut ancla,
+        );
+    });
     let referencia = Referencia {
         meta: meta_i,
         lista: lista_i,
         filtro,
         compilacion: compilacion[0].clone(),
         tamano: tamano[0].clone(),
+        carga: carga.clone(),
     };
     let resultados = combinar_medidas(&tiempo, &memoria, &compilacion, &tamano, &ancla);
-    (resultados, referencia)
+    (aplicar_carga(resultados, carga), referencia)
 }
 
 /// Mide el repo y el lado inicial en vivo, en tests. Tiempo y memoria salen de esas dos series, alternadas.
@@ -1006,19 +1143,26 @@ fn medir_contra_referencia(
     let mut compilacion: [Serie; 2] = [referencia.compilacion.clone(), Ok(vec![])];
     let mut tamano: [Serie; 2] = [referencia.tamano.clone(), Ok(vec![])];
     let mut ancla = Ancla::vacia();
-    // El orden [1, 0] hace que el repo corra primero en cada par de tests.
-    medir_tests([inicial, repo], [1, 0], &filtro, &mut tiempo, &mut memoria);
-    medir_compilacion(
-        [None, Some(repo)],
-        Some(inicial),
-        CORRIDAS_COMPILACION_DE_CASO,
-        [&referencia.meta, &meta_r],
-        &mut compilacion,
-        &mut tamano,
-        &mut ancla,
-    );
+    let carga = con_control_de_carga(|| {
+        // El orden [1, 0] hace que el repo corra primero en cada par de tests.
+        medir_tests([inicial, repo], [1, 0], &filtro, &mut tiempo, &mut memoria);
+        medir_compilacion(
+            [None, Some(repo)],
+            Some(inicial),
+            CORRIDAS_COMPILACION_DE_CASO,
+            [&referencia.meta, &meta_r],
+            &mut compilacion,
+            &mut tamano,
+            &mut ancla,
+        );
+    });
     avisar_ancla(&ancla, avisos);
-    combinar_medidas(&tiempo, &memoria, &compilacion, &tamano, &ancla)
+    // Una base cargada pasa su motivo al caso. La carga propia del caso va primero.
+    let motivo = carga.or_else(|| referencia.carga.clone());
+    aplicar_carga(
+        combinar_medidas(&tiempo, &memoria, &compilacion, &tamano, &ancla),
+        motivo,
+    )
 }
 
 /// Crea la carpeta de trabajo dentro de `tmp` y una subcarpeta por lado. Si falla a medias, borra lo creado.
@@ -2347,6 +2491,180 @@ mod tests {
             assert_eq!(referencia_fijada_actual(), Some(a.clone()));
         });
         assert_eq!(referencia_fijada_actual(), None);
+    }
+
+    /// Un `loadavg` falso con carga de un minuto alta, sobre la mitad de 8 núcleos.
+    const CARGA_ALTA: &str = "6.00 5.00 4.00 1/100 123\n";
+    /// Un `loadavg` falso con carga baja.
+    const CARGA_BAJA: &str = "1.00 0.90 0.80 1/100 123\n";
+    /// Motivo de una medición con `CARGA_ALTA` y 8 núcleos.
+    const MOTIVO_CARGA_ALTA: &str = "la máquina estaba cargada: carga 6.00 con 8 núcleos";
+
+    /// Escribe un `loadavg` falso en `dir` y devuelve su fuente, con `nucleos` núcleos.
+    fn fuente_falsa(dir: &Path, contenido: &str, nucleos: usize) -> FuenteDeCarga {
+        let ruta = dir.join("loadavg");
+        fs::write(&ruta, contenido).expect("escribe loadavg falso");
+        FuenteDeCarga {
+            ruta,
+            nucleos: Ok(nucleos),
+        }
+    }
+
+    /// Ejecutor que reescribe el `loadavg` falso en cada corrida medida (los comandos con `ROOT_NS`).
+    /// Así la carga cambia durante las corridas y no antes.
+    struct ReescribeCarga<'a> {
+        falso: Falso<'a>,
+        ruta: PathBuf,
+        nuevo: &'static str,
+    }
+
+    impl EjecutorHerramienta for ReescribeCarga<'_> {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if cmd.contains("ROOT_NS") {
+                fs::write(&self.ruta, self.nuevo).expect("reescribe loadavg falso");
+            }
+            self.falso.ejecutar(cmd)
+        }
+    }
+
+    /// Mide un caso con una referencia sana fijada. `fuente` es la carga de la medición del caso.
+    fn medir_caso_bajo_carga(fuente: FuenteDeCarga) -> Vec<ResultadoMedida> {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        con_fuente_de_carga(Some(fuente), || {
+            con_referencia(Some(referencia), || {
+                medir_de_prueba(&sano("inicial", &log, &["a"]), &sano("repo", &log, &["a"]))
+            })
+        })
+    }
+
+    #[test]
+    fn caso_con_carga_alta_deja_tiempos_sin_valor_con_su_motivo() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let resultados = medir_caso_bajo_carga(fuente_falsa(dir.path(), CARGA_ALTA, 8));
+        for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
+            let r = por_medida(&resultados, medida);
+            assert_eq!(r.motivo.as_deref(), Some(MOTIVO_CARGA_ALTA), "{medida:?}");
+            assert_eq!(r.comparacion, None, "{medida:?}");
+        }
+    }
+
+    #[test]
+    fn carga_baja_no_cambia_ninguna_medida() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let resultados = medir_caso_bajo_carga(fuente_falsa(dir.path(), CARGA_BAJA, 8));
+        for r in &resultados {
+            assert_eq!(r.motivo, None, "{:?}", r.medida);
+            assert!(r.comparacion.is_some(), "{:?}", r.medida);
+        }
+    }
+
+    #[test]
+    fn carga_alta_no_quita_memoria_ni_tamano() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let resultados = medir_caso_bajo_carga(fuente_falsa(dir.path(), CARGA_ALTA, 8));
+        for medida in [Medida::MemoriaPico, Medida::TamanoBinario] {
+            let r = por_medida(&resultados, medida);
+            assert_eq!(r.motivo, None, "{medida:?}");
+            assert!(r.comparacion.is_some(), "{medida:?}");
+        }
+    }
+
+    #[test]
+    fn la_lectura_despues_de_las_corridas_tambien_cuenta() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fuente = fuente_falsa(dir.path(), CARGA_BAJA, 8);
+        let ruta = fuente.ruta.clone();
+        let log = RefCell::new(Vec::new());
+        let inicial = ReescribeCarga {
+            falso: sano("inicial", &log, &["a"]),
+            ruta,
+            nuevo: CARGA_ALTA,
+        };
+        let resultados = con_fuente_de_carga(Some(fuente), || {
+            medir_de_prueba(&inicial, &sano("repo", &log, &["a"]))
+        });
+        for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
+            let r = por_medida(&resultados, medida);
+            assert_eq!(r.motivo.as_deref(), Some(MOTIVO_CARGA_ALTA), "{medida:?}");
+        }
+    }
+
+    #[test]
+    fn base_cargada_deja_la_calibracion_sin_valor_y_el_caso_hereda_el_motivo() {
+        let dir_alta = tempfile::tempdir().expect("temp dir");
+        let dir_baja = tempfile::tempdir().expect("temp dir");
+        let log = RefCell::new(Vec::new());
+        let referencia =
+            con_fuente_de_carga(Some(fuente_falsa(dir_alta.path(), CARGA_ALTA, 8)), || {
+                let base =
+                    medir_de_prueba(&sano("inicial", &log, &["a"]), &sano("repo", &log, &["a"]));
+                for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
+                    let r = por_medida(&base, medida);
+                    assert_eq!(
+                        r.motivo.as_deref(),
+                        Some(MOTIVO_CARGA_ALTA),
+                        "base {medida:?}"
+                    );
+                }
+                tomar_referencia().expect("la base dejó una referencia")
+            });
+        assert_eq!(referencia.carga.as_deref(), Some(MOTIVO_CARGA_ALTA));
+        let caso = con_fuente_de_carga(Some(fuente_falsa(dir_baja.path(), CARGA_BAJA, 8)), || {
+            con_referencia(Some(referencia), || {
+                medir_de_prueba(&sano("inicial", &log, &["a"]), &sano("repo", &log, &["a"]))
+            })
+        });
+        for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
+            let r = por_medida(&caso, medida);
+            assert_eq!(
+                r.motivo.as_deref(),
+                Some(MOTIVO_CARGA_ALTA),
+                "caso {medida:?}"
+            );
+            assert_eq!(r.comparacion, None, "caso {medida:?}");
+        }
+        assert_eq!(por_medida(&caso, Medida::MemoriaPico).motivo, None);
+    }
+
+    #[test]
+    fn carga_de_exactamente_la_mitad_de_los_nucleos_no_es_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let resultados =
+            medir_caso_bajo_carga(fuente_falsa(dir.path(), "4.00 3.00 2.00 1/100 1\n", 8));
+        for r in &resultados {
+            assert_eq!(r.motivo, None, "{:?}", r.medida);
+        }
+    }
+
+    #[test]
+    fn lectura_ilegible_deja_tiempos_sin_valor_con_motivo_de_lectura() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let resultados = medir_caso_bajo_carga(fuente_falsa(dir.path(), "no es carga\n", 8));
+        for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
+            let r = por_medida(&resultados, medida);
+            assert!(
+                r.motivo
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("no se pudo leer la carga: ")),
+                "{medida:?}: {:?}",
+                r.motivo
+            );
+        }
+        let sin_nucleos = FuenteDeCarga {
+            nucleos: Err("sin núcleos".into()),
+            ..fuente_falsa(dir.path(), CARGA_BAJA, 8)
+        };
+        let resultados = medir_caso_bajo_carga(sin_nucleos);
+        let r = por_medida(&resultados, Medida::TiempoTests);
+        assert_eq!(
+            r.motivo.as_deref(),
+            Some("no se pudo leer la carga: sin núcleos")
+        );
     }
 
     /// Base de t1: diez corridas de tests. Mediana 0,2945; cuartiles 0,29175 y 0,2965.
