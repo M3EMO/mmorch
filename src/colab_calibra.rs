@@ -1662,6 +1662,15 @@ const TIMEOUT_CALIBRAR: Duration = TIMEOUT_LLAMADA;
 const MANIFIESTO_IDA: &str = "manifiesto.json";
 /// Nombre del `calibracion.json` dentro de los paquetes de ida y de vuelta.
 const ARCHIVO_CALIBRACION: &str = "calibracion.json";
+/// Manifiesto que el runtime escribe en la vuelta. Lleva el SHA-256 de cada archivo de la vuelta.
+const MANIFIESTO_DEL_RUNTIME: &str = "manifiesto-vuelta.json";
+
+/// Manifiesto del runtime: el SHA-256 de cada archivo de la vuelta, salvo el propio manifiesto.
+#[derive(Deserialize)]
+struct ManifiestoDelRuntime {
+    v: u32,
+    archivos: BTreeMap<String, String>,
+}
 
 /// Código de salida de un trabajo del paquete. Un código distinto de cero no es error del ciclo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1774,7 +1783,8 @@ fn sin_runtime(paquete: &Path, motivo: String, sesion: String) -> ResultadoRunti
 }
 
 /// Ciclo completo de un paquete: anota, pide el runtime, corre los trabajos, baja la vuelta,
-/// libera el runtime y, si llegó la vuelta, la importa. Siempre libera y borra sus temporales.
+/// libera el runtime y, si llegó la vuelta, la importa. Si la parada falla tras bajar la vuelta,
+/// importa igual y deja un aviso. Siempre intenta liberar y borrar sus temporales.
 #[allow(clippy::too_many_arguments)]
 fn ciclo_de_runtime<C: ColabCli + Sync>(
     cli: &C,
@@ -1855,7 +1865,16 @@ fn ciclo_de_runtime<C: ColabCli + Sync>(
             importar_vuelta(home, &paquete, &vuelta, &sesion, commit_laptop, importacion)
                 .map_err(|e| e.to_string())
         }
-        (Ok(_), Err(e)) => Err(e.to_string()),
+        // La vuelta ya está en la laptop y verificada: se importa aunque la parada haya fallado.
+        (Ok(vuelta), Err(_)) => {
+            match importar_vuelta(home, &paquete, &vuelta, &sesion, commit_laptop, importacion) {
+                Ok(mut resumen) => {
+                    resumen.avisos.push(aviso_de_liberacion_pendiente(&sesion));
+                    Ok(resumen)
+                }
+                Err(e) => Err(format!("{e}; {}", aviso_de_liberacion_pendiente(&sesion))),
+            }
+        }
         (Err(e), Ok(())) => Err(format!("{e}; su paquete de vuelta no llegó")),
         (Err(e), Err(l)) => Err(format!("{e}; además, {l}; su paquete de vuelta no llegó")),
     };
@@ -1986,7 +2005,78 @@ fn correr_runtime<C: ColabCli>(
             bajada.stderr.trim()
         )));
     }
+    verificar_vuelta_del_runtime(&vuelta, tmp)?;
     Ok(vuelta)
+}
+
+/// Revisa la vuelta bajada del runtime antes de usarla. Cada archivo debe coincidir con su SHA-256.
+/// Extrae la vuelta en una carpeta de `tmp` y la borra al salir. Un fallo nombra el archivo.
+pub fn verificar_vuelta_del_runtime(vuelta: &Path, tmp: &Path) -> Result<(), ErrorOraculo> {
+    let carpeta = tmp.join("verificar-vuelta");
+    borrado::borrar_dir_dentro(tmp, &carpeta)
+        .and_then(|()| fs::create_dir_all(&carpeta))
+        .map_err(|e| ErrorOraculo::Infra(format!("carpeta de la verificación: {e}")))?;
+    let revision = revisar_vuelta_extraida(vuelta, &carpeta);
+    let limpieza = borrado::borrar_dir_dentro(tmp, &carpeta);
+    revision?;
+    limpieza.map_err(|e| ErrorOraculo::Infra(format!("borrar la verificación: {e}")))
+}
+
+/// Cuerpo de `verificar_vuelta_del_runtime`: extrae en `carpeta` y compara con el manifiesto.
+fn revisar_vuelta_extraida(vuelta: &Path, carpeta: &Path) -> Result<(), ErrorOraculo> {
+    extraer_paquete(vuelta, carpeta)
+        .map_err(|e| ErrorOraculo::Infra(format!("la vuelta no se pudo leer: {e}")))?;
+    // Un enlace no se sigue: podría apuntar fuera de la vuelta o formar un ciclo.
+    let enlaces = enlaces_simbolicos(carpeta)
+        .map_err(|e| ErrorOraculo::Infra(format!("revisar la vuelta: {e}")))?;
+    if !enlaces.is_empty() {
+        return Err(ErrorOraculo::Infra(format!(
+            "la vuelta trae enlaces simbólicos: {}",
+            enlaces.join(", ")
+        )));
+    }
+    let texto = leer_texto_si_existe(&carpeta.join(MANIFIESTO_DEL_RUNTIME))?.ok_or_else(|| {
+        ErrorOraculo::Infra(format!("falta {MANIFIESTO_DEL_RUNTIME} en la vuelta"))
+    })?;
+    let manifiesto: ManifiestoDelRuntime = serde_json::from_str(&texto)
+        .map_err(|e| ErrorOraculo::Infra(format!("{MANIFIESTO_DEL_RUNTIME} ilegible: {e}")))?;
+    if manifiesto.v != 1 {
+        return Err(ErrorOraculo::Infra(format!(
+            "{MANIFIESTO_DEL_RUNTIME} trae una versión no conocida: {}",
+            manifiesto.v
+        )));
+    }
+
+    let mut hallados =
+        archivos_de(carpeta).map_err(|e| ErrorOraculo::Infra(format!("leer la vuelta: {e}")))?;
+    hallados.remove(MANIFIESTO_DEL_RUNTIME);
+    for (ruta, sha) in &manifiesto.archivos {
+        match hallados.get(ruta) {
+            None => return Err(ErrorOraculo::Infra(format!("falta {ruta} en la vuelta"))),
+            Some(real) if real != sha => {
+                return Err(ErrorOraculo::Infra(format!(
+                    "{ruta} no coincide con su SHA-256 en {MANIFIESTO_DEL_RUNTIME}"
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+    match hallados
+        .keys()
+        .find(|ruta| !manifiesto.archivos.contains_key(*ruta))
+    {
+        Some(ruta) => Err(ErrorOraculo::Infra(format!(
+            "{ruta} no está en {MANIFIESTO_DEL_RUNTIME}"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Aviso de una sesión que no se liberó después de bajar su vuelta. Nombra la sesión y el comando de rescate.
+fn aviso_de_liberacion_pendiente(sesion: &str) -> String {
+    format!(
+        "El runtime {sesion} no se liberó y sigue en activo.json. Corra `oraculo pendientes --liberar`."
+    )
 }
 
 /// Pide el runtime de CPU y registra el pedido. Sin respuesta correcta, da error.
@@ -2382,11 +2472,32 @@ print("ROOT_OK=preparar")
 
 /// Script que verifica las versiones y empaqueta la vuelta. La verificación puede dar `mal`: la revisa la importación.
 fn script_cierre() -> String {
+    script_cierre_en(D_REMOTO, VUELTA_REMOTA)
+}
+
+/// Script de cierre para la carpeta `dir` del runtime y la ruta `vuelta_remota` del tar.
+/// Calcula el SHA-256 de cada archivo que empaqueta, escribe el manifiesto y recién entonces arma el tar.
+fn script_cierre_en(dir: &str, vuelta_remota: &str) -> String {
+    let dir = literal_python(dir);
+    let vuelta = literal_python(vuelta_remota);
     format!(
-        r#"import os
+        r#"import hashlib
+import json
+import os
 import subprocess
 
-D = "{D_REMOTO}"
+D = {dir}
+MANIFIESTO = "{MANIFIESTO_DEL_RUNTIME}"
+
+
+def sha256(ruta):
+    h = hashlib.sha256()
+    with open(ruta, "rb") as f:
+        for bloque in iter(lambda: f.read(1 << 20), b""):
+            h.update(bloque)
+    return h.hexdigest()
+
+
 with open(D + "/verificacion.txt", "w") as verificacion:
     subprocess.run(["bash", D + "/tools/colab/verificar-versiones.sh", D], stdout=verificacion)
 partes = ["verificacion.txt"]
@@ -2394,7 +2505,21 @@ if os.path.isfile(D + "/calibracion.json"):
     partes.append("calibracion.json")
 if os.path.isdir(D + "/calibracion"):
     partes.append("calibracion")
-subprocess.run(["tar", "-czf", "{VUELTA_REMOTA}", "-C", D] + partes, check=True)
+archivos = {{}}
+for parte in partes:
+    ruta = os.path.join(D, parte)
+    if os.path.isdir(ruta):
+        for raiz, _, nombres in os.walk(ruta):
+            for nombre in nombres:
+                completa = os.path.join(raiz, nombre)
+                relativa = os.path.relpath(completa, D).replace(os.sep, "/")
+                archivos[relativa] = sha256(completa)
+    else:
+        archivos[parte] = sha256(ruta)
+with open(os.path.join(D, MANIFIESTO), "w") as manifiesto:
+    json.dump({{"v": 1, "archivos": archivos}}, manifiesto, sort_keys=True)
+partes.append(MANIFIESTO)
+subprocess.run(["tar", "-czf", {vuelta}, "-C", D] + partes, check=True)
 print("ROOT_OK=cierre")
 "#
     )
@@ -3412,6 +3537,7 @@ mod tests_importar {
 
 #[cfg(test)]
 mod tests_calibrar {
+    use super::tests::Escenario;
     use super::*;
     use crate::oracle::colab::Espera;
     use std::sync::{Condvar, Mutex};
@@ -3420,6 +3546,8 @@ mod tests_calibrar {
     const COMMIT: &str = "abc123";
     const TOPE_PRUEBA: Duration = Duration::from_secs(600);
     const ESPERA_MAXIMA: Duration = Duration::from_secs(10);
+    const TS_LAPTOP: f64 = 1_700_000_000.0;
+    const TS_COLAB: f64 = 1_700_100_000.0;
 
     /// Espera con plazo a que lleguen `esperados` hilos. `std::sync::Barrier` no tiene plazo.
     struct Barrera {
@@ -3469,6 +3597,8 @@ mod tests_calibrar {
         activo_visto: Mutex<Option<String>>,
         /// Vuelta que `download` copia al destino.
         vuelta: PathBuf,
+        /// Si `stop` devuelve código 1: la sesión no se confirma como parada.
+        stop_falla: bool,
     }
 
     impl Falso {
@@ -3481,11 +3611,17 @@ mod tests_calibrar {
                 primer_exec: Mutex::new(BTreeSet::new()),
                 activo_visto: Mutex::new(None),
                 vuelta: vuelta.to_path_buf(),
+                stop_falla: false,
             }
         }
 
         fn con_falla(mut self, sufijo: &str) -> Self {
             self.exec_falla_en = Some(sufijo.to_string());
+            self
+        }
+
+        fn con_stop_falla(mut self) -> Self {
+            self.stop_falla = true;
             self
         }
 
@@ -3555,6 +3691,7 @@ mod tests_calibrar {
                     fs::copy(&self.vuelta, destino).expect("copia la vuelta");
                     salida(0, "", "")
                 }
+                Some("stop") if self.stop_falla => salida(1, "", "fallo simulado al parar"),
                 _ => salida(0, "", ""),
             };
             Ok(Espera::Termino(salida))
@@ -3594,12 +3731,13 @@ mod tests_calibrar {
         ]);
     }
 
-    /// Vuelta mínima: verificación en verde y un calibracion.json sin filas.
+    /// Vuelta mínima: verificación en verde, un calibracion.json sin filas y su manifiesto.
     fn vuelta_minima(caja: &Path) -> PathBuf {
         let dir = caja.join("vuelta-minima");
         fs::create_dir_all(&dir).expect("carpeta");
         fs::write(dir.join("verificacion.txt"), "ok tests\n").expect("verificación");
         fs::write(dir.join("calibracion.json"), "{\"v\":1,\"filas\":[]}\n").expect("calibración");
+        con_manifiesto_de_vuelta(&dir);
         let tgz = caja.join("vuelta-minima.tar.gz");
         empaquetar_dir(&dir, &tgz);
         tgz
@@ -3932,6 +4070,7 @@ mod tests_calibrar {
             "{}\n",
         )
         .expect("casos nuevos");
+        con_manifiesto_de_vuelta(&dir);
         let vuelta = caja.path().join("vuelta.tar.gz");
         empaquetar_dir(&dir, &vuelta);
 
@@ -3995,6 +4134,7 @@ mod tests_calibrar {
         fs::write(caja.path().join("secreto"), "x\n").expect("secreto");
         std::os::unix::fs::symlink(caja.path().join("secreto"), dir.join("enlace"))
             .expect("enlace");
+        con_manifiesto_de_vuelta(&dir);
         let vuelta = caja.path().join("vuelta.tar.gz");
         empaquetar_dir(&dir, &vuelta);
 
@@ -4024,6 +4164,14 @@ mod tests_calibrar {
         assert_eq!(ruta_remota("bwrap", &archivos), "bwrap");
     }
 
+    /// Escribe `manifiesto-vuelta.json` en `dir` con el SHA-256 de cada archivo que ya hay.
+    /// Llamarla después de escribir la vuelta y antes de empaquetarla.
+    fn con_manifiesto_de_vuelta(dir: &Path) {
+        let archivos = archivos_de(dir).expect("archivos de la vuelta");
+        let json = serde_json::json!({"v": 1, "archivos": archivos}).to_string();
+        fs::write(dir.join(MANIFIESTO_DEL_RUNTIME), json).expect("manifiesto de vuelta");
+    }
+
     /// Lee un tar.gz en una carpeta temporal nueva.
     fn extraer(tgz: &Path) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("extraído");
@@ -4034,5 +4182,238 @@ mod tests_calibrar {
             dir.path().to_str().expect("ruta"),
         ]);
         dir
+    }
+
+    /// Carpeta de vuelta con verificación en verde y un calibracion.json sin filas. Sin manifiesto.
+    fn carpeta_de_vuelta(caja: &Path, nombre: &str) -> PathBuf {
+        let dir = caja.join(nombre);
+        fs::create_dir_all(&dir).expect("carpeta");
+        fs::write(dir.join("verificacion.txt"), "ok tests\n").expect("verificación");
+        fs::write(dir.join(ARCHIVO_CALIBRACION), "{\"v\":1,\"filas\":[]}\n").expect("calibración");
+        dir
+    }
+
+    /// Fila de Seguridad de la tarea de prueba con la huella y el hash de la laptop.
+    fn fila_valida(ts: f64, home: &Path) -> serde_json::Value {
+        let hash = hash_de_tarea(&cargar_en(home, "tarea-prueba").expect("tarea")).expect("hash");
+        serde_json::json!({
+            "tarea": "tarea-prueba",
+            "dimension": "seguridad",
+            "n": 4,
+            "semilla": 7,
+            "ts": ts,
+            "huella": huella_de(Dimension::Seguridad),
+            "tarea_hash": hash,
+        })
+    }
+
+    fn nombre_casos(ts: f64) -> String {
+        format!("tarea-prueba-seguridad-{}.casos.jsonl", ts as u64)
+    }
+
+    /// Un renglón de `.casos.jsonl` con valor base 0.5.
+    fn caso_de_prueba() -> String {
+        "{\"caso\":0,\"es_defecto\":false,\"detectado\":false,\"valor_base\":0.5}\n".into()
+    }
+
+    /// ROOT_HOME de `Escenario` con una fila de la laptop (valor base 0.5) y sus casos.
+    /// Quita el `calibracion.json` y el `activo.json` de prueba.
+    fn laptop_con_fila_base(home: &Path) {
+        fs::remove_file(home.join(ARCHIVO_CALIBRACION))
+            .expect("quita el calibracion.json de prueba");
+        fs::remove_file(home.join("colab/activo.json")).expect("quita el activo.json de prueba");
+        let fila: Fila =
+            serde_json::from_value(fila_valida(TS_LAPTOP, home)).expect("fila de la laptop");
+        calibra::agregar(home, &fila).expect("agrega la fila de la laptop");
+        let carpeta = home.join(CARPETA_CALIBRACION);
+        fs::create_dir_all(&carpeta).expect("carpeta de casos");
+        fs::write(carpeta.join(nombre_casos(TS_LAPTOP)), caso_de_prueba())
+            .expect("casos de la laptop");
+    }
+
+    /// Vuelta con una fila nueva (`TS_COLAB`) que casa con la base de la laptop, sus casos y su manifiesto.
+    fn vuelta_con_fila_nueva(caja: &Path, home: &Path) -> PathBuf {
+        let dir = carpeta_de_vuelta(caja, "vuelta-con-fila");
+        let calibracion = serde_json::json!({"v": 1, "filas": [fila_valida(TS_COLAB, home)]});
+        fs::write(dir.join(ARCHIVO_CALIBRACION), calibracion.to_string()).expect("calibración");
+        fs::create_dir_all(dir.join(CARPETA_CALIBRACION)).expect("casos");
+        fs::write(
+            dir.join(CARPETA_CALIBRACION).join(nombre_casos(TS_COLAB)),
+            caso_de_prueba(),
+        )
+        .expect("casos de la vuelta");
+        con_manifiesto_de_vuelta(&dir);
+        let tgz = caja.join("vuelta-con-fila.tar.gz");
+        empaquetar_dir(&dir, &tgz);
+        tgz
+    }
+
+    #[test]
+    fn guion_de_cierre_escribe_el_sha_de_lo_que_empaqueta() {
+        if Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("sin python3: se salta el test del guion de cierre");
+            return;
+        }
+        let caja = tempfile::tempdir().expect("caja");
+        let raiz = caja.path().join("raiz");
+        fs::create_dir_all(raiz.join("tools/colab")).expect("carpeta");
+        fs::write(raiz.join("tools/colab/verificar-versiones.sh"), "exit 0\n")
+            .expect("verificador");
+        fs::write(raiz.join(ARCHIVO_CALIBRACION), "{\"v\":1,\"filas\":[]}\n").expect("calibración");
+        fs::create_dir_all(raiz.join(CARPETA_CALIBRACION)).expect("casos");
+        fs::write(
+            raiz.join(CARPETA_CALIBRACION).join(nombre_casos(7.0)),
+            "{}\n",
+        )
+        .expect("casos");
+        let guion = caja.path().join("cierre.py");
+        let vuelta = caja.path().join("vuelta.tar.gz");
+        let texto = script_cierre_en(raiz.to_str().expect("ruta"), vuelta.to_str().expect("ruta"));
+        fs::write(&guion, texto).expect("guion");
+
+        let estado = Command::new("python3")
+            .arg("-I")
+            .arg(&guion)
+            .status()
+            .expect("python3");
+        assert!(estado.success(), "el guion de cierre falló");
+
+        let extraido = tempfile::tempdir().expect("extraído");
+        extraer_paquete(&vuelta, extraido.path()).expect("extrae la vuelta");
+        let texto = fs::read_to_string(extraido.path().join(MANIFIESTO_DEL_RUNTIME))
+            .expect("manifiesto de vuelta");
+        let manifiesto: serde_json::Value = serde_json::from_str(&texto).expect("json");
+        assert_eq!(manifiesto["v"], 1);
+        let declarados: BTreeMap<String, String> =
+            serde_json::from_value(manifiesto["archivos"].clone()).expect("archivos");
+        let mut en_tar = archivos_de(extraido.path()).expect("archivos del tar");
+        en_tar.remove(MANIFIESTO_DEL_RUNTIME);
+        assert_eq!(
+            declarados.keys().collect::<Vec<_>>(),
+            en_tar.keys().collect::<Vec<_>>()
+        );
+        for (ruta, sha) in &declarados {
+            let bytes = fs::read(extraido.path().join(ruta)).expect("lee el archivo");
+            assert_eq!(sha, &sha256_hex(&bytes), "SHA de {ruta}");
+        }
+    }
+
+    #[test]
+    fn vuelta_con_archivo_alterado_no_se_importa() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let dir = carpeta_de_vuelta(caja.path(), "vuelta-alterada");
+        con_manifiesto_de_vuelta(&dir);
+        fs::write(
+            dir.join(ARCHIVO_CALIBRACION),
+            "{\"v\":1,\"filas\":[],\"nota\":\"cambiado\"}\n",
+        )
+        .expect("altera el calibracion.json");
+        let vuelta = caja.path().join("alterada.tar.gz");
+        empaquetar_dir(&dir, &vuelta);
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let motivo = resumen.runtimes[0]
+            .resultado
+            .as_ref()
+            .expect_err("la vuelta alterada no entra");
+        assert!(motivo.contains(ARCHIVO_CALIBRACION), "{motivo}");
+        assert!(!home.path().join(ARCHIVO_CALIBRACION).exists());
+    }
+
+    #[test]
+    fn vuelta_sin_manifiesto_no_se_importa() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let dir = carpeta_de_vuelta(caja.path(), "vuelta-sin-manifiesto");
+        let vuelta = caja.path().join("sin-manifiesto.tar.gz");
+        empaquetar_dir(&dir, &vuelta);
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let motivo = resumen.runtimes[0]
+            .resultado
+            .as_ref()
+            .expect_err("sin manifiesto no entra");
+        assert!(motivo.contains(MANIFIESTO_DEL_RUNTIME), "{motivo}");
+        assert!(!home.path().join(ARCHIVO_CALIBRACION).exists());
+    }
+
+    #[test]
+    fn archivo_que_no_esta_en_el_manifiesto_no_se_importa() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let dir = carpeta_de_vuelta(caja.path(), "vuelta-con-extra");
+        con_manifiesto_de_vuelta(&dir);
+        fs::write(dir.join("extra.txt"), "no listado\n").expect("archivo extra");
+        let vuelta = caja.path().join("con-extra.tar.gz");
+        empaquetar_dir(&dir, &vuelta);
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let motivo = resumen.runtimes[0]
+            .resultado
+            .as_ref()
+            .expect_err("un archivo no listado no entra");
+        assert!(motivo.contains("extra.txt"), "{motivo}");
+        assert!(!home.path().join(ARCHIVO_CALIBRACION).exists());
+    }
+
+    #[test]
+    fn stop_que_falla_tras_bajar_la_vuelta_importa_y_avisa() {
+        let caja = tempfile::tempdir().expect("caja");
+        let escenario = Escenario::con_contrato("cargo test");
+        let home = escenario.home.path();
+        laptop_con_fila_base(home);
+        let vuelta = vuelta_con_fila_nueva(caja.path(), home);
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home, &vuelta).con_stop_falla();
+
+        let resumen = correr(&cli, home, &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let runtime = &resumen.runtimes[0];
+        let importado = runtime
+            .resultado
+            .as_ref()
+            .unwrap_or_else(|motivo| panic!("la vuelta debía importar: {motivo}"));
+        assert_eq!(importado.entraron, 1, "{importado:?}");
+        let aviso = importado
+            .avisos
+            .iter()
+            .find(|a| a.contains(&runtime.sesion))
+            .expect("aviso con la sesión");
+        assert!(aviso.contains("oraculo pendientes --liberar"), "{aviso}");
+        let activo = fs::read_to_string(home.join("colab/activo.json")).expect("activo.json");
+        assert!(activo.contains(&runtime.sesion), "{activo}");
+    }
+
+    #[test]
+    fn stop_que_falla_antes_de_la_vuelta_no_importa() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta)
+            .con_falla("-0")
+            .con_stop_falla();
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let runtime = &resumen.runtimes[0];
+        assert!(runtime.resultado.is_err(), "{:?}", runtime.resultado);
+        let llamadas = cli.llamadas();
+        assert!(
+            !comandos_de(&llamadas, &runtime.sesion).contains(&"download".to_string()),
+            "{llamadas:?}"
+        );
+        assert!(!home.path().join(ARCHIVO_CALIBRACION).exists());
+        assert!(home.path().join("colab/activo.json").exists());
     }
 }
