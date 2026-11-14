@@ -113,7 +113,7 @@ fn contenedor_timeout_da_plazo_vencido_y_borra_el_contenedor() {
     let res = ejecutar(&e);
     let prefijo_nombre = format!("root-oraculo-{}-", std::process::id());
     assert!(
-        matches!(&res, Err(ErrorOraculo::PlazoVencido { segundos, contenedor })
+        matches!(&res, Err(ErrorOraculo::PlazoVencido { segundos, contenedor, .. })
             if *segundos == 2.0 && contenedor.starts_with(&prefijo_nombre)),
         "se esperaba PlazoVencido, llegó {res:?}"
     );

@@ -8612,6 +8612,7 @@ mod tests {
     fn plazo_vencido() -> ErrorOraculo {
         ErrorOraculo::PlazoVencido {
             segundos: 600.0,
+            motor: "contenedor",
             contenedor: "x".into(),
         }
     }

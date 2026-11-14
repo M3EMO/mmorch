@@ -751,9 +751,10 @@ fn ejecutar_descarga_con(
         Err(ErrorOraculo::Infra(m)) => Err(Diagnostico::Infra(m)),
         Err(ErrorOraculo::PlazoVencido {
             segundos,
+            motor,
             contenedor,
         }) => Err(Diagnostico::Infra(format!(
-            "timeout tras {segundos} s; contenedor {contenedor} eliminado"
+            "timeout tras {segundos} s; {motor} {contenedor} eliminado"
         ))),
         Err(otro) => Err(Diagnostico::Desconocido(otro.to_string())),
         Ok(resultado) if resultado.codigo == 0 => Ok(()),
@@ -2327,10 +2328,28 @@ source = \"git+http://host/x?rev=1#abc1234\"\n";
     }
 
     #[test]
+    fn descarga_plazo_vencido_de_bwrap_nombra_el_proceso() {
+        let falso = |_: &Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            Err(ErrorOraculo::PlazoVencido {
+                segundos: 600.0,
+                motor: "proceso bwrap",
+                contenedor: "1234".into(),
+            })
+        };
+        let diagnostico = ejecutar_descarga_con(&falso, &ejecucion(), &[])
+            .expect_err("un plazo vencido es un fallo de descarga");
+        assert_eq!(
+            diagnostico,
+            Diagnostico::Infra("timeout tras 600 s; proceso bwrap 1234 eliminado".into())
+        );
+    }
+
+    #[test]
     fn descarga_plazo_vencido_da_infra_con_el_mensaje_de_timeout() {
         let falso = |_: &Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
             Err(ErrorOraculo::PlazoVencido {
                 segundos: 600.0,
+                motor: "contenedor",
                 contenedor: "root-x".into(),
             })
         };

@@ -114,11 +114,15 @@ pub enum ErrorOraculo {
     /// Infraestructura: podman ausente, error de podman o E/S. Un plazo vencido es `PlazoVencido`.
     #[error("error de infraestructura del oráculo: {0}")]
     Infra(String),
-    /// Venció el plazo de una corrida en contenedor: el contenedor se eliminó. Sale con código 3.
+    /// Venció el plazo de una corrida: el contenedor o el proceso bwrap se eliminó. Sale con código 3.
     #[error(
-        "error de infraestructura del oráculo: timeout tras {segundos} s; contenedor {contenedor} eliminado"
+        "error de infraestructura del oráculo: timeout tras {segundos} s; {motor} {contenedor} eliminado"
     )]
-    PlazoVencido { segundos: f64, contenedor: String },
+    PlazoVencido {
+        segundos: f64,
+        motor: &'static str,
+        contenedor: String,
+    },
     /// El junit falta o está mal formado.
     #[error("junit inválido: {0}")]
     Junit(String),
@@ -4878,6 +4882,7 @@ mod tests {
     fn vencimiento() -> ErrorOraculo {
         ErrorOraculo::PlazoVencido {
             segundos: 1200.0,
+            motor: "contenedor",
             contenedor: "x".into(),
         }
     }
@@ -4887,6 +4892,7 @@ mod tests {
         let salida = tempfile::tempdir().expect("salida");
         let vencido = ErrorOraculo::PlazoVencido {
             segundos: 5.0,
+            motor: "contenedor",
             contenedor: "otro".into(),
         };
         let texto_viejo = ErrorOraculo::Infra("timeout tras 5 s; x".into());
@@ -4910,6 +4916,7 @@ mod tests {
     fn plazo_vencido_con_su_mensaje_de_siempre_y_codigo_3() {
         let error = ErrorOraculo::PlazoVencido {
             segundos: 1200.0,
+            motor: "contenedor",
             contenedor: "x".into(),
         };
         assert_eq!(

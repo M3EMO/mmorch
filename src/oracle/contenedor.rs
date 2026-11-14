@@ -373,10 +373,16 @@ fn montaje(args: &mut Vec<String>, origen: &Path, destino: &str, opciones: &str)
     args.push(format!("{}:{destino}:{opciones}", origen.display()));
 }
 
-/// Error de un contenedor que venció su plazo. Lleva el plazo y el nombre del contenedor eliminado.
-fn error_de_plazo(timeout: Duration, nombre: &str) -> ErrorOraculo {
+/// Error de una corrida que venció su plazo. Lleva el plazo y el nombre de lo eliminado.
+/// Con podman el nombre es el contenedor. Con bwrap es el pid del proceso.
+fn error_de_plazo(timeout: Duration, nombre: &str, backend: Backend) -> ErrorOraculo {
+    let motor = match backend {
+        Backend::Podman => "contenedor",
+        Backend::Bwrap => "proceso bwrap",
+    };
     ErrorOraculo::PlazoVencido {
         segundos: timeout.as_secs_f64(),
+        motor,
         contenedor: nombre.to_string(),
     }
 }
@@ -421,7 +427,7 @@ fn ejecutar_podman(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
         Ok(Some(estado)) => estado,
         Ok(None) => {
             terminar(&mut hijo, &nombre);
-            return Err(error_de_plazo(e.timeout, &nombre));
+            return Err(error_de_plazo(e.timeout, &nombre, Backend::Podman));
         }
         // Sin esto, un fallo al consultar el proceso dejaría el contenedor corriendo.
         Err(err) => {
@@ -433,7 +439,7 @@ fn ejecutar_podman(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
 }
 
 /// Corre `programa` con los argumentos de bwrap y espera hasta `e.timeout`. Si vence, mata el grupo entero.
-/// No borra nada: bwrap no deja contenedor. Sin contenedor, el error de plazo no lleva nombre real.
+/// No borra nada: bwrap no deja contenedor. El error de plazo nombra el pid del proceso.
 fn ejecutar_bwrap(
     e: &Ejecucion,
     programa: &str,
@@ -454,8 +460,9 @@ fn ejecutar_bwrap(
     let estado = match esperar(&mut hijo, e.timeout) {
         Ok(Some(estado)) => estado,
         Ok(None) => {
+            let pid = hijo.id().to_string();
             matar_grupo(&mut hijo);
-            return Err(error_de_plazo(e.timeout, "bwrap"));
+            return Err(error_de_plazo(e.timeout, &pid, Backend::Bwrap));
         }
         Err(err) => {
             matar_grupo(&mut hijo);
@@ -1088,12 +1095,29 @@ mod tests {
 
     #[test]
     fn error_de_plazo_lleva_el_plazo_y_el_nombre_del_contenedor() {
-        let error = error_de_plazo(Duration::from_secs(1200), "root-x");
+        let error = error_de_plazo(Duration::from_secs(1200), "root-x", Backend::Podman);
         assert!(
-            matches!(&error, ErrorOraculo::PlazoVencido { segundos, contenedor }
+            matches!(&error, ErrorOraculo::PlazoVencido { segundos, contenedor, .. }
                 if *segundos == 1200.0 && contenedor == "root-x"),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn error_de_plazo_de_podman_dice_contenedor() {
+        let error = error_de_plazo(Duration::from_secs(1200), "x", Backend::Podman);
+        assert_eq!(
+            error.to_string(),
+            "error de infraestructura del oráculo: timeout tras 1200 s; contenedor x eliminado"
+        );
+    }
+
+    #[test]
+    fn error_de_plazo_de_bwrap_dice_proceso_bwrap_y_no_contenedor() {
+        let error = error_de_plazo(Duration::from_secs(1200), "1234", Backend::Bwrap);
+        let texto = error.to_string();
+        assert!(texto.contains("proceso bwrap"), "{texto}");
+        assert!(!texto.contains("contenedor"), "{texto}");
     }
 
     fn ejecucion() -> Ejecucion {
