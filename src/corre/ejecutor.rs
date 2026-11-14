@@ -1563,7 +1563,7 @@ mod tests {
         let anotado = fs::read_to_string(&log).unwrap_or_default();
         assert!(
             anotado.contains("rm -f -t 0 root-builder-1-0"),
-            "no pidió borrar por nombre: {anotado}"
+            "no pidió borrar por nombre: {anotado}; cortar_vencido dio: {error:?}"
         );
         match error {
             ErrorCorre::Cortado { mensaje, stdout } => {
