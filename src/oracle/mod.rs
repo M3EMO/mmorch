@@ -7126,7 +7126,9 @@ mod tests {
             .expect("calibra");
         let lastres = lastres.into_inner().expect("lastres");
         assert!(!lastres.is_empty(), "debe haber al menos un lastre");
-        let lista = ["uno", "dos"];
+        // Tarea 143: `nueva` existe solo en el repo y corre en los tests comunes, así que también es lugar válido.
+        // `no_corre` no corre y sigue fuera.
+        let lista = ["uno", "dos", "nueva"];
         assert!(
             lastres.iter().all(|f| lista.contains(&f.as_str())),
             "todo lastre cae en la lista: {lastres:?}"
@@ -8158,6 +8160,7 @@ mod tests {
         Calibraciones {
             v: calibra::VERSION,
             filas: vec![calibra::Fila {
+                sonda_lastre: calibra::SondaLastre::default(),
                 base_sin_veredicto: None,
                 eficiencia_base: Vec::new(),
                 tarea_hash: Some(tarea_hash),
@@ -8889,6 +8892,7 @@ mod tests {
         ]
         .into_iter()
         .map(|dimension| calibra::Fila {
+            sonda_lastre: calibra::SondaLastre::default(),
             base_sin_veredicto: None,
             eficiencia_base: Vec::new(),
             tarea_hash: Some(hash.clone()),
@@ -8970,6 +8974,7 @@ mod tests {
         fs::create_dir_all(&carpeta_otra).expect("carpeta de otra tarea");
         fs::write(carpeta_otra.join("tarea.toml"), toml_otra).expect("tarea.toml de otra tarea");
         let fila = calibra::Fila {
+            sonda_lastre: calibra::SondaLastre::default(),
             base_sin_veredicto: None,
             eficiencia_base: Vec::new(),
             tarea_hash: Some(crate::goal::calcular_hash(toml_otra.as_bytes())),

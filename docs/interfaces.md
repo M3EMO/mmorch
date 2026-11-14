@@ -883,6 +883,16 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "format": "float",
           "default": null
         },
+        "sonda_lastre": {
+          "description": "Estado de la sonda de lastre de la base (Tarea 143). Vacío fuera de Eficiencia.",
+          "$ref": "#/$defs/SondaLastre",
+          "default": {
+            "corrio": false,
+            "funciones": 0,
+            "motivo": null,
+            "pedida": false
+          }
+        },
         "tarea": {
           "type": "string"
         },
@@ -1095,6 +1105,37 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "evidencia",
         "fuente"
       ]
+    },
+    "SondaLastre": {
+      "description": "Estado de la sonda de lastre en una medición (Tarea 143). Solo Eficiencia la pide. Sin el campo, o en otras\ndimensiones, vale `default`.",
+      "type": "object",
+      "properties": {
+        "corrio": {
+          "description": "`true` si la sonda terminó sin error, aunque su lista de funciones esté vacía.",
+          "type": "boolean",
+          "default": false
+        },
+        "funciones": {
+          "description": "Funciones que corrieron en la base. Cero si la sonda no corrió o falló.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "motivo": {
+          "description": "Motivo del error de la sonda. `None` si no falló.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "pedida": {
+          "description": "`true` si la medición pidió la sonda: solo Eficiencia la pide.",
+          "type": "boolean",
+          "default": false
+        }
+      }
     }
   }
 }
@@ -1186,6 +1227,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "format": "uint32",
       "default": null,
       "minimum": 0
+    },
+    "lugar_por": {
+      "description": "Dónde cayó el lastre: `sonda` (una función que la sonda vio correr) o `nombre` (la regla de la Tarea 136,\nsin sonda pedida). Solo en un caso con `LastreDeMemoria` medido. `None` en los demás.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
     },
     "motivo": {
       "description": "Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,\n`cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo:<cita>`, `test_malo_nuevo:<clave>`,\n`valor_menor` o `item_bajo:<item>`. `<cita>` es la del hallazgo nuevo que disparó. `<clave>` es\n`oculto:<id>` o `contrato:<id>` del test malo nuevo, y solo aparece en Completitud y Funciona.\n`None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.",

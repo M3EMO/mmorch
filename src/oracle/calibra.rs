@@ -84,6 +84,24 @@ pub struct JuicioBase {
     pub sin_veredicto: Option<String>,
 }
 
+/// Estado de la sonda de lastre en una medición (Tarea 143). Solo Eficiencia la pide. Sin el campo, o en otras
+/// dimensiones, vale `default`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SondaLastre {
+    /// `true` si la medición pidió la sonda: solo Eficiencia la pide.
+    #[serde(default)]
+    pub pedida: bool,
+    /// `true` si la sonda terminó sin error, aunque su lista de funciones esté vacía.
+    #[serde(default)]
+    pub corrio: bool,
+    /// Funciones que corrieron en la base. Cero si la sonda no corrió o falló.
+    #[serde(default)]
+    pub funciones: u32,
+    /// Motivo del error de la sonda. `None` si no falló.
+    #[serde(default)]
+    pub motivo: Option<String>,
+}
+
 /// Una medición de una dimensión de una tarea, con su muestra.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Fila {
@@ -138,6 +156,9 @@ pub struct Fila {
     /// métricas, y no calibra la dimensión. `None` en una medición real. Una dimensión inestable va a `inestable`.
     #[serde(default)]
     pub no_aplica: Option<String>,
+    /// Estado de la sonda de lastre de la base (Tarea 143). Vacío fuera de Eficiencia.
+    #[serde(default)]
+    pub sonda_lastre: SondaLastre,
     /// Motivo por el que la dimensión es inestable en la tarea: sus ítems del juez variaron entre juicios.
     /// Una fila sin el campo vale `None`.
     #[serde(default)]
@@ -739,6 +760,10 @@ pub struct CasoGuardado {
     /// Motivo por el que el caso no aplica. Solo en el renglón de un caso no aplicable.
     #[serde(default)]
     pub no_aplicable: Option<String>,
+    /// Dónde cayó el lastre: `sonda` (una función que la sonda vio correr) o `nombre` (la regla de la Tarea 136,
+    /// sin sonda pedida). Solo en un caso con `LastreDeMemoria` medido. `None` en los demás.
+    #[serde(default)]
+    pub lugar_por: Option<String>,
     /// Nombre del mutante muerto que eligió `AssertBorrado`. `None` en los demás defectos.
     #[serde(default)]
     pub mutante: Option<String>,
@@ -1062,8 +1087,13 @@ struct Ronda<'a> {
     /// Lo que midió el lado inicial de Eficiencia en la base. Cada caso lo fija y no mide ese lado (Tarea 131).
     /// `None` en las otras dimensiones y si la base no lo midió.
     referencia_eficiencia: Option<super::eficiencia::Referencia>,
-    /// Funciones que corrió la sonda de lastre de la base (Tarea 137). Vacía: la sonda no corrió o falló.
+    /// Funciones que corrió la sonda de lastre de la base (Tarea 137). Vacía: la sonda no corrió o falló. Con la
+    /// sonda pedida, el lastre no tiene lugar sin funciones (Tarea 143).
     corridas: &'a [(String, String)],
+    /// La medición pidió la sonda de lastre (solo Eficiencia). Con ella, `LastreDeMemoria` no usa la regla de la 136.
+    sonda_pedida: bool,
+    /// Motivo del caso de lastre cuando la sonda pedida no dio funciones (Tarea 143). `None` en los demás casos.
+    motivo_sonda: Option<String>,
 }
 
 impl Ronda<'_> {
@@ -1273,6 +1303,10 @@ fn inyectar_en(
     limites: &crate::oracle::perfiles::rust::LimitesEstructura,
     semilla: u64,
 ) -> Result<Option<Inyeccion>, ErrorOraculo> {
+    // Con la sonda pedida, el lastre solo cae en lo que la sonda vio correr. Sin funciones, no hay lugar (Tarea 143).
+    if defecto == Defecto::LastreDeMemoria && r.sonda_pedida && r.corridas.is_empty() {
+        return Ok(None);
+    }
     let contexto = inyectar::Contexto {
         capas: r.capas,
         camino_caliente: r.camino,
@@ -1496,10 +1530,17 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     let mut ultimo_plazo = false;
     let mut medido = None;
     // Sin candidatos, el defecto no tiene lugar. Con candidatos, si ninguno sirve, se agotan las reservas.
-    let motivo_sin_caso = if r.candidatos[i].is_empty() {
-        motivo_sin_inyeccion(defecto, r.muertos.is_empty(), r.cambios.is_some())
+    // Lastre con la sonda pedida: sin funciones que la sonda vio correr, el motivo nombra la sonda (Tarea 143).
+    let motivo_sin_caso: String = if !r.candidatos[i].is_empty() {
+        MOTIVO_DISTINTOS_AGOTADOS.to_string()
+    } else if let Some(motivo) = r
+        .motivo_sonda
+        .as_deref()
+        .filter(|_| defecto == Defecto::LastreDeMemoria)
+    {
+        motivo.to_string()
     } else {
-        MOTIVO_DISTINTOS_AGOTADOS
+        motivo_sin_inyeccion(defecto, r.muertos.is_empty(), r.cambios.is_some()).to_string()
     };
     for (t, candidato) in r.candidatos[i].iter().enumerate() {
         // Antes de cada reemplazo (no antes de la primera inyección) se mira el límite. Si un juez ya lo
@@ -1572,10 +1613,10 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     }
     let Some((inyeccion, veredicto, reusado, mutantes, filtro)) = medido else {
         // Si el último candidato descartado pasó su plazo, el motivo lo dice.
-        let motivo = if ultimo_plazo {
+        let motivo: &str = if ultimo_plazo {
             MOTIVO_SUITE_PLAZO
         } else {
-            motivo_sin_caso
+            &motivo_sin_caso
         };
         return Ok(Medido {
             reemplazos: invalidos,
@@ -1603,6 +1644,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         mutantes_cambiados,
         mutantes_explicados,
         filtro,
+        lugar_por: lugar_por_de(defecto, r.sonda_pedida),
         ..Caso::nuevo(i as u32, Some(inyeccion), veredicto)
     };
     Ok(Medido {
@@ -1786,8 +1828,29 @@ fn calibrar_medida_con_defectos(
             })
         })
     });
-    // Funciones que corrieron en la base. Sin resultado, o con error, ninguna: `LastreDeMemoria` usa la regla de la 136.
-    let corridas = corridas_de_la_sonda(sonda_lastre::tomar_sonda_lastre());
+    // Lo que dejó la sonda de la base. Solo Eficiencia la pide. Sin funciones, el lastre no tiene lugar (Tarea 143).
+    let pedida = dimension == Dimension::Eficiencia;
+    let resultado_sonda = sonda_lastre::tomar_sonda_lastre();
+    let sonda = if pedida {
+        SondaLastre {
+            pedida,
+            corrio: matches!(resultado_sonda, Some(Ok(_))),
+            funciones: corridas_de_la_sonda(resultado_sonda.clone()).len() as u32,
+            motivo: match &resultado_sonda {
+                Some(Err(motivo)) => Some(motivo.clone()),
+                _ => None,
+            },
+        }
+    } else {
+        SondaLastre::default()
+    };
+    let motivo_sonda = if pedida {
+        motivo_sin_funciones_de_la_sonda(&resultado_sonda)
+    } else {
+        None
+    };
+    // Funciones que corrieron en la base. Sin resultado, o con error, ninguna.
+    let corridas = corridas_de_la_sonda(resultado_sonda);
     // Los casos comparan su muestra con la de la base. Las bases repetidas no la pisan.
     let mutantes_base = super::mutacion::tomar_muestra();
     // Solo Eficiencia fija la referencia de su lado inicial en los casos. Las bases repetidas no la usan.
@@ -1846,6 +1909,7 @@ fn calibrar_medida_con_defectos(
             no_aplica: None,
             extractos_base,
             juicios_base,
+            sonda_lastre: sonda.clone(),
             ..fila_no_aplica(tarea, &tarea_hash, dimension, semilla, &texto)
         };
         return Ok(Medida {
@@ -1868,6 +1932,7 @@ fn calibrar_medida_con_defectos(
             causas_inestables: causas,
             extractos_base,
             juicios_base,
+            sonda_lastre: sonda.clone(),
             ..fila_no_aplica(tarea, &tarea_hash, dimension, semilla, &motivo)
         };
         return Ok(Medida {
@@ -1945,6 +2010,8 @@ fn calibrar_medida_con_defectos(
         inestables: &inestables_casos,
         referencia_eficiencia,
         corridas: &corridas,
+        sonda_pedida: pedida,
+        motivo_sonda,
     };
     // Las elecciones de los casos se hacen antes de lanzar los hilos: así cada caso ya tiene su lista fija.
     let pre = preelegir(&ronda, n)?;
@@ -2063,6 +2130,7 @@ fn calibrar_medida_con_defectos(
             juicios_base,
             eficiencia_base: juicios[0].eficiencia_auto.clone(),
             tarea_hash: Some(tarea_hash.clone()),
+            sonda_lastre: sonda.clone(),
             ..fila_de(
                 tarea,
                 dimension,
@@ -2163,6 +2231,7 @@ fn fila_de(
         }
     }
     Fila {
+        sonda_lastre: SondaLastre::default(),
         base_sin_veredicto: None,
         eficiencia_base: Vec::new(),
         tarea_hash: None,
@@ -2465,6 +2534,15 @@ pub fn calibrar_tarea_con_lector(
         compartidos.as_ref(),
         Some(home),
     )?;
+    // Un error de la sonda de lastre avisa aquí. El veredicto de la base no se guarda, así que el aviso sale de la fila.
+    if let Some(motivo) = medida
+        .fila
+        .as_ref()
+        .and_then(|f| f.sonda_lastre.motivo.clone())
+        && !avisos.contains(&motivo)
+    {
+        avisos.push(motivo);
+    }
     if let Some(fila) = medida.fila.as_mut() {
         fila.repo_origen = repo_origen;
     }
@@ -2539,6 +2617,7 @@ fn fila_no_aplica(
     motivo: &str,
 ) -> Fila {
     Fila {
+        sonda_lastre: SondaLastre::default(),
         base_sin_veredicto: None,
         eficiencia_base: Vec::new(),
         tarea_hash: Some(tarea_hash.into()),
@@ -2721,6 +2800,8 @@ struct Caso {
     mutantes_explicados: Vec<String>,
     /// `-F` de cargo-mutants que midió el caso. Vacío si el caso no midió mutación.
     filtro: String,
+    /// Dónde cayó el lastre (`sonda` o `nombre`). `None` si no es un caso de lastre medido.
+    lugar_por: Option<&'static str>,
 }
 
 impl Caso {
@@ -2752,6 +2833,7 @@ impl Caso {
             mutantes_cambiados: Vec::new(),
             mutantes_explicados: Vec::new(),
             filtro: String::new(),
+            lugar_por: None,
         }
     }
 
@@ -2799,12 +2881,14 @@ impl CasoGuardado {
             mutantes_explicados: caso.mutantes_explicados.clone(),
             ruidoso: !caso.mutantes_cambiados.is_empty(),
             filtro: caso.filtro.clone(),
+            lugar_por: caso.lugar_por.map(str::to_string),
         }
     }
 
     /// Renglón de un caso con defecto que no se pudo aplicar: no mide, solo dice por qué.
     fn de_no_aplicable(no: &NoAplicable) -> CasoGuardado {
         CasoGuardado {
+            lugar_por: None,
             caso: no.indice,
             defecto: Some(nombre_defecto(no.defecto)),
             item: Some(no.defecto.item().to_string()),
@@ -2877,6 +2961,34 @@ const MOTIVO_FUERA_DEL_CAMBIO: &str = "ningún lugar del cambio admite este defe
 /// Motivo de un `LastreDeMemoria` con estado inicial: no hay función vieja que corra los tests.
 const MOTIVO_LASTRE_SIN_LUGAR: &str =
     "ninguna función vieja que corran los tests del estado inicial";
+
+/// Motivo de un caso de lastre cuando la sonda se pidió y no dio funciones (Tarea 143).
+const MOTIVO_SONDA_SIN_FUNCIONES: &str = "la sonda de lastre no dio funciones";
+/// Motivo de un caso de lastre cuando la sonda se pidió y no dejó resultado: no corrió (Tarea 143).
+const MOTIVO_SONDA_NO_CORRIO: &str = "la sonda no corrió";
+
+/// Motivo de los casos de lastre cuando la sonda pedida no dio funciones (Tarea 143). `None` si dio funciones.
+/// Con error, el motivo del error va detrás de `MOTIVO_SONDA_SIN_FUNCIONES`.
+fn motivo_sin_funciones_de_la_sonda(
+    resultado: &Option<Result<BTreeSet<sonda_lastre::FuncionMarcada>, String>>,
+) -> Option<String> {
+    match resultado {
+        Some(Ok(funciones)) if !funciones.is_empty() => None,
+        Some(Ok(_)) => Some(MOTIVO_SONDA_SIN_FUNCIONES.to_string()),
+        Some(Err(motivo)) => Some(format!("{MOTIVO_SONDA_SIN_FUNCIONES}: {motivo}")),
+        None => Some(MOTIVO_SONDA_NO_CORRIO.to_string()),
+    }
+}
+
+/// Dónde cayó el lastre de un caso con `defecto` (Tarea 143). Con la sonda pedida, cae en una función que la
+/// sonda vio correr: `sonda`. Sin sonda, cae por la regla de la 136: `nombre`. Los demás defectos no tienen lugar.
+fn lugar_por_de(defecto: Defecto, sonda_pedida: bool) -> Option<&'static str> {
+    match defecto {
+        Defecto::LastreDeMemoria if sonda_pedida => Some("sonda"),
+        Defecto::LastreDeMemoria => Some("nombre"),
+        _ => None,
+    }
+}
 
 /// Motivo de un `ModuloBorrado` con estado inicial: borrar un módulo rompe el build y da una detección segura.
 const MOTIVO_MODULO_CON_INICIAL: &str =
@@ -3349,6 +3461,7 @@ mod tests {
     /// Fila que cuenta para `aplicar_en` con `tarea_hash` "" y la huella actual: 16 defectos y 16 limpios, todos bien.
     fn fila(tarea: &str, dimension: Dimension, ts: f64, exactitud: Option<f32>) -> Fila {
         Fila {
+            sonda_lastre: SondaLastre::default(),
             base_sin_veredicto: None,
             eficiencia_base: Vec::new(),
             tarea_hash: Some(String::new()),
@@ -3862,7 +3975,10 @@ mod tests {
             dir.path(),
             "\n[calibracion]\ncamino_caliente = [\"no_existe\"]\n\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n",
         );
-        let ev = falso(dir.path(), &base, |_, _, base| base.clone());
+        let ev = con_sonda_de_todas(
+            dir.path(),
+            falso(dir.path(), &base, |_, _, base| base.clone()),
+        );
         let fila = calibrar_con(&tarea, Dimension::Eficiencia, 10, 42, dir.path(), &ev)
             .expect("sin función del camino igual hay fila");
         // Eficiencia rota entre el bucle y el lastre. El bucle no tiene dónde caer: sus casos son no aplicables.
@@ -3896,7 +4012,10 @@ mod tests {
             dir.path(),
             "\n[calibracion]\ncamino_caliente = [\"ejecutar\"]\n\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n",
         );
-        let ev = falso(dir.path(), &base, |_, _, base| base.clone());
+        let ev = con_sonda_de_todas(
+            dir.path(),
+            falso(dir.path(), &base, |_, _, base| base.clone()),
+        );
         let fila =
             calibrar_con(&tarea, Dimension::Eficiencia, 10, 42, dir.path(), &ev).expect("hay fila");
         // El bucle aplica una vez: la única función del camino se agota. El lastre aplica en sus dos casos.
@@ -3922,10 +4041,35 @@ mod tests {
         }
     }
 
+    /// Tarea 143: envuelve un evaluador de Eficiencia. Su base deja en la sonda todas las funciones de `src/` de
+    /// `repo`, como la sonda real con los tests comunes. Sin sonda, el lastre no tiene lugar.
+    fn con_sonda_de_todas<'a>(
+        repo: &'a Path,
+        ev: impl Fn(&Path) -> Result<Veredicto, ErrorOraculo> + Sync + 'a,
+    ) -> impl Fn(&Path) -> Result<Veredicto, ErrorOraculo> + Sync + 'a {
+        move |ruta: &Path| {
+            if ruta == repo && super::sonda_lastre::sonda_lastre_pedida() {
+                let mut funciones = BTreeSet::new();
+                for entrada in fs::read_dir(repo.join("src")).expect("src de la copia") {
+                    let ruta_src = entrada.expect("entrada").path();
+                    let texto = fs::read_to_string(&ruta_src).expect("lee src");
+                    let nombre = format!(
+                        "src/{}",
+                        ruta_src.file_name().expect("nombre").to_string_lossy()
+                    );
+                    let (_, mapa) = super::sonda_lastre::marcar_archivo(&nombre, &texto);
+                    funciones.extend(mapa.into_values());
+                }
+                super::sonda_lastre::dejar_sonda_lastre(Ok(funciones));
+            }
+            ev(ruta)
+        }
+    }
+
     /// Medida de Eficiencia con el evaluador falso, un hilo y sin tope. Sirve a los tests de la rotación.
     fn medir_eficiencia(tarea: &Tarea, repo: &Path) -> Medida {
         let base = eficiencia_base();
-        let ev = falso(repo, &base, |_, _, base| base.clone());
+        let ev = con_sonda_de_todas(repo, falso(repo, &base, |_, _, base| base.clone()));
         let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| ev(ruta);
         calibrar_medida_con_hilos(
             tarea,
@@ -4168,6 +4312,242 @@ mod tests {
         );
         assert!(corridas_de_la_sonda(Some(Err("motivo".into()))).is_empty());
         assert!(corridas_de_la_sonda(None).is_empty());
+    }
+
+    /// Tarea 143: mide Eficiencia con `tarea_con_bootstrap(true)`. La base deja `resultado` en la sonda, si hay.
+    fn medir_eficiencia_con_sonda(
+        repo: &Path,
+        tarea: &Tarea,
+        resultado: Option<Result<BTreeSet<crate::oracle::FuncionMarcada>, String>>,
+    ) -> Medida {
+        let base = eficiencia_base();
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            if let Some(r) = &resultado
+                && tipo == TipoCaso::Base
+                && super::sonda_lastre::sonda_lastre_pedida()
+            {
+                super::sonda_lastre::dejar_sonda_lastre(r.clone());
+            }
+            Ok(base.clone())
+        };
+        calibrar_medida_con_hilos(
+            tarea,
+            Dimension::Eficiencia,
+            2,
+            42,
+            repo,
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide")
+    }
+
+    /// Función `vieja` de `comandos.rs`, la que la sonda dice que corrió.
+    fn sonda_vieja() -> crate::oracle::FuncionMarcada {
+        crate::oracle::FuncionMarcada {
+            archivo: "src/comandos.rs".into(),
+            linea: 1,
+            nombre: "vieja".into(),
+        }
+    }
+
+    /// Tarea 143: con la sonda pedida y sin funciones, ningún caso de lastre se inyecta. Su motivo es `motivo`.
+    fn sonda_sin_funciones_no_pone_lastre(
+        resultado: Option<Result<BTreeSet<crate::oracle::FuncionMarcada>, String>>,
+        motivo: &str,
+    ) {
+        let (dir, tarea) = tarea_con_bootstrap(true);
+        let medida = medir_eficiencia_con_sonda(&dir.path().join("repo-bueno"), &tarea, resultado);
+        let con_lastre: Vec<u32> = medida
+            .casos
+            .iter()
+            .filter(|c| {
+                c.inyeccion
+                    .as_ref()
+                    .is_some_and(|i| i.defecto == Defecto::LastreDeMemoria)
+            })
+            .map(|c| c.indice)
+            .collect();
+        assert!(con_lastre.is_empty(), "casos con lastre: {con_lastre:?}");
+        let motivos: Vec<&str> = medida
+            .no_aplicables
+            .iter()
+            .filter(|n| n.defecto == Defecto::LastreDeMemoria)
+            .map(|n| n.motivo.as_str())
+            .collect();
+        assert!(
+            !motivos.is_empty() && motivos.iter().all(|m| *m == motivo),
+            "{motivos:?}"
+        );
+    }
+
+    /// Tarea 143, punto 1: la sonda pedida y sin funciones no usa la regla de la 136 en silencio.
+    #[test]
+    fn sonda_lastre_sin_funciones_no_pone_lastre_y_lo_dice() {
+        sonda_sin_funciones_no_pone_lastre(Some(Ok(BTreeSet::new())), MOTIVO_SONDA_SIN_FUNCIONES);
+    }
+
+    /// Tarea 143, punto 1: con error de la sonda, el motivo del caso lo nombra.
+    #[test]
+    fn sonda_lastre_con_error_no_pone_lastre_y_el_motivo_lo_nombra() {
+        sonda_sin_funciones_no_pone_lastre(
+            Some(Err("motivo x".into())),
+            &format!("{MOTIVO_SONDA_SIN_FUNCIONES}: motivo x"),
+        );
+    }
+
+    /// Tarea 143, punto 1: sin resultado de la sonda, el motivo dice que no corrió.
+    #[test]
+    fn sonda_lastre_sin_resultado_no_pone_lastre_y_dice_que_no_corrio() {
+        sonda_sin_funciones_no_pone_lastre(None, MOTIVO_SONDA_NO_CORRIO);
+    }
+
+    /// Tarea 143, punto 2: la fila guarda lo que hizo la sonda, y las otras dimensiones quedan por defecto.
+    #[test]
+    fn sonda_lastre_la_fila_guarda_lo_que_hizo_la_sonda() {
+        let (dir, tarea) = tarea_con_bootstrap(true);
+        let repo = dir.path().join("repo-bueno");
+        let con_una =
+            medir_eficiencia_con_sonda(&repo, &tarea, Some(Ok(BTreeSet::from([sonda_vieja()]))));
+        assert_eq!(
+            con_una.fila.expect("fila").sonda_lastre,
+            SondaLastre {
+                pedida: true,
+                corrio: true,
+                funciones: 1,
+                motivo: None,
+            }
+        );
+        let vacia = medir_eficiencia_con_sonda(&repo, &tarea, Some(Ok(BTreeSet::new())));
+        assert_eq!(
+            vacia.fila.expect("fila").sonda_lastre,
+            SondaLastre {
+                pedida: true,
+                corrio: true,
+                funciones: 0,
+                motivo: None,
+            }
+        );
+        let con_error = medir_eficiencia_con_sonda(&repo, &tarea, Some(Err("motivo x".into())));
+        assert_eq!(
+            con_error.fila.expect("fila").sonda_lastre,
+            SondaLastre {
+                pedida: true,
+                corrio: false,
+                funciones: 0,
+                motivo: Some("motivo x".into()),
+            }
+        );
+        let base = veredicto_de(Dimension::Funciona, 1.0, None);
+        let evaluador = |_: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            Ok(base.clone())
+        };
+        let funciona = medir_funciona(&tarea, &repo, 2, 42, &evaluador);
+        assert_eq!(
+            funciona.fila.expect("fila").sonda_lastre,
+            SondaLastre::default()
+        );
+    }
+
+    /// Tarea 143, punto 3: el renglón del lastre dice que lo puso la sonda. Los demás casos no tienen lugar.
+    #[test]
+    fn sonda_lastre_renglon_del_lastre_dice_que_lo_puso_la_sonda() {
+        let (dir, tarea) = tarea_con_bootstrap(true);
+        let repo = dir.path().join("repo-bueno");
+        let medida =
+            medir_eficiencia_con_sonda(&repo, &tarea, Some(Ok(BTreeSet::from([sonda_vieja()]))));
+        let lastre = medida
+            .casos
+            .iter()
+            .find(|c| {
+                c.inyeccion
+                    .as_ref()
+                    .is_some_and(|i| i.defecto == Defecto::LastreDeMemoria)
+            })
+            .expect("un caso con lastre");
+        assert_eq!(CasoGuardado::de(lastre).lugar_por.as_deref(), Some("sonda"));
+        for caso in medida.casos.iter().filter(|c| {
+            c.inyeccion
+                .as_ref()
+                .is_none_or(|i| i.defecto != Defecto::LastreDeMemoria)
+        }) {
+            assert_eq!(
+                CasoGuardado::de(caso).lugar_por,
+                None,
+                "caso {}",
+                caso.indice
+            );
+        }
+    }
+
+    /// Tarea 143, punto 3: `lugar_por` nombra la regla que puso el lastre. Solo el lastre tiene lugar.
+    #[test]
+    fn sonda_lastre_lugar_por_nombra_quien_eligio_el_lastre() {
+        assert_eq!(lugar_por_de(Defecto::LastreDeMemoria, true), Some("sonda"));
+        assert_eq!(
+            lugar_por_de(Defecto::LastreDeMemoria, false),
+            Some("nombre")
+        );
+        assert_eq!(lugar_por_de(Defecto::BucleCuadratico, true), None);
+        assert_eq!(lugar_por_de(Defecto::CuerpoVaciado, false), None);
+    }
+
+    /// Tarea 143, punto 5: un error de la sonda llega a los avisos que `calibrar` imprime.
+    #[test]
+    fn sonda_lastre_error_de_la_sonda_llega_a_los_avisos() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        fs::create_dir_all(&carpeta).expect("carpeta de la tarea");
+        let _ = tarea_en(&carpeta, "\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n");
+        let repo = copia_fixture();
+        let base = eficiencia_base();
+        let evaluador = |_: &Tarea, _: &Path, opciones: &OpcionesOraculo| {
+            if matches!(opciones.target, Target::Guardar(_))
+                && super::sonda_lastre::sonda_lastre_pedida()
+            {
+                super::sonda_lastre::dejar_sonda_lastre(Err("sonda de lastre: motivo".into()));
+            }
+            Ok(base.clone())
+        };
+        let calibrada = calibrar_tarea_con_lector(
+            home.path(),
+            "calibra-fixture",
+            "eficiencia",
+            2,
+            42,
+            Some(repo.path()),
+            None,
+            &evaluador,
+            &digest_falso,
+        )
+        .expect("calibra eficiencia");
+        assert_eq!(
+            calibrada.avisos,
+            vec!["sonda de lastre: motivo".to_string()]
+        );
+    }
+
+    /// Tarea 143, punto 4: una fila y un renglón viejos, sin los campos nuevos, se leen con su valor por defecto.
+    #[test]
+    fn sonda_lastre_renglon_viejo_se_lee_con_el_valor_por_defecto() {
+        let fila = fila_de_prueba("tarea", 1.0);
+        let mut valor = serde_json::to_value(&fila).expect("fila a json");
+        valor
+            .as_object_mut()
+            .expect("objeto")
+            .remove("sonda_lastre");
+        let vieja: Fila = serde_json::from_value(valor).expect("fila vieja");
+        assert_eq!(vieja.sonda_lastre, SondaLastre::default());
+        let caso: CasoGuardado = serde_json::from_str(
+            r#"{"caso":0,"es_defecto":true,"detectado":false,"defecto":"lastre_de_memoria"}"#,
+        )
+        .expect("renglón viejo");
+        assert_eq!(caso.lugar_por, None);
     }
 
     /// Tarea 132: sin defectos aplicables, la fila dice por qué y la base no se evalúa.

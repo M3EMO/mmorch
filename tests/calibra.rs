@@ -953,6 +953,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
     .expect("calibra");
     // Seguridad calibrada en la misma tarea: `global` la cuenta y Eficiencia no.
     let seguridad = Fila {
+        sonda_lastre: Default::default(),
         base_sin_veredicto: None,
         eficiencia_base: Vec::new(),
         causas_inestables: std::collections::BTreeMap::new(),
@@ -1128,6 +1129,7 @@ fn eficiencia_con_bloque_mantiene_la_medicion_previa() {
 #[test]
 fn fila_vieja_sin_no_aplica_se_lee() {
     let fila = Fila {
+        sonda_lastre: Default::default(),
         base_sin_veredicto: None,
         eficiencia_base: Vec::new(),
         causas_inestables: std::collections::BTreeMap::new(),
@@ -1177,6 +1179,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
     // Una fila `no_aplica` nueva se agrega al final: las filas anteriores quedan como estaban.
     let home = home_con_tarea("");
     let antes = Fila {
+        sonda_lastre: Default::default(),
         base_sin_veredicto: None,
         eficiencia_base: Vec::new(),
         causas_inestables: std::collections::BTreeMap::new(),

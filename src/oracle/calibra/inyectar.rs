@@ -221,13 +221,14 @@ pub struct Contexto<'a> {
     /// Rangos de líneas del cambio (1-based, inclusivos) por ruta relativa. `None`: la tarea no trae `bootstrap/`.
     pub cambios: Option<&'a Rangos>,
     /// Carpeta del estado inicial (`bootstrap/`). `Some`: `ComportamientoRoto` cambia también operadores y condiciones,
-    /// `CuerpoVaciado` vacía solo funciones que ya existían, `LastreDeMemoria` pone su reserva solo en funciones
-    /// que ya existían, y `ModuloBorrado` no aplica.
+    /// `CuerpoVaciado` vacía solo funciones que ya existían, `LastreDeMemoria` sin `corridas` pone su reserva solo en
+    /// funciones que ya existían, y `ModuloBorrado` no aplica. Con `corridas`, `LastreDeMemoria` no mira el estado inicial.
     /// `None`: `CuerpoVaciado` elige cualquier función de producción.
     pub inicial: Option<&'a Path>,
     /// Identidades que la elección no puede tomar: las ya usadas y las inválidas. Vacío: no excluye nada.
     pub excluidos: &'a Excluidos,
-    /// Funciones viejas que la sonda de lastre vio correr (Tarea 137). Vacía: `LastreDeMemoria` usa la regla de la Tarea 136.
+    /// Funciones que la sonda de lastre vio correr (Tarea 137). Vacía: `LastreDeMemoria` usa la regla de la Tarea 136.
+    /// Con la sonda pedida, la calibración no la deja vacía: sin funciones, el lastre no tiene lugar (Tarea 143).
     pub corridas: &'a [(String, String)],
 }
 
@@ -1290,8 +1291,9 @@ const _: () = assert!(LASTRE_BYTES == 64 << 20);
 
 /// Agrega una reserva de memoria que el compilador no puede quitar, al inicio de una función de producción del
 /// cambio: lastre de memoria. La línea reportada es la de la reserva, `abre + 2` (1-based), justo debajo de la `{`.
-/// Con `corridas` (Tarea 137), elige solo funciones viejas que la sonda de lastre vio correr, por archivo y nombre.
-/// Si ninguna existe en el repo, no hay lugar (`Ok(None)`).
+/// Con `corridas` (Tarea 137 y 143), elige solo funciones que la sonda de lastre vio correr, por archivo y nombre.
+/// No exige que la función existiera en el estado inicial: la lista dice qué corre en el repo. Si ninguna existe
+/// en el repo, no hay lugar (`Ok(None)`).
 /// Sin `corridas`, con `inicial`, solo elige funciones viejas que un test viejo llama por su nombre (`llamados_de_tests_viejos`).
 /// En los dos casos, primero una del cambio (`cambios`); si no queda ninguna libre, una de cualquier archivo de producción.
 /// Sin `inicial`, elige como antes entre todas las del cambio.
@@ -1319,11 +1321,12 @@ fn lastre_de_memoria(
         }
         libre
     } else {
-        let candidatos = funciones_de_efecto(dir, cambios, inicial, None)?;
+        // Tarea 143: sin filtro de estado inicial. Una función nueva que la sonda vio correr también es candidata.
+        let candidatos = funciones_de_efecto(dir, cambios, None, None)?;
         let mut candidatos = en_corridas(dir, candidatos, corridas)?;
         let mut libre = rng.elegir_libre(&candidatos, excluidos, identidad);
         if libre.is_none() && cambios.is_some() {
-            let todas = funciones_de_efecto(dir, None, inicial, None)?;
+            let todas = funciones_de_efecto(dir, None, None, None)?;
             candidatos = en_corridas(dir, todas, corridas)?;
             libre = rng.elegir_libre(&candidatos, excluidos, identidad);
         }
@@ -4894,6 +4897,34 @@ pub fn dos(x: u32) -> bool {
             assert!(
                 b.contains(&format!("pub fn tres(x: u32) -> u32 {{\n{LINEA_LASTRE}")),
                 "semilla {semilla}: {b}"
+            );
+        }
+    }
+
+    /// Tarea 143: con la lista de la sonda, una función nueva (que no existe en el estado inicial) que la
+    /// sonda vio correr es candidata. La lista dice qué corre en el repo; `inicial` no filtra más.
+    #[test]
+    fn lastre_sonda_funcion_nueva_que_corrio_es_candidata() {
+        let con_nueva = DOS_VIEJAS_UNA_LLAMADA.replace(
+            "#[cfg(test)]",
+            "pub fn nueva(x: u32) -> u32 {\n    x + 7\n}\n\n#[cfg(test)]",
+        );
+        let inicial = repo_de(&[("src/a.rs", DOS_VIEJAS_UNA_LLAMADA)]);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let corridas = [corrida("src/a.rs", "nueva")];
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/a.rs", con_nueva.as_str())]);
+            let inyeccion =
+                con_corridas_de(dir.path(), &cambios, inicial.path(), &corridas, semilla)
+                    .expect("E/S")
+                    .expect("aplica");
+            let a = leer(dir.path(), "src/a.rs").expect("lee a");
+            let lineas: Vec<&str> = a.lines().collect();
+            let i = inyeccion.linea as usize - 1;
+            assert_eq!(
+                lineas[i - 1],
+                "pub fn nueva(x: u32) -> u32 {",
+                "semilla {semilla}: {a}"
             );
         }
     }
