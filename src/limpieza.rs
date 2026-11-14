@@ -398,7 +398,7 @@ mod tests {
             })
             .collect();
         let cuerpo = format!(
-            "#!/bin/sh\nif [ \"$1\" = --sonda ]; then exit 0; fi\necho \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\n{lista}fi\n",
+            "#!/bin/sh\nif [ \"$1\" = --sonda ]; then exit 0; fi\necho \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\n:\n{lista}fi\n",
             log.display()
         );
         let ruta = base.join("podman-falso");
@@ -845,6 +845,40 @@ mod tests {
             .expect("lanza el podman falso");
         assert!(estado.success(), "la sonda sale con 0");
         assert!(!log.exists(), "la sonda no anota ninguna llamada");
+    }
+
+    #[test]
+    fn podman_falso_sin_contenedores_es_sintaxis_sh_valida() {
+        let _serie = serie();
+        let tmp = TempDir::new().expect("tmp");
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        let salida = Command::new("sh")
+            .arg("-n")
+            .arg(&podman)
+            .output()
+            .expect("sh -n");
+        let errores = String::from_utf8_lossy(&salida.stderr);
+        assert!(salida.status.success(), "sh -n falla: {errores}");
+        assert!(errores.is_empty(), "sh -n escribe en stderr: {errores}");
+    }
+
+    #[test]
+    fn podman_falso_sin_contenedores_lista_en_silencio() {
+        let _serie = serie();
+        let tmp = TempDir::new().expect("tmp");
+        let (podman, _log) = podman_falso(tmp.path(), &[]);
+        let salida = Command::new(&podman)
+            .arg("ps")
+            .output()
+            .expect("lanza el podman falso");
+        let errores = String::from_utf8_lossy(&salida.stderr);
+        assert!(salida.status.success(), "ps sale con 0: {errores}");
+        assert!(
+            salida.stdout.is_empty(),
+            "ps no escribe en stdout: {}",
+            String::from_utf8_lossy(&salida.stdout)
+        );
+        assert!(errores.is_empty(), "ps escribe en stderr: {errores}");
     }
 
     #[test]
