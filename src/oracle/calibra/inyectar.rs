@@ -27,10 +27,11 @@ pub enum Defecto {
     DockerfileRoot,
     ComportamientoRoto,
     CuerpoVaciado,
+    EstadoGlobal,
 }
 
 /// Todos los defectos, en el orden de `Defecto`.
-pub const TODOS: [Defecto; 11] = [
+pub const TODOS: [Defecto; 12] = [
     Defecto::SecretoEnCodigo,
     Defecto::PanicoEnEntrada,
     Defecto::BucleCuadratico,
@@ -42,6 +43,7 @@ pub const TODOS: [Defecto; 11] = [
     Defecto::DockerfileRoot,
     Defecto::ComportamientoRoto,
     Defecto::CuerpoVaciado,
+    Defecto::EstadoGlobal,
 ];
 
 impl Defecto {
@@ -58,6 +60,7 @@ impl Defecto {
             Defecto::DockerfileRoot => Dimension::Entrega,
             Defecto::ComportamientoRoto => Dimension::Funciona,
             Defecto::CuerpoVaciado => Dimension::Completitud,
+            Defecto::EstadoGlobal => Dimension::Diseno,
         }
     }
 
@@ -75,6 +78,7 @@ impl Defecto {
             Defecto::DockerfileRoot => "entrega.contenedor",
             Defecto::ComportamientoRoto => "funciona.correccion",
             Defecto::CuerpoVaciado => "completitud.alcance",
+            Defecto::EstadoGlobal => "diseno.estado",
         }
     }
 }
@@ -181,6 +185,7 @@ impl Inyeccion {
             Defecto::PanicoEnEntrada
             | Defecto::BucleCuadratico
             | Defecto::ErrorTragado
+            | Defecto::EstadoGlobal
             | Defecto::CuerpoVaciado => {
                 identidad_de_lugar(self.defecto, &self.archivo, self.linea, "")
             }
@@ -278,6 +283,7 @@ pub fn inyectar_con(
                 },
             )
         }
+        Defecto::EstadoGlobal => estado_global(dir, &mut rng, contexto.cambios, ex)?,
     };
     // Con `cambios`, un defecto de línea o de módulo solo cae dentro del cambio: toda elección lo está.
     // Un cuerpo vaciado sin estado inicial puede caer fuera: su marca sale de `cuerpo_vaciado`.
@@ -1000,6 +1006,110 @@ fn error_tragado(dir: &Path, rng: &mut Prng, excluidos: &Excluidos) -> io::Resul
     lineas[i] = format!("{sangria}let _ = {expr};");
     escribir(dir, &archivo, &unir(&lineas))?;
     Ok(Some((archivo, i as u32 + 1)))
+}
+
+/// Nombre del contador de `EstadoGlobal` en un archivo que no lo usa.
+const NOMBRE_CONTADOR: &str = "ROOT_CONTADOR_CALIBRACION";
+
+/// `NOMBRE_CONTADOR`, o el primero con sufijo `_2`, `_3`, ... que el texto no contenga.
+fn nombre_libre(texto: &str) -> String {
+    std::iter::once(NOMBRE_CONTADOR.to_string())
+        .chain((2..).map(|n| format!("{NOMBRE_CONTADOR}_{n}")))
+        .find(|n| !texto.contains(n.as_str()))
+        .expect("siempre hay un sufijo libre")
+}
+
+/// `true` si la línea declara un `mod x {` en línea: el módulo abre su bloque en la misma línea.
+fn es_mod_en_linea(limpia: &str) -> bool {
+    limpia.split_whitespace().any(|p| p == "mod") && limpia.trim_end().ends_with('{')
+}
+
+/// `true` si la función de la línea `firma` no es `const fn` ni `unsafe fn`, y no es de test: sin `#[test]`
+/// ni `#[cfg(test)]` entre los atributos que la preceden.
+fn es_fn_normal(lineas: &[String], firma: usize) -> bool {
+    let antes_de_fn = lineas[firma].split("fn ").next().unwrap_or("");
+    let calificada = antes_de_fn
+        .split_whitespace()
+        .any(|p| p == "const" || p == "unsafe");
+    let de_test = lineas[..firma]
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .take_while(|t| t.starts_with("#[") || t.starts_with("///"))
+        .any(|t| t.starts_with("#[") && t.contains("test"));
+    !calificada && !de_test
+}
+
+/// Funciones de producción donde `EstadoGlobal` puede poner el contador: `(archivo, cuerpo)`. Solo archivos que
+/// toca el cambio (`archivo_tocado`). Una función es candidata si su cuerpo cierra dentro de la producción, si su
+/// `{` de apertura termina la línea y si `es_fn_normal`. `cuerpo_de` ya descarta el cuerpo de una sola línea.
+/// Límites: no detecta una función dentro de un bloque `unsafe { }`. Un archivo con `mod x {` en línea se salta
+/// entero: el static va en la raíz del archivo y no se ve desde un módulo anidado.
+fn funciones_de_efecto(dir: &Path, cambios: Option<&Rangos>) -> io::Result<Vec<(String, Cuerpo)>> {
+    let mut salida = Vec::new();
+    for archivo in rust_en(dir, "src")? {
+        if !archivo_tocado(cambios, &archivo) {
+            continue;
+        }
+        let lineas = partir(&leer(dir, &archivo)?);
+        let limpias = limpias_de(&lineas);
+        let limite = limite_de_produccion(&lineas);
+        if limpias[..limite].iter().any(|l| es_mod_en_linea(l)) {
+            continue;
+        }
+        for firma in 0..limite {
+            if nombre_de_funcion(&lineas[firma]).is_none() || !es_fn_normal(&lineas, firma) {
+                continue;
+            }
+            let Some(cuerpo) = cuerpo_de(&limpias, firma).filter(|c| c.cierra < limite) else {
+                continue;
+            };
+            if lineas[cuerpo.abre].trim_end().ends_with('{') {
+                salida.push((archivo.clone(), cuerpo));
+            }
+        }
+    }
+    Ok(salida)
+}
+
+/// Agrega un contador atómico global y lo incrementa al inicio de una función de producción: estado global mutable.
+/// La línea reportada es la del incremento, `abre + 2` (1-based), justo debajo de la `{`.
+fn estado_global(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
+    let candidatos = funciones_de_efecto(dir, cambios)?;
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, c)| {
+        identidad_de_lugar(Defecto::EstadoGlobal, a, c.abre as u32 + 2, "")
+    });
+    let Some((archivo, cuerpo)) = libre else {
+        return Ok(None);
+    };
+    let texto = leer(dir, &archivo)?;
+    let nombre = nombre_libre(&texto);
+    // Primero la línea del incremento, después el static: el static va tras la función, no la mueve.
+    let mut lineas = partir(&texto);
+    let sangria: String = lineas[cuerpo.firma]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    lineas.insert(
+        cuerpo.abre + 1,
+        format!(
+            "{sangria}    let _ = {nombre}.fetch_add(1, std::sync::atomic::Ordering::Relaxed);"
+        ),
+    );
+    let estatica = format!(
+        "static {nombre}: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);"
+    );
+    escribir(
+        dir,
+        &archivo,
+        &insertar_antes_de_tests(&unir(&lineas), &[estatica]),
+    )?;
+    Ok(Some((archivo, cuerpo.abre as u32 + 2)))
 }
 
 /// Lo que `AssertBorrado` apagó: el lugar del primer `#[ignore]` y el mutante elegido.
@@ -3855,5 +3965,143 @@ pub fn dos(x: u32) -> bool {
                 panic!("semilla {semilla}: la copia con {inyeccion:?} no compila:\n{stderr}");
             }
         }
+    }
+
+    const LINEA_CONTADOR: &str =
+        "    let _ = ROOT_CONTADOR_CALIBRACION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);";
+
+    /// Repo con `src/a.rs` (dos funciones de producción y un test) y `src/b.rs` (una función).
+    fn repo_con_a_y_b() -> tempfile::TempDir {
+        repo_de(&[
+            (
+                "src/a.rs",
+                "pub fn uno(x: u32) -> u32 {\n    x + 1\n}\n\nfn dos(x: u32) -> u32 {\n    x * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(super::uno(1), 2);\n    }\n}\n",
+            ),
+            ("src/b.rs", "pub fn tres(x: u32) -> u32 {\n    x - 1\n}\n"),
+        ])
+    }
+
+    #[test]
+    fn estado_global_pone_el_contador_en_una_funcion_del_cambio() {
+        let dir = repo_con_a_y_b();
+        let b_antes = leer(dir.path(), "src/b.rs").expect("lee b");
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let inyeccion = con_cambios(Defecto::EstadoGlobal, dir.path(), Some(&cambios), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.archivo, "src/a.rs");
+        let a = leer(dir.path(), "src/a.rs").expect("lee a");
+        let lineas: Vec<&str> = a.lines().collect();
+        let i = inyeccion.linea as usize - 1;
+        assert_eq!(lineas[i], LINEA_CONTADOR, "{a}");
+        assert!(
+            lineas[i - 1].ends_with('{'),
+            "no va dentro de una función: {a}"
+        );
+        let estatica = lineas
+            .iter()
+            .position(|l| l.starts_with("static ROOT_CONTADOR_CALIBRACION"))
+            .expect("el static queda en el archivo");
+        assert!(estatica > i, "el static va después de la función: {a}");
+        assert_eq!(leer(dir.path(), "src/b.rs").expect("lee b"), b_antes);
+    }
+
+    #[test]
+    fn estado_global_la_copia_del_fixture_compila() {
+        let dir = copia_fixture();
+        inyectar(Defecto::EstadoGlobal, dir.path(), &capas_fixture(), 42)
+            .expect("E/S")
+            .expect("aplica");
+        let objetivo = tempfile::tempdir().expect("temporal");
+        if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
+            panic!("la copia del fixture no compila:\n{stderr}");
+        }
+    }
+
+    #[test]
+    fn estado_global_es_de_diseno_con_su_item() {
+        assert_eq!(Defecto::EstadoGlobal.dimension(), Dimension::Diseno);
+        assert_eq!(Defecto::EstadoGlobal.item(), "diseno.estado");
+        assert_eq!(
+            de_dimension(Dimension::Diseno),
+            vec![Defecto::ErrorTragado, Defecto::EstadoGlobal]
+        );
+        assert_eq!(TODOS.len(), 12);
+    }
+
+    #[test]
+    fn estado_global_no_elige_const_fn_ni_unsafe_fn_ni_tests() {
+        let codigo = "pub const fn c() -> u32 {\n    1\n}\n\npub unsafe fn u() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(1, 1);\n    }\n}\n";
+        let dir = repo_con_lib(codigo);
+        for semilla in 1..=20u64 {
+            let r = inyectar(Defecto::EstadoGlobal, dir.path(), &capas_fixture(), semilla)
+                .expect("E/S");
+            assert!(r.is_none(), "semilla {semilla}: {r:?}");
+        }
+        assert_eq!(leer(dir.path(), "src/lib.rs").expect("lee"), codigo);
+    }
+
+    #[test]
+    fn estado_global_elige_la_fn_normal_y_no_la_const() {
+        let dir =
+            repo_con_lib("pub const fn c() -> u32 {\n    1\n}\n\npub fn n() -> u32 {\n    2\n}\n");
+        let inyeccion = inyectar(Defecto::EstadoGlobal, dir.path(), &capas_fixture(), 7)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.linea, 6);
+        let nuevo = leer(dir.path(), "src/lib.rs").expect("lee");
+        assert!(
+            nuevo.contains("pub fn n() -> u32 {\n    let _ = ROOT_CONTADOR_CALIBRACION.fetch_add"),
+            "{nuevo}"
+        );
+    }
+
+    #[test]
+    fn estado_global_no_elige_archivo_con_mod_en_linea() {
+        let codigo = "pub mod interno {\n    pub fn f() -> u32 {\n        1\n    }\n}\n";
+        let dir = repo_con_lib(codigo);
+        for semilla in 1..=10u64 {
+            let r = inyectar(Defecto::EstadoGlobal, dir.path(), &capas_fixture(), semilla)
+                .expect("E/S");
+            assert!(r.is_none(), "semilla {semilla}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn estado_global_misma_semilla_mismo_lugar_y_nombre_libre_con_sufijo() {
+        let dir1 = repo_con_a_y_b();
+        let dir2 = repo_con_a_y_b();
+        let uno = inyectar(Defecto::EstadoGlobal, dir1.path(), &capas_fixture(), 9)
+            .expect("E/S")
+            .expect("aplica");
+        let otro = inyectar(Defecto::EstadoGlobal, dir2.path(), &capas_fixture(), 9)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(uno, otro);
+        assert_eq!(arbol(dir1.path()), arbol(dir2.path()));
+
+        let con_nombre = repo_de(&[(
+            "src/lib.rs",
+            "// ROOT_CONTADOR_CALIBRACION ya usado aquí\npub fn uno() -> u32 {\n    1\n}\n",
+        )]);
+        inyectar(
+            Defecto::EstadoGlobal,
+            con_nombre.path(),
+            &capas_fixture(),
+            9,
+        )
+        .expect("E/S")
+        .expect("aplica");
+        let nuevo = leer(con_nombre.path(), "src/lib.rs").expect("lee");
+        assert!(
+            nuevo.contains("static ROOT_CONTADOR_CALIBRACION_2: std::sync::atomic::AtomicUsize"),
+            "{nuevo}"
+        );
+        assert!(
+            nuevo.contains(
+                "    let _ = ROOT_CONTADOR_CALIBRACION_2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);"
+            ),
+            "{nuevo}"
+        );
     }
 }

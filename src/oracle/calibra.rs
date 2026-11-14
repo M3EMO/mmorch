@@ -4876,7 +4876,7 @@ mod tests {
             .count();
         assert_eq!(
             llamadas.len(),
-            medidos + inestables::JUICIOS_EXTRA,
+            medidos + 1 + inestables::JUICIOS_EXTRA,
             "la base (tres juicios) y cada caso llaman al evaluador"
         );
         assert!(llamadas[0].base, "la primera llamada es la base");
@@ -5008,7 +5008,7 @@ mod tests {
             .count();
         assert_eq!(
             llamadas.len(),
-            medidos + inestables::JUICIOS_EXTRA,
+            medidos + 1 + inestables::JUICIOS_EXTRA,
             "la base (tres juicios) y cada caso llaman al evaluador"
         );
         assert!(
