@@ -6779,6 +6779,156 @@ mod tests {
         assert!(v.avisos.iter().any(|a| a == &motivo), "{:?}", v.avisos);
     }
 
+    /// Ids de la sonda de lastre de todos los `.rs` bajo `dir`, en orden de lectura.
+    fn ids_de_sonda(dir: &Path, ids: &mut Vec<String>) {
+        let Ok(entradas) = fs::read_dir(dir) else {
+            return;
+        };
+        for entrada in entradas.flatten() {
+            let ruta = entrada.path();
+            if ruta.is_dir() {
+                ids_de_sonda(&ruta, ids);
+            } else if ruta.extension().is_some_and(|e| e == "rs")
+                && let Ok(texto) = fs::read_to_string(&ruta)
+            {
+                for linea in texto.lines().filter(|l| l.contains("ROOT_SONDA_")) {
+                    let Some(pos) = linea.find("/tmp/root-sonda/") else {
+                        continue;
+                    };
+                    let id: String = linea[pos + "/tmp/root-sonda/".len()..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    ids.push(id);
+                }
+            }
+        }
+    }
+
+    /// Ejecutor de la calibración de punta a punta: la sonda responde todas las funciones menos `no_corre`;
+    /// el resto de los comandos lo responde `EficienciaFalsa`.
+    struct LastreFalso {
+        eficiencia: EficienciaFalsa,
+        repo: PathBuf,
+    }
+
+    impl EjecutorHerramienta for LastreFalso {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if !cmd.contains("ROOT_SONDA_INICIO") {
+                return self.eficiencia.ejecutar(cmd);
+            }
+            let mut ids = Vec::new();
+            ids_de_sonda(&self.repo.join("src"), &mut ids);
+            let ids: Vec<String> = ids
+                .into_iter()
+                .filter(|id| !id.ends_with("__no_corre"))
+                .collect();
+            let stdout = format!(
+                "34 tests pasan\nROOT_SONDA_INICIO\n{}\nROOT_SONDA_FIN\n",
+                ids.join("\n")
+            );
+            Ok(SalidaHerramienta {
+                stdout,
+                ..SalidaHerramienta::default()
+            })
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            self.eficiencia.tiene_rustsec()
+        }
+    }
+
+    /// Fábrica de `LastreFalso`. Cada copia recibe su propio `EficienciaFalsa` con `cmds`.
+    fn fabrica_lastre(
+        ns_repo: u64,
+        cmds: Comandos,
+    ) -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
+        move |p: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(LastreFalso {
+                eficiencia: EficienciaFalsa {
+                    base: HerramientasSanas {
+                        faltan: Vec::new(),
+                        fuga: false,
+                    },
+                    inicial: p.repo.ends_with("bootstrap"),
+                    ns_repo,
+                    ops: None,
+                    cmds: cmds.clone(),
+                },
+                repo: p.repo.clone(),
+            })
+        }
+    }
+
+    /// Nombre de la función en cuya `{` cae el lastre de `texto`: la firma `fn` inmediatamente anterior.
+    fn funcion_del_lastre(texto: &str) -> Option<String> {
+        let mut firma = None;
+        for linea in texto.lines() {
+            if linea.contains("let _lastre = std::hint::black_box(") {
+                return firma;
+            }
+            if let Some(pos) = linea.find("fn ") {
+                let nombre: String = linea[pos + 3..]
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !nombre.is_empty() {
+                    firma = Some(nombre);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn sonda_lastre_calibracion_de_eficiencia_de_punta_a_punta_pone_el_lastre_en_la_lista() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let bootstrap = tarea.dir.join("bootstrap");
+        fs::create_dir_all(bootstrap.join("src")).expect("bootstrap/src");
+        fs::write(
+            bootstrap.join("src/lib.rs"),
+            "pub fn uno() -> u8 {\n    let x = 1;\n    x\n}\n\n\
+             pub fn dos() -> u8 {\n    let x = 2;\n    x\n}\n\n\
+             pub fn no_corre() -> u8 {\n    let x = 3;\n    x\n}\n",
+        )
+        .expect("lib.rs inicial");
+        fs::write(bootstrap.join("Cargo.lock"), LOCK_SANO).expect("lock inicial");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn uno() -> u8 {\n    let x = 1;\n    x\n}\n\n\
+             pub fn dos() -> u8 {\n    let x = 2;\n    x\n}\n\n\
+             pub fn no_corre() -> u8 {\n    let x = 3;\n    x\n}\n\n\
+             pub fn nueva() -> u8 {\n    let x = 4;\n    x\n}\n",
+        )
+        .expect("repo bueno");
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let lastres = std::sync::Mutex::new(Vec::<String>::new());
+        let evaluador = |ruta: &Path| -> Result<Veredicto, ErrorOraculo> {
+            let fabrica = fabrica_lastre(1_300_000_000, Comandos::default());
+            let v = evaluar_falso_con(ruta, &tarea, &opciones(&home), &correr, &fabrica)?;
+            if let Ok(texto) = fs::read_to_string(ruta.join("src/lib.rs"))
+                && texto.contains("let _lastre = std::hint::black_box(")
+                && let Some(nombre) = funcion_del_lastre(&texto)
+            {
+                lastres.lock().expect("lastres").push(nombre);
+            }
+            Ok(v)
+        };
+        calibra::calibrar_con(&tarea, Dimension::Eficiencia, 6, 42, &repo, &evaluador)
+            .expect("calibra");
+        let lastres = lastres.into_inner().expect("lastres");
+        assert!(!lastres.is_empty(), "debe haber al menos un lastre");
+        let lista = ["uno", "dos"];
+        assert!(
+            lastres.iter().all(|f| lista.contains(&f.as_str())),
+            "todo lastre cae en la lista: {lastres:?}"
+        );
+    }
+
     #[test]
     fn oraculo_eficiencia_no_rust_con_estado_inicial_no_mide_sola() {
         let base = tempfile::tempdir().expect("base");
