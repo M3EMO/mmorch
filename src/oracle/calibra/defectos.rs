@@ -569,6 +569,31 @@ fn estado_global_lo_detecta_el_juez_falso() {
 }
 
 #[test]
+fn efecto_en_nucleo_lo_detecta_el_juez_falso() {
+    let dir = tempfile::tempdir().expect("tarea");
+    let tarea = tarea_en(dir.path(), IMAGEN_HERRAMIENTAS, "cargo test", REQUISITO);
+    let partes = partes_para(Dimension::Arquitectura, &tarea, |p| {
+        p.entrega = false;
+        p.gitleaks = false;
+        p.cargo_audit = false;
+        p.clippy = false;
+        p.eficiencia = false;
+        p.mutacion = false;
+        p.configs = false;
+        p.hadolint = false;
+    });
+    let juez = JuezFalso;
+    let e = ensayar(
+        Defecto::EfectoEnNucleo,
+        &tarea,
+        partes,
+        Some(&juez),
+        &sin_cambios,
+    );
+    afirma_detectado(&e, Defecto::EfectoEnNucleo, true);
+}
+
+#[test]
 fn dockerfile_root_lo_detecta_la_sonda_de_entrega() {
     crate::saltar_sin_podman!();
     let dir = tempfile::tempdir().expect("tarea");
@@ -596,7 +621,9 @@ fn dockerfile_root_lo_detecta_la_sonda_de_entrega() {
 /// y una cita de `src/lib.rs`. Sin `let _ =` en el prompt, todos quedan en 3: solo da cobertura de juez a
 /// Arquitectura y Estructura, que sin juez no tienen veredicto (`sin_veredicto` por cobertura). Con un
 /// `let _ =` en el prompt (lo que deja `ErrorTragado`), baja `diseno.errores` a nivel 1 y cita esa línea en
-/// un hallazgo. Con el `fetch_add` del contador (lo que deja `EstadoGlobal`), baja `diseno.estado` igual. No mira nada más del repo: solo el texto que recibe.
+/// un hallazgo. Con el `fetch_add` del contador (lo que deja `EstadoGlobal`), baja `diseno.estado` igual. Con la
+/// lectura de `ROOT_EFECTO` (lo que deja `EfectoEnNucleo`), baja `arquitectura.adecuacion`. No mira nada más del
+/// repo: solo el texto que recibe.
 struct JuezFalso;
 
 impl ModeloJuez for JuezFalso {
@@ -654,7 +681,8 @@ struct HallazgoFalso {
     detalle: &'static str,
 }
 
-/// Un hallazgo por cada patrón de defecto de Diseño que el prompt trae: `let _ =` (errores) y el contador (estado).
+/// Un hallazgo por cada patrón de defecto que el prompt trae: `let _ =` (errores), el contador (estado) y la
+/// lectura de `ROOT_EFECTO` (efecto en el núcleo).
 fn hallazgos_falsos(usuario: &str) -> Vec<HallazgoFalso> {
     let mut salida = Vec::new();
     if let Some((archivo, linea, cita)) = donde_let_guion(usuario) {
@@ -675,6 +703,15 @@ fn hallazgos_falsos(usuario: &str) -> Vec<HallazgoFalso> {
             detalle: "estado global mutable: un contador atómico compartido",
         });
     }
+    if let Some((archivo, linea, cita)) = donde_efecto(usuario) {
+        salida.push(HallazgoFalso {
+            item: "arquitectura.adecuacion",
+            archivo,
+            linea,
+            cita,
+            detalle: "efecto de lado en el núcleo: lee el entorno",
+        });
+    }
     salida
 }
 
@@ -693,9 +730,9 @@ fn ids_pedidos(usuario: &str) -> Vec<String> {
         .collect()
 }
 
-/// Archivo, línea y cita de la primera línea de los extractos que tiene `let _ =`. Los extractos vienen
+/// Archivo, línea y cita de la primera línea de los extractos que cumple `cumple`. Los extractos vienen
 /// como `--- <archivo> ---` seguido de `N: <texto>` por línea.
-fn donde_let_guion(usuario: &str) -> Option<(String, u32, String)> {
+fn primera_linea(usuario: &str, cumple: impl Fn(&str) -> bool) -> Option<(String, u32, String)> {
     let mut archivo = String::new();
     for linea in usuario.lines() {
         if let Some(nombre) = linea
@@ -707,8 +744,7 @@ fn donde_let_guion(usuario: &str) -> Option<(String, u32, String)> {
         }
         if let Some((numero, texto)) = linea.split_once(": ")
             && let Ok(n) = numero.parse::<u32>()
-            && texto.contains("let _ =")
-            && !texto.contains("fetch_add")
+            && cumple(texto)
         {
             return Some((archivo, n, texto.trim().to_string()));
         }
@@ -716,24 +752,23 @@ fn donde_let_guion(usuario: &str) -> Option<(String, u32, String)> {
     None
 }
 
+/// Archivo, línea y cita de la primera línea que tiene `let _ =`. No cuentan el `fetch_add` del contador ni la
+/// lectura de `ROOT_EFECTO`: son de otros defectos.
+fn donde_let_guion(usuario: &str) -> Option<(String, u32, String)> {
+    primera_linea(usuario, |t| {
+        t.contains("let _ =") && !t.contains("fetch_add") && !t.contains("ROOT_EFECTO")
+    })
+}
+
 /// Archivo, línea y cita de la primera línea de los extractos que incrementa `ROOT_CONTADOR_CALIBRACION`.
 /// Es el `fetch_add`, no el `static`: así la cita es la línea que el inyector tocó.
 fn donde_contador(usuario: &str) -> Option<(String, u32, String)> {
-    let mut archivo = String::new();
-    for linea in usuario.lines() {
-        if let Some(nombre) = linea
-            .strip_prefix("--- ")
-            .and_then(|r| r.strip_suffix(" ---"))
-        {
-            archivo = nombre.to_string();
-            continue;
-        }
-        if let Some((numero, texto)) = linea.split_once(": ")
-            && let Ok(n) = numero.parse::<u32>()
-            && texto.contains("ROOT_CONTADOR_CALIBRACION.fetch_add")
-        {
-            return Some((archivo, n, texto.trim().to_string()));
-        }
-    }
-    None
+    primera_linea(usuario, |t| {
+        t.contains("ROOT_CONTADOR_CALIBRACION.fetch_add")
+    })
+}
+
+/// Archivo, línea y cita de la primera línea de los extractos que lee `ROOT_EFECTO`: la que pone `EfectoEnNucleo`.
+fn donde_efecto(usuario: &str) -> Option<(String, u32, String)> {
+    primera_linea(usuario, |t| t.contains("ROOT_EFECTO"))
 }

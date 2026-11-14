@@ -8328,20 +8328,26 @@ mod tests {
     #[test]
     fn calibra_arquitectura_limpio_con_item_del_defecto_que_baja_dos_detecta() {
         // Punto 3: el ítem del defecto anterior baja 2 niveles en el limpio: detecta.
-        let medida = medir_arquitectura(
-            &arquitectura_con_item(3),
-            |_, _| arquitectura_con_item(1),
-            4,
-        );
+        // Arquitectura rota dos defectos (Tarea 129): base y limpio traen el ítem de cada uno.
+        let con_los_dos = |nivel: u8| {
+            let mut v = arquitectura_con_item(nivel);
+            let mut otro = v.puntajes[0].items[0].clone();
+            otro.item = "arquitectura.adecuacion".into();
+            v.puntajes[0].items.push(otro);
+            v
+        };
+        let medida = medir_arquitectura(&con_los_dos(3), |_, _| con_los_dos(1), 4);
         let limpios = limpios_guardados(&medida);
         assert!(!limpios.is_empty(), "hay casos limpios");
         for caso in &limpios {
             assert!(caso.detectado, "caso {}: bajó 2 niveles", caso.caso);
-            assert_eq!(
-                caso.motivo.as_deref(),
-                Some("item_baja_2:arquitectura.dependencias"),
-                "caso {}",
-                caso.caso
+            assert!(
+                caso.motivo
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("item_baja_2:arquitectura.")),
+                "caso {}: {:?}",
+                caso.caso,
+                caso.motivo
             );
         }
     }

@@ -28,10 +28,11 @@ pub enum Defecto {
     ComportamientoRoto,
     CuerpoVaciado,
     EstadoGlobal,
+    EfectoEnNucleo,
 }
 
 /// Todos los defectos, en el orden de `Defecto`.
-pub const TODOS: [Defecto; 12] = [
+pub const TODOS: [Defecto; 13] = [
     Defecto::SecretoEnCodigo,
     Defecto::PanicoEnEntrada,
     Defecto::BucleCuadratico,
@@ -44,6 +45,7 @@ pub const TODOS: [Defecto; 12] = [
     Defecto::ComportamientoRoto,
     Defecto::CuerpoVaciado,
     Defecto::EstadoGlobal,
+    Defecto::EfectoEnNucleo,
 ];
 
 impl Defecto {
@@ -61,6 +63,7 @@ impl Defecto {
             Defecto::ComportamientoRoto => Dimension::Funciona,
             Defecto::CuerpoVaciado => Dimension::Completitud,
             Defecto::EstadoGlobal => Dimension::Diseno,
+            Defecto::EfectoEnNucleo => Dimension::Arquitectura,
         }
     }
 
@@ -79,6 +82,7 @@ impl Defecto {
             Defecto::ComportamientoRoto => "funciona.correccion",
             Defecto::CuerpoVaciado => "completitud.alcance",
             Defecto::EstadoGlobal => "diseno.estado",
+            Defecto::EfectoEnNucleo => "arquitectura.adecuacion",
         }
     }
 }
@@ -186,6 +190,7 @@ impl Inyeccion {
             | Defecto::BucleCuadratico
             | Defecto::ErrorTragado
             | Defecto::EstadoGlobal
+            | Defecto::EfectoEnNucleo
             | Defecto::CuerpoVaciado => {
                 identidad_de_lugar(self.defecto, &self.archivo, self.linea, "")
             }
@@ -284,6 +289,7 @@ pub fn inyectar_con(
             )
         }
         Defecto::EstadoGlobal => estado_global(dir, &mut rng, contexto.cambios, ex)?,
+        Defecto::EfectoEnNucleo => efecto_en_nucleo(dir, &mut rng, contexto.cambios, ex)?,
     };
     // Con `cambios`, un defecto de línea o de módulo solo cae dentro del cambio: toda elección lo está.
     // Un cuerpo vaciado sin estado inicial puede caer fuera: su marca sale de `cuerpo_vaciado`.
@@ -1040,8 +1046,8 @@ fn es_fn_normal(lineas: &[String], firma: usize) -> bool {
     !calificada && !de_test
 }
 
-/// Funciones de producción donde `EstadoGlobal` puede poner el contador: `(archivo, cuerpo)`. Solo archivos que
-/// toca el cambio (`archivo_tocado`). Una función es candidata si su cuerpo cierra dentro de la producción, si su
+/// Funciones de producción donde `EstadoGlobal` y `EfectoEnNucleo` ponen su línea: `(archivo, cuerpo)`. Solo
+/// archivos que toca el cambio (`archivo_tocado`). Una función es candidata si su cuerpo cierra dentro de la producción, si su
 /// `{` de apertura termina la línea y si `es_fn_normal`. `cuerpo_de` ya descarta el cuerpo de una sola línea.
 /// Límites: no detecta una función dentro de un bloque `unsafe { }`. Un archivo con `mod x {` en línea se salta
 /// entero: el static va en la raíz del archivo y no se ve desde un módulo anidado.
@@ -1109,6 +1115,34 @@ fn estado_global(
         &archivo,
         &insertar_antes_de_tests(&unir(&lineas), &[estatica]),
     )?;
+    Ok(Some((archivo, cuerpo.abre as u32 + 2)))
+}
+
+/// Agrega una lectura del entorno al inicio de una función de producción del cambio: un efecto de lado en el
+/// núcleo. La línea reportada es la de la lectura, `abre + 2` (1-based), justo debajo de la `{`.
+fn efecto_en_nucleo(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
+    let candidatos = funciones_de_efecto(dir, cambios)?;
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, c)| {
+        identidad_de_lugar(Defecto::EfectoEnNucleo, a, c.abre as u32 + 2, "")
+    });
+    let Some((archivo, cuerpo)) = libre else {
+        return Ok(None);
+    };
+    let mut lineas = partir(&leer(dir, &archivo)?);
+    let sangria: String = lineas[cuerpo.firma]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    lineas.insert(
+        cuerpo.abre + 1,
+        format!("{sangria}    let _ = std::env::var(\"ROOT_EFECTO\");"),
+    );
+    escribir(dir, &archivo, &unir(&lineas))?;
     Ok(Some((archivo, cuerpo.abre as u32 + 2)))
 }
 
@@ -4026,7 +4060,7 @@ pub fn dos(x: u32) -> bool {
             de_dimension(Dimension::Diseno),
             vec![Defecto::ErrorTragado, Defecto::EstadoGlobal]
         );
-        assert_eq!(TODOS.len(), 12);
+        assert_eq!(TODOS.len(), 13);
     }
 
     #[test]
@@ -4103,5 +4137,78 @@ pub fn dos(x: u32) -> bool {
             ),
             "{nuevo}"
         );
+    }
+
+    const LINEA_EFECTO: &str = "    let _ = std::env::var(\"ROOT_EFECTO\");";
+
+    #[test]
+    fn efecto_en_nucleo_pone_la_linea_en_una_funcion_del_cambio() {
+        let dir = repo_con_a_y_b();
+        let b_antes = leer(dir.path(), "src/b.rs").expect("lee b");
+        let a_antes = leer(dir.path(), "src/a.rs").expect("lee a");
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let inyeccion = con_cambios(Defecto::EfectoEnNucleo, dir.path(), Some(&cambios), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.defecto, Defecto::EfectoEnNucleo);
+        assert_eq!(inyeccion.archivo, "src/a.rs");
+        assert!(!inyeccion.en_cambio, "{inyeccion:?}");
+        let a = leer(dir.path(), "src/a.rs").expect("lee a");
+        let lineas: Vec<&str> = a.lines().collect();
+        let i = inyeccion.linea as usize - 1;
+        assert_eq!(lineas[i], LINEA_EFECTO, "{a}");
+        assert!(
+            lineas[i - 1].ends_with('{'),
+            "no va dentro de una función: {a}"
+        );
+        let sin_la_linea: Vec<&str> = lineas
+            .iter()
+            .enumerate()
+            .filter(|(n, _)| *n != i)
+            .map(|(_, l)| *l)
+            .collect();
+        let original: Vec<&str> = a_antes.lines().collect();
+        assert_eq!(sin_la_linea, original, "el resto del archivo cambia: {a}");
+        assert_eq!(leer(dir.path(), "src/b.rs").expect("lee b"), b_antes);
+    }
+
+    #[test]
+    fn efecto_en_nucleo_la_copia_del_fixture_compila() {
+        let dir = copia_fixture();
+        inyectar(Defecto::EfectoEnNucleo, dir.path(), &capas_fixture(), 42)
+            .expect("E/S")
+            .expect("aplica");
+        let objetivo = tempfile::tempdir().expect("temporal");
+        if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
+            panic!("la copia del fixture no compila:\n{stderr}");
+        }
+    }
+
+    #[test]
+    fn efecto_en_nucleo_es_de_arquitectura_con_su_item() {
+        assert_eq!(Defecto::EfectoEnNucleo.dimension(), Dimension::Arquitectura);
+        assert_eq!(Defecto::EfectoEnNucleo.item(), "arquitectura.adecuacion");
+        assert_eq!(
+            de_dimension(Dimension::Arquitectura),
+            vec![Defecto::CicloEntreCapas, Defecto::EfectoEnNucleo]
+        );
+        assert_eq!(TODOS.len(), 13);
+    }
+
+    #[test]
+    fn efecto_en_nucleo_no_elige_const_fn_ni_tests() {
+        let codigo = "pub const fn c() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(1, 1);\n    }\n}\n";
+        let dir = repo_con_lib(codigo);
+        for semilla in 1..=20u64 {
+            let r = inyectar(
+                Defecto::EfectoEnNucleo,
+                dir.path(),
+                &capas_fixture(),
+                semilla,
+            )
+            .expect("E/S");
+            assert!(r.is_none(), "semilla {semilla}: {r:?}");
+        }
+        assert_eq!(leer(dir.path(), "src/lib.rs").expect("lee"), codigo);
     }
 }
