@@ -48,6 +48,10 @@ use crate::tipos::{
 };
 use crate::track::stats::wilson_inferior;
 use calibra::Calibraciones;
+use calibra::sonda_lastre::{
+    FuncionMarcada, armar_copia_marcada, cmd_sonda, dejar_sonda_lastre, leer_salida, salida_valida,
+    sonda_lastre_pedida, tomar_sonda_lastre,
+};
 use contenedor::{Ejecucion, Resultado};
 use descarga::python::AVISO_NO_VERIFICADAS;
 use eficiencia::ResultadoMedida;
@@ -579,6 +583,67 @@ const DIMENSIONES: [Dimension; 9] = [
     Dimension::Pruebas,
 ];
 
+/// Corre la sonda de lastre sobre una copia marcada de `bootstrap` y deja su resultado. Sus fallos suman un
+/// aviso y la evaluación sigue. La carpeta de trabajo se borra al terminar, también con error.
+fn correr_sonda_de_lastre(
+    tmp: &Path,
+    bootstrap: &Path,
+    cache: Option<&Path>,
+    rustsec: Option<&Path>,
+    herramientas: FabricaHerramientas,
+    avisos: &mut Vec<String>,
+) {
+    let resultado = match temporal(tmp) {
+        Ok(trabajo) => {
+            let resultado = medir_lastre(trabajo.path(), bootstrap, cache, rustsec, herramientas);
+            if let Err(e) = borrado::borrar_dir_dentro(tmp, trabajo.path()) {
+                avisos.push(format!(
+                    "sonda de lastre: no se borró su carpeta de trabajo: {e}"
+                ));
+            }
+            resultado
+        }
+        Err(e) => Err(format!(
+            "sonda de lastre: no se creó la carpeta de trabajo: {e}"
+        )),
+    };
+    if let Err(motivo) = &resultado {
+        avisos.push(motivo.clone());
+    }
+    dejar_sonda_lastre(resultado);
+}
+
+/// Arma la copia marcada en `trabajo`, corre la sonda y lee las funciones que corrieron.
+fn medir_lastre(
+    trabajo: &Path,
+    bootstrap: &Path,
+    cache: Option<&Path>,
+    rustsec: Option<&Path>,
+    herramientas: FabricaHerramientas,
+) -> Result<BTreeSet<FuncionMarcada>, String> {
+    let ruta_repo = trabajo.join("repo");
+    let mapa = armar_copia_marcada(bootstrap, &ruta_repo)
+        .map_err(|e| format!("sonda de lastre: la copia marcada no se armó: {e}"))?;
+    let ruta_salida = trabajo.join("salida");
+    fs::create_dir_all(&ruta_salida)
+        .map_err(|e| format!("sonda de lastre: la salida no se creó: {e}"))?;
+    // Podman rootless: si el contenedor corre con otro uid, la salida debe ser escribible por todos.
+    fs::set_permissions(&ruta_salida, fs::Permissions::from_mode(0o777))
+        .map_err(|e| format!("sonda de lastre: permisos de la salida: {e}"))?;
+    let ej = herramientas(&Preparada {
+        repo: ruta_repo,
+        cache: cache.map(Path::to_path_buf),
+        rustsec: rustsec.map(Path::to_path_buf),
+    });
+    let salida = ej
+        .ejecutar_en(&cmd_sonda(), &ruta_salida)
+        .map_err(|e| format!("sonda de lastre: el ejecutor falló: {e}"))?;
+    if !salida_valida(&salida.stdout) {
+        return Err("sonda de lastre: sin salida; el comando no llegó a sus marcas".into());
+    }
+    Ok(leer_salida(&salida.stdout, &mapa))
+}
+
 /// Como `evaluar`, con las dependencias que se le pasen.
 fn evaluar_con(
     repo: &Path,
@@ -823,6 +888,21 @@ fn evaluar_con(
         }
         None
     };
+    // La sonda de lastre (Tarea 137): solo si `calibra` la pide. Sin ella, la evaluación no cambia.
+    if sonda_lastre_pedida() {
+        // Sin resultado viejo: aunque aquí no corra, no queda el de una evaluación anterior.
+        let _ = tomar_sonda_lastre();
+        if tarea.lenguaje == "rust" && bootstrap.is_dir() {
+            correr_sonda_de_lastre(
+                &tmp,
+                &bootstrap,
+                cache.as_deref(),
+                rustsec.as_deref(),
+                deps.herramientas,
+                &mut avisos,
+            );
+        }
+    }
     // La medición automática de Eficiencia: Rust con `bootstrap/`, si la partes pide. Sus dos ejecutores son
     // nuevos, sin memo ni reuso (Tarea 115).
     let mut avisos_eficiencia = Vec::new();
@@ -6520,6 +6600,183 @@ mod tests {
         let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, Some(partes));
         assert!(cmds.borrow().is_empty(), "{:?}", cmds.borrow());
         assert!(v.eficiencia_auto.is_empty(), "{:?}", v.eficiencia_auto);
+    }
+
+    /// Lo que ve la sonda de lastre en un test: los comandos que llegan y las copias marcadas.
+    #[derive(Default)]
+    struct EspiaSonda {
+        comandos: std::cell::RefCell<Vec<String>>,
+        copias: std::cell::RefCell<Vec<PathBuf>>,
+    }
+
+    /// Ejecutor de la sonda falso: responde `respuesta` a su comando y sanas al resto.
+    struct SondaFalsa {
+        espia: std::rc::Rc<EspiaSonda>,
+        respuesta: Result<&'static str, &'static str>,
+    }
+
+    impl EjecutorHerramienta for SondaFalsa {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if !cmd.contains("ROOT_SONDA_INICIO") {
+                return HerramientasSanas {
+                    faltan: Vec::new(),
+                    fuga: false,
+                }
+                .ejecutar(cmd);
+            }
+            self.espia.comandos.borrow_mut().push(cmd.to_string());
+            match self.respuesta {
+                Ok(stdout) => Ok(SalidaHerramienta {
+                    stdout: stdout.into(),
+                    ..SalidaHerramienta::default()
+                }),
+                Err(motivo) => Err(ErrorOraculo::Infra(motivo.into())),
+            }
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            true
+        }
+    }
+
+    /// Fábrica de la sonda: anota las copias marcadas que llegan y da `respuesta` a la sonda.
+    fn fabrica_de_sonda(
+        espia: std::rc::Rc<EspiaSonda>,
+        respuesta: Result<&'static str, &'static str>,
+    ) -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
+        move |p: &Preparada| {
+            let marcada = fs::read_to_string(p.repo.join("src/lib.rs"))
+                .is_ok_and(|t| t.contains("ROOT_SONDA_0"));
+            if marcada {
+                espia.copias.borrow_mut().push(p.repo.clone());
+            }
+            Box::new(SondaFalsa {
+                espia: espia.clone(),
+                respuesta,
+            })
+        }
+    }
+
+    /// Tarea de Rust con `bootstrap/` de una función `uno` en la línea 1 de `src/lib.rs`.
+    fn tarea_rust_con_bootstrap_de_funciones(base: &Path) -> Tarea {
+        let tarea = tarea_rust(base);
+        let bootstrap = tarea.dir.join("bootstrap");
+        fs::create_dir_all(bootstrap.join("src")).expect("bootstrap/src");
+        fs::write(
+            bootstrap.join("src/lib.rs"),
+            "pub fn uno() -> u8 {\n    1\n}\n",
+        )
+        .expect("lib.rs inicial");
+        fs::write(bootstrap.join("Cargo.lock"), LOCK_SANO).expect("lock inicial");
+        tarea
+    }
+
+    /// Evalúa la tarea de Rust con la sonda `respuesta`. Con `pedida`, la evaluación corre bajo la sonda pedida.
+    fn evaluar_con_sonda(
+        base: &Path,
+        espia: &std::rc::Rc<EspiaSonda>,
+        respuesta: Result<&'static str, &'static str>,
+        pedida: bool,
+    ) -> Veredicto {
+        let tarea = tarea_rust_con_bootstrap_de_funciones(base);
+        let repo = repo_rust(base, LOCK_SANO);
+        let home = home_con_cache(base, LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = fabrica_de_sonda(espia.clone(), respuesta);
+        let evaluar = || evaluar_falso(&repo, &tarea, &home, &correr, &fabrica).expect("evalúa");
+        if pedida {
+            calibra::sonda_lastre::con_sonda_lastre(evaluar)
+        } else {
+            evaluar()
+        }
+    }
+
+    #[test]
+    fn sonda_lastre_pedida_manda_el_comando_con_copia_marcada_y_la_borra() {
+        let base = tempfile::tempdir().expect("base");
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        evaluar_con_sonda(
+            base.path(),
+            &espia,
+            Ok("ROOT_SONDA_INICIO\nROOT_SONDA_FIN\n"),
+            true,
+        );
+        assert!(
+            espia
+                .comandos
+                .borrow()
+                .iter()
+                .any(|c| c.contains("mkdir -p /tmp/root-sonda")),
+            "{:?}",
+            espia.comandos.borrow()
+        );
+        let copias = espia.copias.borrow();
+        assert_eq!(copias.len(), 1, "{copias:?}");
+        assert!(!copias[0].exists(), "la copia se borra al terminar");
+    }
+
+    #[test]
+    fn sonda_lastre_sin_pedida_no_manda_comando_ni_deja_resultado() {
+        let base = tempfile::tempdir().expect("base");
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        let _ = calibra::sonda_lastre::tomar_sonda_lastre();
+        evaluar_con_sonda(
+            base.path(),
+            &espia,
+            Ok("ROOT_SONDA_INICIO\nROOT_SONDA_FIN\n"),
+            false,
+        );
+        assert!(
+            espia.comandos.borrow().is_empty(),
+            "{:?}",
+            espia.comandos.borrow()
+        );
+        assert!(espia.copias.borrow().is_empty());
+        assert!(calibra::sonda_lastre::tomar_sonda_lastre().is_none());
+    }
+
+    #[test]
+    fn sonda_lastre_salida_valida_deja_la_funcion_que_corrio() {
+        let base = tempfile::tempdir().expect("base");
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        let salida = "ROOT_SONDA_INICIO\nsrc_lib_rs__1__uno\nROOT_SONDA_FIN\n";
+        evaluar_con_sonda(base.path(), &espia, Ok(salida), true);
+        let Some(Ok(corrieron)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
+            panic!("la sonda debía dejar un resultado válido");
+        };
+        let esperada = calibra::sonda_lastre::FuncionMarcada {
+            archivo: "src/lib.rs".into(),
+            linea: 1,
+            nombre: "uno".into(),
+        };
+        assert_eq!(corrieron, BTreeSet::from([esperada]));
+    }
+
+    #[test]
+    fn sonda_lastre_fallo_del_ejecutor_deja_motivo_aviso_y_sigue() {
+        let base = tempfile::tempdir().expect("base");
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        let v = evaluar_con_sonda(base.path(), &espia, Err("contenedor caído"), true);
+        let Some(Err(motivo)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
+            panic!("el fallo debía dejar un motivo");
+        };
+        assert!(motivo.contains("el ejecutor falló"), "{motivo}");
+        assert!(v.avisos.iter().any(|a| a == &motivo), "{:?}", v.avisos);
+        let copias = espia.copias.borrow();
+        assert_eq!(copias.len(), 1, "{copias:?}");
+        assert!(!copias[0].exists(), "la copia se borra también con error");
+    }
+
+    #[test]
+    fn sonda_lastre_salida_sin_marcas_deja_error_sin_salida() {
+        let base = tempfile::tempdir().expect("base");
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        let v = evaluar_con_sonda(base.path(), &espia, Ok("salida sin marcas\n"), true);
+        let Some(Err(motivo)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
+            panic!("la salida sin marcas debía dejar un motivo");
+        };
+        assert!(motivo.contains("sin salida"), "{motivo}");
+        assert!(v.avisos.iter().any(|a| a == &motivo), "{:?}", v.avisos);
     }
 
     #[test]

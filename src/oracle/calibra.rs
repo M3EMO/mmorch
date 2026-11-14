@@ -621,9 +621,7 @@ mod estables;
 mod inestables;
 mod regla;
 mod sonda;
-// Sin llamadores de producción todavía: el punto 2 los usa.
-#[allow(dead_code)]
-mod sonda_lastre;
+pub(crate) mod sonda_lastre;
 mod target;
 
 use compartidos::Compartidos;

@@ -1,6 +1,7 @@
 //! Sonda de lastre: marca las funciones de producción de una copia de `bootstrap/` y anota cuáles corren.
 //! Funciones puras sobre texto. Solo `armar_copia_marcada` toca archivos.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -179,6 +180,42 @@ pub(crate) fn salida_valida(stdout: &str) -> bool {
     tramo(stdout).is_some()
 }
 
+thread_local! {
+    /// `true` mientras corre `con_sonda_lastre` en este hilo.
+    static PEDIDA: Cell<bool> = const { Cell::new(false) };
+    /// Resultado de la última sonda de este hilo. Lo saca `tomar_sonda_lastre`.
+    static ULTIMA: RefCell<Option<Result<BTreeSet<FuncionMarcada>, String>>> = const { RefCell::new(None) };
+}
+
+/// Corre `f` con la sonda pedida en este hilo. Al salir, también ante pánico, vuelve el valor anterior.
+#[allow(dead_code)]
+pub(crate) fn con_sonda_lastre<T>(f: impl FnOnce() -> T) -> T {
+    /// Devuelve la bandera anterior al salir del ámbito.
+    struct Restaura(bool);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            PEDIDA.with(|p| p.set(self.0));
+        }
+    }
+    let _restaura = Restaura(PEDIDA.with(|p| p.replace(true)));
+    f()
+}
+
+/// `true` si la evaluación en curso pide la sonda de lastre.
+pub(crate) fn sonda_lastre_pedida() -> bool {
+    PEDIDA.with(Cell::get)
+}
+
+/// Guarda el resultado de la última sonda de este hilo.
+pub(crate) fn dejar_sonda_lastre(resultado: Result<BTreeSet<FuncionMarcada>, String>) {
+    ULTIMA.with(|u| *u.borrow_mut() = Some(resultado));
+}
+
+/// Saca el resultado de la última sonda de este hilo. Deja el valor vacío.
+pub(crate) fn tomar_sonda_lastre() -> Option<Result<BTreeSet<FuncionMarcada>, String>> {
+    ULTIMA.with(|u| u.borrow_mut().take())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +343,44 @@ mod tests {
         assert!(a.contains("ROOT_SONDA_0"));
         assert!(!destino.join("target").exists());
         assert!(destino.join("Cargo.toml").exists());
+    }
+
+    #[test]
+    fn sonda_lastre_con_sonda_pone_la_bandera_y_la_restaura() {
+        assert!(!sonda_lastre_pedida());
+        let dentro = con_sonda_lastre(|| {
+            let externa = sonda_lastre_pedida();
+            let anidada = con_sonda_lastre(sonda_lastre_pedida);
+            // Al salir de la anidada, la bandera vuelve al valor de la externa.
+            (externa, anidada, sonda_lastre_pedida())
+        });
+        assert_eq!(dentro, (true, true, true));
+        assert!(!sonda_lastre_pedida(), "al salir vuelve el valor anterior");
+    }
+
+    #[test]
+    fn sonda_lastre_con_sonda_restaura_ante_panico() {
+        let resultado =
+            std::panic::catch_unwind(|| con_sonda_lastre::<()>(|| panic!("a propósito")));
+        assert!(resultado.is_err());
+        assert!(
+            !sonda_lastre_pedida(),
+            "tras el pánico vuelve el valor anterior"
+        );
+    }
+
+    #[test]
+    fn sonda_lastre_tomar_saca_el_resultado_y_deja_vacio() {
+        let funcion = FuncionMarcada {
+            archivo: "src/a.rs".into(),
+            linea: 1,
+            nombre: "uno".into(),
+        };
+        let set = BTreeSet::from([funcion]);
+        dejar_sonda_lastre(Ok(set.clone()));
+        assert_eq!(tomar_sonda_lastre(), Some(Ok(set)));
+        assert_eq!(tomar_sonda_lastre(), None, "tras tomarlo queda vacío");
+        dejar_sonda_lastre(Err("motivo".into()));
+        assert_eq!(tomar_sonda_lastre(), Some(Err("motivo".into())));
     }
 }
