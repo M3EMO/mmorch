@@ -454,11 +454,7 @@ fn armar_y_empaquetar(
     }
     copiar_archivo_si_existe(&paquete.home.join("root.toml"), &staging.join("root.toml"))?;
     for nombre in tareas.keys() {
-        copiar_dir(
-            &paquete.repos[nombre],
-            &staging.join("repos").join(nombre),
-            &[".git", "target"],
-        )?;
+        copiar_repo(&paquete.repos[nombre], &staging.join("repos").join(nombre))?;
     }
 
     // El manifiesto se escribe al final: lista todos los archivos anteriores.
@@ -794,6 +790,32 @@ fn copiar_dir(origen: &Path, destino: &Path, excluir: &[&str]) -> Result<(), Err
         if tipo.is_dir() {
             copiar_dir(&ruta, &destino_entrada, excluir)?;
         } else if tipo.is_file() && !(nombre.starts_with(".env") || es_nombre_secreto(&nombre)) {
+            fs::copy(&ruta, &destino_entrada)
+                .map_err(|e| ErrorOraculo::Infra(format!("copiar {}: {e}", ruta.display())))?;
+        }
+    }
+    Ok(())
+}
+
+/// Copia el código de un repo a `destino`. Omite `.git` y `target` en cualquier nivel.
+/// Omite los archivos `.env*` y los enlaces simbólicos. No aplica `EXCLUIDOS` ni nombres secretos.
+fn copiar_repo(origen: &Path, destino: &Path) -> Result<(), ErrorOraculo> {
+    let error = |e: io::Error| ErrorOraculo::Infra(format!("copiar {}: {e}", origen.display()));
+    fs::create_dir_all(destino)
+        .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", destino.display())))?;
+    for entrada in fs::read_dir(origen).map_err(error)? {
+        let entrada = entrada.map_err(error)?;
+        let nombre_os = entrada.file_name();
+        let nombre = nombre_os.to_string_lossy();
+        if nombre == ".git" || nombre == "target" {
+            continue;
+        }
+        let tipo = entrada.file_type().map_err(error)?;
+        let ruta = entrada.path();
+        let destino_entrada = destino.join(&*nombre);
+        if tipo.is_dir() {
+            copiar_repo(&ruta, &destino_entrada)?;
+        } else if tipo.is_file() && !nombre.starts_with(".env") {
             fs::copy(&ruta, &destino_entrada)
                 .map_err(|e| ErrorOraculo::Infra(format!("copiar {}: {e}", ruta.display())))?;
         }
@@ -2523,6 +2545,78 @@ mod tests {
             );
             assert!(!nombre.starts_with("colab/"), "entra {nombre}");
         }
+    }
+
+    #[test]
+    fn repo_con_archivo_de_nombre_secreto_lo_lleva() {
+        // `token.rs` es código del repo: el filtro de nombres no aplica aquí.
+        let e = Escenario::con_contrato("cargo test");
+        fs::create_dir_all(e.repo.path().join("src")).expect("dir");
+        fs::write(e.repo.path().join("src/token.rs"), "pub fn t() {}\n").expect("escribe");
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let nombres = listar(&resumen.salida);
+        assert!(
+            nombres.contains("repos/tarea-prueba/src/token.rs"),
+            "{nombres:?}"
+        );
+    }
+
+    #[test]
+    fn repo_con_carpeta_evidencia_la_lleva() {
+        // `evidencia` está en EXCLUIDOS para ROOT_HOME, pero no para el código de un repo.
+        let e = Escenario::con_contrato("cargo test");
+        fs::create_dir_all(e.repo.path().join("evidencia")).expect("dir");
+        fs::write(e.repo.path().join("evidencia/x.txt"), "x\n").expect("escribe");
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let nombres = listar(&resumen.salida);
+        assert!(
+            nombres.contains("repos/tarea-prueba/evidencia/x.txt"),
+            "{nombres:?}"
+        );
+    }
+
+    #[test]
+    fn repo_no_lleva_git_target_ni_env() {
+        let e = Escenario::con_contrato("cargo test");
+        // `.git` y `target` se omiten en cualquier nivel.
+        fs::create_dir_all(e.repo.path().join("anidado/.git")).expect("dir");
+        fs::write(e.repo.path().join("anidado/.git/HEAD"), "ref\n").expect("escribe");
+        fs::create_dir_all(e.repo.path().join("anidado/target")).expect("dir");
+        fs::write(e.repo.path().join("anidado/target/b.txt"), "b\n").expect("escribe");
+        // Los `.env*` son claves reales: ninguno sale del paquete.
+        fs::write(e.repo.path().join(".env"), "CLAVE=valor\n").expect("escribe");
+        fs::write(e.repo.path().join(".env.local"), "CLAVE=valor\n").expect("escribe");
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let nombres = listar(&resumen.salida);
+        assert!(
+            !nombres.contains("repos/tarea-prueba/.git/HEAD"),
+            "{nombres:?}"
+        );
+        assert!(!nombres.contains("repos/tarea-prueba/.env"), "{nombres:?}");
+        assert!(
+            !nombres.contains("repos/tarea-prueba/.env.local"),
+            "{nombres:?}"
+        );
+        assert!(
+            !nombres.iter().any(|n| {
+                n.starts_with("repos/") && n.split('/').any(|c| c == ".git" || c == "target")
+            }),
+            "{nombres:?}"
+        );
+    }
+
+    #[test]
+    fn token_de_root_home_no_sale_al_paquete() {
+        // `copiar_dir` sigue filtrando los nombres secretos de ROOT_HOME.
+        let e = Escenario::con_contrato("cargo test");
+        fs::write(e.home.path().join("configs/token.json"), "{}\n").expect("escribe");
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let nombres = listar(&resumen.salida);
+        assert!(!nombres.contains("configs/token.json"), "{nombres:?}");
     }
 
     #[test]
