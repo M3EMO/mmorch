@@ -221,7 +221,8 @@ pub struct Contexto<'a> {
     /// Rangos de líneas del cambio (1-based, inclusivos) por ruta relativa. `None`: la tarea no trae `bootstrap/`.
     pub cambios: Option<&'a Rangos>,
     /// Carpeta del estado inicial (`bootstrap/`). `Some`: `ComportamientoRoto` cambia también operadores y condiciones,
-    /// `CuerpoVaciado` vacía solo funciones que ya existían, y `ModuloBorrado` no aplica.
+    /// `CuerpoVaciado` vacía solo funciones que ya existían, `LastreDeMemoria` pone su reserva solo en funciones
+    /// que ya existían, y `ModuloBorrado` no aplica.
     /// `None`: `CuerpoVaciado` elige cualquier función de producción.
     pub inicial: Option<&'a Path>,
     /// Identidades que la elección no puede tomar: las ya usadas y las inválidas. Vacío: no excluye nada.
@@ -295,7 +296,9 @@ pub fn inyectar_con(
         }
         Defecto::EstadoGlobal => estado_global(dir, &mut rng, contexto.cambios, ex)?,
         Defecto::EfectoEnNucleo => efecto_en_nucleo(dir, &mut rng, contexto.cambios, ex)?,
-        Defecto::LastreDeMemoria => lastre_de_memoria(dir, &mut rng, contexto.cambios, ex)?,
+        Defecto::LastreDeMemoria => {
+            lastre_de_memoria(dir, &mut rng, contexto.cambios, contexto.inicial, ex)?
+        }
     };
     // Con `cambios`, un defecto de línea o de módulo solo cae dentro del cambio: toda elección lo está.
     // Un cuerpo vaciado sin estado inicial puede caer fuera: su marca sale de `cuerpo_vaciado`.
@@ -883,6 +886,21 @@ fn declara_fn(texto: &str, nombre: &str) -> bool {
         .any(|l| l.contains(&format!("fn {nombre}(")) || l.contains(&format!("fn {nombre}<")))
 }
 
+/// `true` si `nombre` ya existía en el estado inicial: `declara_fn` sobre su texto. Sin estado inicial (`None`), todas lo son.
+fn es_funcion_vieja(nombre: &str, inicial: Option<&str>) -> bool {
+    inicial.is_none_or(|texto| declara_fn(texto, nombre))
+}
+
+/// Texto de `archivo` en el estado inicial. `None` sin estado inicial. Vacío si el archivo no existe allí,
+/// así que ninguna función de ese archivo es vieja.
+fn texto_inicial(inicial: Option<&Path>, archivo: &str) -> io::Result<Option<String>> {
+    Ok(match inicial {
+        Some(inicial) if inicial.join(archivo).is_file() => Some(leer(inicial, archivo)?),
+        Some(_) => Some(String::new()),
+        None => None,
+    })
+}
+
 /// Vacía el cuerpo de una función de producción. El cuerpo queda en `todo!()`, con la firma intacta.
 /// Con `inicial`, solo elige funciones que ya existían en el estado inicial y que el cambio tocó.
 /// Sin `inicial`, elige cualquier función de producción con la semilla. Devuelve el lugar y si la elegida
@@ -898,11 +916,7 @@ fn cuerpo_vaciado(
     let mut candidatos: Vec<(String, Cuerpo, bool)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
-        let previo = match inicial {
-            Some(inicial) if inicial.join(&archivo).is_file() => Some(leer(inicial, &archivo)?),
-            Some(_) => Some(String::new()),
-            None => None,
-        };
+        let previo = texto_inicial(inicial, &archivo)?;
         let limpias = limpias_de(&lineas);
         let limite = limite_de_produccion(&lineas);
         for firma in 0..limite {
@@ -1057,7 +1071,12 @@ fn es_fn_normal(lineas: &[String], firma: usize) -> bool {
 /// `{` de apertura termina la línea y si `es_fn_normal`. `cuerpo_de` ya descarta el cuerpo de una sola línea.
 /// Límites: no detecta una función dentro de un bloque `unsafe { }`. Un archivo con `mod x {` en línea se salta
 /// entero: el static va en la raíz del archivo y no se ve desde un módulo anidado.
-fn funciones_de_efecto(dir: &Path, cambios: Option<&Rangos>) -> io::Result<Vec<(String, Cuerpo)>> {
+/// Con `inicial`, solo cuentan las funciones viejas (`es_funcion_vieja`): las que ya existían en el estado inicial.
+fn funciones_de_efecto(
+    dir: &Path,
+    cambios: Option<&Rangos>,
+    inicial: Option<&Path>,
+) -> io::Result<Vec<(String, Cuerpo)>> {
     let mut salida = Vec::new();
     for archivo in rust_en(dir, "src")? {
         if !archivo_tocado(cambios, &archivo) {
@@ -1069,8 +1088,12 @@ fn funciones_de_efecto(dir: &Path, cambios: Option<&Rangos>) -> io::Result<Vec<(
         if limpias[..limite].iter().any(|l| es_mod_en_linea(l)) {
             continue;
         }
+        let previo = texto_inicial(inicial, &archivo)?;
         for firma in 0..limite {
-            if nombre_de_funcion(&lineas[firma]).is_none() || !es_fn_normal(&lineas, firma) {
+            let Some(nombre) = nombre_de_funcion(&lineas[firma]) else {
+                continue;
+            };
+            if !es_fn_normal(&lineas, firma) || !es_funcion_vieja(nombre, previo.as_deref()) {
                 continue;
             }
             let Some(cuerpo) = cuerpo_de(&limpias, firma).filter(|c| c.cierra < limite) else {
@@ -1092,7 +1115,7 @@ fn estado_global(
     cambios: Option<&Rangos>,
     excluidos: &Excluidos,
 ) -> io::Result<Lugar> {
-    let candidatos = funciones_de_efecto(dir, cambios)?;
+    let candidatos = funciones_de_efecto(dir, cambios, None)?;
     let libre = rng.elegir_libre(&candidatos, excluidos, |(a, c)| {
         identidad_de_lugar(Defecto::EstadoGlobal, a, c.abre as u32 + 2, "")
     });
@@ -1132,7 +1155,7 @@ fn efecto_en_nucleo(
     cambios: Option<&Rangos>,
     excluidos: &Excluidos,
 ) -> io::Result<Lugar> {
-    let candidatos = funciones_de_efecto(dir, cambios)?;
+    let candidatos = funciones_de_efecto(dir, cambios, None)?;
     let libre = rng.elegir_libre(&candidatos, excluidos, |(a, c)| {
         identidad_de_lugar(Defecto::EfectoEnNucleo, a, c.abre as u32 + 2, "")
     });
@@ -1162,16 +1185,24 @@ const _: () = assert!(LASTRE_BYTES == 64 << 20);
 
 /// Agrega una reserva de memoria que el compilador no puede quitar, al inicio de una función de producción del
 /// cambio: lastre de memoria. La línea reportada es la de la reserva, `abre + 2` (1-based), justo debajo de la `{`.
+/// Con `inicial`, solo elige funciones viejas: primero una del cambio (`cambios`); si no queda ninguna libre,
+/// una vieja de cualquier archivo de producción. Sin `inicial`, elige como antes entre todas las del cambio.
 fn lastre_de_memoria(
     dir: &Path,
     rng: &mut Prng,
     cambios: Option<&Rangos>,
+    inicial: Option<&Path>,
     excluidos: &Excluidos,
 ) -> io::Result<Lugar> {
-    let candidatos = funciones_de_efecto(dir, cambios)?;
-    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, c)| {
+    let identidad = |(a, c): &(String, Cuerpo)| {
         identidad_de_lugar(Defecto::LastreDeMemoria, a, c.abre as u32 + 2, "")
-    });
+    };
+    let mut candidatos = funciones_de_efecto(dir, cambios, inicial)?;
+    let mut libre = rng.elegir_libre(&candidatos, excluidos, identidad);
+    if libre.is_none() && inicial.is_some() && cambios.is_some() {
+        candidatos = funciones_de_efecto(dir, None, inicial)?;
+        libre = rng.elegir_libre(&candidatos, excluidos, identidad);
+    }
     let Some((archivo, cuerpo)) = libre else {
         return Ok(None);
     };
@@ -4332,5 +4363,131 @@ pub fn dos(x: u32) -> bool {
             ),
             "{nuevo}"
         );
+    }
+
+    /// Código de `src/a.rs` con una función vieja (`vieja`, en el estado inicial) y una nueva (`nueva`).
+    const CODIGO_A: &str = "pub fn vieja(x: u32) -> u32 {\n    x + 1\n}\n\npub fn nueva(x: u32) -> u32 {\n    x * 2\n}\n";
+
+    #[test]
+    fn lastre_de_memoria_va_a_la_funcion_vieja_y_no_a_la_nueva() {
+        let inicial = repo_de(&[("src/a.rs", "pub fn vieja(x: u32) -> u32 {\n    x + 1\n}\n")]);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/a.rs", CODIGO_A)]);
+            let inyeccion = con_inicial_de(
+                Defecto::LastreDeMemoria,
+                dir.path(),
+                &cambios,
+                inicial.path(),
+                semilla,
+            )
+            .expect("E/S")
+            .expect("aplica");
+            assert_eq!(inyeccion.archivo, "src/a.rs", "semilla {semilla}");
+            let a = leer(dir.path(), "src/a.rs").expect("lee a");
+            let lineas: Vec<&str> = a.lines().collect();
+            let i = inyeccion.linea as usize - 1;
+            assert_eq!(lineas[i], LINEA_LASTRE, "semilla {semilla}: {a}");
+            assert_eq!(
+                lineas[i - 1],
+                "pub fn vieja(x: u32) -> u32 {",
+                "semilla {semilla}: el lastre no va en la vieja: {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn lastre_de_memoria_con_el_cambio_solo_en_nuevas_va_a_una_vieja_de_otro_archivo() {
+        const CODIGO_B: &str = "pub fn tres(x: u32) -> u32 {\n    x - 1\n}\n";
+        let inicial = repo_de(&[("src/b.rs", CODIGO_B)]);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/a.rs", CODIGO_A), ("src/b.rs", CODIGO_B)]);
+            let a_antes = leer(dir.path(), "src/a.rs").expect("lee a");
+            let inyeccion = con_inicial_de(
+                Defecto::LastreDeMemoria,
+                dir.path(),
+                &cambios,
+                inicial.path(),
+                semilla,
+            )
+            .expect("E/S")
+            .expect("aplica");
+            assert_eq!(inyeccion.archivo, "src/b.rs", "semilla {semilla}");
+            assert_eq!(
+                leer(dir.path(), "src/a.rs").expect("lee a"),
+                a_antes,
+                "semilla {semilla}"
+            );
+            let b = leer(dir.path(), "src/b.rs").expect("lee b");
+            assert!(
+                b.contains(&format!("pub fn tres(x: u32) -> u32 {{\n{LINEA_LASTRE}")),
+                "semilla {semilla}: {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn lastre_de_memoria_sin_ninguna_funcion_vieja_no_aplica() {
+        let estados = [
+            repo_de(&[("src/a.rs", "pub fn otra() -> u32 {\n    1\n}\n")]),
+            repo_de(&[]),
+        ];
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        for inicial in &estados {
+            for semilla in 1..=5u64 {
+                let dir = repo_de(&[("src/a.rs", CODIGO_A)]);
+                let antes = arbol(dir.path());
+                let r = con_inicial_de(
+                    Defecto::LastreDeMemoria,
+                    dir.path(),
+                    &cambios,
+                    inicial.path(),
+                    semilla,
+                )
+                .expect("E/S");
+                assert!(r.is_none(), "semilla {semilla}: {r:?}");
+                assert_eq!(arbol(dir.path()), antes, "semilla {semilla}");
+            }
+        }
+    }
+
+    #[test]
+    fn lastre_de_memoria_con_inicial_la_copia_compila() {
+        let cambios: BTreeMap<String, Vec<(u32, u32)>> =
+            ["src/almacen.rs", "src/comandos.rs", "src/protocolo.rs"]
+                .iter()
+                .map(|r| (r.to_string(), vec![(1, 100)]))
+                .collect();
+        let objetivo = tempfile::tempdir().expect("temporal");
+        for semilla in 1..=8u64 {
+            let dir = copia_fixture();
+            let inicial = copia_fixture();
+            let inyeccion = con_inicial_de(
+                Defecto::LastreDeMemoria,
+                dir.path(),
+                &cambios,
+                inicial.path(),
+                semilla,
+            )
+            .expect("E/S")
+            .expect("aplica");
+            if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
+                panic!("semilla {semilla}: la copia con {inyeccion:?} no compila:\n{stderr}");
+            }
+        }
+    }
+
+    #[test]
+    fn es_funcion_vieja_sin_estado_inicial_es_siempre_vieja() {
+        assert!(es_funcion_vieja("cualquiera", None));
+    }
+
+    #[test]
+    fn es_funcion_vieja_solo_si_el_texto_inicial_la_declara() {
+        let inicial = "pub fn uno(x: u32) -> u32 {\n    x\n}\n";
+        assert!(es_funcion_vieja("uno", Some(inicial)));
+        assert!(!es_funcion_vieja("dos", Some(inicial)));
+        assert!(!es_funcion_vieja("uno", Some("")));
     }
 }
