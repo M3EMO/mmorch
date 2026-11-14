@@ -307,6 +307,7 @@ fn secreto_en_codigo_lo_detecta_gitleaks() {
 
 #[test]
 fn panico_en_entrada_lo_detecta_la_sonda_nativa() {
+    crate::saltar_sin_podman!();
     let dir = tempfile::tempdir().expect("tarea");
     let tarea = tarea_en(dir.path(), IMAGEN_HERRAMIENTAS, "cargo test", REQUISITO);
     let partes = partes_para(Dimension::Seguridad, &tarea, |p| {

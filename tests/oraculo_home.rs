@@ -53,6 +53,7 @@ fn gates(home: &Path) -> Vec<Value> {
 
 #[test]
 fn oraculo_home_evaluar_y_llamadas_escriben_solo_en_su_home() {
+    root::saltar_sin_podman!();
     let real = tempfile::tempdir().expect("ROOT_HOME del proceso");
     let b = tempfile::tempdir().expect("home propio");
     // SAFETY: único test de este binario; nadie más lee el entorno en paralelo.
