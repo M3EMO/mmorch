@@ -20,6 +20,9 @@ use crate::oracle::perfiles::herramientas::{
 
 /// Corridas por lado. rustc-perf: tres corridas y se compara el mínimo.
 pub const CORRIDAS: usize = 3;
+/// Corridas de tests por lado. Los tests duran menos de medio segundo: con 3 corridas no se estima bien la
+/// dispersión (en t1-t3 duraron de 0,25 a 0,42 s; un 2 % son 5 a 8 ms).
+pub const CORRIDAS_TESTS: usize = 10;
 /// Piso de ruido: 2 % de cambio. Perfherder usa este piso.
 pub const PISO_RUIDO: f64 = 0.02;
 /// Más de 1,5 veces da "no listo". Decisión P105 a del usuario.
@@ -46,7 +49,8 @@ impl Medida {
     }
 }
 
-/// Resultado de comparar dos lados. `razon` es repo sobre referencia.
+/// Resultado de comparar dos lados. `razon` es repo sobre referencia. `ruido` es la mayor dispersión
+/// de los dos lados, con el piso `PISO_RUIDO`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Comparacion {
     pub razon: f64,
@@ -54,17 +58,26 @@ pub struct Comparacion {
     pub regresion: bool,
 }
 
-/// Compara las corridas de cada lado. Usa el mínimo de cada lado. `None` si no se puede comparar.
+/// Compara las corridas de cada lado. Usa el mínimo de cada lado. El ruido es la mayor dispersión de los
+/// dos lados, con el piso `PISO_RUIDO`. `None` si no se puede comparar.
 pub fn comparar(referencia: &[f64], repo: &[f64]) -> Option<Comparacion> {
     let min_ref = referencia.iter().copied().reduce(f64::min)?;
     let max_ref = referencia.iter().copied().reduce(f64::max)?;
     let min_repo = repo.iter().copied().reduce(f64::min)?;
+    let max_repo = repo.iter().copied().reduce(f64::max)?;
     if min_ref <= 0.0 {
         return None;
     }
     let razon = min_repo / min_ref;
-    // El ruido es la dispersión de la referencia, con el piso mínimo.
-    let ruido = ((max_ref - min_ref) / min_ref).max(PISO_RUIDO);
+    // El ruido es la mayor dispersión de los dos lados, con el piso mínimo. Un repo con mínimo no
+    // positivo cuenta dispersión cero: no se divide por cero.
+    let disp_ref = (max_ref - min_ref) / min_ref;
+    let disp_repo = if min_repo > 0.0 {
+        (max_repo - min_repo) / min_repo
+    } else {
+        0.0
+    };
+    let ruido = disp_ref.max(disp_repo).max(PISO_RUIDO);
     Some(Comparacion {
         razon,
         ruido,
@@ -435,8 +448,8 @@ fn correr_tests(lado: &Lado, filtro: &str, tiempo: &mut Serie, memoria: &mut Ser
 }
 
 /// Mide tiempo y memoria de los tests. Compila los tests de cada lado que corre, y luego corre esos lados
-/// alternados, `CORRIDAS` veces. Un lado que no compila no corre. Si `lados[k]` es `None`, ese lado no corre:
-/// su serie ya viene en `tiempo[k]` y `memoria[k]`. Con `filtro` con error, los dos lados quedan con ese error.
+/// alternados, `CORRIDAS_TESTS` veces. Un lado que no compila no corre. Si `lados[k]` es `None`, ese lado
+/// no corre: su serie ya viene en `tiempo[k]` y `memoria[k]`. Con `filtro` con error, los dos lados quedan con ese error.
 /// Si `ancla_lado` es `Some`, corre una vez tras la primera corrida de `lados`. Su serie va a `ancla`.
 fn medir_tests(
     lados: [Option<&Lado>; 2],
@@ -467,7 +480,7 @@ fn medir_tests(
             anotar(&mut memoria[k], Err(motivo));
         }
     }
-    for corrida in 0..CORRIDAS {
+    for corrida in 0..CORRIDAS_TESTS {
         for (k, lado) in lados.into_iter().enumerate() {
             let Some(lado) = lado else { continue };
             if tiempo[k].is_err() && memoria[k].is_err() {
@@ -1037,10 +1050,36 @@ mod tests {
 
     #[test]
     fn comparar_ruido_bajo_usa_el_piso_y_marca_regresion() {
-        let c = comparar(&[1.0, 1.01, 1.0], &[1.6, 1.7, 1.65]).expect("comparable");
+        let c = comparar(&[1.0, 1.01, 1.0], &[1.6, 1.61, 1.6]).expect("comparable");
         assert!(cerca(c.razon, 1.6), "razon {}", c.razon);
         assert!(cerca(c.ruido, 0.02), "ruido {}", c.ruido);
         assert!(c.regresion);
+    }
+
+    #[test]
+    fn comparar_ruido_del_repo_mayor_que_el_de_la_referencia_gana() {
+        let referencia = [
+            0.400, 0.401, 0.402, 0.403, 0.404, 0.400, 0.401, 0.402, 0.403, 0.404,
+        ];
+        let repo = [
+            0.409, 0.410, 0.411, 0.412, 0.419, 0.409, 0.410, 0.411, 0.412, 0.419,
+        ];
+        let c = comparar(&referencia, &repo).expect("comparable");
+        assert!((c.razon - 1.0225).abs() < 1e-4, "razon {}", c.razon);
+        assert!((c.ruido - 0.02445).abs() < 1e-4, "ruido {}", c.ruido);
+        assert!(!c.regresion, "{c:?}");
+    }
+
+    #[test]
+    fn comparar_lados_estables_y_50_por_ciento_mas_lento_es_regresion() {
+        let referencia = [
+            1.000, 1.005, 1.002, 1.001, 1.004, 1.000, 1.003, 1.002, 1.001, 1.004,
+        ];
+        let repo = [
+            1.500, 1.505, 1.502, 1.501, 1.504, 1.500, 1.503, 1.502, 1.501, 1.504,
+        ];
+        let c = comparar(&referencia, &repo).expect("comparable");
+        assert!(c.regresion, "{c:?}");
     }
 
     #[test]
@@ -1079,12 +1118,31 @@ mod tests {
         let resultados = medir_de_prueba(&inicial, &repo);
         assert_eq!(resultados.len(), 4);
         let entradas = log.borrow();
-        let esperado: Vec<String> = (0..CORRIDAS)
+        let esperado_tests: Vec<String> = (0..CORRIDAS_TESTS)
             .flat_map(|_| ["inicial", "repo"])
             .map(String::from)
             .collect();
-        assert_eq!(lados_de(&entradas, "tests"), esperado);
-        assert_eq!(lados_de(&entradas, "build"), esperado);
+        let esperado_build: Vec<String> = (0..CORRIDAS)
+            .flat_map(|_| ["inicial", "repo"])
+            .map(String::from)
+            .collect();
+        assert_eq!(lados_de(&entradas, "tests"), esperado_tests);
+        assert_eq!(lados_de(&entradas, "build"), esperado_build);
+    }
+
+    #[test]
+    fn medir_corre_los_tests_de_cada_lado_corridas_tests_veces() {
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        medir_de_prueba(&inicial, &repo);
+        let entradas = log.borrow();
+        for lado in ["inicial", "repo"] {
+            let tipos = tipos_de(&entradas, lado);
+            let cuenta = |tipo: &str| tipos.iter().filter(|t| *t == tipo).count();
+            assert_eq!(cuenta("tests"), CORRIDAS_TESTS, "{lado}: {tipos:?}");
+            assert_eq!(cuenta("build"), CORRIDAS, "{lado}: {tipos:?}");
+        }
     }
 
     #[test]
@@ -1463,7 +1521,7 @@ mod tests {
             })
             .collect();
         let mut esperado = vec!["inicial compilar_tests", "repo compilar_tests"];
-        for _ in 0..CORRIDAS {
+        for _ in 0..CORRIDAS_TESTS {
             esperado.extend(["inicial tests", "repo tests"]);
         }
         assert_eq!(vistas, esperado);
@@ -1638,12 +1696,17 @@ mod tests {
         let repo = sano("repo", &log, &["a"]);
         con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
         let entradas = log.borrow();
-        let esperado: Vec<String> = ["repo", "inicial", "repo", "repo"]
+        // Tests: el repo corre en cada corrida y el ancla del inicial corre tras la primera.
+        let mut esperado_tests = vec!["repo", "inicial"];
+        esperado_tests.extend(vec!["repo"; CORRIDAS_TESTS - 1]);
+        let esperado_tests: Vec<String> = esperado_tests.into_iter().map(String::from).collect();
+        assert_eq!(lados_de(&entradas, "tests"), esperado_tests, "{entradas:?}");
+        // Build: sin cambios, sigue con CORRIDAS.
+        let esperado_build: Vec<String> = ["repo", "inicial", "repo", "repo"]
             .into_iter()
             .map(String::from)
             .collect();
-        assert_eq!(lados_de(&entradas, "tests"), esperado, "{entradas:?}");
-        assert_eq!(lados_de(&entradas, "build"), esperado, "{entradas:?}");
+        assert_eq!(lados_de(&entradas, "build"), esperado_build, "{entradas:?}");
     }
 
     #[test]
@@ -1653,12 +1716,16 @@ mod tests {
         let repo = sano("repo", &log, &["a"]);
         medir_de_prueba(&inicial, &repo);
         let entradas = log.borrow();
-        let esperado: Vec<String> = (0..CORRIDAS)
+        let esperado_tests: Vec<String> = (0..CORRIDAS_TESTS)
             .flat_map(|_| ["inicial", "repo"])
             .map(String::from)
             .collect();
-        assert_eq!(lados_de(&entradas, "tests"), esperado, "{entradas:?}");
-        assert_eq!(lados_de(&entradas, "build"), esperado, "{entradas:?}");
+        let esperado_build: Vec<String> = (0..CORRIDAS)
+            .flat_map(|_| ["inicial", "repo"])
+            .map(String::from)
+            .collect();
+        assert_eq!(lados_de(&entradas, "tests"), esperado_tests, "{entradas:?}");
+        assert_eq!(lados_de(&entradas, "build"), esperado_build, "{entradas:?}");
     }
 
     /// Un ancla que falla no hace fallar la medida: la referencia queda en la serie de la base.
@@ -1807,10 +1874,14 @@ mod tests {
         let tiempo = por_medida(&resultados, Medida::TiempoTests);
         assert_eq!(
             tiempo.corridas_referencia,
-            vec![1.5; CORRIDAS],
+            vec![1.5; CORRIDAS_TESTS],
             "{tiempo:?}"
         );
-        assert_eq!(tiempo.corridas_repo, vec![3.0; CORRIDAS], "{tiempo:?}");
+        assert_eq!(
+            tiempo.corridas_repo,
+            vec![3.0; CORRIDAS_TESTS],
+            "{tiempo:?}"
+        );
     }
 
     #[test]
@@ -1832,10 +1903,14 @@ mod tests {
         };
         let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
         let tiempo = por_medida(&resultados, Medida::TiempoTests);
-        let mut esperado = vec![1.5; CORRIDAS];
+        let mut esperado = vec![1.5; CORRIDAS_TESTS];
         esperado.push(9.0);
         assert_eq!(tiempo.corridas_referencia, esperado, "{tiempo:?}");
-        assert_eq!(tiempo.corridas_repo, vec![3.0; CORRIDAS], "{tiempo:?}");
+        assert_eq!(
+            tiempo.corridas_repo,
+            vec![3.0; CORRIDAS_TESTS],
+            "{tiempo:?}"
+        );
     }
 
     #[test]
