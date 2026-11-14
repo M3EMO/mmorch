@@ -972,6 +972,43 @@ impl Drop for CarpetaMutacion<'_> {
     }
 }
 
+/// Nombre de la carpeta de Eficiencia dentro de la temporal de una medición de Eficiencia.
+const NOMBRE_CARPETA_EFICIENCIA: &str = "eficiencia";
+
+/// Carpeta de trabajo fija de una medición de Eficiencia, dentro de `raiz`. Así el `target` de cada lado sigue
+/// de un caso al siguiente, en vez de partir vacío. Solo Eficiencia la tiene. Al soltarse borra la carpeta,
+/// también al salir por error o pánico. Declararlo después de la temporal hace que se suelte antes que ella.
+struct CarpetaEficiencia<'a> {
+    raiz: &'a Path,
+    ruta: Option<PathBuf>,
+}
+
+impl<'a> CarpetaEficiencia<'a> {
+    fn nueva(raiz: &'a Path, dimension: Dimension) -> Result<Self, ErrorOraculo> {
+        let ruta = if dimension == Dimension::Eficiencia {
+            let ruta = raiz.join(NOMBRE_CARPETA_EFICIENCIA);
+            fs::create_dir_all(&ruta).map_err(|e| super::infra("carpeta de eficiencia", e))?;
+            Some(ruta)
+        } else {
+            None
+        };
+        Ok(CarpetaEficiencia { raiz, ruta })
+    }
+
+    fn ruta(&self) -> Option<&Path> {
+        self.ruta.as_deref()
+    }
+}
+
+impl Drop for CarpetaEficiencia<'_> {
+    fn drop(&mut self) {
+        // Ignora el error: en Drop no hay a quién devolverlo.
+        if let Some(ruta) = self.ruta.take() {
+            let _ = borrado::borrar_dir_dentro(self.raiz, &ruta);
+        }
+    }
+}
+
 /// Lo que comparten los casos de una medición. Solo se lee: los casos corren en hilos distintos.
 struct Ronda<'a> {
     semilla: u64,
@@ -983,6 +1020,8 @@ struct Ronda<'a> {
     tmp: &'a Path,
     /// Carpeta de mutación de la medición (solo Pruebas). Los casos corren en otros hilos: por eso va aquí.
     carpeta_mutacion: Option<&'a Path>,
+    /// Carpeta de trabajo fija de Eficiencia (solo Eficiencia). Los casos corren en otros hilos: por eso va aquí.
+    carpeta_eficiencia: Option<&'a Path>,
     capas: &'a [Vec<String>],
     camino: &'a [String],
     muertos: &'a [MutanteMuerto],
@@ -1098,10 +1137,15 @@ fn evaluar_copia(
             super::mutacion::con_carpeta_de_mutacion(r.carpeta_mutacion, || {
                 super::mutacion::con_muestra_de_base(r.mutantes_base, || {
                     super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
-                        super::eficiencia::con_referencia(r.referencia_eficiencia.clone(), || {
-                            con_plazos_suites(Some(r.plazos_suites), || {
-                                en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
-                            })
+                        super::eficiencia::con_carpeta_de_eficiencia(r.carpeta_eficiencia, || {
+                            super::eficiencia::con_referencia(
+                                r.referencia_eficiencia.clone(),
+                                || {
+                                    con_plazos_suites(Some(r.plazos_suites), || {
+                                        en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+                                    })
+                                },
+                            )
                         })
                     })
                 })
@@ -1693,6 +1737,8 @@ fn calibrar_medida_con_defectos(
     // Pruebas: la carpeta de mutación va dentro de la temporal. Se borra al salir, también con error. Sin ella
     // (otras dimensiones) no se crea nada.
     let carpeta_mutacion = CarpetaMutacion::nueva(tmp.path(), dimension)?;
+    // Eficiencia: una carpeta fija para la base y los casos. Se borra al salir, también con error (Tarea 133).
+    let carpeta_eficiencia = CarpetaEficiencia::nueva(tmp.path(), dimension)?;
     let destino_target = tmp.path().join(NOMBRE_TARGET_BASE);
     // Vacía la muestra de mutación del hilo: lo que quede después es de la base.
     let _ = super::mutacion::tomar_muestra();
@@ -1704,11 +1750,13 @@ fn calibrar_medida_con_defectos(
     // La base corre con el límite activo: su juez también cuenta. Una base rechazada no mide nada.
     let base = en_limite(tope, || {
         super::mutacion::con_carpeta_de_mutacion(carpeta_mutacion.ruta(), || {
-            evaluador(
-                repo_bueno,
-                TipoCaso::Base,
-                Target::Guardar(destino_target.clone()),
-            )
+            super::eficiencia::con_carpeta_de_eficiencia(carpeta_eficiencia.ruta(), || {
+                evaluador(
+                    repo_bueno,
+                    TipoCaso::Base,
+                    Target::Guardar(destino_target.clone()),
+                )
+            })
         })
     });
     // Los casos comparan su muestra con la de la base. Las bases repetidas no la pisan.
@@ -1737,7 +1785,9 @@ fn calibrar_medida_con_defectos(
         for _ in 0..inestables::JUICIOS_EXTRA {
             let repetida = en_limite(tope, || {
                 super::mutacion::con_carpeta_de_mutacion(carpeta_mutacion.ruta(), || {
-                    evaluador(repo_bueno, TipoCaso::BaseRepetida, Target::Ninguno)
+                    super::eficiencia::con_carpeta_de_eficiencia(carpeta_eficiencia.ruta(), || {
+                        evaluador(repo_bueno, TipoCaso::BaseRepetida, Target::Ninguno)
+                    })
                 })
             });
             let veredicto = match (repetida, detencion_de_rechazo(tope)) {
@@ -1839,6 +1889,7 @@ fn calibrar_medida_con_defectos(
         repo_bueno,
         tmp: tmp.path(),
         carpeta_mutacion: carpeta_mutacion.ruta(),
+        carpeta_eficiencia: carpeta_eficiencia.ruta(),
         capas,
         camino,
         muertos: &muertos,
@@ -1869,7 +1920,13 @@ fn calibrar_medida_con_defectos(
     let pre = preelegir(&ronda, n)?;
     ronda.candidatos = pre.candidatos;
     ronda.agotado = pre.agotado;
-    let hilos = hilos.max(1);
+    // Con carpeta de Eficiencia, los casos van en serie. Compartirían su `target` entre hilos, y las corridas de
+    // tiempo se solaparían. Por eso no se usan los hilos pedidos.
+    let hilos = if carpeta_eficiencia.ruta().is_some() {
+        1
+    } else {
+        hilos.max(1)
+    };
     let (tx, rx) = mpsc::channel::<(usize, Result<Medido, ErrorOraculo>)>();
     // El coordinador suelta su envío cuando ya no lanza: si un hilo muere sin enviar, `recv` falla en vez de
     // esperar para siempre.
@@ -4064,6 +4121,234 @@ mod tests {
             llamadas_inicial > 0 && llamadas_inicial.is_multiple_of(3),
             "cada caso llama al lado inicial solo por el ancla: {llamadas_inicial}"
         );
+    }
+
+    /// Carpetas de `/salida` que recibe cada lado de Eficiencia en una calibración, y cuántas veces juzga el evaluador.
+    #[derive(Default)]
+    struct CarpetasEficiencia {
+        ini: Mutex<Vec<PathBuf>>,
+        rep: Mutex<Vec<PathBuf>>,
+        llamadas: AtomicUsize,
+        evaluaciones: AtomicUsize,
+    }
+
+    /// Ejecutor de un lado de Eficiencia que anota la carpeta de cada `ejecutar_en`. Responde como `Contado`.
+    struct EnCarpeta<'a> {
+        carpetas: &'a Mutex<Vec<PathBuf>>,
+        llamadas: &'a AtomicUsize,
+    }
+
+    impl EjecutorHerramienta for EnCarpeta<'_> {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            Contado {
+                llamadas: self.llamadas,
+            }
+            .ejecutar(cmd)
+        }
+
+        fn ejecutar_en(&self, cmd: &str, salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+            self.carpetas
+                .lock()
+                .expect("carpetas")
+                .push(salida.to_path_buf());
+            self.ejecutar(cmd)
+        }
+    }
+
+    const TAREA_EFICIENCIA_TOML: &str = "\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n\n[calibracion]\ncamino_caliente = [\"ejecutar\"]\n";
+
+    /// Base de Eficiencia sin ítems del juez: el evaluador la devuelve tal cual.
+    fn veredicto_base_de_eficiencia() -> Veredicto {
+        Veredicto {
+            puntajes: vec![Puntaje {
+                inestables: Vec::new(),
+                motivo_sin_calibrar: None,
+                dimension: Dimension::Eficiencia,
+                valor: 1.0,
+                calibrada: false,
+                exactitud_balanceada: None,
+                items: vec![],
+                sin_veredicto: None,
+                no_aplica: None,
+                faltantes: Vec::new(),
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Mide los dos lados de Eficiencia como lo haría el evaluador de una calibración, anotando carpetas.
+    fn medir_lados_de_prueba(carpetas: &CarpetasEficiencia, tmp: &Path) {
+        carpetas.evaluaciones.fetch_add(1, Ordering::SeqCst);
+        let _ = crate::oracle::eficiencia::medir(
+            &EnCarpeta {
+                carpetas: &carpetas.ini,
+                llamadas: &carpetas.llamadas,
+            },
+            &EnCarpeta {
+                carpetas: &carpetas.rep,
+                llamadas: &carpetas.llamadas,
+            },
+            tmp,
+            &mut Vec::new(),
+        );
+    }
+
+    /// Punto 2 de la Tarea 133: la base y dos casos usan la misma carpeta fija en cada lado.
+    #[test]
+    fn calibra_eficiencia_la_base_y_dos_casos_reciben_la_misma_carpeta_del_repo() {
+        let dir = copia_fixture();
+        let tmp = tempfile::tempdir().expect("temporal");
+        let base = veredicto_base_de_eficiencia();
+        let tarea = tarea_en(dir.path(), TAREA_EFICIENCIA_TOML);
+        let carpetas = CarpetasEficiencia::default();
+        let ev_falso = falso(dir.path(), &base, |_, _, base| base.clone());
+        let evaluador = |ruta: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            medir_lados_de_prueba(&carpetas, tmp.path());
+            ev_falso(ruta)
+        };
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Eficiencia,
+            10,
+            42,
+            dir.path(),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            4,
+            None,
+            None,
+        )
+        .expect("mide");
+        assert!(
+            carpetas.evaluaciones.load(Ordering::SeqCst) >= 3,
+            "la base y dos casos"
+        );
+        let rep = carpetas.rep.lock().expect("rep").clone();
+        let ini = carpetas.ini.lock().expect("ini").clone();
+        assert!(rep.iter().all(|c| *c == rep[0]), "repo: {rep:?}");
+        assert!(ini.iter().all(|c| *c == ini[0]), "inicial: {ini:?}");
+        assert_ne!(ini[0], rep[0]);
+    }
+
+    /// Punto 2 de la Tarea 133: al terminar la calibración, la carpeta fija de Eficiencia ya no existe.
+    #[test]
+    fn calibra_eficiencia_la_carpeta_no_existe_despues_de_calibrar() {
+        let dir = copia_fixture();
+        let tmp = tempfile::tempdir().expect("temporal");
+        let base = veredicto_base_de_eficiencia();
+        let tarea = tarea_en(dir.path(), TAREA_EFICIENCIA_TOML);
+        let carpetas = CarpetasEficiencia::default();
+        let ev_falso = falso(dir.path(), &base, |_, _, base| base.clone());
+        let evaluador = |ruta: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            medir_lados_de_prueba(&carpetas, tmp.path());
+            ev_falso(ruta)
+        };
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Eficiencia,
+            10,
+            42,
+            dir.path(),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let rep = carpetas.rep.lock().expect("rep")[0].clone();
+        let carpeta = rep.parent().expect("carpeta de Eficiencia");
+        assert_eq!(
+            carpeta.file_name(),
+            Some("eficiencia".as_ref()),
+            "{carpeta:?}"
+        );
+        assert!(!carpeta.exists(), "{carpeta:?}");
+    }
+
+    /// Punto 2 de la Tarea 133: un caso que da error no deja la carpeta fija de Eficiencia.
+    #[test]
+    fn calibra_eficiencia_la_carpeta_se_borra_tambien_si_un_caso_da_error() {
+        let dir = copia_fixture();
+        let tmp = tempfile::tempdir().expect("temporal");
+        let base = veredicto_base_de_eficiencia();
+        let tarea = tarea_en(dir.path(), TAREA_EFICIENCIA_TOML);
+        let carpetas = CarpetasEficiencia::default();
+        let ev_falso = falso(dir.path(), &base, |_, _, base| base.clone());
+        let evaluador = |ruta: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            medir_lados_de_prueba(&carpetas, tmp.path());
+            if ruta == dir.path() {
+                ev_falso(ruta)
+            } else {
+                Err(ErrorOraculo::Infra("corte de prueba".into()))
+            }
+        };
+        let error = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Eficiencia,
+            10,
+            42,
+            dir.path(),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .err()
+        .expect("un caso da error");
+        assert!(matches!(error, ErrorOraculo::Infra(_)), "{error}");
+        let rep = carpetas.rep.lock().expect("rep")[0].clone();
+        let carpeta = rep.parent().expect("carpeta de Eficiencia");
+        assert!(!carpeta.exists(), "{carpeta:?}");
+    }
+
+    /// Punto 4 de la Tarea 133: con carpeta fija los casos corren en serie aunque se pidan cuatro hilos.
+    #[test]
+    fn calibra_eficiencia_con_carpeta_fija_corre_los_casos_en_serie() {
+        let dir = copia_fixture();
+        let tmp = tempfile::tempdir().expect("temporal");
+        let base = veredicto_base_de_eficiencia();
+        let tarea = tarea_en(dir.path(), TAREA_EFICIENCIA_TOML);
+        let carpetas = CarpetasEficiencia::default();
+        let ev_falso = falso(dir.path(), &base, |_, _, base| base.clone());
+        let en_vuelo = AtomicUsize::new(0);
+        let maximo = AtomicUsize::new(0);
+        let casos = AtomicUsize::new(0);
+        let evaluador = |ruta: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            medir_lados_de_prueba(&carpetas, tmp.path());
+            if ruta != dir.path() {
+                casos.fetch_add(1, Ordering::SeqCst);
+                let ahora = en_vuelo.fetch_add(1, Ordering::SeqCst) + 1;
+                maximo.fetch_max(ahora, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(20));
+                en_vuelo.fetch_sub(1, Ordering::SeqCst);
+            }
+            ev_falso(ruta)
+        };
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Eficiencia,
+            10,
+            42,
+            dir.path(),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            4,
+            None,
+            None,
+        )
+        .expect("mide");
+        assert!(casos.load(Ordering::SeqCst) >= 2, "hay casos");
+        assert_eq!(maximo.load(Ordering::SeqCst), 1, "los casos se solapan");
     }
 
     /// Punto 2 de la Tarea 121: una base sin veredicto da fila sin casos. Antes era `ErrorOraculo::Infra`.

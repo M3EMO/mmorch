@@ -645,6 +645,30 @@ thread_local! {
     static ULTIMA_REFERENCIA: RefCell<Option<Referencia>> = const { RefCell::new(None) };
     /// Referencia fijada que usa `medir_lados` en este hilo. `None`: mide los dos lados.
     static REFERENCIA_FIJA: RefCell<Option<Referencia>> = const { RefCell::new(None) };
+    /// Carpeta fija de Eficiencia que usa `medir_con` en este hilo. `None`: `medir` crea y borra la suya.
+    static CARPETA_DE_EFICIENCIA: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Corre `f` con `carpeta` como la carpeta de trabajo fija de Eficiencia. Sin carpeta, `medir` crea y borra la suya.
+/// Al salir, también ante pánico, vuelve el valor anterior.
+pub(crate) fn con_carpeta_de_eficiencia<T>(carpeta: Option<&Path>, f: impl FnOnce() -> T) -> T {
+    /// Devuelve la carpeta anterior al salir del ámbito.
+    struct Restaura(Option<PathBuf>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = self.0.take();
+            CARPETA_DE_EFICIENCIA.with(|c| *c.borrow_mut() = anterior);
+        }
+    }
+    let anterior = CARPETA_DE_EFICIENCIA.with(|c| c.replace(carpeta.map(Path::to_path_buf)));
+    let _restaura = Restaura(anterior);
+    f()
+}
+
+/// Carpeta fija de Eficiencia que ve este hilo. Solo para los tests.
+#[cfg(test)]
+fn carpeta_de_eficiencia_actual() -> Option<PathBuf> {
+    CARPETA_DE_EFICIENCIA.with(|c| c.borrow().clone())
 }
 
 /// Saca la referencia que midió la última medición de dos lados de este hilo. Deja el valor vacío.
@@ -677,6 +701,7 @@ fn referencia_fijada_actual() -> Option<Referencia> {
 /// Mide el repo contra el estado inicial. Siempre devuelve cuatro resultados, en orden de `Medida`.
 /// `tmp` es la carpeta padre (`home/tmp`): `medir` crea ahí su carpeta de trabajo y la borra al terminar,
 /// también con error. Cada lado tiene su subcarpeta: todas sus llamadas usan la misma `/salida`.
+/// Con carpeta fija (`con_carpeta_de_eficiencia`), usa esa carpeta y no crea ni borra la suya.
 /// Si el borrado de esa carpeta falla, `avisos` recibe un aviso con la ruta y el error. Las medidas no cambian.
 pub fn medir(
     inicial: &dyn EjecutorHerramienta,
@@ -695,7 +720,12 @@ fn medir_con(
     borrar: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
     avisos: &mut Vec<String>,
 ) -> Vec<ResultadoMedida> {
-    let raiz = match crear_trabajo(tmp, borrar, avisos) {
+    let fija = CARPETA_DE_EFICIENCIA.with(|c| c.borrow().clone());
+    let creada = match &fija {
+        Some(carpeta) => crear_subcarpetas_fijas(carpeta),
+        None => crear_trabajo(tmp, borrar, avisos),
+    };
+    let raiz = match creada {
         Ok(raiz) => raiz,
         Err(e) => {
             let motivo = format!("carpeta de trabajo: {e}");
@@ -719,11 +749,22 @@ fn medir_con(
         salida: raiz.join("repo"),
     };
     let resultados = medir_lados(&lado_i, &lado_r);
-    // Un fallo de borrado no cambia las medidas: la carpeta queda y el siguiente `medir` la ignora.
-    if let Err(e) = borrar(tmp, &raiz) {
+    // La carpeta fija es de quien la fijó: no se borra aquí. Un fallo de borrado no cambia las medidas: la
+    // carpeta queda y el siguiente `medir` la ignora.
+    if fija.is_none()
+        && let Err(e) = borrar(tmp, &raiz)
+    {
         avisos.push(aviso_de_borrado(&raiz, &e));
     }
     resultados
+}
+
+/// Crea las subcarpetas `inicial` y `repo` dentro de la carpeta fija. Las que ya existen se reusan.
+fn crear_subcarpetas_fijas(carpeta: &Path) -> std::io::Result<PathBuf> {
+    ["inicial", "repo"]
+        .iter()
+        .try_for_each(|lado| fs::create_dir_all(carpeta.join(lado)))?;
+    Ok(carpeta.to_path_buf())
 }
 
 /// Aviso del veredicto cuando no se puede borrar la carpeta de trabajo. Dice la ruta y el error.
@@ -1255,6 +1296,127 @@ mod tests {
             let quedo: Vec<_> = fs::read_dir(tmp.path()).expect("lee tmp").collect();
             assert!(quedo.is_empty(), "error_en {error_en:?}: {quedo:?}");
         }
+    }
+
+    #[test]
+    fn sin_carpeta_de_eficiencia_crea_y_borra_su_carpeta_como_hoy() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let log = RefCell::new(Vec::new());
+        let inicial = con_carpeta("inicial", &log, None);
+        let repo = con_carpeta("repo", &log, None);
+        medir(&inicial, &repo, tmp.path(), &mut Vec::new());
+        let carpetas_i = inicial.carpetas.borrow();
+        assert!(carpetas_i[0].starts_with(tmp.path()), "{carpetas_i:?}");
+        assert!(fs::read_dir(tmp.path()).expect("lee tmp").next().is_none());
+    }
+
+    #[test]
+    fn con_carpeta_de_eficiencia_cada_lado_usa_su_subcarpeta_fija() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let fija = tempfile::tempdir().expect("carpeta fija");
+        let log = RefCell::new(Vec::new());
+        let inicial = con_carpeta("inicial", &log, None);
+        let repo = con_carpeta("repo", &log, None);
+        con_carpeta_de_eficiencia(Some(fija.path()), || {
+            medir(&inicial, &repo, tmp.path(), &mut Vec::new());
+        });
+        let carpetas_i = inicial.carpetas.borrow().clone();
+        let carpetas_r = repo.carpetas.borrow().clone();
+        let esperada_i = fija.path().join("inicial");
+        let esperada_r = fija.path().join("repo");
+        assert!(!carpetas_i.is_empty(), "sin llamadas del inicial");
+        assert!(
+            carpetas_i.iter().all(|c| *c == esperada_i),
+            "{carpetas_i:?}"
+        );
+        assert!(!carpetas_r.is_empty(), "sin llamadas del repo");
+        assert!(
+            carpetas_r.iter().all(|c| *c == esperada_r),
+            "{carpetas_r:?}"
+        );
+        assert!(esperada_i.is_dir() && esperada_r.is_dir());
+        let quedo: Vec<_> = fs::read_dir(tmp.path()).expect("lee tmp").collect();
+        assert!(quedo.is_empty(), "{quedo:?}");
+    }
+
+    #[test]
+    fn con_carpeta_de_eficiencia_dos_mediciones_reusan_la_misma_carpeta() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let fija = tempfile::tempdir().expect("carpeta fija");
+        let log = RefCell::new(Vec::new());
+        let inicial = con_carpeta("inicial", &log, None);
+        let repo = con_carpeta("repo", &log, None);
+        con_carpeta_de_eficiencia(Some(fija.path()), || {
+            medir(&inicial, &repo, tmp.path(), &mut Vec::new());
+            medir(&inicial, &repo, tmp.path(), &mut Vec::new());
+        });
+        let usadas: BTreeSet<PathBuf> = inicial
+            .carpetas
+            .borrow()
+            .iter()
+            .chain(repo.carpetas.borrow().iter())
+            .cloned()
+            .collect();
+        assert_eq!(usadas.len(), 2, "{usadas:?}");
+        assert!(fija.path().is_dir());
+    }
+
+    #[test]
+    fn con_carpeta_de_eficiencia_restaura_la_anterior_tambien_con_panico() {
+        assert_eq!(carpeta_de_eficiencia_actual(), None);
+        con_carpeta_de_eficiencia(Some(Path::new("/a")), || {
+            con_carpeta_de_eficiencia(Some(Path::new("/b")), || {
+                assert_eq!(
+                    carpeta_de_eficiencia_actual().as_deref(),
+                    Some(Path::new("/b"))
+                );
+            });
+            assert_eq!(
+                carpeta_de_eficiencia_actual().as_deref(),
+                Some(Path::new("/a"))
+            );
+            let panico = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                con_carpeta_de_eficiencia(Some(Path::new("/c")), || panic!("a propósito"));
+            }));
+            assert!(panico.is_err());
+            assert_eq!(
+                carpeta_de_eficiencia_actual().as_deref(),
+                Some(Path::new("/a")),
+                "tras un pánico vuelve la anterior"
+            );
+        });
+        assert_eq!(
+            carpeta_de_eficiencia_actual(),
+            None,
+            "tras f vuelve el anterior"
+        );
+    }
+
+    #[test]
+    fn con_carpeta_de_eficiencia_que_no_se_puede_crear_da_cuatro_medidas_sin_valor() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let fija = tempfile::tempdir().expect("carpeta fija");
+        // Un archivo donde iría la subcarpeta `inicial`: crearla falla.
+        fs::write(fija.path().join("inicial"), "x").expect("archivo");
+        let log = RefCell::new(Vec::new());
+        let inicial = con_carpeta("inicial", &log, None);
+        let repo = con_carpeta("repo", &log, None);
+        let resultados = con_carpeta_de_eficiencia(Some(fija.path()), || {
+            medir(&inicial, &repo, tmp.path(), &mut Vec::new())
+        });
+        assert_eq!(resultados.len(), 4, "{resultados:?}");
+        for r in &resultados {
+            assert_eq!((r.referencia, r.repo, &r.comparacion), (None, None, &None));
+            assert!(
+                r.motivo
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("carpeta de trabajo: ")),
+                "{:?}",
+                r.motivo
+            );
+        }
+        assert!(inicial.carpetas.borrow().is_empty());
+        assert!(repo.carpetas.borrow().is_empty());
     }
 
     #[test]
