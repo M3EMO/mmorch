@@ -87,6 +87,12 @@ pub const EXCLUIDOS: &[(&str, &str)] = &[
 /// Tiempo máximo de cada llamada a podman.
 const PLAZO_PODMAN: Duration = Duration::from_secs(300);
 
+/// Repeticiones por defecto de `oraculo calibrar`. Son las de la recalibración de oráculo en la laptop.
+/// Con n=20, una calibración de Pruebas tarda unas cinco veces más.
+pub const N_POR_DEFECTO: u32 = 4;
+/// Semilla por defecto de `oraculo calibrar`. Es la misma de la recalibración de oráculo en la laptop.
+pub const SEMILLA_POR_DEFECTO: u64 = 42;
+
 /// Acceso a la imagen de la tarea. Los tests usan un doble. La implementación real llama a podman.
 pub trait Imagen {
     /// Copia `/usr/local/bin/<nombre>` de la imagen a `destino`.
@@ -183,17 +189,27 @@ pub struct Trabajo {
     pub comandos: Vec<String>,
 }
 
+/// Un trabajo pedido en la línea de comandos. `n` son las repeticiones de su calibración.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrabajoPedido {
+    pub tarea: String,
+    pub dimension: Dimension,
+    pub n: u32,
+}
+
 /// Datos ya leídos que arman el paquete. Los tests los llenan a mano.
 #[derive(Debug, Clone)]
 pub struct Paquete {
     pub home: PathBuf,
     pub raiz_root: PathBuf,
     pub binario: PathBuf,
-    pub trabajos: Vec<(String, Dimension)>,
+    pub trabajos: Vec<TrabajoPedido>,
     pub repos: BTreeMap<String, PathBuf>,
     pub rustup_sha256: String,
     pub salida: PathBuf,
     pub commit_root: String,
+    /// Semilla de `oraculo calibrar` para los trabajos del paquete.
+    pub semilla: u64,
 }
 
 /// Pedido tal como llega de la línea de comandos.
@@ -237,6 +253,10 @@ pub struct TrabajoManifiesto {
     pub comando: String,
     pub args: Vec<String>,
     pub entorno: BTreeMap<String, String>,
+    /// Repeticiones de la calibración del trabajo.
+    pub n: u32,
+    /// Semilla de la calibración del trabajo.
+    pub semilla: u64,
 }
 
 /// Datos de un trabajo que el manifiesto necesita.
@@ -246,6 +266,8 @@ pub struct DatoTrabajo {
     pub dimension: Dimension,
     pub tarea_hash: String,
     pub imagen_id: String,
+    pub n: u32,
+    pub semilla: u64,
 }
 
 /// Datos que arman el manifiesto, sin tocar el disco.
@@ -265,9 +287,18 @@ pub struct Orden {
     pub entorno: BTreeMap<String, String>,
 }
 
-/// Punto de entrada del comando. Lee ROOT_HOME, git y podman, y arma el paquete.
+/// Punto de entrada del comando. Usa las repeticiones y la semilla por defecto.
 pub fn empaquetar_cli(pedido: PedidoEmpaquetar) -> Result<Resumen, ErrorOraculo> {
-    let trabajos = parsear_trabajos(&pedido.trabajos)?;
+    empaquetar_cli_con(pedido, N_POR_DEFECTO, SEMILLA_POR_DEFECTO)
+}
+
+/// Lee ROOT_HOME, git y podman, y arma el paquete. `n` es el valor por defecto de cada trabajo.
+pub fn empaquetar_cli_con(
+    pedido: PedidoEmpaquetar,
+    n: u32,
+    semilla: u64,
+) -> Result<Resumen, ErrorOraculo> {
+    let trabajos = parsear_trabajos(&pedido.trabajos, n)?;
     let repos = parsear_repos(&pedido.repos)?;
     let raiz_root = match pedido.raiz_root {
         Some(raiz) => raiz,
@@ -284,6 +315,7 @@ pub fn empaquetar_cli(pedido: PedidoEmpaquetar) -> Result<Resumen, ErrorOraculo>
         rustup_sha256: pedido.rustup_sha256,
         salida: pedido.salida,
         commit_root,
+        semilla,
     };
     let imagen = PodmanReal {
         binario: binario_podman(),
@@ -314,7 +346,8 @@ pub fn empaquetar(paquete: &Paquete, imagen: &dyn Imagen) -> Result<Resumen, Err
 
     let mut tareas: BTreeMap<String, Tarea> = BTreeMap::new();
     let mut trabajos = Vec::new();
-    for (nombre, dimension) in &paquete.trabajos {
+    for pedido in &paquete.trabajos {
+        let nombre = &pedido.tarea;
         if !tareas.contains_key(nombre) {
             let tarea = cargar_en(&paquete.home, nombre)?;
             tareas.insert(nombre.clone(), tarea);
@@ -322,7 +355,7 @@ pub fn empaquetar(paquete: &Paquete, imagen: &dyn Imagen) -> Result<Resumen, Err
         let tarea = &tareas[nombre];
         trabajos.push(Trabajo {
             tarea: nombre.clone(),
-            dimension: *dimension,
+            dimension: pedido.dimension,
             comandos: vec![tarea.contrato.cmd.clone(), tarea.oculto.cmd.clone()],
         });
     }
@@ -463,13 +496,15 @@ fn armar_y_empaquetar(
     // Cuenta también `manifiesto.json`, que todavía no existe.
     let contados = archivos.len() + 1;
     let mut trabajos = Vec::new();
-    for (nombre, dimension) in &paquete.trabajos {
-        let tarea = &tareas[nombre];
+    for pedido in &paquete.trabajos {
+        let tarea = &tareas[&pedido.tarea];
         trabajos.push(DatoTrabajo {
-            tarea: nombre.clone(),
-            dimension: *dimension,
+            tarea: pedido.tarea.clone(),
+            dimension: pedido.dimension,
             tarea_hash: hash_de_tarea(tarea)?,
             imagen_id: id.clone(),
+            n: pedido.n,
+            semilla: paquete.semilla,
         });
     }
     let imagenes: BTreeMap<String, String> =
@@ -615,7 +650,7 @@ pub fn armar_manifiesto(datos: &DatosManifiesto, archivos: BTreeMap<String, Stri
         .trabajos
         .iter()
         .map(|t| {
-            let orden = comando_de_trabajo(&t.tarea, t.dimension, &t.imagen_id);
+            let orden = comando_de_trabajo(&t.tarea, t.dimension, &t.imagen_id, t.n, t.semilla);
             TrabajoManifiesto {
                 tarea: t.tarea.clone(),
                 dimension: t.dimension.clave().to_string(),
@@ -625,6 +660,8 @@ pub fn armar_manifiesto(datos: &DatosManifiesto, archivos: BTreeMap<String, Stri
                 comando: orden.comando,
                 args: orden.args,
                 entorno: orden.entorno,
+                n: t.n,
+                semilla: t.semilla,
             }
         })
         .collect();
@@ -675,9 +712,15 @@ pub fn version_de_rustc(salida: &str) -> Option<String> {
 }
 
 /// Orden de un trabajo: comando, argumentos y entorno.
-pub fn comando_de_trabajo(tarea: &str, dimension: Dimension, imagen_id: &str) -> Orden {
+pub fn comando_de_trabajo(
+    tarea: &str,
+    dimension: Dimension,
+    imagen_id: &str,
+    n: u32,
+    semilla: u64,
+) -> Orden {
     let repo = format!("repos/{tarea}");
-    let args: Vec<String> = [
+    let mut args: Vec<String> = [
         "oraculo",
         "calibrar",
         "--tarea",
@@ -686,11 +729,18 @@ pub fn comando_de_trabajo(tarea: &str, dimension: Dimension, imagen_id: &str) ->
         dimension.clave(),
         "--repo",
         repo.as_str(),
-        "--json",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect();
+    // Las repeticiones y la semilla van antes de `--json`, como pide el CLI de `oraculo calibrar`.
+    args.extend([
+        "--n".to_string(),
+        n.to_string(),
+        "--semilla".to_string(),
+        semilla.to_string(),
+        "--json".to_string(),
+    ]);
     let comando = format!("r00t {}", args.join(" "));
     let entorno = BTreeMap::from([
         (ROOT_CONTENEDOR_MODO.to_string(), MODO_BWRAP.to_string()),
@@ -704,19 +754,39 @@ pub fn comando_de_trabajo(tarea: &str, dimension: Dimension, imagen_id: &str) ->
     }
 }
 
-/// Lee `tarea:dimension` de cada trabajo.
-pub fn parsear_trabajos(entradas: &[String]) -> Result<Vec<(String, Dimension)>, ErrorOraculo> {
+/// Lee `tarea:dimension` o `tarea:dimension:n` de cada trabajo. Sin `n`, usa `n_por_defecto`.
+pub fn parsear_trabajos(
+    entradas: &[String],
+    n_por_defecto: u32,
+) -> Result<Vec<TrabajoPedido>, ErrorOraculo> {
     entradas
         .iter()
         .map(|entrada| {
-            let (tarea, clave) = entrada.split_once(':').ok_or_else(|| {
-                ErrorOraculo::Uso(format!(
-                    "trabajo mal formado: {entrada} (se espera tarea:dimension)"
-                ))
-            })?;
+            let mut partes = entrada.splitn(3, ':');
+            let (Some(tarea), Some(clave)) = (partes.next(), partes.next()) else {
+                return Err(ErrorOraculo::Uso(format!(
+                    "trabajo mal formado: {entrada} (se espera tarea:dimension o tarea:dimension:n)"
+                )));
+            };
             let dimension = Dimension::desde_clave(clave)
                 .ok_or_else(|| ErrorOraculo::Uso(format!("dimensión desconocida: {clave}")))?;
-            Ok((tarea.to_string(), dimension))
+            let n = match partes.next() {
+                None => n_por_defecto,
+                Some(texto) => texto
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| {
+                        ErrorOraculo::Uso(format!(
+                            "n inválida en {entrada}: se espera un entero mayor que cero"
+                        ))
+                    })?,
+            };
+            Ok(TrabajoPedido {
+                tarea: tarea.to_string(),
+                dimension,
+                n,
+            })
         })
         .collect()
 }
@@ -2446,11 +2516,19 @@ mod tests {
                 home: self.home.path().to_path_buf(),
                 raiz_root: self.raiz.path().to_path_buf(),
                 binario: self.binario.clone(),
-                trabajos: trabajos.iter().map(|(t, d)| (t.to_string(), *d)).collect(),
+                trabajos: trabajos
+                    .iter()
+                    .map(|(t, d)| TrabajoPedido {
+                        tarea: t.to_string(),
+                        dimension: *d,
+                        n: N_POR_DEFECTO,
+                    })
+                    .collect(),
                 repos,
                 rustup_sha256: "a".repeat(64),
                 salida: self.salida.path().join("paquete.tar.gz"),
                 commit_root: "abc123".into(),
+                semilla: SEMILLA_POR_DEFECTO,
             }
         }
     }
@@ -2715,7 +2793,7 @@ mod tests {
         );
         assert_eq!(
             trabajo.comando,
-            "r00t oraculo calibrar --tarea tarea-prueba --dimension seguridad --repo repos/tarea-prueba --json"
+            "r00t oraculo calibrar --tarea tarea-prueba --dimension seguridad --repo repos/tarea-prueba --n 4 --semilla 42 --json"
         );
         assert_eq!(
             trabajo
@@ -2814,22 +2892,120 @@ mod tests {
 
     #[test]
     fn parseo_de_trabajos_repos_y_sha_de_entrada() {
-        let trabajos = parsear_trabajos(&["tarea-a:funciona".into(), "tarea-b:pruebas".into()])
-            .expect("trabajos");
+        let trabajos = parsear_trabajos(
+            &["tarea-a:funciona".into(), "tarea-b:pruebas".into()],
+            N_POR_DEFECTO,
+        )
+        .expect("trabajos");
         assert_eq!(
             trabajos,
             vec![
-                ("tarea-a".to_string(), Dimension::Funciona),
-                ("tarea-b".to_string(), Dimension::Pruebas)
+                TrabajoPedido {
+                    tarea: "tarea-a".into(),
+                    dimension: Dimension::Funciona,
+                    n: N_POR_DEFECTO,
+                },
+                TrabajoPedido {
+                    tarea: "tarea-b".into(),
+                    dimension: Dimension::Pruebas,
+                    n: N_POR_DEFECTO,
+                },
             ]
         );
-        assert!(parsear_trabajos(&["tarea-a".into()]).is_err());
-        assert!(parsear_trabajos(&["tarea-a:nada".into()]).is_err());
+        assert!(parsear_trabajos(&["tarea-a".into()], N_POR_DEFECTO).is_err());
+        assert!(parsear_trabajos(&["tarea-a:nada".into()], N_POR_DEFECTO).is_err());
         let repos = parsear_repos(&["tarea-a=ruta/a".into()]).expect("repos");
         assert_eq!(repos.get("tarea-a"), Some(&PathBuf::from("ruta/a")));
         assert!(parsear_repos(&["sin-igual".into()]).is_err());
         assert!(es_sha256_hex(&"a".repeat(64)));
         assert!(!es_sha256_hex("abc"));
+    }
+
+    #[test]
+    fn comando_sin_n_explicita_lleva_n_4_y_semilla_42() {
+        let orden = comando_de_trabajo(
+            "tarea-prueba",
+            Dimension::Pruebas,
+            "sha256:imagen",
+            N_POR_DEFECTO,
+            SEMILLA_POR_DEFECTO,
+        );
+        assert_eq!(
+            orden.comando,
+            "r00t oraculo calibrar --tarea tarea-prueba --dimension pruebas --repo repos/tarea-prueba --n 4 --semilla 42 --json"
+        );
+        assert_eq!(orden.comando, format!("r00t {}", orden.args.join(" ")));
+    }
+
+    #[test]
+    fn trabajo_sin_tercer_campo_usa_la_n_por_defecto() {
+        let trabajos = parsear_trabajos(
+            &["s2-t1:pruebas".into(), "otra:funciona".into()],
+            N_POR_DEFECTO,
+        )
+        .expect("trabajos");
+        assert_eq!(trabajos[0].n, N_POR_DEFECTO);
+        assert_eq!(trabajos[1].n, N_POR_DEFECTO);
+    }
+
+    #[test]
+    fn trabajo_con_n_explicita_usa_esa_n_y_el_otro_la_por_defecto() {
+        let trabajos = parsear_trabajos(
+            &["s2-t1:pruebas:8".into(), "otra:funciona".into()],
+            N_POR_DEFECTO,
+        )
+        .expect("trabajos");
+        assert_eq!(
+            trabajos,
+            vec![
+                TrabajoPedido {
+                    tarea: "s2-t1".into(),
+                    dimension: Dimension::Pruebas,
+                    n: 8,
+                },
+                TrabajoPedido {
+                    tarea: "otra".into(),
+                    dimension: Dimension::Funciona,
+                    n: 4,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn n_que_no_es_entero_mayor_que_cero_da_uso_y_nombra_la_entrada() {
+        for entrada in ["t:pruebas:0", "t:pruebas:x", "t:pruebas:-1", "t:pruebas:"] {
+            match parsear_trabajos(&[entrada.to_string()], N_POR_DEFECTO) {
+                Err(ErrorOraculo::Uso(mensaje)) => {
+                    assert!(
+                        mensaje.contains(entrada),
+                        "el mensaje no nombra {entrada}: {mensaje}"
+                    );
+                }
+                otro => panic!("{entrada}: se esperaba Uso, llegó {otro:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn manifiesto_guarda_n_y_semilla_de_cada_trabajo() {
+        let e = Escenario::con_contrato("cargo test");
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Pruebas)]);
+        paquete.trabajos[0].n = 8;
+        paquete.semilla = 7;
+        let resumen = empaquetar(&paquete, &Doble).expect("empaqueta");
+        let extraido = extraer(&resumen.salida);
+        let texto =
+            fs::read_to_string(extraido.path().join("manifiesto.json")).expect("manifiesto");
+        let m: Manifiesto = serde_json::from_str(&texto).expect("JSON del manifiesto");
+        let trabajo = &m.trabajos[0];
+        assert_eq!(trabajo.n, 8);
+        assert_eq!(trabajo.semilla, 7);
+        assert!(
+            trabajo.comando.ends_with("--n 8 --semilla 7 --json"),
+            "comando: {}",
+            trabajo.comando
+        );
     }
 }
 
@@ -3454,6 +3630,8 @@ mod tests_calibrar {
                 dimension: Dimension::Seguridad,
                 tarea_hash: "hash".into(),
                 imagen_id: "imagen".into(),
+                n: N_POR_DEFECTO,
+                semilla: SEMILLA_POR_DEFECTO,
             }],
             imagenes: BTreeMap::from([("tarea-prueba".to_string(), "imagen".to_string())]),
         };
