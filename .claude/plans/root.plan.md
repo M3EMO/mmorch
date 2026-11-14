@@ -9273,3 +9273,126 @@ El brief está en `docs/builds/brief-local-119.md`, con base "punta de `laptop/c
 - La 118 toca `src/limpieza.rs`, que tampoco comparten.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (41): la 116, la 118 y la 119, los 43 tests, y qué sigue
+
+**Estado.**
+- La suite con podman de la cadena con la 115 (cfb8970) dio 3421, 3 y 5. Corrió junto a tres builders. Podman no registró ningún `kill`. Las tres fallas parecen de carga, y el orquestador las reprueba solas.
+- Las Tareas 116 (2b2bd92), 118 (ac1ea84) y 119 (5c583da) terminaron en verde sin podman.
+- El orquestador encadena 118, 116 y 119 sobre cfb8970 en `laptop/cadena-110-119`, y corre su suite con podman, sola.
+- Después corre la medición P101 a, que ya estaba en cola.
+
+## 1. Las seis preguntas de la 116
+
+1. **La segunda evaluación da error, y la fila lleva la primera:** acepto. Un veredicto vacío borraría datos medidos.
+2. **La vuelta sale mal, y la fila lleva la primera con el motivo:** acepto.
+3. **El repo del builder ya no es el evaluado:** acepto. La fila describe el estado de `final/`, que sigue en la carpeta de la corrida. El motivo lo dice.
+4. **Sin sesión legible, la vuelta va sin `--resume`:** acepto. La instrucción trae las medidas y los números.
+5. **Un error en los pasos g o h de la vuelta corta la corrida:** acepto. Son las mismas reglas de la vuelta normal.
+6. **"sin valor veces la referencia":** es un texto que no se puede alcanzar hoy. Va en la Tarea 120: la instrucción solo nombra medidas con regresión.
+
+## 2. Las dos preguntas de la 118
+
+1. **Los 43 tests que llegan al podman real:** van en la Tarea 120. Ver la sección 4.
+2. **La carrera ETXTBSY de `podman_falso`:** se arregla en la 120. Una falla en cinco corridas frena un commit de cada cinco, porque el hook corre la suite.
+
+## 3. Las seis preguntas de la 119
+
+1. **Un borrado que falla y se ignora: no se acepta.** Puede dejar varios GB, y el disco tiene 39 GB libres, al 92 %. El veredicto suma un aviso con la carpeta y el error. La medida no cambia. Va en la 120.
+2. **El motivo "la corrida medida recompiló" sin el lado:** acepto.
+3. **La marca `ROOT_COMPILAR <código>`:** acepto. Una compilación fallida no debe pasar inadvertida.
+4. **La frase genérica sin números:** acepto.
+5. **La línea del resumen con la frase genérica:** acepto.
+6. **El desempate entre ids desconocidos: orden alfabético.** El resumen debe dar lo mismo con el mismo veredicto. Va en la 120.
+
+**`grep` en la imagen:** la imagen sale de `docker.io/library/rust:1`, que es Debian y trae `grep`. La prueba del orquestador lo confirma.
+
+## 4. Los 43 tests de la auditoría
+
+**Decisión: los 41 de calibración no se saltean. Se inyecta la lectura del digest.**
+- Su camino es `calibrar_tarea_con` → `leer_digest` (`src/oracle/calibra.rs:1578`) → `target::digest_de_imagen` (`src/oracle/calibra/target.rs:51`), que corre `podman image inspect`.
+- Prueban lógica de calibración, no podman. Saltearlos sin podman perdería 41 tests de lógica.
+- Con la lectura inyectada, cada test usa un digest fijo. Su resultado ya no depende de las imágenes de la laptop.
+
+**Los otros dos sí se saltean.** `panico_en_entrada_lo_detecta_la_sonda_nativa` (`src/oracle/calibra/defectos.rs:309`) y `oraculo_home_evaluar_y_llamadas_escriben_solo_en_su_home` (`tests/oraculo_home.rs:55`) usan `PodmanReal`, y lanzan contenedores. Son tests con podman sin su guarda.
+
+**La carrera ETXTBSY.** Un hilo escribe el script falso. Otro hilo hace fork mientras tanto, y el hijo hereda el descriptor de escritura. Ese descriptor se cierra recién cuando el hijo hace `exec`. El arreglo: el helper prueba lanzar el script, con reintentos cortos, antes de devolverlo. Si una prueba anda, ningún hijo guarda el descriptor.
+
+**El brief es `docs/builds/brief-local-120.md`,** con base "punta de `laptop/cadena-110-119`". Suma los arreglos chicos de las secciones 1 y 3.
+
+## 5. La prueba del orquestador para la 119
+
+Corre sola, sin builders y sin otra suite. No usa API. No toca el `ROOT_HOME` real: copia lo que hace falta con reflink.
+
+**Un dato para completar:** `REPO_T1` es el mismo `--repo` de s2-t1 que usó la recalibración de la serie 113. `tarea.toml` de s2-t1 no trae `[calibracion] repo`, así que el planner no lo conoce.
+
+```bash
+set -euo pipefail
+REPO_T1=<el --repo de s2-t1 de la serie 113>
+RAIZ=/home/mpera/.claude/orchestration
+P=$HOME/.cache/root-wt/prueba-119
+mkdir -p "$P/home"
+
+# 1. El binario de la cadena.
+git -C "$RAIZ" worktree add --detach "$P/wt" laptop/cadena-110-119
+git -C "$P/wt" config --worktree core.hooksPath .githooks
+CARGO_TARGET_DIR="$P/target" cargo build --release --manifest-path "$P/wt/Cargo.toml"
+R="$P/target/release/r00t"
+
+# 2. Una copia del ROOT_HOME con reflink. El real no se toca.
+for x in root.toml cache oraculos configs previos calibracion.json politica.json; do
+  cp -a --reflink=always "$HOME/.local/share/root/$x" "$P/home/"
+done
+
+# 3. El disco antes, y un vigía del disco de home/tmp cada 5 s.
+df -B1 --output=avail "$HOME" | tail -1 > "$P/disco-antes.txt"
+( while sleep 5; do du -sb "$P/home/tmp" 2>/dev/null | cut -f1; done ) > "$P/disco-tmp.log" &
+VIGIA=$!
+
+# 4. La evaluación, sin claves.
+a=$(date +%s)
+env -u DEEPSEEK_API_KEY -u ANTHROPIC_API_KEY ROOT_HOME="$P/home" \
+  "$R" oraculo evaluar --tarea s2-t1 --repo "$REPO_T1" > "$P/veredicto.json" 2> "$P/stderr.log" || echo "salida $?" > "$P/salida.txt"
+b=$(date +%s)
+kill "$VIGIA"
+echo "segundos $((b-a))" > "$P/tiempo.txt"
+
+# 5. Lo que se anota.
+jq '.eficiencia_auto' "$P/veredicto.json" > "$P/eficiencia_auto.json"
+jq '.puntajes[] | select((.dimension|tostring|ascii_downcase) == "eficiencia")' "$P/veredicto.json" > "$P/puntaje.json"
+jq '{decision: .informe.decision, resumen: .informe.resumen}' "$P/veredicto.json" > "$P/decision.json"
+grep -c "recompiló" "$P/eficiencia_auto.json" > "$P/recompilo.txt" || true
+grep -c "memory.peak\|compilación de los tests falló" "$P/eficiencia_auto.json" > "$P/motivos-raros.txt" || true
+sort -n "$P/disco-tmp.log" | tail -1 > "$P/disco-pico.txt"
+find "$P/home/tmp" -maxdepth 3 -name target -type d | wc -l > "$P/targets-que-quedan.txt"
+df -B1 --output=avail "$HOME" | tail -1 > "$P/disco-despues.txt"
+cat "$P/tiempo.txt" "$P/recompilo.txt" "$P/motivos-raros.txt" "$P/disco-pico.txt" "$P/targets-que-quedan.txt"
+```
+
+**Lo que debe dar:**
+- Las cuatro medidas con valor, o con un motivo que no sea "recompiló".
+- `recompilo.txt` en 0, y `targets-que-quedan.txt` en 0.
+- `disco-antes.txt` y `disco-despues.txt` casi iguales.
+- Si la memoria queda sin valor por `memory.peak`, el cgroup no se ve dentro del contenedor. Eso pide otra decisión.
+
+**Al terminar,** el orquestador informa los archivos de `$P`, y después quita el worktree con `git -C "$RAIZ" worktree remove "$P/wt"`.
+
+## 6. Qué sigue para calibrar Root, en orden
+
+1. **La mezcla de la cadena 110 a 119.** Primero, la suite con podman en verde, y las tres fallas de carga reprobadas solas. Espera la orden del usuario.
+2. **La Tarea 120.** Deja la suite sin podman independiente de la laptop.
+3. **La prueba de la 119,** de la sección 5. Sin ella, Eficiencia no se calibra.
+4. **La medición P101 a,** que ya está en cola.
+5. **La medición del reparto del tiempo,** de la vuelta (35). Ordena las mejoras 3 a 6 de P106 c.
+6. **La recalibración de t1 a t3 con la regla de P102 a.** Junta los casos por versión. Muestra, por dimensión, la cota de Wilson y cuántos casos faltan para 0,8.
+7. **Una tarea de defectos de eficiencia.** Hoy `BucleCuadratico` solo sirve con `[eficiencia]`. Hace falta un defecto que la medición automática vea, en una función que los tests llaman.
+8. **P97 c: la reserva nueva,** con los 5 arreglos de broot.
+9. **P98 c: el final abre recién con 15 defectos reales.**
+10. **La validez sobre el final sellado.** Va al último. El planner no lee el sellado.
+
+**Lista de limpiezas, sin tarea todavía:**
+- El motivo de una fila sin `tarea_hash` (vuelta 38).
+- El literal `localhost/root-oraculo-rust:2` en un test de la 112.
+- La rama `laptop/tarea-119-inf`, que el orquestador puede borrar.
+
+**Preguntas al usuario:** ninguna nueva.
