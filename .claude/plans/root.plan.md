@@ -9588,3 +9588,89 @@ python3 -I "$P/scripts/reparto.py" "$P/podman.jsonl" "$P/totales.txt" | tee "$P/
 **Al terminar,** el orquestador quita el worktree con `git -C "$RAIZ" worktree remove "$P/wt"`.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (43): la 121, la mutación de la calibración, y Eficiencia en t1
+
+**Estado.**
+- La suite con podman de `laptop/cadena-110-120` (ea04410) dio verde, sola: 3471, 0 y 5.
+- **La prueba de la 119 pasó.** Con `--json`, dio las cuatro medidas con valor y sin "recompiló". Las razones fueron 1,014, 1,003, 0,999 y 1,000. El pico de tmp fue 1,3 GB, y no quedó ningún `target`. La evaluación tardó unos 16 minutos. Eficiencia dio 1,0 sin calibrar: "calibración con otro tarea.toml".
+- **El reparto del tiempo corrió.** Completitud con n=4 tardó 88 s. Pruebas con n=4 tardó 527 s. La mutación usó 524 s en 8 contenedores, el 85,8 % del tiempo en contenedores. Nextest usó 85 s.
+- Las Tareas 121 (976511b) y 122 (349f6f0) terminaron en verde sin podman. `laptop/cadena-110-122` (b6245d9) las junta sobre ea04410. Su suite con podman corre ahora. Después corre P101 a otra vez, en `mineria/s2/p101-121/`.
+- **El disco está al 98 %, con 14 GB libres.** El borrado de carpetas viejas espera la orden del usuario.
+
+## 1. Las diez preguntas de la 121
+
+1. **La salida humana de `calibrar` no muestra `base_sin_veredicto`:** se arregla en la Tarea 124.
+2. **`inestables_de` salta las filas con `base_sin_veredicto`:** acepto. Una fila que no midió no debe borrar los inestables de otra que sí midió.
+3. **`motivo_sin_calibrar_en` da "ningún caso aplicable" para esa fila:** es engañoso. Va a la lista de limpiezas: el motivo debe ser "la base no tiene veredicto: <motivo>". No va en la 123 ni en la 124, para no mezclar archivos.
+4. **Una fila por cada intento sin veredicto:** acepto. Cada intento es una medición, y `cuenta` la excluye.
+5. **`informe.rs` no lee `causas_inestables`:** acepto por ahora. El dato sirve para decidir la regla. El informe lo leerá si la regla cambia.
+6. **"sin nivel" cubre dos casos:** acepto.
+7. **La causa "varía de a a b" no dice el juicio:** acepto. `juicios_base` lo trae.
+8. **Arquitectura de s2-t1:** se decide con los datos de `p101-121`.
+9. **El texto histórico con el error viejo:** acepto. Los informes y el plan son historia.
+10. **El test que usa `diseno.acoplamiento`, que no existe:** va a la lista de limpiezas. Un ítem inexistente puede tapar un error de filtro por rúbrica.
+
+## 2. La mutación de la calibración
+
+**Lo que dice el reparto.** `podman.jsonl` trae cinco corridas de mutación de Pruebas: la base y cuatro casos. Cada una tardó entre 100 y 108 s. **Las cinco corrieron los mismos 14 mutantes**, con el mismo `-F`.
+
+**Lo que dice `casos.jsonl`.**
+- La base mató 3 de 14: valor 0,214.
+- Dos casos fueron `assert_borrado` en `tests/search_strings.rs`. Los dos se detectaron por `mutante_vivo`: un mutante que la base mataba quedó vivo.
+- Dos casos fueron limpios. Dieron el mismo 0,214.
+
+**Lo que un caso puede cambiar.** Un defecto de Pruebas debilita los tests. Un caso se detecta si un mutante que la base mataba queda vivo (`separar_cambios`, `src/oracle/calibra.rs:1299`). Un mutante que la base dejaba vivo sigue vivo, porque un test más débil no mata más. Un limpio mide el ruido de esos mismos mutantes.
+
+**La decisión: un caso corre solo los mutantes que la base mató.**
+- Los que la base dejó vivos se copian de la base como vivos.
+- El valor del caso se calcula sobre los 14, como hoy. Así se compara con la base.
+- En t1, cada caso corre 3 mutantes en vez de 14. La corrida baja de unos 100 s a unos 35 s, con la compilación base de cargo-mutants.
+- Pruebas con n=4 bajaría de 527 s a unos 250 s.
+
+**El único hueco.** Si un test debilitado llega a un bucle infinito con un mutante, ese mutante vence su plazo. Un `Timeout` cuenta como muerto. Un mutante que la base dejaba vivo podría morir así. Ese cambio sube el valor del caso, y nunca da una detección falsa. A lo sumo baja un poco la sensibilidad. Lo acepto, y la 123 lo deja escrito en un comentario.
+
+**Lo que no va todavía:**
+- `--baseline=skip` en los casos. Ahorraría una compilación más por caso. Pero sin la base de cargo-mutants, un caso con tests rotos daría todos los mutantes muertos. Primero se mide cuánto pesa la base con el envoltorio de la vuelta (42).
+- `-j2`. Pide un `target` por trabajo, y un `target` compartido se bloquea.
+
+El brief es `docs/builds/brief-local-123.md`.
+
+## 3. Los 16 minutos de una evaluación con Eficiencia
+
+**Para una evaluación, son aceptables.** Una evaluación corre una vez por corrida de `corre`, al final. Un builder trabaja horas.
+
+**Para calibrar Eficiencia, no lo son.** Cada caso repite toda la medición. Con n=4, son más de 60 minutos.
+
+**Lo que los baja, en orden de ganancia:**
+1. **Reusar la referencia en la calibración.** El lado `bootstrap/` es igual en todos los casos. Se mide una vez en la base, y los casos reusan su serie. Así cada caso mide un solo lado. Se pierde la alternancia, y el ruido de la referencia sigue midiéndose. Es aceptable en la calibración, donde los casos corren seguidos.
+2. **La compilación de release es la medida más cara.** Son cerca de 65 s por corrida, y 4 corridas por lado. Su medida no cambia: P105 pide el tiempo de compilación, y el release es el que se entrega.
+3. **El resto de la evaluación** son las suites y la mutación. La 123 baja la mutación solo en la calibración.
+
+## 4. Lo que hace falta para calibrar Eficiencia en t1
+
+**El motivo "calibración con otro tarea.toml"** quiere decir que la fila de Eficiencia de s2-t1 tiene un `tarea_hash` viejo. El `tarea.toml` cambió con las capas, y la fila no se rehízo.
+
+**Rehacer la fila no alcanza.** Para una dimensión de oráculo, P102 a pide un defecto detectado y todos los limpios bien. Hoy no hay un defecto que la medición automática vea:
+- `BucleCuadratico` solo sirve con `[eficiencia]`, que s2-t1 no trae.
+- Un defecto útil mete trabajo extra en una función que los tests comunes llaman. En t1, el cambio es `CompositePattern::search_string`, y `tests/search_strings.rs` lo llama.
+
+**Lo que hace falta, en orden:**
+1. **Un defecto de eficiencia para la medición automática.** Lo inyecta en una función del cambio que los tests comunes llaman. Su costo debe pasar 1,5 veces en el tiempo de los tests.
+2. **La referencia reusada en la calibración,** de la sección 3.
+3. **La calibración de Eficiencia en s2-t1,** con n=4: dos defectos y dos limpios. No usa API.
+
+Las dos primeras son una tarea de código. Va después de la 123 y la 124, porque toca `calibra.rs`. La numero cuando llegue.
+
+## 5. La salida humana de `calibrar`
+
+La Tarea 124 toca solo `src/lib.rs`. No comparte archivos con la 123. El brief es `docs/builds/brief-local-124.md`.
+
+**Lista de limpiezas, sin tarea todavía:**
+- El motivo de una fila sin `tarea_hash` (vuelta 38).
+- El literal `localhost/root-oraculo-rust:2` en un test de la 112.
+- La rama `laptop/tarea-119-inf`.
+- El motivo de una fila con `base_sin_veredicto` en `motivo_sin_calibrar_en` (pregunta 3 de la 121).
+- El ítem `diseno.acoplamiento` en un test de la 121.
+
+**Preguntas al usuario:** ninguna nueva.
