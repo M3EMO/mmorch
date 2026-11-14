@@ -2844,6 +2844,10 @@ const MOTIVO_SIN_CANDIDATO: &str = "sin candidato para inyectar";
 /// Motivo de un defecto de línea o de módulo sin lugar dentro del cambio de `bootstrap/`.
 const MOTIVO_FUERA_DEL_CAMBIO: &str = "ningún lugar del cambio admite este defecto";
 
+/// Motivo de un `LastreDeMemoria` con estado inicial: no hay función vieja que corra los tests.
+const MOTIVO_LASTRE_SIN_LUGAR: &str =
+    "ninguna función vieja que corran los tests del estado inicial";
+
 /// Motivo de un `ModuloBorrado` con estado inicial: borrar un módulo rompe el build y da una detección segura.
 const MOTIVO_MODULO_CON_INICIAL: &str =
     "con estado inicial, borrar un módulo rompe el build y da una detección segura";
@@ -2856,7 +2860,8 @@ const MOTIVO_SIN_TEST_DE_MUERTO: &str = "ningún mutante muerto tiene tests fall
 
 /// Motivo de un caso sin inyección. `AssertBorrado` separa si la base no dio muertos de si ninguno tiene test.
 /// Con `con_rangos`, `ModuloBorrado` dice que con estado inicial no aplica. `ComportamientoRoto` y `CuerpoVaciado`
-/// dicen que ningún lugar del cambio los admite. Los demás defectos usan el motivo común.
+/// dicen que ningún lugar del cambio los admite. `LastreDeMemoria` con `con_rangos` dice que no hay
+/// función vieja que corra los tests del estado inicial. Los demás defectos usan el motivo común.
 fn motivo_sin_inyeccion(defecto: Defecto, sin_muertos: bool, con_rangos: bool) -> &'static str {
     match (defecto, sin_muertos) {
         (Defecto::AssertBorrado, true) => MOTIVO_SIN_MUERTOS,
@@ -2865,6 +2870,7 @@ fn motivo_sin_inyeccion(defecto: Defecto, sin_muertos: bool, con_rangos: bool) -
         (Defecto::ComportamientoRoto | Defecto::CuerpoVaciado, _) if con_rangos => {
             MOTIVO_FUERA_DEL_CAMBIO
         }
+        (Defecto::LastreDeMemoria, _) if con_rangos => MOTIVO_LASTRE_SIN_LUGAR,
         _ => MOTIVO_SIN_CANDIDATO,
     }
 }
@@ -8666,6 +8672,18 @@ mod tests {
         );
         assert_eq!(
             motivo_sin_inyeccion(Defecto::ComportamientoRoto, false, false),
+            MOTIVO_SIN_CANDIDATO
+        );
+    }
+
+    #[test]
+    fn motivo_de_lastre_con_rangos_sin_lugar_lo_dice() {
+        assert_eq!(
+            motivo_sin_inyeccion(Defecto::LastreDeMemoria, false, true),
+            MOTIVO_LASTRE_SIN_LUGAR
+        );
+        assert_eq!(
+            motivo_sin_inyeccion(Defecto::LastreDeMemoria, false, false),
             MOTIVO_SIN_CANDIDATO
         );
     }
