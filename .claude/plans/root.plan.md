@@ -10239,3 +10239,106 @@ El brief es `docs/builds/brief-local-132.md`. Toca solo `src/oracle/calibra.rs`.
 - Un solo helper para insertar al principio de una función (pregunta 5 de la 131).
 
 **Preguntas al usuario:** P107 sigue abierta.
+
+## Vuelta del 2026-11-14 (49): Eficiencia medida, y lo que esa medición enseña
+
+**Estado.**
+- La Tarea 132 terminó en verde sin podman: 3586, 0 y 5. `laptop/cadena-110-132` (56fd3eb) la suma. Su suite con podman dio verde, sola: 3586, 0 y 5.
+- **La calibración de Eficiencia corrió en el `ROOT_HOME` real,** con n=4, semilla 42 y el binario de 56fd3eb. Respaldo en `efi-real/`.
+- t1: limpios 0,950 y 0,948, los dos detectados por `valor_menor`. Defectos 0,951 y 0,956. Especificidad 0, sensibilidad 1, ExB 0,5.
+- t2: defectos 0,415 y 0,417, limpios 1,0. ExB 1,0.
+- t3: un defecto en `content_match.rs:17` dio 1,0. El otro quedó "candidatos distintos agotados". Sensibilidad 0, ExB 0,5.
+- Una tarea tarda entre 38 y 50 minutos con n=4.
+- P107 espera la respuesta del usuario. El disco está al 98 %, con 11 GB libres.
+
+## 1. Las dos preguntas de la 132
+
+1. **Sin `[eficiencia]`, `eficiencia.tiempo` no tiene defecto:** acepto. La medición automática igual mide el tiempo, pero ningún defecto lo prueba hoy. Va a la lista de ideas: un defecto de tiempo que no dependa de cuántas veces se llama la función.
+2. **El motivo perdió el prefijo "no aplica: ":** acepto. `cuenta` y `es_no_aplica` leen el campo `no_aplica`, no el texto.
+
+## 2. Por qué un limpio de t1 da 0,95
+
+**La regla de detección no tiene margen.** `motivo_de_deteccion` (`src/oracle/calibra.rs`, cerca de la línea 3027) da `valor_menor` si `pv.valor < pb.valor`. Cualquier baja cuenta. `estables::permite` solo filtra Completitud y Funciona. Para Eficiencia siempre deja pasar.
+
+**El ruido sí se mide, pero mal en la calibración.**
+- La medición de la 115 solo marca regresión si la razón pasa 1 + ruido. El ruido es la dispersión de las tres corridas de la referencia, con un piso de 2 %.
+- En una evaluación, los dos lados se alternan. Una carga pasajera de la máquina pega en los dos lados.
+- **En la calibración, la 131 reusa la referencia de la base.** Cada caso mide solo el repo, entre 10 y 40 minutos después. Si la máquina se puso un 5 % más lenta, el repo sale un 5 % más lento. La dispersión de la referencia no ve ese cambio, porque se midió antes.
+- Un valor de 0,95 es una razón de 1,053: pasa 1 + 2 %, y cuenta como regresión.
+
+**Un error mío.** En la vuelta (43) acepté perder la alternancia en la calibración. Dije que los casos corren seguidos. Corren seguidos, pero durante 40 minutos. La máquina cambia en ese tiempo.
+
+**No sé qué medida bajó.** Los `.casos.jsonl` no guardan las medidas de cada caso, solo el valor. La 133 las guarda.
+
+**¿Falta un margen medido? Sí, y debe salir del mismo caso.** Un margen fijo sería adivinar. Un margen sacado de los limpios sería circular: los limpios son lo que se juzga.
+
+**El arreglo: una corrida ancla de la referencia en cada caso.**
+- Cada caso corre una vez el lado `bootstrap/`, en medio de las corridas del repo. Vale para el tiempo de los tests, la memoria y la compilación. El tamaño no cambia con el tiempo.
+- El ruido del caso es la dispersión de la serie de la base más el ancla. Si la máquina cambió, el ancla lo muestra, y el umbral sube.
+- Cuesta una corrida de cada lado en vez de tres. La compilación es la más cara: unos 65 s por corrida.
+
+**Cómo medir el ruido sin API.** Con la 133, cada caso guarda sus medidas. Una calibración de Eficiencia de t1 da dos limpios con sus razones. Dos calibraciones dan cuatro. Ninguna usa el juez.
+
+## 3. Por qué el lastre baja 5 % en t1 y nada en t3
+
+**En t1, el lastre no movió la memoria.** Los defectos dieron 0,951 y 0,956. Los limpios dieron 0,950 y 0,948. Es la misma baja: la del ruido de la sección 2. La sensibilidad de 1 de t1 es falsa. Los defectos se detectaron por el ruido, no por el lastre.
+
+**En t2, el lastre sí se vio:** 0,415 es una razón de 2,4. Es lo que se esperaba con 64 MB sobre 42 MB.
+
+**La causa, en la medición misma.**
+- La medición automática solo corre los tests que pasan en los dos lados: el estado inicial y el repo.
+- **Los tests de la función nueva no pasan en `bootstrap/`,** porque ahí la función todavía no existe. Quedan fuera de la medición.
+- El lastre de t1 cayó en `composite_pattern.rs:19` y `:170`. El de t3 cayó en `content_match.rs:17`. Si esas funciones son nuevas, solo las llaman los tests nuevos. La medición nunca las corre.
+- En t2, el cambio toca `content_search/mod.rs`, una función que ya existía. Los tests viejos la llaman, y el lastre se ve.
+
+**Lo que eso dice de la medición de la 115.** La medición automática ve una regresión en un camino que ya existía. No puede ver el costo de código nuevo, porque el estado inicial no tiene con qué compararlo. Es un límite de diseño de P105 a, no un error. Lo dejo escrito.
+
+**El arreglo del defecto: el lastre va a una función que ya existía.** Una función cuenta como vieja si `bootstrap/` tiene una función con el mismo nombre en el mismo archivo. Primero se busca en los archivos del cambio. Si no hay, en cualquier archivo de producción. Así, en t3 también hay más lugares, y el segundo defecto no se agota.
+
+## 4. Qué se puede recortar de los 38 a 50 minutos
+
+**Lo que dice el código.** Los `.casos.jsonl` no traen tiempos por fase. El código sí dice dónde está el costo.
+- La Tarea 119 crea una carpeta de trabajo por medición, con un `target` por lado, y la borra al terminar.
+- **En la calibración, cada caso crea su carpeta de nuevo.** El `target` del repo parte vacío en cada caso. La primera compilación sin medir compila todas las dependencias de broot en release y en debug.
+- Es el mismo problema de la mutación, que la 127 y la 130 resolvieron con una carpeta fija por calibración.
+
+**El recorte: una carpeta fija por lado para toda la calibración.**
+- Las dependencias se compilan una vez por lado, en la base.
+- Las corridas medidas no cambian: cada una limpia solo el paquete con `cargo clean -p` antes de compilar. La medida es la misma.
+- No sé cuánto pesa la compilación en frío de broot, porque no hay datos por fase. Estimo que es la mayor parte del tiempo de un caso. La 133 pide repetir el reparto con el envoltorio de podman para medirlo.
+
+## 5. Las Tareas 133 y 134
+
+| Tarea | Qué | Archivos |
+|---|---|---|
+| 133 | El ancla de la referencia en cada caso, la carpeta fija por lado, y las medidas guardadas en cada caso | `src/oracle/eficiencia.rs`, `src/oracle/calibra.rs`, `docs/interfaces.md` |
+| 134 | El lastre va a una función que ya existía en `bootstrap/` | `src/oracle/calibra/inyectar.rs`, el módulo de tests de `src/oracle/calibra/defectos.rs` |
+
+**Corren en paralelo.** No comparten archivos. La base de las dos es la punta de `laptop/cadena-110-132`.
+
+Los briefs son `docs/builds/brief-local-133.md` y `docs/builds/brief-local-134.md`.
+
+**Las filas de Eficiencia del `ROOT_HOME` real se quedan.** Son una medición honesta con el binario de 56fd3eb. La de t1 tiene especificidad 0, así que Eficiencia no cumple P102 a con las tareas juntas. Una calibración con la 133 y la 134 las reemplaza.
+
+## 6. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | API |
+|---|---|---|---|
+| 1 | La mezcla de la cadena 110 a 132 | La orden del usuario | No |
+| 2 | Las Tareas 133 y 134, en paralelo | Nada | No |
+| 3 | El reparto del tiempo de una calibración de Eficiencia, con el envoltorio de podman | La 133 | No |
+| 4 | La calibración de Eficiencia de t1 a t3, otra vez | La 133 y la 134 | No |
+| 5 | Una prueba de dos casos de Diseño con el juez real | **P107** | Sí, cerca de 0,35 USD |
+| 6 | La calibración de Diseño, Arquitectura y Estructura de t1 a t3 | **P107** | Sí, cerca de 17 USD |
+| 7 | Congelar la versión | El paso 6 | No |
+| 8 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | No |
+| 9 | P98 c: el final con 15 defectos reales | El paso 8 | No |
+| 10 | La validez sobre el final sellado | Los pasos 1 a 9 | Según el final |
+
+**Hoy cumplen P102 a:** Seguridad, Pruebas, Completitud y Funciona.
+**No cumplen:** Eficiencia, por el ruido de t1. Diseño, Arquitectura y Estructura, por falta de casos con juez.
+**No se pueden calibrar con S2:** Entrega.
+
+**Lista de ideas, nueva entrada:** un defecto de tiempo para `eficiencia.tiempo` que no dependa de cuántas veces se llama la función.
+
+**Preguntas al usuario:** P107 sigue abierta.
