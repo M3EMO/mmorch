@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::configs::{instrucciones, palabra_clave, parsear_from};
-use super::contenedor::{self, Ejecucion, SalidaPodman};
+use super::contenedor::{self, Backend, Ejecucion, SalidaPodman, backend_actual};
 use super::entrega::{Eleccion, PodmanReal, dockerfiles_del_repo, elegir_dockerfile};
 use super::juez::ModeloJuez;
 use super::tarea::Tarea;
@@ -1299,9 +1299,24 @@ pub(crate) fn leer_cola<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle<Ve
     })
 }
 
-/// Corre `podman` con `args` y espera hasta `plazo`. Guarda solo la cola de cada salida.
-/// Si vence, mata el proceso y da `Infra`. Si lo mata una señal, también da `Infra`.
+/// Corre `podman` con `args` y espera hasta `plazo`. El motor sale de `ROOT_CONTENEDOR_MODO`.
 fn correr_podman_acotado(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+    correr_podman_acotado_con(backend_actual(), args, plazo)
+}
+
+/// Igual que `correr_podman_acotado`, con el motor pasado por quien llama. En bwrap da `Infra` sin lanzar
+/// nada: la caché de dependencias viene en el paquete. Con podman guarda solo la cola de cada salida.
+/// Si vence, mata el proceso y da `Infra`. Si lo mata una señal, también da `Infra`.
+fn correr_podman_acotado_con(
+    backend: Backend,
+    args: &[&str],
+    plazo: Duration,
+) -> Result<SalidaPodman, ErrorOraculo> {
+    if backend == Backend::Bwrap {
+        return Err(ErrorOraculo::Infra(
+            "en modo bwrap, la caché de dependencias viene en el paquete".into(),
+        ));
+    }
     let mut hijo = Command::new("podman")
         .args(args)
         .stdout(Stdio::piped())
@@ -2330,6 +2345,24 @@ source = \"git+http://host/x?rev=1#abc1234\"\n";
                 assert_eq!(
                     m,
                     "infraestructura: timeout tras 600 s; contenedor root-x eliminado"
+                );
+            }
+            otro => panic!("debe ser Infra, es {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn bwrap_descarga_correr_podman_acotado_en_bwrap_da_infra_sin_lanzar_podman() {
+        // Sin podman no hay pull ni inspect. El error exacto prueba que no se lanzó nada.
+        match correr_podman_acotado_con(
+            Backend::Bwrap,
+            &["image", "exists", "x"],
+            Duration::from_secs(1),
+        ) {
+            Err(ErrorOraculo::Infra(motivo)) => {
+                assert!(
+                    motivo.contains("la caché de dependencias viene en el paquete"),
+                    "{motivo}"
                 );
             }
             otro => panic!("debe ser Infra, es {otro:?}"),

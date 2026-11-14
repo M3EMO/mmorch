@@ -8,6 +8,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::oracle::contenedor::{Backend, VARIABLE_BWRAP_IMAGEN_ID, backend_actual};
+
 /// Carpetas de la raíz que no cuentan: su contenido no es código fuente de la copia.
 const EXCLUIDOS_RAIZ: &[&str] = &["target", ".git"];
 /// Nombres de archivo que cuentan como manifiesto. Cualquier carpeta del árbol puede tenerlos.
@@ -46,9 +48,32 @@ fn recoger(raiz: &Path, dir: &Path, mapa: &mut BTreeMap<PathBuf, Vec<u8>>) -> io
     Ok(())
 }
 
+/// Id de la imagen `imagen`. El motor sale de `ROOT_CONTENEDOR_MODO`. En bwrap el id viene de
+/// `ROOT_BWRAP_IMAGEN_ID`.
+pub fn digest_de_imagen(imagen: &str) -> Option<String> {
+    let imagen_id = std::env::var(VARIABLE_BWRAP_IMAGEN_ID).ok();
+    digest_de_imagen_con(backend_actual(), imagen_id.as_deref(), imagen)
+}
+
+/// Igual que `digest_de_imagen`, con el motor y el id pasados por quien llama. En bwrap da `imagen_id`
+/// recortado, o `None` si falta o queda vacío. Sin `podman` en esa rama.
+pub fn digest_de_imagen_con(
+    backend: Backend,
+    imagen_id: Option<&str>,
+    imagen: &str,
+) -> Option<String> {
+    match backend {
+        Backend::Bwrap => imagen_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string),
+        Backend::Podman => id_de_podman(imagen),
+    }
+}
+
 /// Id de la imagen `imagen` con `podman`. `None` si `podman` falla o no hay imagen. Con imágenes locales el
 /// `.Digest` sale vacío, así que se usa el `.Id`.
-pub fn digest_de_imagen(imagen: &str) -> Option<String> {
+fn id_de_podman(imagen: &str) -> Option<String> {
     let salida = Command::new("podman")
         .args(["image", "inspect", "--format", "{{.Id}}", imagen])
         .output()
@@ -231,5 +256,26 @@ mod tests {
             Some("sha:a"),
             Some("sha:a")
         ));
+    }
+
+    #[test]
+    fn bwrap_digest_de_imagen_devuelve_el_id_de_la_variable() {
+        assert_eq!(
+            digest_de_imagen_con(Backend::Bwrap, Some("sha256:abc"), "imagen"),
+            Some("sha256:abc".to_string())
+        );
+    }
+
+    #[test]
+    fn bwrap_digest_de_imagen_sin_variable_da_none() {
+        assert_eq!(digest_de_imagen_con(Backend::Bwrap, None, "imagen"), None);
+    }
+
+    #[test]
+    fn bwrap_digest_de_imagen_con_variable_vacia_da_none() {
+        assert_eq!(
+            digest_de_imagen_con(Backend::Bwrap, Some("  "), "imagen"),
+            None
+        );
     }
 }
