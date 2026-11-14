@@ -244,3 +244,92 @@ fn toml_distinto_nombra_nextest_toml() {
         "falta la línea mal nextest.toml: {ls:?}"
     );
 }
+
+const PREPARAR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tools/colab/preparar-runtime.sh"
+);
+
+const CONTAINERFILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/imagenes/oraculo-rust/Containerfile"
+);
+
+/// Bloque de nextest.toml dentro de `verificar-versiones.sh`: desde `[store]` hasta `path = "junit.xml"`.
+fn bloque_nextest(texto: &str) -> String {
+    let lineas: Vec<&str> = texto.lines().collect();
+    // La primera línea del bloque lleva el prefijo `NEXTEST_TOML='`, que no es parte del texto.
+    let inicio = lineas
+        .iter()
+        .position(|l| l.trim_start_matches("NEXTEST_TOML='") == "[store]")
+        .expect("falta [store] en verificar-versiones.sh");
+    let fin = lineas[inicio..]
+        .iter()
+        .position(|l| *l == "path = \"junit.xml\"")
+        .expect("falta path = \"junit.xml\" en verificar-versiones.sh")
+        + inicio;
+    let mut bloque: Vec<&str> = lineas[inicio..=fin].to_vec();
+    bloque[0] = bloque[0].trim_start_matches("NEXTEST_TOML='");
+    bloque.join("\n")
+}
+
+#[test]
+fn bash_n_de_preparar() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea bash_n_de_preparar");
+        return;
+    }
+    let salida = Command::new("bash")
+        .arg("-n")
+        .arg(PREPARAR)
+        .output()
+        .expect("lanza bash");
+    assert!(
+        salida.status.success(),
+        "bash -n falla: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+}
+
+#[test]
+fn preparar_y_verificar_comparten_el_texto_de_nextest() {
+    let preparar = fs::read_to_string(PREPARAR).expect("lee preparar-runtime.sh");
+    let verificar = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tools/colab/verificar-versiones.sh"
+    ))
+    .expect("lee verificar-versiones.sh");
+    let containerfile = fs::read_to_string(CONTAINERFILE).expect("lee Containerfile");
+
+    let bloque = bloque_nextest(&verificar);
+    assert!(
+        preparar.contains(&bloque),
+        "preparar-runtime.sh no contiene el bloque de nextest.toml:\n{bloque}"
+    );
+    for linea in bloque.lines().filter(|l| !l.is_empty()) {
+        assert!(
+            containerfile.contains(linea),
+            "el Containerfile no contiene la línea de nextest.toml: {linea}"
+        );
+    }
+}
+
+#[test]
+fn preparar_termina_llamando_a_verificar() {
+    let preparar = fs::read_to_string(PREPARAR).expect("lee preparar-runtime.sh");
+    for esperado in [
+        "verificar-versiones.sh",
+        "set -euo pipefail",
+        "apt-get install -y bubblewrap",
+        "/usr/local/rustup",
+        "/usr/local/cargo",
+        "--profile minimal",
+        "rustup component add clippy",
+        "0755",
+    ] {
+        assert!(
+            preparar.contains(esperado),
+            "preparar-runtime.sh no contiene {esperado:?}"
+        );
+    }
+}
