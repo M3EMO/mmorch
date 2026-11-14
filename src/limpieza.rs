@@ -18,6 +18,7 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle, Signals};
 
 use crate::Error;
+use crate::entorno::{VARIABLE_SIN_PODMAN, debe_saltear};
 use crate::oracle::ErrorOraculo;
 use crate::oracle::contenedor::{PLAZO_LIMPIEZA, SalidaPodman, correr_comando};
 
@@ -35,6 +36,16 @@ const PODMAN: &str = "podman";
 /// Quita los contenedores de procesos muertos de la familia. Sin turno de podman: quien lo llama
 /// debe tenerlo. Un fallo se avisa y no corta la corrida.
 pub(crate) fn barrer_al_arrancar(programa: &str) {
+    let sin_podman = std::env::var(VARIABLE_SIN_PODMAN).ok();
+    barrer_al_arrancar_con(programa, sin_podman.as_deref());
+}
+
+/// Igual que `barrer_al_arrancar`, con el valor de `ROOT_SIN_PODMAN` pasado por quien llama.
+/// Así los tests no cambian el entorno del proceso. Con `ROOT_SIN_PODMAN=1` no llama al programa.
+fn barrer_al_arrancar_con(programa: &str, sin_podman: Option<&str>) {
+    if debe_saltear(sin_podman) {
+        return;
+    }
     match barrer(programa, Path::new(PROCESOS), PLAZO_BARRIDO) {
         Ok(quitados) if quitados.is_empty() => {}
         Ok(quitados) => eprintln!(
@@ -767,5 +778,38 @@ mod tests {
     fn vigia_se_suelta_sin_colgarse() {
         let vigia = Vigia::iniciar(PODMAN).expect("registra");
         drop(vigia);
+    }
+
+    #[test]
+    fn barrido_con_sin_podman_uno_no_llama_al_programa() {
+        let _serie = serie();
+        let tmp = TempDir::new().expect("tmp");
+        let (podman, log) = podman_falso(tmp.path(), &[]);
+        barrer_al_arrancar_con(podman.to_str().expect("ruta"), Some("1"));
+        assert!(!log.exists(), "con ROOT_SIN_PODMAN=1 no se llama a podman");
+    }
+
+    #[test]
+    fn barrido_sin_variable_llama_al_programa() {
+        let _serie = serie();
+        let tmp = TempDir::new().expect("tmp");
+        let (podman, log) = podman_falso(tmp.path(), &[]);
+        barrer_al_arrancar_con(podman.to_str().expect("ruta"), None);
+        let texto = fs::read_to_string(&log).expect("log del podman falso");
+        assert!(
+            texto.contains("ps"),
+            "sin la variable, el barrido lista con ps"
+        );
+    }
+
+    #[test]
+    fn barrido_con_otros_valores_de_sin_podman_llama_al_programa() {
+        let _serie = serie();
+        for valor in ["0", "true", ""] {
+            let tmp = TempDir::new().expect("tmp");
+            let (podman, log) = podman_falso(tmp.path(), &[]);
+            barrer_al_arrancar_con(podman.to_str().expect("ruta"), Some(valor));
+            assert!(log.exists(), "con {valor:?} el barrido llama a podman");
+        }
     }
 }
