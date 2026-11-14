@@ -9929,3 +9929,69 @@ Toca `src/oracle/calibra.rs` y `src/oracle/mod.rs`. Choca con la 127 en `calibra
 - La 128 va después de la 127, porque las dos tocan `calibra.rs`.
 
 **Preguntas al usuario:** P107.
+
+## Vuelta del 2026-11-14 (46): la 126 y la 127, y los briefs de la 128 y la 129
+
+**Estado.**
+- Las Tareas 126 (b4e87ce) y 127 (4d433e4) terminaron en verde sin podman: 3521, 0 y 5, y 3536, 0 y 5.
+- `laptop/cadena-110-127` (f70e05d) las junta sobre 5deb835, sin conflictos.
+- Ahora corre, sola, la suite con podman de la cadena dos veces seguidas. Después corre el reparto del tiempo con la 127, en `reparto3/`.
+- P107 espera la respuesta del usuario.
+- El disco está al 98 %, con 12 GB libres.
+
+## 1. Las preguntas de la 126 y la 127
+
+**La 126:**
+1. **`src/oracle/pendientes.rs:698`:** queda así. Es código de producción que escribe el `correr.sh` del paquete de Colab. Root no lo ejecuta en la laptop. Lo ejecuta Colab, en otra máquina, así que no hay fork que compita.
+2. **La sonda solo en `#!/bin/sh` exacto:** acepto. Ningún script del alcance usa otro intérprete.
+3. **Otro error de spawn entra en pánico:** acepto. Un error así debe verse.
+4. **La copia en `tests/comun/`:** acepto. `tests/` no ve los módulos de tests de `src/`.
+
+**La 127:**
+1. **La carpeta es la subcarpeta `mutacion` de la temporal de la medición, con guardia propio:** acepto.
+2. **Quitar un `expect(dead_code)` y sumar un getter de test en `mutacion.rs`:** acepto. El hook falla con código muerto.
+3. **Borrar también `/salida/mutants`:** acepto. Un resultado viejo no se debe leer.
+
+## 2. Una corrección a la vuelta (45), sección 7
+
+**El punto 3 estaba mal.** Dije que un defecto en el piso no cuenta como medido. Pero el caso 8 de Diseño cayó en el piso, y se detectó por `cita_juez`. El juez citó la línea del defecto.
+
+- **Un defecto en el piso se puede detectar.** No por la baja del ítem, pero sí por la cita del juez.
+- **Por eso sigue contando como medido.** Sacarlo escondería si el juez ve el defecto.
+- **Lo que sí cambia, en la 128:** al elegir un defecto, la calibración prefiere uno cuyo ítem pueda bajar en la base. En Diseño, Arquitectura y Estructura, un ítem cuenta como bajado con 2 niveles (`BAJA_ITEM_CON_JUEZ`, `src/oracle/calibra.rs`). Así, un ítem con nivel 0 o 1 en la base no puede bajar.
+
+## 3. El brief de la 128
+
+Tiene tres puntos:
+1. **Los casos juzgan sin los ítems inestables de la base.** La cobertura de un caso se calcula sin ellos, igual que en una evaluación.
+2. **Un defecto sin veredicto no cuenta como no detectado.** Sale de la sensibilidad. La regla del 20 % vale también para los defectos.
+3. **La rotación prefiere un defecto cuyo ítem pueda bajar en la base.** Si ninguno puede, usa el que hay.
+
+Toca `src/oracle/calibra.rs` y `src/oracle/mod.rs`. El brief es `docs/builds/brief-local-128.md`.
+
+## 4. El brief de la 129
+
+**Dos defectos nuevos para ítems del juez.** En t1, los ítems con nivel 2 o más en la base son `diseno.estado` (3) y `arquitectura.adecuacion` (2, 3 y 3). Los defectos apuntan a esos ítems.
+
+| Defecto | Dimensión | Ítem | Qué inyecta |
+|---|---|---|---|
+| `EstadoGlobal` | Diseño | `diseno.estado` | Un contador global `static` que una función del cambio suma y lee, sin cambiar el resultado |
+| `EfectoEnNucleo` | Arquitectura | `arquitectura.adecuacion` | Una lectura del entorno dentro de una función del cambio, sin usar su valor |
+
+- Los dos compilan con la biblioteca estándar, sin dependencias.
+- Los dos no cambian el comportamiento. Los tests siguen pasando.
+- Los dos caen en un archivo del cambio, si lo hay. El juez lee el cambio primero.
+
+**¿Corre en paralelo con la 128? Sí.** La 129 toca `src/oracle/calibra/inyectar.rs` y el módulo de tests de `src/oracle/calibra/defectos.rs`. La 128 toca `calibra.rs` y `mod.rs`. La 129 tiene una condición: si un defecto nuevo pide un cambio en `calibra.rs`, el builder se detiene y lo escribe en el informe. Su base es la punta de `laptop/cadena-110-127`.
+
+El brief es `docs/builds/brief-local-129.md`.
+
+## 5. Otra tarea de código sin API
+
+**La siguiente es Eficiencia, de la vuelta (43), sección 4.** Pide un defecto que la medición automática vea, y reusar la referencia en la calibración.
+- **No corre en paralelo con la 128 ni con la 129.** El defecto va en `inyectar.rs`, que toca la 129. La referencia reusada va en `calibra.rs`, que toca la 128.
+- Va después de las dos. La numero entonces.
+
+**Lo que sí corre en paralelo, sin código y sin API:** recalibrar las dimensiones de oráculo de t1 a t3 con el binario de la cadena 110 a 127. Son Seguridad, Funciona, Completitud y Pruebas. P102 a pide para ellas un defecto detectado y todos los limpios bien. No usan el juez. Con la 127, Pruebas cuesta menos tiempo.
+
+**Preguntas al usuario:** P107 sigue abierta.
