@@ -583,29 +583,41 @@ const DIMENSIONES: [Dimension; 9] = [
     Dimension::Pruebas,
 ];
 
-/// Corre la sonda de lastre sobre una copia marcada de `bootstrap` y deja su resultado. Sus fallos suman un
-/// aviso y la evaluación sigue. La carpeta de trabajo se borra al terminar, también con error.
+/// Corre la sonda de lastre sobre una copia marcada del repo bueno (`repo_copia`), con el filtro de sus tests
+/// comunes, y deja su resultado. Sin filtro, no copia ni corre. Sus fallos suman un aviso y la evaluación sigue.
+/// La carpeta de trabajo se borra al terminar, también con error.
 fn correr_sonda_de_lastre(
     tmp: &Path,
-    bootstrap: &Path,
+    repo_copia: &Path,
     cache: Option<&Path>,
     rustsec: Option<&Path>,
     herramientas: FabricaHerramientas,
+    filtro: Result<String, String>,
     avisos: &mut Vec<String>,
 ) {
-    let resultado = match temporal(tmp) {
-        Ok(trabajo) => {
-            let resultado = medir_lastre(trabajo.path(), bootstrap, cache, rustsec, herramientas);
-            if let Err(e) = borrado::borrar_dir_dentro(tmp, trabajo.path()) {
-                avisos.push(format!(
-                    "sonda de lastre: no se borró su carpeta de trabajo: {e}"
-                ));
+    let resultado = match filtro {
+        Err(motivo) => Err(motivo),
+        Ok(filtro) => match temporal(tmp) {
+            Ok(trabajo) => {
+                let resultado = medir_lastre(
+                    trabajo.path(),
+                    repo_copia,
+                    cache,
+                    rustsec,
+                    herramientas,
+                    &filtro,
+                );
+                if let Err(e) = borrado::borrar_dir_dentro(tmp, trabajo.path()) {
+                    avisos.push(format!(
+                        "sonda de lastre: no se borró su carpeta de trabajo: {e}"
+                    ));
+                }
+                resultado
             }
-            resultado
-        }
-        Err(e) => Err(format!(
-            "sonda de lastre: no se creó la carpeta de trabajo: {e}"
-        )),
+            Err(e) => Err(format!(
+                "sonda de lastre: no se creó la carpeta de trabajo: {e}"
+            )),
+        },
     };
     if let Err(motivo) = &resultado {
         avisos.push(motivo.clone());
@@ -613,16 +625,32 @@ fn correr_sonda_de_lastre(
     dejar_sonda_lastre(resultado);
 }
 
-/// Arma la copia marcada en `trabajo`, corre la sonda y lee las funciones que corrieron.
+/// Filtro de los tests comunes para la sonda. Da el motivo si la medición de Eficiencia no lo dejó.
+fn filtro_de_la_sonda() -> Result<String, String> {
+    match eficiencia::filtro_de_tests_comunes() {
+        None => Err(
+            "sonda de lastre: sin filtro de tests comunes: la medición de Eficiencia no corrió"
+                .into(),
+        ),
+        Some(Err(motivo)) => Err(format!(
+            "sonda de lastre: sin filtro de tests comunes: {motivo}"
+        )),
+        Some(Ok(filtro)) => Ok(filtro),
+    }
+}
+
+/// Arma la copia marcada de `repo_copia` en `trabajo`, corre la sonda con `filtro` y lee las funciones que
+/// corrieron.
 fn medir_lastre(
     trabajo: &Path,
-    bootstrap: &Path,
+    repo_copia: &Path,
     cache: Option<&Path>,
     rustsec: Option<&Path>,
     herramientas: FabricaHerramientas,
+    filtro: &str,
 ) -> Result<BTreeSet<FuncionMarcada>, String> {
     let ruta_repo = trabajo.join("repo");
-    let mapa = armar_copia_marcada(bootstrap, &ruta_repo)
+    let mapa = armar_copia_marcada(repo_copia, &ruta_repo)
         .map_err(|e| format!("sonda de lastre: la copia marcada no se armó: {e}"))?;
     let ruta_salida = trabajo.join("salida");
     fs::create_dir_all(&ruta_salida)
@@ -636,7 +664,7 @@ fn medir_lastre(
         rustsec: rustsec.map(Path::to_path_buf),
     });
     let salida = ej
-        .ejecutar_en(&cmd_sonda(), &ruta_salida)
+        .ejecutar_en(&cmd_sonda(filtro), &ruta_salida)
         .map_err(|e| format!("sonda de lastre: el ejecutor falló: {e}"))?;
     if !salida_valida(&salida.stdout) {
         return Err("sonda de lastre: sin salida; el comando no llegó a sus marcas".into());
@@ -888,21 +916,6 @@ fn evaluar_con(
         }
         None
     };
-    // La sonda de lastre (Tarea 137): solo si `calibra` la pide. Sin ella, la evaluación no cambia.
-    if sonda_lastre_pedida() {
-        // Sin resultado viejo: aunque aquí no corra, no queda el de una evaluación anterior.
-        let _ = tomar_sonda_lastre();
-        if tarea.lenguaje == "rust" && bootstrap.is_dir() {
-            correr_sonda_de_lastre(
-                &tmp,
-                &bootstrap,
-                cache.as_deref(),
-                rustsec.as_deref(),
-                deps.herramientas,
-                &mut avisos,
-            );
-        }
-    }
     // La medición automática de Eficiencia: Rust con `bootstrap/`, si la partes pide. Sus dos ejecutores son
     // nuevos, sin memo ni reuso (Tarea 115).
     let mut avisos_eficiencia = Vec::new();
@@ -928,6 +941,23 @@ fn evaluar_con(
             Vec::new()
         };
     avisos.extend(avisos_eficiencia);
+    // La sonda de lastre (Tarea 137): solo si `calibra` la pide. Corre después de Eficiencia: su filtro de tests
+    // comunes sale de esa medición. Sin ella, la evaluación no cambia.
+    if sonda_lastre_pedida() {
+        // Sin resultado viejo: aunque aquí no corra, no queda el de una evaluación anterior.
+        let _ = tomar_sonda_lastre();
+        if tarea.lenguaje == "rust" && bootstrap.is_dir() {
+            correr_sonda_de_lastre(
+                &tmp,
+                &repo_copia,
+                cache.as_deref(),
+                rustsec.as_deref(),
+                deps.herramientas,
+                filtro_de_la_sonda(),
+                &mut avisos,
+            );
+        }
+    }
     let preparada = Preparada {
         repo: repo_copia.clone(),
         cache,
@@ -6613,16 +6643,14 @@ mod tests {
     struct SondaFalsa {
         espia: std::rc::Rc<EspiaSonda>,
         respuesta: Result<&'static str, &'static str>,
+        /// Lo que no es la sonda: la medición de Eficiencia, con `EficienciaFalsa`.
+        resto: Box<dyn EjecutorHerramienta>,
     }
 
     impl EjecutorHerramienta for SondaFalsa {
         fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
             if !cmd.contains("ROOT_SONDA_INICIO") {
-                return HerramientasSanas {
-                    faltan: Vec::new(),
-                    fuga: false,
-                }
-                .ejecutar(cmd);
+                return self.resto.ejecutar(cmd);
             }
             self.espia.comandos.borrow_mut().push(cmd.to_string());
             match self.respuesta {
@@ -6639,10 +6667,12 @@ mod tests {
         }
     }
 
-    /// Fábrica de la sonda: anota las copias marcadas que llegan y da `respuesta` a la sonda.
+    /// Fábrica de la sonda: anota las copias marcadas que llegan y da `respuesta` a la sonda. Lo demás lo
+    /// responde `EficienciaFalsa`. Con `lista_inicial`, el estado inicial lista esa salida de tests.
     fn fabrica_de_sonda(
         espia: std::rc::Rc<EspiaSonda>,
         respuesta: Result<&'static str, &'static str>,
+        lista_inicial: Option<&'static str>,
     ) -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
         move |p: &Preparada| {
             let marcada = fs::read_to_string(p.repo.join("src/lib.rs"))
@@ -6650,12 +6680,57 @@ mod tests {
             if marcada {
                 espia.copias.borrow_mut().push(p.repo.clone());
             }
+            let inicial = p.repo.ends_with("bootstrap");
+            let eficiencia = Box::new(EficienciaFalsa {
+                base: HerramientasSanas {
+                    faltan: Vec::new(),
+                    fuga: false,
+                },
+                inicial,
+                ns_repo: 1_300_000_000,
+                ops: Some(6000.0),
+                cmds: Comandos::default(),
+            });
+            let resto: Box<dyn EjecutorHerramienta> = match lista_inicial {
+                Some(xml) if inicial => Box::new(ListaDelInicial {
+                    xml,
+                    dentro: eficiencia,
+                }),
+                _ => eficiencia,
+            };
             Box::new(SondaFalsa {
                 espia: espia.clone(),
                 respuesta,
+                resto,
             })
         }
     }
+
+    /// Ejecutor del estado inicial que responde `xml` a `cmd_lista`. Lo demás va a `dentro`.
+    struct ListaDelInicial {
+        xml: &'static str,
+        dentro: Box<dyn EjecutorHerramienta>,
+    }
+
+    impl EjecutorHerramienta for ListaDelInicial {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if cmd != eficiencia::cmd_lista() {
+                return self.dentro.ejecutar(cmd);
+            }
+            let mut salida = SalidaHerramienta::default();
+            salida.archivos.insert("lista.xml".into(), self.xml.into());
+            Ok(salida)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            self.dentro.tiene_rustsec()
+        }
+    }
+
+    /// Salida de `cmd_lista` con `t1` y `t2`, los dos pasan. Solo el estado inicial la usa en las pruebas.
+    const LISTA_CON_T2: &str = r#"<testsuites><testsuite name="x"><testcase name="t1" classname="c"/><testcase name="t2" classname="c"/></testsuite></testsuites>"#;
+    /// Fuente del repo bueno en las pruebas de la sonda: `uno`, igual que la de `bootstrap/`.
+    const FUENTE_SONDA: &str = "pub fn uno() -> u8 {\n    1\n}\n";
 
     /// Tarea de Rust con `bootstrap/` de una función `uno` en la línea 1 de `src/lib.rs`.
     fn tarea_rust_con_bootstrap_de_funciones(base: &Path) -> Tarea {
@@ -6671,6 +6746,25 @@ mod tests {
         tarea
     }
 
+    /// Evalúa `tarea` con el repo `fuente_repo` y `partes` (o todas). No pide la sonda: lo hace quien llama.
+    fn evaluar_tarea_de_sonda(
+        base: &Path,
+        tarea: &Tarea,
+        fuente_repo: &str,
+        partes: Option<Partes>,
+        fabrica: &dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
+    ) -> Veredicto {
+        let repo = repo_rust(base, LOCK_SANO);
+        fs::write(repo.join("src/lib.rs"), fuente_repo).expect("lib.rs del repo");
+        let home = home_con_cache(base, LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let o = OpcionesOraculo {
+            partes,
+            ..opciones(&home)
+        };
+        evaluar_falso_con(&repo, tarea, &o, &correr, fabrica).expect("evalúa")
+    }
+
     /// Evalúa la tarea de Rust con la sonda `respuesta`. Con `pedida`, la evaluación corre bajo la sonda pedida.
     fn evaluar_con_sonda(
         base: &Path,
@@ -6679,16 +6773,126 @@ mod tests {
         pedida: bool,
     ) -> Veredicto {
         let tarea = tarea_rust_con_bootstrap_de_funciones(base);
-        let repo = repo_rust(base, LOCK_SANO);
-        let home = home_con_cache(base, LOCK_SANO);
-        let correr = correr_suites(JUNIT_CONTRATO);
-        let fabrica = fabrica_de_sonda(espia.clone(), respuesta);
-        let evaluar = || evaluar_falso(&repo, &tarea, &home, &correr, &fabrica).expect("evalúa");
+        let fabrica = fabrica_de_sonda(espia.clone(), respuesta, None);
+        let evaluar = || evaluar_tarea_de_sonda(base, &tarea, FUENTE_SONDA, None, &fabrica);
         if pedida {
             calibra::sonda_lastre::con_sonda_lastre(evaluar)
         } else {
             evaluar()
         }
+    }
+
+    /// `true` si la marca de la sonda va justo después de la firma `fn <nombre>(` de `texto`.
+    fn marcada_en_la_funcion(texto: &str, nombre: &str) -> bool {
+        let lineas: Vec<&str> = texto.lines().collect();
+        let firma = format!("fn {nombre}(");
+        lineas
+            .iter()
+            .position(|l| l.contains(&firma))
+            .is_some_and(|pos| {
+                lineas
+                    .get(pos + 1)
+                    .is_some_and(|l| l.contains("ROOT_SONDA_"))
+            })
+    }
+
+    #[test]
+    fn sonda_lastre_con_sonda_marca_la_copia_del_repo_bueno_y_no_la_de_bootstrap() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_bootstrap_de_funciones(base.path());
+        let textos = std::cell::RefCell::new(Vec::<String>::new());
+        let fabrica_base = fabrica_lastre(1_300_000_000, Comandos::default());
+        // Antes de que la sonda borre su copia, anota el texto de las copias marcadas que llegan.
+        let fabrica = |p: &Preparada| {
+            if let Ok(texto) = fs::read_to_string(p.repo.join("src/lib.rs"))
+                && texto.contains("ROOT_SONDA_")
+            {
+                textos.borrow_mut().push(texto);
+            }
+            fabrica_base(p)
+        };
+        // Solo el repo bueno tiene `solo_repo`: bootstrap no.
+        let fuente = "pub fn uno() -> u8 {\n    1\n}\n\npub fn solo_repo() -> u8 {\n    2\n}\n";
+        calibra::sonda_lastre::con_sonda_lastre(|| {
+            evaluar_tarea_de_sonda(base.path(), &tarea, fuente, None, &fabrica)
+        });
+        let textos = textos.into_inner();
+        assert_eq!(textos.len(), 1, "{textos:?}");
+        assert!(
+            marcada_en_la_funcion(&textos[0], "solo_repo"),
+            "{}",
+            textos[0]
+        );
+    }
+
+    #[test]
+    fn sonda_lastre_comando_lleva_el_filtro_de_los_tests_comunes() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_bootstrap_de_funciones(base.path());
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        // El estado inicial lista `t2` y el repo no: `t2` no es común y el filtro la excluye.
+        let fabrica = fabrica_de_sonda(
+            espia.clone(),
+            Ok("ROOT_SONDA_INICIO\nROOT_SONDA_FIN\n"),
+            Some(LISTA_CON_T2),
+        );
+        calibra::sonda_lastre::con_sonda_lastre(|| {
+            evaluar_tarea_de_sonda(base.path(), &tarea, FUENTE_SONDA, None, &fabrica)
+        });
+        let comandos = espia.comandos.borrow();
+        assert_eq!(comandos.len(), 1, "{comandos:?}");
+        assert!(
+            comandos[0].contains("nextest.toml -E 'not (test(=t2))'; echo ROOT_SONDA_INICIO"),
+            "{}",
+            comandos[0]
+        );
+    }
+
+    #[test]
+    fn sonda_lastre_sin_filtro_de_tests_comunes_da_error_y_no_corre() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_bootstrap_de_funciones(base.path());
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        let fabrica = fabrica_de_sonda(
+            espia.clone(),
+            Ok("ROOT_SONDA_INICIO\nROOT_SONDA_FIN\n"),
+            None,
+        );
+        // Las partes de Diseño no miden Eficiencia: no queda referencia de dos lados en el hilo.
+        let _ = eficiencia::tomar_referencia();
+        let partes = partes_de(Dimension::Diseno, &[], &tarea);
+        let v = calibra::sonda_lastre::con_sonda_lastre(|| {
+            evaluar_tarea_de_sonda(base.path(), &tarea, FUENTE_SONDA, Some(partes), &fabrica)
+        });
+        let Some(Err(motivo)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
+            panic!("sin filtro la sonda debía dejar un error");
+        };
+        assert!(motivo.contains("sin filtro de tests comunes"), "{motivo}");
+        assert!(v.avisos.iter().any(|a| a == &motivo), "{:?}", v.avisos);
+        assert!(
+            espia.comandos.borrow().is_empty(),
+            "la sonda no debe correr"
+        );
+    }
+
+    #[test]
+    fn sonda_lastre_funcion_nueva_del_repo_que_corre_queda_en_la_lista() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_bootstrap_de_funciones(base.path());
+        let fabrica = fabrica_lastre(1_300_000_000, Comandos::default());
+        let fuente = "pub fn uno() -> u8 {\n    1\n}\n\npub fn solo_repo() -> u8 {\n    2\n}\n";
+        let _ = calibra::sonda_lastre::con_sonda_lastre(|| {
+            evaluar_tarea_de_sonda(base.path(), &tarea, fuente, None, &fabrica)
+        });
+        let Some(Ok(corrieron)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
+            panic!("la sonda debía dejar una lista");
+        };
+        let solo = calibra::sonda_lastre::FuncionMarcada {
+            archivo: "src/lib.rs".into(),
+            linea: 5,
+            nombre: "solo_repo".into(),
+        };
+        assert!(corrieron.contains(&solo), "{corrieron:?}");
     }
 
     #[test]

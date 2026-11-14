@@ -148,10 +148,11 @@ fn copiar_marcando(
     Ok(())
 }
 
-/// Comando de shell que corre la sonda. Nextest no corta en el primer fallo; `ls` corre aunque falle.
-pub(crate) fn cmd_sonda() -> String {
+/// Comando de shell que corre la sonda con el filtro `filtro` (vacío o ` -E '...'`). Nextest no corta en el
+/// primer fallo; `ls` corre aunque falle.
+pub(crate) fn cmd_sonda(filtro: &str) -> String {
     format!(
-        "{PRELUDIO}rm -rf /tmp/root-sonda; mkdir -p /tmp/root-sonda; cd /repo && export CARGO_TARGET_DIR=/salida/target && cargo nextest run --offline --no-fail-fast --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml; echo ROOT_SONDA_INICIO; ls /tmp/root-sonda; echo ROOT_SONDA_FIN"
+        "{PRELUDIO}rm -rf /tmp/root-sonda; mkdir -p /tmp/root-sonda; cd /repo && export CARGO_TARGET_DIR=/salida/target && cargo nextest run --offline --no-fail-fast --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml{filtro}; echo ROOT_SONDA_INICIO; ls /tmp/root-sonda; echo ROOT_SONDA_FIN"
     )
 }
 
@@ -312,7 +313,7 @@ mod tests {
 
     #[test]
     fn sonda_lastre_comando_corre_nextest_sin_cortar_y_lista_marcas() {
-        let cmd = cmd_sonda();
+        let cmd = cmd_sonda("");
         assert!(cmd.contains("--no-fail-fast"));
         assert!(cmd.contains("mkdir -p /tmp/root-sonda"));
         assert!(cmd.contains("cargo nextest run --offline"));
@@ -321,6 +322,16 @@ mod tests {
         let nextest = cmd.find("cargo nextest").expect("nextest");
         let ls = cmd.find("ls /tmp/root-sonda").expect("ls");
         assert!(nextest < ls, "el ls va después de nextest");
+        assert!(!cmd.contains(" -E "), "sin filtro, nextest corre todo");
+    }
+
+    #[test]
+    fn sonda_lastre_comando_lleva_el_filtro_antes_de_la_marca() {
+        let cmd = cmd_sonda(" -E 'not (test(=a::b))'");
+        assert!(
+            cmd.contains("nextest.toml -E 'not (test(=a::b))'; echo ROOT_SONDA_INICIO"),
+            "{cmd}"
+        );
     }
 
     #[test]

@@ -831,6 +831,12 @@ pub(crate) fn tomar_referencia() -> Option<Referencia> {
     ULTIMA_REFERENCIA.with(|u| u.borrow_mut().take())
 }
 
+/// Filtro `-E` de los tests comunes de la última medición de dos lados de este hilo. Lo lee sin vaciar
+/// la referencia: `tomar_referencia` la sigue necesitando. `None` si no hubo esa medición.
+pub(crate) fn filtro_de_tests_comunes() -> Option<Result<String, String>> {
+    ULTIMA_REFERENCIA.with(|u| u.borrow().as_ref().map(|r| r.filtro.clone()))
+}
+
 /// Corre `f` con `referencia` como el lado inicial. Sin referencia, la medición mide los dos lados.
 /// Al salir, también ante pánico, vuelve la referencia anterior.
 pub(crate) fn con_referencia<T>(referencia: Option<Referencia>, f: impl FnOnce() -> T) -> T {
@@ -1777,6 +1783,32 @@ mod tests {
     fn referencia_de(inicial: &Falso, repo: &Falso) -> Referencia {
         let _ = medir_de_prueba(inicial, repo);
         tomar_referencia().expect("la medición dejó una referencia")
+    }
+
+    #[test]
+    fn filtro_de_tests_comunes_lee_sin_vaciar_la_referencia() {
+        let _ = tomar_referencia();
+        assert_eq!(
+            filtro_de_tests_comunes(),
+            None,
+            "sin medición no hay filtro"
+        );
+        let log = RefCell::new(Vec::new());
+        // `b` pasa en el inicial y no en el repo: no es común, así que el filtro la excluye.
+        let inicial = Falso {
+            lista: lista(&[("a", true), ("b", true)]),
+            ..sano("inicial", &log, &[])
+        };
+        let repo = Falso {
+            lista: lista(&[("a", true), ("b", false)]),
+            ..sano("repo", &log, &[])
+        };
+        let _ = medir_de_prueba(&inicial, &repo);
+        let primera = filtro_de_tests_comunes();
+        let segunda = filtro_de_tests_comunes();
+        assert_eq!(primera, Some(Ok(" -E 'not (test(=b))'".to_string())));
+        assert_eq!(primera, segunda, "leer dos veces da lo mismo");
+        assert!(tomar_referencia().is_some(), "leer no vacía la referencia");
     }
 
     #[test]
