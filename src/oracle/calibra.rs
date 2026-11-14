@@ -33,7 +33,8 @@ use crate::goal::calcular_hash;
 use crate::observe;
 use crate::proveedores::{LimiteCalibracion, con_caso, con_limite, rechazo_en_este_hilo};
 use crate::tipos::{
-    Dimension, Eleccion, Evento, Fuente, Hallazgo, ItemFaltante, NivelItem, Puntaje, Veredicto,
+    Dimension, Eleccion, Evento, Fuente, Hallazgo, ItemFaltante, MedidaEficiencia, NivelItem,
+    Puntaje, Veredicto,
 };
 
 /// Nombre del archivo de calibración dentro de `ROOT_HOME`.
@@ -171,6 +172,10 @@ pub struct Fila {
     /// Lo que dijo cada juicio de la base sobre la dimensión, en orden. Una fila sin el campo vale vacía.
     #[serde(default)]
     pub juicios_base: Vec<JuicioBase>,
+    /// Medidas de Eficiencia de la base, contra el estado inicial. Solo Eficiencia las trae. Una fila sin el campo
+    /// vale vacía.
+    #[serde(default)]
+    pub eficiencia_base: Vec<MedidaEficiencia>,
     /// Plazo fijo en segundos que usaron los casos de mutación. Sale de la duración de la base.
     /// `None` si la base no trajo duración. Una fila sin el campo vale `None`.
     #[serde(default)]
@@ -726,6 +731,10 @@ pub struct CasoGuardado {
     /// Los extractos que leyó el juez en este caso (archivo, primera línea, última línea y motivo).
     #[serde(default)]
     pub extractos: Vec<ExtractoGuardado>,
+    /// Medidas de Eficiencia de este caso, contra el estado inicial. Vacía si la dimensión no es Eficiencia o el
+    /// caso no midió. Un renglón viejo sin el campo lo lee vacío.
+    #[serde(default)]
+    pub eficiencia: Vec<MedidaEficiencia>,
     /// Motivo por el que el caso no aplica. Solo en el renglón de un caso no aplicable.
     #[serde(default)]
     pub no_aplicable: Option<String>,
@@ -1965,6 +1974,7 @@ fn calibrar_medida_con_defectos(
             causas_inestables: causas,
             extractos_base,
             juicios_base,
+            eficiencia_base: juicios[0].eficiencia_auto.clone(),
             tarea_hash: Some(tarea_hash.clone()),
             ..fila_de(
                 tarea,
@@ -2067,6 +2077,7 @@ fn fila_de(
     }
     Fila {
         base_sin_veredicto: None,
+        eficiencia_base: Vec::new(),
         tarea_hash: None,
         tarea: tarea.nombre.clone(),
         dimension,
@@ -2442,6 +2453,7 @@ fn fila_no_aplica(
 ) -> Fila {
     Fila {
         base_sin_veredicto: None,
+        eficiencia_base: Vec::new(),
         tarea_hash: Some(tarea_hash.into()),
         tarea: tarea.nombre.clone(),
         dimension,
@@ -2683,6 +2695,7 @@ impl CasoGuardado {
             valor_base: caso.valor_base,
             valor: caso.valor,
             extractos: caso.extractos.clone(),
+            eficiencia: caso.veredicto.eficiencia_auto.clone(),
             no_aplicable: None,
             piso: caso.piso,
             omitidos: caso.omitidos.clone(),
@@ -2723,6 +2736,7 @@ impl CasoGuardado {
             valor_base: None,
             valor: None,
             extractos: Vec::new(),
+            eficiencia: Vec::new(),
             no_aplicable: Some(no.motivo.clone()),
             piso: false,
             omitidos: Vec::new(),
@@ -3243,6 +3257,7 @@ mod tests {
     fn fila(tarea: &str, dimension: Dimension, ts: f64, exactitud: Option<f32>) -> Fila {
         Fila {
             base_sin_veredicto: None,
+            eficiencia_base: Vec::new(),
             tarea_hash: Some(String::new()),
             plazo_mutantes: None,
             duracion_contrato: None,
@@ -10852,6 +10867,138 @@ mod tests {
             leida.extractos_base.is_empty(),
             "{:?}",
             leida.extractos_base
+        );
+    }
+
+    /// Una medida de Eficiencia de prueba: `tiempo_tests` con repo 20 % más lento.
+    fn medida_eficiencia_de_prueba() -> Vec<MedidaEficiencia> {
+        vec![MedidaEficiencia {
+            medida: "tiempo_tests".into(),
+            referencia: Some(1.0),
+            repo: Some(1.2),
+            razon: Some(1.2),
+            ruido: Some(0.02),
+            regresion: true,
+            motivo: None,
+        }]
+    }
+
+    /// Base de Eficiencia con las medidas `medidas` en `eficiencia_auto`.
+    fn base_eficiencia_con_medidas(medidas: Vec<MedidaEficiencia>) -> Veredicto {
+        Veredicto {
+            eficiencia_auto: medidas,
+            ..eficiencia_base()
+        }
+    }
+
+    /// Un caso de Eficiencia guarda sus medidas en su renglón de `.casos.jsonl`.
+    #[test]
+    fn caso_de_eficiencia_guarda_sus_medidas_en_el_renglon() {
+        let dir = copia_fixture();
+        let medidas = medida_eficiencia_de_prueba();
+        let base = base_eficiencia_con_medidas(medidas.clone());
+        let ev = falso(dir.path(), &base, |_, _, base| base.clone());
+        let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| ev(ruta);
+        let tarea = tarea_en(
+            dir.path(),
+            "\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n\n[calibracion]\ncamino_caliente = [\"ejecutar\"]\n",
+        );
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Eficiencia,
+            10,
+            42,
+            dir.path(),
+            &sin_tipo,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let fila = medida.fila.as_ref().expect("hay fila");
+        let home = tempfile::tempdir().expect("home");
+        let ruta = escribir_casos(
+            home.path(),
+            &tarea.nombre,
+            Dimension::Eficiencia,
+            fila,
+            &medida.casos,
+            &medida.no_aplicables,
+        )
+        .expect("escribe")
+        .expect("hay casos");
+        let texto = fs::read_to_string(ruta).expect("lee");
+        let renglones: Vec<CasoGuardado> = texto
+            .lines()
+            .map(|linea| serde_json::from_str(linea).expect("renglón"))
+            .collect();
+        // Un renglón no aplicable no mide: su lista queda vacía. Los demás traen la medida.
+        let medidos: Vec<&CasoGuardado> = renglones
+            .iter()
+            .filter(|r| r.no_aplicable.is_none())
+            .collect();
+        assert!(!medidos.is_empty(), "ningún renglón medido");
+        for renglon in medidos {
+            assert_eq!(renglon.eficiencia, medidas, "renglón {}", renglon.caso);
+        }
+    }
+
+    /// Un renglón de `.casos.jsonl` sin el campo `eficiencia` se lee con lista vacía.
+    #[test]
+    fn renglon_viejo_sin_eficiencia_se_lee() {
+        let viejo = r#"{"caso":3,"es_defecto":true,"detectado":true}"#;
+        let caso: CasoGuardado = serde_json::from_str(viejo).expect("renglón de antes");
+        assert!(caso.eficiencia.is_empty(), "{:?}", caso.eficiencia);
+    }
+
+    /// La base de Eficiencia guarda sus medidas en la fila, en `eficiencia_base`.
+    #[test]
+    fn la_base_guarda_sus_medidas_en_la_fila() {
+        let dir = copia_fixture();
+        let medidas = medida_eficiencia_de_prueba();
+        let base = base_eficiencia_con_medidas(medidas.clone());
+        let ev = falso(dir.path(), &base, |_, _, base| base.clone());
+        let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| ev(ruta);
+        let tarea = tarea_en(
+            dir.path(),
+            "\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n\n[calibracion]\ncamino_caliente = [\"ejecutar\"]\n",
+        );
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Eficiencia,
+            10,
+            42,
+            dir.path(),
+            &sin_tipo,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(fila.eficiencia_base, medidas);
+    }
+
+    /// Una fila de antes de `eficiencia_base` se lee con lista vacía.
+    #[test]
+    fn fila_vieja_sin_eficiencia_base_se_lee() {
+        let mut texto =
+            serde_json::to_value(fila("t", Dimension::Eficiencia, 1.0, None)).expect("json");
+        texto
+            .as_object_mut()
+            .expect("objeto")
+            .remove("eficiencia_base");
+        let leida: Fila = serde_json::from_value(texto).expect("fila vieja");
+        assert!(
+            leida.eficiencia_base.is_empty(),
+            "{:?}",
+            leida.eficiencia_base
         );
     }
 

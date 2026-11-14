@@ -693,6 +693,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "format": "double",
           "default": null
         },
+        "eficiencia_base": {
+          "description": "Medidas de Eficiencia de la base, contra el estado inicial. Solo Eficiencia las trae. Una fila sin el campo\nvale vacía.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MedidaEficiencia"
+          }
+        },
         "equivalentes_excluidos": {
           "description": "Entradas de `[calibracion].equivalentes` que la corrida aplicó: el largo de la lista declarada, sin\nentradas repetidas (mismo archivo, línea y edición). Una fila sin el campo vale 0.",
           "type": "integer",
@@ -980,6 +988,63 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         }
       }
     },
+    "MedidaEficiencia": {
+      "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
+      "type": "object",
+      "properties": {
+        "medida": {
+          "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
+          "type": "string"
+        },
+        "motivo": {
+          "description": "Por qué la medida no tiene valor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "razon": {
+          "description": "Repo sobre referencia. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "referencia": {
+          "description": "Mínimo de las corridas del estado inicial. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "regresion": {
+          "description": "Verdadero si el repo queda más lento o más pesado que el ruido permite.",
+          "type": "boolean"
+        },
+        "repo": {
+          "description": "Mínimo de las corridas del repo. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ruido": {
+          "description": "Dispersión de la referencia, con piso de 2 %. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "medida",
+        "regresion"
+      ]
+    },
     "NivelItem": {
       "description": "Nivel de un ítem de rúbrica. `nivel` va de 0 a 3.",
       "type": "object",
@@ -1048,6 +1113,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "detectado": {
       "description": "Si la dimensión calibrada bajó frente a la base en este caso.",
       "type": "boolean"
+    },
+    "eficiencia": {
+      "description": "Medidas de Eficiencia de este caso, contra el estado inicial. Vacía si la dimensión no es Eficiencia o el\ncaso no midió. Un renglón viejo sin el campo lo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MedidaEficiencia"
+      }
     },
     "en_cambio": {
       "description": "`true` si el defecto cayó dentro del cambio de `bootstrap/`.\nEn `ComportamientoRoto`, la línea invertida es una línea tocada.\nEn `ModuloBorrado`, el módulo borrado es un archivo tocado.\nUn archivo tocado tiene al menos una línea del cambio. Los casos limpios y sin cambio valen `false`.",
@@ -1285,6 +1358,63 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "desde",
         "hasta",
         "motivo"
+      ]
+    },
+    "MedidaEficiencia": {
+      "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
+      "type": "object",
+      "properties": {
+        "medida": {
+          "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
+          "type": "string"
+        },
+        "motivo": {
+          "description": "Por qué la medida no tiene valor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "razon": {
+          "description": "Repo sobre referencia. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "referencia": {
+          "description": "Mínimo de las corridas del estado inicial. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "regresion": {
+          "description": "Verdadero si el repo queda más lento o más pesado que el ruido permite.",
+          "type": "boolean"
+        },
+        "repo": {
+          "description": "Mínimo de las corridas del repo. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ruido": {
+          "description": "Dispersión de la referencia, con piso de 2 %. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "medida",
+        "regresion"
       ]
     },
     "MutanteEstado": {

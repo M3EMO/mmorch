@@ -7546,6 +7546,7 @@ mod tests {
             v: calibra::VERSION,
             filas: vec![calibra::Fila {
                 base_sin_veredicto: None,
+                eficiencia_base: Vec::new(),
                 tarea_hash: Some(tarea_hash),
                 plazo_mutantes: None,
                 duracion_contrato: None,
@@ -8276,6 +8277,7 @@ mod tests {
         .into_iter()
         .map(|dimension| calibra::Fila {
             base_sin_veredicto: None,
+            eficiencia_base: Vec::new(),
             tarea_hash: Some(hash.clone()),
             plazo_mutantes: None,
             duracion_contrato: None,
@@ -8356,6 +8358,7 @@ mod tests {
         fs::write(carpeta_otra.join("tarea.toml"), toml_otra).expect("tarea.toml de otra tarea");
         let fila = calibra::Fila {
             base_sin_veredicto: None,
+            eficiencia_base: Vec::new(),
             tarea_hash: Some(crate::goal::calcular_hash(toml_otra.as_bytes())),
             plazo_mutantes: None,
             duracion_contrato: None,
