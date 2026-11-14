@@ -46,7 +46,7 @@ pub const COTA_WILSON_MINIMA: f64 = 0.8;
 /// Z del nivel de confianza del 95% de la cota de Wilson (decisión P102).
 const Z_NIVEL_95: f64 = 1.96;
 /// Porcentaje máximo de casos limpios sin veredicto para calibrar una dimensión. Más que esto, la medida no calibra.
-const MAX_LIMPIOS_SIN_VEREDICTO_PCT: u32 = 20;
+const MAX_SIN_VEREDICTO_PCT: u32 = 20;
 /// Multiplicador del plazo de cada suite en una calibración, sobre su duración en la base (Tarea 107).
 const MULTIPLICADOR_PLAZO_SUITE: u64 = 10;
 /// Plazo mínimo de cada suite en una calibración, en segundos (Tarea 107).
@@ -179,10 +179,16 @@ pub struct Fila {
     /// salió de `--repo` o de `[calibracion] repo`, y en las dimensiones que no son Pruebas.
     #[serde(default)]
     pub repo_origen: Option<String>,
-    /// Identidades de inyección distintas entre los defectos medidos. Una fila sin el campo vale `None`:
-    /// es anterior a la Tarea 106 y puede contar inyecciones repetidas. `Some(0)` si no midió defectos.
+    /// Identidades de inyección distintas entre los defectos medidos con veredicto. Los defectos sin veredicto no
+    /// cuentan aquí: van a `defectos_sin_veredicto`. Una fila sin el campo vale `None`: es anterior a la Tarea 106
+    /// y puede contar inyecciones repetidas. `Some(0)` si no midió defectos con veredicto.
     #[serde(default)]
     pub inyecciones_distintas: Option<u32>,
+    /// Defectos distintos sin veredicto de la dimensión. No entran a la sensibilidad: no hay veredicto que medir.
+    /// No son defectos no detectados. Una fila sin el campo vale 0: esas filas contaban estos defectos como no
+    /// detectados, así que eran más estrictas.
+    #[serde(default)]
+    pub defectos_sin_veredicto: u32,
     /// Entradas de `[calibracion].equivalentes` que la corrida aplicó: el largo de la lista declarada, sin
     /// entradas repetidas (mismo archivo, línea y edición). Una fila sin el campo vale 0.
     #[serde(default)]
@@ -305,6 +311,7 @@ impl Calibraciones {
             version.limpios_bien += aciertos_de(fila.especificidad, con_veredicto);
             version.limpios += fila.limpios;
             version.limpios_sin_veredicto += fila.limpios_sin_veredicto;
+            version.defectos_sin_veredicto += fila.defectos_sin_veredicto;
             version.tareas.push(nombre.to_string());
         }
         version
@@ -370,7 +377,7 @@ pub fn wilson_inferior(aciertos: u32, total: u32) -> f64 {
 /// Suma de las filas que cuentan para una dimensión en una versión de Root, de todas las tareas medidas.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Version {
-    /// Defectos medidos: las inyecciones distintas de las filas que cuentan.
+    /// Defectos medidos con veredicto: las inyecciones distintas con veredicto de las filas que cuentan.
     pub defectos: u32,
     /// Defectos que la dimensión detectó.
     pub detectados: u32,
@@ -382,6 +389,8 @@ pub struct Version {
     pub limpios: u32,
     /// Limpios sin veredicto de la dimensión.
     pub limpios_sin_veredicto: u32,
+    /// Defectos distintos sin veredicto de las filas que cuentan. No entran a `detectados` ni a `defectos`.
+    pub defectos_sin_veredicto: u32,
     /// Tareas con una fila que cuenta, en orden alfabético. Vacía si ninguna fila cuenta.
     pub tareas: Vec<String>,
 }
@@ -389,12 +398,15 @@ pub struct Version {
 impl Version {
     /// `true` si la versión calibra la dimensión. Con ítems del juez, la cota de Wilson de los defectos detectados
     /// y la de los limpios bien deben llegar a `COTA_WILSON_MINIMA`. Sin ellos, basta un defecto detectado y
-    /// ningún limpio marcado, con al menos un limpio con veredicto. Sin filas que cuenten, o con más de
-    /// `MAX_LIMPIOS_SIN_VEREDICTO_PCT` de limpios sin
-    /// veredicto sobre todos los casos juntos, no calibra.
+    /// ningún limpio marcado, con al menos un limpio con veredicto. Sin filas que cuenten, no calibra. Tampoco
+    /// calibra con más de `MAX_SIN_VEREDICTO_PCT` sin veredicto en cualquiera de los dos casos: los limpios sin
+    /// veredicto sobre todos los limpios, y los defectos sin veredicto sobre todos los defectos.
     pub fn calibrada(&self, juez: bool) -> bool {
-        let dentro_del_tope =
-            self.limpios_sin_veredicto * 100 <= self.limpios * MAX_LIMPIOS_SIN_VEREDICTO_PCT;
+        let limpios_dentro_del_tope =
+            self.limpios_sin_veredicto * 100 <= self.limpios * MAX_SIN_VEREDICTO_PCT;
+        let defectos_dentro_del_tope = self.defectos_sin_veredicto * 100
+            <= (self.defectos + self.defectos_sin_veredicto) * MAX_SIN_VEREDICTO_PCT;
+        let dentro_del_tope = limpios_dentro_del_tope && defectos_dentro_del_tope;
         if self.tareas.is_empty() || !dentro_del_tope {
             return false;
         }
@@ -1908,8 +1920,12 @@ fn fila_de(
         .filter(|c| !c.es_defecto && c.sin_veredicto.is_none());
     let defectos_en_piso = casos.iter().filter(|c| c.es_defecto && c.piso).count() as u32;
     let omisiones: u32 = casos.iter().map(|c| c.omitidos.len() as u32).sum();
-    // La sensibilidad cuenta inyecciones distintas: un defecto repetido no suma dos veces.
-    let defectos_unicos = defectos_distintos(casos);
+    // La sensibilidad cuenta inyecciones distintas con veredicto: un defecto repetido no suma dos veces, y uno
+    // sin veredicto no es un no detectado. Los sin veredicto se cuentan aparte.
+    let (defectos_unicos, sin_veredicto): (Vec<&Caso>, Vec<&Caso>) = defectos_distintos(casos)
+        .into_iter()
+        .partition(|c| c.sin_veredicto.is_none());
+    let defectos_sin_veredicto = sin_veredicto.len() as u32;
     let inyecciones_distintas = defectos_unicos.len() as u32;
     let sensibilidad = proporcion(
         defectos_unicos.iter().filter(|c| c.detectado).count() as u32,
@@ -1983,6 +1999,7 @@ fn fila_de(
         duracion_oculto: None,
         repo_origen: None,
         inyecciones_distintas: Some(inyecciones_distintas),
+        defectos_sin_veredicto,
         equivalentes_excluidos: cuantos_equivalentes(tarea),
     }
 }
@@ -2346,6 +2363,7 @@ fn fila_no_aplica(
         duracion_oculto: None,
         repo_origen: None,
         inyecciones_distintas: Some(0),
+        defectos_sin_veredicto: 0,
         equivalentes_excluidos: cuantos_equivalentes(tarea),
     }
 }
@@ -3115,6 +3133,7 @@ mod tests {
             duracion_oculto: None,
             repo_origen: None,
             inyecciones_distintas: Some(16),
+            defectos_sin_veredicto: 0,
             equivalentes_excluidos: 0,
             tarea: tarea.into(),
             dimension,
@@ -3290,7 +3309,7 @@ mod tests {
     }
 
     #[test]
-    fn calibra_defecto_sin_veredicto_es_falso_negativo() {
+    fn calibra_defecto_sin_veredicto_no_es_falso_negativo() {
         let base = veredicto_base();
         let fila = calibrar(
             Path::new(FIXTURE),
@@ -3298,13 +3317,14 @@ mod tests {
             |limpia, _, base| if limpia { base.clone() } else { sin(base) },
             20,
         );
-        assert_eq!(
-            fila.sensibilidad,
-            Some(0.0),
-            "un defecto sin veredicto es FN"
+        // Sin defectos con veredicto, la sensibilidad no tiene clase: no hay FN que contar.
+        assert_eq!(fila.sensibilidad, None, "un defecto sin veredicto no es FN");
+        assert!(
+            fila.defectos_sin_veredicto > 0,
+            "los defectos sin veredicto se cuentan aparte"
         );
         assert_eq!(fila.especificidad, Some(1.0));
-        assert_eq!(fila.exactitud_balanceada, Some(0.5));
+        assert_eq!(fila.exactitud_balanceada, None);
     }
 
     #[test]
@@ -3366,10 +3386,17 @@ mod tests {
         assert!(!defectos.is_empty(), "hay defectos medidos");
         assert!(
             defectos.iter().all(|c| !c.detectado),
-            "un defecto sin veredicto es FN"
+            "un defecto sin veredicto no detecta"
         );
         let fila = medida.fila.expect("fila");
-        assert_eq!(fila.sensibilidad, Some(0.0));
+        assert_eq!(
+            fila.sensibilidad, None,
+            "sin defectos con veredicto no hay sensibilidad"
+        );
+        assert!(
+            fila.defectos_sin_veredicto > 0,
+            "los defectos sin veredicto se cuentan aparte"
+        );
         assert_eq!(fila.limpios_sin_veredicto, 0);
     }
 
@@ -8585,6 +8612,72 @@ mod tests {
         assert_eq!(fila.sensibilidad, Some(0.5));
     }
 
+    /// Caso con defecto en `src/<archivo>`. `sin_veredicto` dice si la dimensión no dio veredicto en él.
+    fn caso_defecto_sin_veredicto(
+        indice: u32,
+        archivo: &str,
+        detectado: bool,
+        sin_veredicto: bool,
+    ) -> Caso {
+        let inyeccion = Inyeccion {
+            archivo: archivo.into(),
+            ..inyeccion_modulo()
+        };
+        let mut caso = caso_defecto_identidad(indice, inyeccion, detectado);
+        if sin_veredicto {
+            caso.sin_veredicto = Some("juez caído".into());
+        }
+        caso
+    }
+
+    /// Cinco identidades distintas: tres sin veredicto, uno detectado y uno no. Solo los dos con veredicto miden.
+    #[test]
+    fn defecto_sin_veredicto_no_entra_a_la_sensibilidad() {
+        let (_t, tarea) = tarea_prueba();
+        let casos = vec![
+            caso_defecto_sin_veredicto(1, "a.rs", true, false),
+            caso_defecto_sin_veredicto(2, "b.rs", false, false),
+            caso_defecto_sin_veredicto(3, "c.rs", false, true),
+            caso_defecto_sin_veredicto(4, "d.rs", false, true),
+            caso_defecto_sin_veredicto(5, "e.rs", false, true),
+        ];
+        let fila = fila_de(&tarea, Dimension::Seguridad, 1, &casos, &[], 0, false);
+        assert_eq!(fila.defectos_sin_veredicto, 3);
+        assert_eq!(fila.inyecciones_distintas, Some(2));
+        assert_eq!(fila.sensibilidad, Some(0.5));
+    }
+
+    /// Fila vieja: sin `defectos_sin_veredicto` en el JSON, se lee con 0.
+    #[test]
+    fn fila_vieja_sin_defectos_sin_veredicto_se_lee_con_cero() {
+        let fila = Fila {
+            defectos_sin_veredicto: 3,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(0.95))
+        };
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        vieja
+            .as_object_mut()
+            .expect("objeto")
+            .remove("defectos_sin_veredicto");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!(leida.defectos_sin_veredicto, 0);
+    }
+
+    #[test]
+    fn version_suma_defectos_sin_veredicto_de_las_filas_que_cuentan() {
+        let home = tempfile::tempdir().expect("home");
+        let con_sin_veredicto = Fila {
+            defectos_sin_veredicto: 3,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![con_sin_veredicto],
+        };
+        let version = c.version_en(home.path(), "memora", "", Dimension::Seguridad);
+        assert_eq!(version.defectos_sin_veredicto, 3);
+    }
+
     #[test]
     fn version_cuenta_inyecciones_distintas_no_defectos() {
         let home = tempfile::tempdir().expect("home");
@@ -11901,6 +11994,42 @@ mod tests {
                 .count();
             assert_eq!(agotados, 2, "semilla {semilla}");
         }
+    }
+
+    /// Guarda de la regla del 20 %: 3 de 10 defectos sin veredicto está sobre el tope. No calibra, con los
+    /// limpios y los detectados perfectos. Juez apagado: la cota de Wilson no es el motivo.
+    #[test]
+    fn oraculo_tres_defectos_sin_veredicto_de_diez_no_calibra() {
+        let version = Version {
+            defectos: 7,
+            detectados: 7,
+            defectos_sin_veredicto: 3,
+            limpios: 10,
+            limpios_con_veredicto: 10,
+            limpios_bien: 10,
+            tareas: vec!["t".into()],
+            ..Version::default()
+        };
+        assert!(
+            !version.calibrada(false),
+            "3 de 10 defectos sin veredicto superan el 20 %"
+        );
+    }
+
+    /// Guarda de la regla del 20 %: 2 de 10 defectos sin veredicto es el tope exacto. Calibra.
+    #[test]
+    fn oraculo_dos_defectos_sin_veredicto_de_diez_calibra() {
+        let version = Version {
+            defectos: 8,
+            detectados: 8,
+            defectos_sin_veredicto: 2,
+            limpios: 10,
+            limpios_con_veredicto: 10,
+            limpios_bien: 10,
+            tareas: vec!["t".into()],
+            ..Version::default()
+        };
+        assert!(version.calibrada(false), "2 de 10 es el 20 %, en el tope");
     }
 
     #[test]

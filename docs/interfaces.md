@@ -665,6 +665,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 0,
           "minimum": 0
         },
+        "defectos_sin_veredicto": {
+          "description": "Defectos distintos sin veredicto de la dimensión. No entran a la sensibilidad: no hay veredicto que medir.\nNo son defectos no detectados. Una fila sin el campo vale 0: esas filas contaban estos defectos como no\ndetectados, así que eran más estrictas.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "dimension": {
           "$ref": "#/$defs/Dimension"
         },
@@ -750,7 +757,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "inyecciones_distintas": {
-          "description": "Identidades de inyección distintas entre los defectos medidos. Una fila sin el campo vale `None`:\nes anterior a la Tarea 106 y puede contar inyecciones repetidas. `Some(0)` si no midió defectos.",
+          "description": "Identidades de inyección distintas entre los defectos medidos con veredicto. Los defectos sin veredicto no\ncuentan aquí: van a `defectos_sin_veredicto`. Una fila sin el campo vale `None`: es anterior a la Tarea 106\ny puede contar inyecciones repetidas. `Some(0)` si no midió defectos con veredicto.",
           "type": [
             "integer",
             "null"

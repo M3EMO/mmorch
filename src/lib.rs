@@ -1302,6 +1302,7 @@ mod tests {
             limpios_bien: bien,
             limpios,
             limpios_sin_veredicto: 0,
+            defectos_sin_veredicto: 0,
             tareas: vec!["t".into()],
         }
     }
