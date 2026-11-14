@@ -49,7 +49,7 @@ use crate::tipos::{
 use crate::track::stats::wilson_inferior;
 use calibra::Calibraciones;
 use calibra::sonda_lastre::{
-    FuncionMarcada, armar_copia_marcada, cmd_sonda, dejar_sonda_lastre, leer_salida, salida_valida,
+    ARCHIVO_LISTA, FuncionMarcada, armar_copia_marcada, cmd_sonda, dejar_sonda_lastre, leer_salida,
     sonda_lastre_pedida, tomar_sonda_lastre,
 };
 use contenedor::{Ejecucion, Resultado};
@@ -667,13 +667,12 @@ fn medir_lastre(
         cache: cache.map(Path::to_path_buf),
         rustsec: rustsec.map(Path::to_path_buf),
     });
-    let salida = ej
-        .ejecutar_en(&cmd_sonda(filtro), &ruta_salida)
+    ej.ejecutar_en(&cmd_sonda(filtro), &ruta_salida)
         .map_err(|e| format!("sonda de lastre: el ejecutor falló: {e}"))?;
-    if !salida_valida(&salida.stdout) {
-        return Err("sonda de lastre: sin salida; el comando no llegó a sus marcas".into());
-    }
-    Ok(leer_salida(&salida.stdout, &mapa))
+    // La lista va por archivo: la consola se corta y no siempre trae las marcas.
+    let texto = fs::read_to_string(ruta_salida.join(ARCHIVO_LISTA))
+        .map_err(|_| "sonda de lastre: sin salida; el comando no llegó a sus marcas".to_string())?;
+    Ok(leer_salida(&texto, &mapa))
 }
 
 /// Como `evaluar`, con las dependencias que se le pasen.
@@ -6646,25 +6645,37 @@ mod tests {
         copias: std::cell::RefCell<Vec<PathBuf>>,
     }
 
-    /// Ejecutor de la sonda falso: responde `respuesta` a su comando y sanas al resto.
+    /// Ejecutor de la sonda falso: escribe `lista` en el archivo de la sonda (`None`: no escribe nada) y
+    /// responde `respuesta` a su comando. Lo demás va a `resto`.
     struct SondaFalsa {
         espia: std::rc::Rc<EspiaSonda>,
-        respuesta: Result<&'static str, &'static str>,
+        respuesta: Result<Option<&'static str>, &'static str>,
         /// Lo que no es la sonda: la medición de Eficiencia, con `EficienciaFalsa`.
         resto: Box<dyn EjecutorHerramienta>,
     }
 
     impl EjecutorHerramienta for SondaFalsa {
         fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
-            if !cmd.contains("ROOT_SONDA_INICIO") {
-                return self.resto.ejecutar(cmd);
+            if cmd.contains(ARCHIVO_LISTA) {
+                return Err(ErrorOraculo::Infra(
+                    "la sonda necesita carpeta de salida".into(),
+                ));
+            }
+            self.resto.ejecutar(cmd)
+        }
+
+        fn ejecutar_en(&self, cmd: &str, salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if !cmd.contains(ARCHIVO_LISTA) {
+                return self.resto.ejecutar_en(cmd, salida);
             }
             self.espia.comandos.borrow_mut().push(cmd.to_string());
             match self.respuesta {
-                Ok(stdout) => Ok(SalidaHerramienta {
-                    stdout: stdout.into(),
-                    ..SalidaHerramienta::default()
-                }),
+                Ok(lista) => {
+                    if let Some(lista) = lista {
+                        fs::write(salida.join(ARCHIVO_LISTA), lista).expect("lista");
+                    }
+                    Ok(SalidaHerramienta::default())
+                }
                 Err(motivo) => Err(ErrorOraculo::Infra(motivo.into())),
             }
         }
@@ -6678,7 +6689,7 @@ mod tests {
     /// responde `EficienciaFalsa`. Con `lista_inicial`, el estado inicial lista esa salida de tests.
     fn fabrica_de_sonda(
         espia: std::rc::Rc<EspiaSonda>,
-        respuesta: Result<&'static str, &'static str>,
+        respuesta: Result<Option<&'static str>, &'static str>,
         lista_inicial: Option<&'static str>,
     ) -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
         move |p: &Preparada| {
@@ -6776,7 +6787,7 @@ mod tests {
     fn evaluar_con_sonda(
         base: &Path,
         espia: &std::rc::Rc<EspiaSonda>,
-        respuesta: Result<&'static str, &'static str>,
+        respuesta: Result<Option<&'static str>, &'static str>,
         pedida: bool,
     ) -> Veredicto {
         let tarea = tarea_rust_con_bootstrap_de_funciones(base);
@@ -6838,18 +6849,16 @@ mod tests {
         let tarea = tarea_rust_con_bootstrap_de_funciones(base.path());
         let espia = std::rc::Rc::new(EspiaSonda::default());
         // El estado inicial lista `t2` y el repo no: `t2` no es común y el filtro la excluye.
-        let fabrica = fabrica_de_sonda(
-            espia.clone(),
-            Ok("ROOT_SONDA_INICIO\nROOT_SONDA_FIN\n"),
-            Some(LISTA_CON_T2),
-        );
+        let fabrica = fabrica_de_sonda(espia.clone(), Ok(Some("")), Some(LISTA_CON_T2));
         calibra::sonda_lastre::con_sonda_lastre(|| {
             evaluar_tarea_de_sonda(base.path(), &tarea, FUENTE_SONDA, None, &fabrica)
         });
         let comandos = espia.comandos.borrow();
         assert_eq!(comandos.len(), 1, "{comandos:?}");
         assert!(
-            comandos[0].contains("nextest.toml -E 'not (test(=t2))'; echo ROOT_SONDA_INICIO"),
+            comandos[0].contains(
+                "nextest.toml -E 'not (test(=t2))'; ls /tmp/root-sonda > /salida/root-sonda.lista"
+            ),
             "{}",
             comandos[0]
         );
@@ -6860,11 +6869,7 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let tarea = tarea_rust_con_bootstrap_de_funciones(base.path());
         let espia = std::rc::Rc::new(EspiaSonda::default());
-        let fabrica = fabrica_de_sonda(
-            espia.clone(),
-            Ok("ROOT_SONDA_INICIO\nROOT_SONDA_FIN\n"),
-            None,
-        );
+        let fabrica = fabrica_de_sonda(espia.clone(), Ok(Some("")), None);
         // Las partes de Diseño no miden Eficiencia: no queda referencia de dos lados en el hilo.
         let _ = eficiencia::tomar_referencia();
         let partes = partes_de(Dimension::Diseno, &[], &tarea);
@@ -6906,12 +6911,7 @@ mod tests {
     fn sonda_lastre_pedida_manda_el_comando_con_copia_marcada_y_la_borra() {
         let base = tempfile::tempdir().expect("base");
         let espia = std::rc::Rc::new(EspiaSonda::default());
-        evaluar_con_sonda(
-            base.path(),
-            &espia,
-            Ok("ROOT_SONDA_INICIO\nROOT_SONDA_FIN\n"),
-            true,
-        );
+        evaluar_con_sonda(base.path(), &espia, Ok(Some("")), true);
         assert!(
             espia
                 .comandos
@@ -6931,12 +6931,7 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let espia = std::rc::Rc::new(EspiaSonda::default());
         let _ = calibra::sonda_lastre::tomar_sonda_lastre();
-        evaluar_con_sonda(
-            base.path(),
-            &espia,
-            Ok("ROOT_SONDA_INICIO\nROOT_SONDA_FIN\n"),
-            false,
-        );
+        evaluar_con_sonda(base.path(), &espia, Ok(Some("")), false);
         assert!(
             espia.comandos.borrow().is_empty(),
             "{:?}",
@@ -6947,11 +6942,11 @@ mod tests {
     }
 
     #[test]
-    fn sonda_lastre_salida_valida_deja_la_funcion_que_corrio() {
+    fn sonda_lastre_lista_en_el_archivo_deja_la_funcion_que_corrio() {
         let base = tempfile::tempdir().expect("base");
         let espia = std::rc::Rc::new(EspiaSonda::default());
-        let salida = "ROOT_SONDA_INICIO\nsrc_lib_rs__1__uno\nROOT_SONDA_FIN\n";
-        evaluar_con_sonda(base.path(), &espia, Ok(salida), true);
+        let lista = "src_lib_rs__1__uno\n";
+        evaluar_con_sonda(base.path(), &espia, Ok(Some(lista)), true);
         let Some(Ok(corrieron)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
             panic!("la sonda debía dejar un resultado válido");
         };
@@ -6982,12 +6977,109 @@ mod tests {
     fn sonda_lastre_salida_sin_marcas_deja_error_sin_salida() {
         let base = tempfile::tempdir().expect("base");
         let espia = std::rc::Rc::new(EspiaSonda::default());
-        let v = evaluar_con_sonda(base.path(), &espia, Ok("salida sin marcas\n"), true);
+        // Sin archivo: la consola puede traer marcas, pero no hay lista que leer.
+        let v = evaluar_con_sonda(base.path(), &espia, Ok(None), true);
         let Some(Err(motivo)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
             panic!("la salida sin marcas debía dejar un motivo");
         };
         assert!(motivo.contains("sin salida"), "{motivo}");
         assert!(v.avisos.iter().any(|a| a == &motivo), "{:?}", v.avisos);
+    }
+
+    /// Ejecutor de `medir_lastre` que escribe la lista de ids de `repo` en la salida, si `escribe`, y
+    /// responde `stdout` como cola de la consola.
+    struct ListaFalsa {
+        repo: PathBuf,
+        escribe: bool,
+        stdout: String,
+    }
+
+    impl EjecutorHerramienta for ListaFalsa {
+        fn ejecutar(&self, _cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            Err(ErrorOraculo::Infra(
+                "la sonda necesita carpeta de salida".into(),
+            ))
+        }
+
+        fn ejecutar_en(
+            &self,
+            _cmd: &str,
+            salida: &Path,
+        ) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if self.escribe {
+                let mut ids = Vec::new();
+                ids_de_sonda(&self.repo.join("src"), &mut ids);
+                fs::write(salida.join("root-sonda.lista"), ids.join("\n")).expect("lista");
+            }
+            Ok(SalidaHerramienta {
+                stdout: self.stdout.clone(),
+                ..SalidaHerramienta::default()
+            })
+        }
+    }
+
+    /// Copia fuente de `base/fuente` con `texto` en `src/lib.rs`. Devuelve su ruta.
+    fn fuente_con(base: &Path, texto: &str) -> PathBuf {
+        let repo = base.join("fuente");
+        fs::create_dir_all(repo.join("src")).expect("src");
+        fs::write(repo.join("src/lib.rs"), texto).expect("lib.rs");
+        repo
+    }
+
+    #[test]
+    fn sonda_lastre_con_la_cola_de_4000_del_stdout_da_las_300_funciones() {
+        let base = tempfile::tempdir().expect("base");
+        let fuente: String = (0..300)
+            .map(|n| format!("pub fn f{n}() -> u32 {{\n    {n}\n}}\n\n"))
+            .collect();
+        let repo = fuente_con(base.path(), &fuente);
+        // Como `resultado_de`: el stdout llega solo con sus últimos 4000 caracteres, sin marcas.
+        let stdout = "salida de tests\n".repeat(400);
+        let cola = stdout[stdout.len() - 4000..].to_string();
+        let fabrica = |p: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(ListaFalsa {
+                repo: p.repo.clone(),
+                escribe: true,
+                stdout: cola.clone(),
+            })
+        };
+        let corrieron = medir_lastre(
+            &base.path().join("trabajo"),
+            &repo,
+            None,
+            None,
+            &fabrica,
+            "",
+        )
+        .expect("mide");
+        assert_eq!(corrieron.len(), 300, "{corrieron:?}");
+    }
+
+    #[test]
+    fn sonda_lastre_sin_archivo_da_el_error_de_las_marcas() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = fuente_con(base.path(), "pub fn uno() -> u32 {\n    1\n}\n");
+        // Aunque el stdout traiga las marcas, sin el archivo no hay lista que leer.
+        let fabrica = |p: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(ListaFalsa {
+                repo: p.repo.clone(),
+                escribe: false,
+                stdout: "ROOT_SONDA_INICIO\nROOT_SONDA_FIN\n".into(),
+            })
+        };
+        let motivo = medir_lastre(
+            &base.path().join("trabajo"),
+            &repo,
+            None,
+            None,
+            &fabrica,
+            "",
+        )
+        .expect_err("sin archivo hay error");
+        assert!(
+            motivo.contains("el comando no llegó a sus marcas"),
+            "{motivo}"
+        );
     }
 
     /// Ids de la sonda de lastre de todos los `.rs` bajo `dir`, en orden de lectura.
@@ -7025,8 +7117,17 @@ mod tests {
 
     impl EjecutorHerramienta for LastreFalso {
         fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
-            if !cmd.contains("ROOT_SONDA_INICIO") {
-                return self.eficiencia.ejecutar(cmd);
+            if cmd.contains(ARCHIVO_LISTA) {
+                return Err(ErrorOraculo::Infra(
+                    "la sonda necesita carpeta de salida".into(),
+                ));
+            }
+            self.eficiencia.ejecutar(cmd)
+        }
+
+        fn ejecutar_en(&self, cmd: &str, salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if !cmd.contains(ARCHIVO_LISTA) {
+                return self.eficiencia.ejecutar_en(cmd, salida);
             }
             let mut ids = Vec::new();
             ids_de_sonda(&self.repo.join("src"), &mut ids);
@@ -7034,12 +7135,9 @@ mod tests {
                 .into_iter()
                 .filter(|id| !id.ends_with("__no_corre"))
                 .collect();
-            let stdout = format!(
-                "34 tests pasan\nROOT_SONDA_INICIO\n{}\nROOT_SONDA_FIN\n",
-                ids.join("\n")
-            );
+            fs::write(salida.join(ARCHIVO_LISTA), ids.join("\n")).expect("lista");
             Ok(SalidaHerramienta {
-                stdout,
+                stdout: "34 tests pasan\n".into(),
                 ..SalidaHerramienta::default()
             })
         }

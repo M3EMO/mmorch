@@ -21,10 +21,8 @@ pub(crate) struct FuncionMarcada {
     pub nombre: String,
 }
 
-/// Marca de inicio de la salida de la sonda.
-const INICIO: &str = "ROOT_SONDA_INICIO";
-/// Marca de fin de la salida de la sonda.
-const FIN: &str = "ROOT_SONDA_FIN";
+/// Archivo en `/salida` con la lista de funciones que corrieron, un id por línea.
+pub(crate) const ARCHIVO_LISTA: &str = "root-sonda.lista";
 
 /// Devuelve el texto marcado y el mapa de `<id>` a función. Cada marca va justo después de la `{`.
 pub(crate) fn marcar_archivo(
@@ -152,33 +150,20 @@ fn copiar_marcando(
 /// primer fallo; `ls` corre aunque falle.
 pub(crate) fn cmd_sonda(filtro: &str) -> String {
     format!(
-        "{PRELUDIO}rm -rf /tmp/root-sonda; mkdir -p /tmp/root-sonda; cd /repo && export CARGO_TARGET_DIR=/salida/target && cargo nextest run --offline --no-fail-fast --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml{filtro}; echo ROOT_SONDA_INICIO; ls /tmp/root-sonda; echo ROOT_SONDA_FIN"
+        "{PRELUDIO}rm -rf /tmp/root-sonda; mkdir -p /tmp/root-sonda; cd /repo && export CARGO_TARGET_DIR=/salida/target && cargo nextest run --offline --no-fail-fast --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml{filtro}; ls /tmp/root-sonda > /salida/{ARCHIVO_LISTA}"
     )
 }
 
-/// Líneas entre las dos marcas, si ambas están y en orden. `None` si no.
-fn tramo(stdout: &str) -> Option<Vec<&str>> {
-    let lineas: Vec<&str> = stdout.lines().map(str::trim).collect();
-    let ini = lineas.iter().position(|l| *l == INICIO)?;
-    let fin = lineas[ini + 1..].iter().position(|l| *l == FIN)? + ini + 1;
-    Some(lineas[ini + 1..fin].to_vec())
-}
-
-/// Funciones que corrieron según la salida del comando. Los ids fuera de `mapa` se ignoran.
+/// Funciones que corrieron según la lista de la sonda, un id por línea. Los ids fuera de `mapa` se ignoran.
 pub(crate) fn leer_salida(
-    stdout: &str,
+    texto: &str,
     mapa: &BTreeMap<String, FuncionMarcada>,
 ) -> BTreeSet<FuncionMarcada> {
-    tramo(stdout)
-        .unwrap_or_default()
-        .into_iter()
+    texto
+        .lines()
+        .map(str::trim)
         .filter_map(|id| mapa.get(id).cloned())
         .collect()
-}
-
-/// `true` si la salida trae ambas marcas, en orden. Sin ellas, la sonda no corrió.
-pub(crate) fn salida_valida(stdout: &str) -> bool {
-    tramo(stdout).is_some()
 }
 
 thread_local! {
@@ -289,8 +274,8 @@ mod tests {
     fn sonda_lastre_leer_salida_da_las_funciones_que_corrieron() {
         let texto = "fn uno() -> u32 {\n    1\n}\n\nfn dos() -> u32 {\n    2\n}\n";
         let (_, mapa) = marcar_archivo("src/a.rs", texto);
-        let salida = "salida de tests\nROOT_SONDA_INICIO\nsrc_a_rs__1__uno\nsrc_fuera__9__x\n  src_a_rs__5__dos  \nROOT_SONDA_FIN\n";
-        let nombres: Vec<String> = leer_salida(salida, &mapa)
+        let lista = "src_a_rs__1__uno\nsrc_fuera__9__x\n  src_a_rs__5__dos  \n";
+        let nombres: Vec<String> = leer_salida(lista, &mapa)
             .into_iter()
             .map(|f| f.nombre)
             .collect();
@@ -298,38 +283,35 @@ mod tests {
     }
 
     #[test]
-    fn sonda_lastre_leer_salida_ignora_lo_que_esta_fuera_de_las_marcas() {
+    fn sonda_lastre_leer_salida_lista_vacia_no_da_funciones() {
         let texto = "fn uno() -> u32 {\n    1\n}\n";
         let (_, mapa) = marcar_archivo("src/a.rs", texto);
-        let antes = "src_a_rs__1__uno\nROOT_SONDA_INICIO\nROOT_SONDA_FIN\n";
-        assert!(leer_salida(antes, &mapa).is_empty());
-        let sin_marcas = "src_a_rs__1__uno\n";
-        assert!(leer_salida(sin_marcas, &mapa).is_empty());
-        assert!(!salida_valida(sin_marcas));
-        let sin_fin = "ROOT_SONDA_INICIO\nsrc_a_rs__1__uno\n";
-        assert!(leer_salida(sin_fin, &mapa).is_empty());
-        assert!(!salida_valida(sin_fin));
+        assert!(leer_salida("", &mapa).is_empty());
+        assert!(leer_salida("src_fuera__9__x\n", &mapa).is_empty());
     }
 
     #[test]
-    fn sonda_lastre_comando_corre_nextest_sin_cortar_y_lista_marcas() {
+    fn sonda_lastre_comando_corre_nextest_sin_cortar_y_lista_al_archivo() {
         let cmd = cmd_sonda("");
         assert!(cmd.contains("--no-fail-fast"));
         assert!(cmd.contains("mkdir -p /tmp/root-sonda"));
         assert!(cmd.contains("cargo nextest run --offline"));
-        assert!(cmd.contains("ls /tmp/root-sonda"));
+        assert!(cmd.contains("ls /tmp/root-sonda > /salida/root-sonda.lista"));
         assert!(cmd.starts_with(PRELUDIO));
         let nextest = cmd.find("cargo nextest").expect("nextest");
         let ls = cmd.find("ls /tmp/root-sonda").expect("ls");
         assert!(nextest < ls, "el ls va después de nextest");
         assert!(!cmd.contains(" -E "), "sin filtro, nextest corre todo");
+        assert!(!cmd.contains("ROOT_SONDA_"), "sin marcas en la consola");
     }
 
     #[test]
-    fn sonda_lastre_comando_lleva_el_filtro_antes_de_la_marca() {
+    fn sonda_lastre_comando_lleva_el_filtro_antes_del_ls() {
         let cmd = cmd_sonda(" -E 'not (test(=a::b))'");
         assert!(
-            cmd.contains("nextest.toml -E 'not (test(=a::b))'; echo ROOT_SONDA_INICIO"),
+            cmd.contains(
+                "nextest.toml -E 'not (test(=a::b))'; ls /tmp/root-sonda > /salida/root-sonda.lista"
+            ),
             "{cmd}"
         );
     }
