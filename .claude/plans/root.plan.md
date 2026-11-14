@@ -9771,3 +9771,161 @@ La Tarea 124 toca solo `src/lib.rs`. No comparte archivos con la 123. El brief e
 - Corre con el binario de la cadena con la 125, en un `ROOT_HOME` copiado, como esta vez.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (45): la carrera de `ejecutor.rs`, el `target` frío de la mutación, y Diseño de t1
+
+**Estado.**
+- Las Tareas 123 (6b5b264), 124 (21b694b) y 125 (b15e38d) terminaron en verde sin podman. `laptop/cadena-110-125` (5deb835) las junta sobre b6245d9.
+- Su suite con podman, sola, dio 3522, 1 y 5. La falla es `vencimiento_sigue_borrando_el_contenedor_por_nombre`, por tercera vez. Pasó 3 de 3 sola.
+- **El reparto 2, con la 123:** Pruebas con n=4 bajó de 527 s a 429 s, no a 250 s. La base tardó 104 s con 14 mutantes. Cada caso tardó entre 78 y 82 s con 3 mutantes.
+- **P101 a para Diseño, con la 125:** costó 1,5921 USD. S2 suma 6,549 USD, de 7. n=10, sensibilidad 0,2, especificidad 1,0. Cuatro limpios sin veredicto.
+- La fila de Arquitectura de s2-t1 ya está en el `ROOT_HOME` real, con respaldo.
+- El disco está al 98 %, con 12 GB libres.
+
+## 1. Las preguntas de la 123 y la 125
+
+**La 123:**
+1. **Una muestra de base vacía no fija nada:** acepto.
+2. **Un mutante de la muestra que la base no trae, corre:** acepto. Copiar un estado desconocido sería inventarlo.
+3. **Los hallazgos de los vivos copiados salen del nombre del mutante:** acepto.
+4. **El comentario del hueco del `Timeout`:** acepto.
+
+**La 125:**
+1. **Solo se reintenta lo que `serde_json` rechaza:** acepto. Un objeto sin `items` es JSON válido con otra forma. Repetir la pregunta no lo arregla.
+2. **Sin reintento si el prompt con la línea extra pasa el límite de entrada:** acepto.
+3. **Un JSON roto cuesta dos llamadas:** acepto. Pasa por el mismo control de gasto.
+
+## 2. La falla de `vencimiento_sigue_borrando_el_contenedor_por_nombre`
+
+**La carrera es la misma ETXTBSY de las Tareas 120 y 122, en un helper que quedó afuera.**
+- `programa_falso` (`src/corre/ejecutor.rs:1368`) escribe un script y le da permisos. No lo prueba antes de devolverlo.
+- El test lo lanza enseguida, por `cortar_vencido` → `borrar_contenedor` → `correr_paso_de_quitar`.
+- Si otro hilo de la suite hizo fork mientras el script se escribía, el hijo guarda el descriptor de escritura. El `exec` del script da ETXTBSY.
+- `borrar_contenedor` devuelve error. El script nunca corre, el log queda vacío, y la aserción de la línea 1567 falla.
+- `serie_de_pruebas` solo ordena los tests de `ejecutor.rs` entre sí. Los forks de otros módulos siguen.
+- Solo pasa en la suite completa, con muchos hilos. Solo, pasa 3 de 3. Encaja con la carrera.
+
+**El error mío.** La 120 arregló `limpieza.rs`, y la 122 arregló `corrida.rs` y `tests/corre.rs`. Arreglé helper por helper. Hay 16 lugares que escriben un ejecutable en los tests (`grep from_mode(0o7`). Cada uno tiene la misma carrera.
+
+**La Tarea 126 los arregla todos con un solo helper.**
+1. Un módulo de tests nuevo en `src/` escribe un ejecutable y lo prueba antes de devolverlo. La sonda es una variable de entorno, no un argumento, para servir a cualquier script.
+2. Todos los helpers de `src/` lo usan. `tests/` tiene una copia, porque no ve los módulos de tests de `src/`.
+3. La aserción del test que falló muestra también el error de `cortar_vencido`. Así, si vuelve a fallar, se ve la causa.
+
+El brief es `docs/builds/brief-local-126.md`.
+
+## 3. El costo fijo de cargo-mutants
+
+**Mi estimación de la vuelta (43) estaba mal.** Supuse que el costo fijo era chico. Con los dos repartos se despeja:
+- Base: 104 s con 14 mutantes. Caso: unos 80 s con 3 mutantes.
+- Cada mutante cuesta unos 2,2 s. El costo fijo de cada corrida es de unos 73 s.
+
+**La causa del costo fijo: cada corrida compila las dependencias desde cero.**
+- La mutación corre con `CARGO_TARGET_DIR=/salida/target` (`src/oracle/mutacion.rs:695`).
+- En `reparto2/podman.jsonl`, cada corrida monta un `/salida` nuevo: `home/tmp/sondas-<azar>`. El `target` siempre parte vacío.
+- El reuso del `target` de la Tarea 59 vale para las suites, no para la mutación. La mutación corre por `EjecutorContenedor`, que crea una carpeta nueva por llamada.
+- Además, cargo-mutants copia el árbol a una carpeta temporal con nombre al azar. La ruta del crate cambia en cada corrida, y la compilación incremental no sirve entre corridas.
+
+**La decisión: un `target` y una ruta fijos para la mutación de una calibración. Es la Tarea 127.**
+1. La calibración crea una carpeta de trabajo para la mutación, y la usa en la base y en todos los casos. Usa `ejecutar_en` de la Tarea 119.
+2. Cada corrida borra y vuelve a copiar `/salida/work`. Así el código del caso es el correcto.
+3. cargo-mutants corre con `--in-place` en `/salida/work`. La ruta del crate queda fija, y la compilación incremental sirve.
+4. Las dependencias se compilan una vez, en la base. Los casos las reusan.
+5. La carpeta se borra al terminar la calibración, también en un error.
+
+**La ganancia esperada.** Los casos deberían bajar de unos 80 s a unos 20 s. Pruebas con n=4 bajaría de 429 s a unos 200 s. La 127 pide repetir el reparto para confirmarlo.
+
+**Lo que no va todavía.** Sembrar el `target` de la mutación de una evaluación normal con el de sus suites. La evaluación corre la mutación una sola vez, y ganaría cerca de un minuto de 16.
+
+El brief es `docs/builds/brief-local-127.md`.
+
+## 4. Diseño de s2-t1: por qué la sensibilidad es 0,2
+
+Leí `t1-diseno.json` y `s2-t1-diseno-1794629816.casos.jsonl` del home copiado.
+
+**Los cinco defectos son `error_tragado`, sobre `diseno.errores`.** Diseño tiene un solo tipo de defecto (`de_dimension`, `src/oracle/calibra/inyectar.rs:80`).
+
+| Caso | Archivo | Veredicto | Detectado |
+|---|---|---|---|
+| 0 | `src/shell_install/powershell.rs` | Sin veredicto: cobertura 6 de 13 | No |
+| 2 | `src/filesystems/filesystems_state.rs` | Con veredicto | No |
+| 4 | `src/skin/ext_colors.rs` | Sin veredicto: "conexión cortada después de enviar el pedido" | No |
+| 6 | `src/kitty/image_renderer.rs` | Sin veredicto: la misma conexión cortada | No |
+| 8 | `src/app/app_context.rs` | Con veredicto | Sí, por `cita_juez` |
+
+**Tres causas, de mayor a menor peso:**
+1. **Los defectos sin veredicto cuentan como no detectados.** Tres de cinco no tienen veredicto: dos por un corte de la API y uno por cobertura. P102 a cuenta "defectos distintos detectados sobre defectos distintos medidos". Un caso sin veredicto no está medido. Con la regla bien aplicada, la sensibilidad sería 1 de 2.
+2. **Los cinco defectos caen en el piso.** `diseno.errores` vale 0 en los tres juicios de la base. Un defecto no puede bajar un ítem que ya está en 0. Solo se detecta si el juez cita la línea. `defectos_en_piso` da 5.
+3. **Un defecto con veredicto no se detectó.** El caso 2 bajó el valor de 0,25 a 0,167, pero por otros ítems. El juez no citó la línea del defecto.
+
+## 5. Por qué cuatro limpios no tienen veredicto
+
+| Caso | Motivo |
+|---|---|
+| 1, 5 y 9 | Cobertura 6 de 13 de peso, menor que dos tercios |
+| 7 | La conexión cortada |
+
+**La cobertura de los casos cuenta los ítems inestables. La evaluación no los cuenta.**
+- La base marcó inestables `diseno.robustez` (3) y `diseno.operabilidad` (2). Juntos pesan 5.
+- En una evaluación, `excluidos_de` (`src/oracle/mod.rs`) los saca del peso total. El total queda en 8.
+- En una calibración, `excluidos_de` no saca nada. Su comentario lo dice: "la calibración juzga la base con todos sus ítems". El total sigue en 13.
+- En los limpios, el juez tampoco dio evidencia para esos dos ítems. Midió 6 de 13, menos de dos tercios.
+- Con los inestables fuera, sería 6 de 8, que pasa los dos tercios.
+- **La calibración mide la dimensión de otra forma que la evaluación.** Debe medirla igual: un caso juzga sin los ítems que la base marcó inestables.
+
+## 6. La regla de inestables, revisada
+
+**Los datos nuevos.** Los dos inestables de Diseño son de una sola causa: "falta en el juicio k: el juez no encontró evidencia".
+
+| Ítem | Juicio 1 | Juicio 2 | Juicio 3 |
+|---|---|---|---|
+| `diseno.robustez` | sin evidencia | 2 | 2 |
+| `diseno.operabilidad` | 3 | sin evidencia | 3 |
+
+Cuando el juez da nivel, el nivel no varía. Lo que varía es si encuentra evidencia.
+
+**La regla queda: un ítem que a veces no tiene evidencia es inestable.** La razón está en la sección 5. En los limpios, el juez tampoco encontró evidencia para esos dos ítems. Un ítem así no mide la tarea de forma fija. Si se lo dejara, cada caso dependería de si el juez lo encuentra.
+
+**Lo que cambia es dónde se aplica.** La regla ya saca esos ítems de la evaluación. Ahora debe sacarlos también de la cobertura de los casos de calibración. Es el punto 1 de la Tarea 128.
+
+## 7. La Tarea 128: la calibración mide como la evaluación
+
+1. **Los casos juzgan sin los inestables de la base.** La cobertura de un caso usa el peso total sin esos ítems, igual que una evaluación.
+2. **Un defecto sin veredicto no cuenta como no detectado.** Sale de la sensibilidad, igual que un limpio sin veredicto sale de la especificidad. La regla del 20 % vale también para los defectos.
+3. **Un defecto cuyo ítem está en piso en la base no cuenta como medido.** Queda como no aplicable, con el motivo "el ítem ya está en piso en la base". Sin otro defecto para la dimensión, la calibración lo dice.
+
+Toca `src/oracle/calibra.rs` y `src/oracle/mod.rs`. Choca con la 127 en `calibra.rs`. Va después de la 127. Escribo su brief en la próxima vuelta.
+
+**Con la 128, Diseño de s2-t1 no se puede calibrar.** Su único defecto cae en el piso. Hace falta un defecto de Diseño para un ítem con nivel en la base, como `diseno.estado`, que vale 3. Es una tarea más, la 129.
+
+**Arquitectura tiene el mismo hueco.** Su único defecto, `CicloEntreCapas`, apunta a `arquitectura.dependencias`, que es de sonda. El 1,0 de t1 mide la sonda de ciclos, no el juez. `adecuacion` e `interfaces` no tienen ningún defecto que los pruebe. La 129 suma un defecto para un ítem del juez de Arquitectura.
+
+## 8. El tope de S2 y el juez
+
+**Lo que falta medir con el juez.** P102 a pide una cota de Wilson de 0,8 por clase, con las tareas juntas. Eso es al menos 16 defectos detectados y 16 limpios bien, por dimensión de juez.
+- Las dimensiones con juez son Diseño, Arquitectura y Estructura.
+- Un caso de Arquitectura costó cerca de 0,115 USD. Tres juicios de base cuestan cerca de 0,25 USD por tarea.
+- **Por dimensión:** 32 casos más tres bases dan unos 4,5 USD, si nada falla.
+- **Las tres dimensiones:** unos 13,5 USD. Con casos sin veredicto y repeticiones, cerca de 17 USD.
+- Quedan 0,451 USD del tope de 7.
+
+**Sin más gasto, las dimensiones de juez no se pueden calibrar.** Por P103 a, igual pueden dar veredicto, y Root puede decir "listo". Pero esas dimensiones no entran al global ni a los mínimos.
+
+**P107: ¿cuánto se gasta en calibrar las dimensiones con juez?**
+- **a)** Subir el tope de S2 a 25 USD. Se mide recién después de la 128 y la 129, con una prueba de dos casos antes de cada serie. *(Recomendada: con 0,45 USD no se calibra ninguna dimensión de juez, y medir antes de la 128 desperdicia gasto, como esta vez.)*
+- **b)** Subir el tope a 12 USD, y calibrar solo Diseño y Arquitectura. Estructura queda sin calibrar.
+- **c)** Dejar el tope en 7 USD. Las dimensiones con juez quedan sin calibrar, y Root solo calibra las de oráculo.
+
+## 9. El orden y el paralelo
+
+| Tarea | Qué | Archivos | Base |
+|---|---|---|---|
+| 126 | La carrera ETXTBSY en todos los helpers | Módulos de tests de varios archivos, un módulo de tests nuevo, `tests/` | Punta de `laptop/cadena-110-125` |
+| 127 | `target` y ruta fijos para la mutación de la calibración | `src/oracle/mutacion.rs`, `src/oracle/calibra.rs` | Punta de `laptop/cadena-110-125` |
+| 128 | La calibración mide como la evaluación | `src/oracle/calibra.rs`, `src/oracle/mod.rs` | Punta de la 127 |
+| 129 | Defectos para ítems del juez de Diseño y Arquitectura | `src/oracle/calibra/inyectar.rs` y sus tests | Después de la 128 |
+
+- **La 126 y la 127 corren en paralelo.** La 126 solo toca módulos de tests, y ninguno de `mutacion.rs` ni de `calibra.rs`.
+- La 128 va después de la 127, porque las dos tocan `calibra.rs`.
+
+**Preguntas al usuario:** P107.
