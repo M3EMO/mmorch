@@ -1638,8 +1638,8 @@ const ACELERADOR_CPU: Option<&str> = None;
 
 /// Carpeta remota donde el runtime descomprime el paquete de ida.
 const D_REMOTO: &str = "/content/root-paquete";
-/// Nombre remoto del paquete de ida. Vive en `/content`.
-const PAQUETE_REMOTO_IDA: &str = "paquete.tar.gz";
+/// Ruta remota del paquete de ida que arma la unión de los trozos. Es absoluta, como exige el runtime.
+const PAQUETE_REMOTO_IDA: &str = "/content/paquete.tar.gz";
 /// Ruta remota del paquete de vuelta que arma el cierre.
 const VUELTA_REMOTA: &str = "/content/vuelta.tar.gz";
 /// Tiempo de la preparación del runtime, en segundos.
@@ -1917,31 +1917,18 @@ fn correr_runtime<C: ColabCli>(
 ) -> Result<PathBuf, ErrorOraculo> {
     pedir_runtime(cli, lim, home, sesion)?;
 
-    let subida = llamar(
-        cli,
-        lim,
-        &colab::args(&[
-            "upload",
-            "-s",
-            sesion,
-            &colab::ruta(paquete),
-            PAQUETE_REMOTO_IDA,
-        ]),
-        TIMEOUT_CALIBRAR,
-    )?;
-    if subida.codigo != 0 {
-        return Err(ErrorOraculo::Infra(format!(
-            "no se pudo subir el paquete: {}",
-            subida.stderr.trim()
-        )));
-    }
+    // Los trozos suben de uno a la vez. El SHA-256 del paquete completo va al guion de preparación.
+    let bytes = fs::read(paquete)
+        .map_err(|e| ErrorOraculo::Infra(format!("leer el paquete de ida: {e}")))?;
+    let sha = sha256_hex(&bytes);
+    let trozos = colab::subir_en_trozos(cli, lim, sesion, paquete, tmp, TIMEOUT_CALIBRAR)?;
 
-    let guion = colab::escribir(tmp, "preparar.py", &script_preparar())?;
+    let guion = colab::escribir(tmp, "preparar.py", &script_preparar(trozos, &sha))?;
     let preparado = ejecutar_guion(cli, lim, sesion, SEG_PREPARAR_CALIBRAR, &guion)?;
     if preparado.codigo != 0 || colab::marcador(&preparado.stdout, "ROOT_OK=").is_none() {
         return Err(ErrorOraculo::Infra(format!(
             "la preparación del runtime falló: {}",
-            preparado.stderr.trim()
+            preparado.detalle()
         )));
     }
 
@@ -1968,7 +1955,7 @@ fn correr_runtime<C: ColabCli>(
                 "el trabajo {} {} no corrió: {}",
                 trabajo.tarea,
                 trabajo.dimension,
-                salida.stderr.trim()
+                salida.detalle()
             )));
         }
         let codigo = colab::marcador(&salida.stdout, "ROOT_CODIGO=")
@@ -1988,7 +1975,7 @@ fn correr_runtime<C: ColabCli>(
     if cierre.codigo != 0 || colab::marcador(&cierre.stdout, "ROOT_OK=").is_none() {
         return Err(ErrorOraculo::Infra(format!(
             "el cierre de la vuelta falló: {}",
-            cierre.stderr.trim()
+            cierre.detalle()
         )));
     }
 
@@ -2008,7 +1995,7 @@ fn correr_runtime<C: ColabCli>(
     if bajada.codigo != 0 || !vuelta.is_file() {
         return Err(ErrorOraculo::Infra(format!(
             "no se pudo bajar la vuelta: {}",
-            bajada.stderr.trim()
+            bajada.detalle()
         )));
     }
     // Antes de abrir la vuelta: su SHA-256 debe coincidir con el que dijo el cierre.
@@ -2140,7 +2127,7 @@ fn pedir_runtime<C: ColabCli>(
     Err(ErrorOraculo::Infra(format!(
         "colab new salió con código {}: {}",
         salida.codigo,
-        salida.stderr.trim()
+        salida.detalle()
     )))
 }
 
@@ -2483,17 +2470,53 @@ print("ROOT_CODIGO=%d" % r.returncode)
     )
 }
 
-/// Script que descomprime el paquete de ida y corre su preparación.
-fn script_preparar() -> String {
-    format!(
-        r#"import os
-import subprocess
+/// Script que une los `n` trozos, compara su SHA-256 con `sha` y, si coincide, prepara el runtime.
+/// Los trozos se borran en todos los caminos.
+fn script_preparar(n: usize, sha: &str) -> String {
+    let trozos: Vec<String> = (0..n).map(colab::nombre_de_trozo).collect();
+    guion_preparar_en(&trozos, PAQUETE_REMOTO_IDA, D_REMOTO, sha)
+}
 
-D = "{D_REMOTO}"
-os.makedirs(D, exist_ok=True)
-subprocess.run(["tar", "-xzf", "/content/{PAQUETE_REMOTO_IDA}", "-C", D], cwd="/content", check=True)
-subprocess.run(["bash", D + "/tools/colab/preparar-runtime.sh", D], check=True)
-print("ROOT_OK=preparar")
+/// Guion de `script_preparar` con las rutas como parámetros (para los tests).
+/// Si el SHA-256 de la unión difiere, escribe `ROOT_PAQUETE_SHA_DISTINTO` a stderr, borra el tar
+/// y sale con 1 sin extraer. Si coincide, extrae el tar, corre la preparación e imprime `ROOT_OK=preparar`.
+fn guion_preparar_en(trozos: &[String], tar: &str, d: &str, sha: &str) -> String {
+    let trozos = serde_json::to_string(trozos).expect("una lista de cadenas se serializa");
+    let tar = literal_python(tar);
+    let d = literal_python(d);
+    let esperado = literal_python(sha);
+    format!(
+        r#"import hashlib, os, subprocess, sys
+
+TROZOS = {trozos}
+TAR = {tar}
+D = {d}
+ESPERADO = {esperado}
+
+sha_ok = False
+try:
+    digest = hashlib.sha256()
+    with open(TAR, "wb") as salida:
+        for trozo in TROZOS:
+            with open(trozo, "rb") as entrada:
+                for bloque in iter(lambda: entrada.read(1 << 20), b""):
+                    salida.write(bloque)
+                    digest.update(bloque)
+    obtenido = digest.hexdigest()
+    if obtenido != ESPERADO:
+        sys.stderr.write("ROOT_PAQUETE_SHA_DISTINTO: esperado %s, obtenido %s\n" % (ESPERADO, obtenido))
+        sys.exit(1)
+    sha_ok = True
+    os.makedirs(D, exist_ok=True)
+    subprocess.run(["tar", "-xzf", TAR, "-C", D], check=True)
+    subprocess.run(["bash", D + "/tools/colab/preparar-runtime.sh", D], check=True)
+    print("ROOT_OK=preparar")
+finally:
+    if not sha_ok and os.path.exists(TAR):
+        os.remove(TAR)
+    for trozo in TROZOS:
+        if os.path.exists(trozo):
+            os.remove(trozo)
 "#
     )
 }
@@ -3696,6 +3719,10 @@ mod tests_calibrar {
         stop_falla: bool,
         /// SHA que el cierre imprime en `ROOT_SHA_VUELTA=`. Sin valor, el SHA real de `vuelta`.
         sha_de_cierre: Option<String>,
+        /// Sufijo de la ruta remota de `upload` que devuelve código 1 con texto en stdout.
+        upload_falla_en: Option<String>,
+        /// Si la falla de `exec` escribe su texto en stdout, no en stderr.
+        falla_en_stdout: bool,
     }
 
     impl Falso {
@@ -3710,7 +3737,20 @@ mod tests_calibrar {
                 vuelta: vuelta.to_path_buf(),
                 stop_falla: false,
                 sha_de_cierre: None,
+                upload_falla_en: None,
+                falla_en_stdout: false,
             }
+        }
+
+        fn con_falla_upload(mut self, sufijo: &str) -> Self {
+            self.upload_falla_en = Some(sufijo.to_string());
+            self
+        }
+
+        fn con_falla_en_stdout(mut self, sufijo: &str) -> Self {
+            self.exec_falla_en = Some(sufijo.to_string());
+            self.falla_en_stdout = true;
+            self
         }
 
         fn con_sha_de_cierre(mut self, sha: &str) -> Self {
@@ -3766,7 +3806,11 @@ mod tests_calibrar {
                 .as_deref()
                 .is_some_and(|sufijo| sesion.ends_with(sufijo))
             {
-                return salida(1, "", "fallo simulado");
+                return if self.falla_en_stdout {
+                    salida(1, "fallo simulado en stdout", "")
+                } else {
+                    salida(1, "", "fallo simulado")
+                };
             }
             let stdout = if guion.contains("preparar-runtime.sh") {
                 "ROOT_OK=preparar\n".to_string()
@@ -3797,6 +3841,18 @@ mod tests_calibrar {
                     salida(0, "", "")
                 }
                 Some("stop") if self.stop_falla => salida(1, "", "fallo simulado al parar"),
+                Some("upload")
+                    if self
+                        .upload_falla_en
+                        .as_deref()
+                        .is_some_and(|sufijo| args.last().is_some_and(|r| r.ends_with(sufijo))) =>
+                {
+                    salida(
+                        1,
+                        "[colab] Upload failed: 400 colab-runtime-proxy-token=SECRETO123&x=1",
+                        "",
+                    )
+                }
                 _ => salida(0, "", ""),
             };
             Ok(Espera::Termino(salida))
@@ -4596,5 +4652,250 @@ mod tests_calibrar {
         );
         assert!(!home.path().join(ARCHIVO_CALIBRACION).exists());
         assert!(home.path().join("colab/activo.json").exists());
+    }
+
+    /// Paquete de ida de `mib` MiB. Es esparcido: el falso no lo abre, solo se lee para subir.
+    fn paquete_de_mib(caja: &Path, nombre: &str, mib: u64) -> PathBuf {
+        let ruta = caja.join(nombre);
+        let archivo = fs::File::create(&ruta).expect("archivo");
+        archivo.set_len(mib * 1024 * 1024).expect("tamaño");
+        ruta
+    }
+
+    /// Corre la subida, la preparación y el cierre con un manifiesto sin trabajos.
+    fn correr_runtime_de(
+        cli: &Falso,
+        home: &Path,
+        paquete: &Path,
+    ) -> Result<PathBuf, ErrorOraculo> {
+        let tmp = home.join("tmp-runtime");
+        fs::create_dir_all(&tmp).expect("carpeta temporal");
+        let sin_senal = Senales::default();
+        let lim = colab::Limites {
+            cancelar: &sin_senal,
+            inicio: Instant::now(),
+            tope: TOPE_PRUEBA,
+        };
+        let manifiesto = Manifiesto {
+            v: 1,
+            commit_root: COMMIT.into(),
+            binario_sha256: String::new(),
+            archivos: BTreeMap::new(),
+            trabajos: Vec::new(),
+            imagenes: BTreeMap::new(),
+        };
+        let mut codigos = Vec::new();
+        correr_runtime(
+            cli,
+            &lim,
+            home,
+            paquete,
+            "root-prueba-1",
+            &tmp,
+            &manifiesto,
+            &mut codigos,
+        )
+    }
+
+    /// Remotos de cada `upload`, en orden. El último argumento de `upload` es la ruta remota.
+    fn subidas(llamadas: &[Vec<String>]) -> Vec<String> {
+        llamadas
+            .iter()
+            .filter(|a| a.first().is_some_and(|c| c == "upload"))
+            .filter_map(|a| a.last().cloned())
+            .collect()
+    }
+
+    #[test]
+    fn ciclo_completo_sube_y_baja_con_rutas_remotas_absolutas() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let llamadas = cli.llamadas();
+        assert!(!subidas(&llamadas).is_empty(), "{llamadas:?}");
+        for args in &llamadas {
+            match args.first().map(String::as_str) {
+                Some("upload") => {
+                    assert!(args.last().is_some_and(|r| r.starts_with('/')), "{args:?}")
+                }
+                Some("download") => {
+                    assert!(args.get(3).is_some_and(|r| r.starts_with('/')), "{args:?}")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn paquete_chico_sube_un_solo_trozo_a_root_paq_00() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        assert_eq!(subidas(&cli.llamadas()), ["/content/root-paq.00"]);
+    }
+
+    #[test]
+    fn paquete_de_100_mib_sube_tres_trozos_en_orden() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let paquete = paquete_de_mib(caja.path(), "grande.tar.gz", 100);
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        correr_runtime_de(&cli, home.path(), &paquete).expect("sube y prepara");
+
+        assert_eq!(
+            subidas(&cli.llamadas()),
+            [
+                "/content/root-paq.00",
+                "/content/root-paq.01",
+                "/content/root-paq.02"
+            ]
+        );
+    }
+
+    #[test]
+    fn trozo_que_falla_frena_la_subida_y_nombra_el_trozo_sin_token() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let paquete = paquete_de_mib(caja.path(), "grande.tar.gz", 100);
+        let cli = Falso::nuevo(home.path(), &vuelta).con_falla_upload("root-paq.01");
+
+        let Err(error) = correr_runtime_de(&cli, home.path(), &paquete) else {
+            panic!("el trozo 1 fallido debía frenar la subida");
+        };
+        let mensaje = error.to_string();
+        assert!(mensaje.contains("trozo 1"), "{mensaje}");
+        assert!(mensaje.contains("Upload failed: 400"), "{mensaje}");
+        assert!(!mensaje.contains("SECRETO123"), "{mensaje}");
+        let llamadas = cli.llamadas();
+        assert_eq!(
+            subidas(&llamadas),
+            ["/content/root-paq.00", "/content/root-paq.01"]
+        );
+        assert!(!llamadas.iter().any(|a| a[0] == "exec"), "{llamadas:?}");
+    }
+
+    #[test]
+    fn preparacion_con_falla_solo_en_stdout_la_muestra() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_falla_en_stdout("-0");
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let mensaje = resumen.runtimes[0]
+            .resultado
+            .as_ref()
+            .expect_err("la preparación falla");
+        assert!(
+            mensaje.contains("la preparación del runtime falló"),
+            "{mensaje}"
+        );
+        assert!(mensaje.contains("fallo simulado en stdout"), "{mensaje}");
+    }
+
+    /// Parte un tar.gz real en dos trozos en `caja/content`. Devuelve los trozos, el tar y su SHA-256.
+    fn partir_paquete(caja: &Path) -> (Vec<PathBuf>, Vec<u8>, String) {
+        let fuente = caja.join("fuente");
+        fs::create_dir_all(fuente.join("tools/colab")).expect("carpeta");
+        fs::write(fuente.join("tools/colab/preparar-runtime.sh"), "exit 0\n").expect("guion");
+        fs::write(fuente.join("marca.txt"), "hola\n").expect("marca");
+        let original = caja.join("original.tar.gz");
+        empaquetar_dir(&fuente, &original);
+        let bytes = fs::read(&original).expect("lee el original");
+        let (uno, dos) = bytes.split_at(bytes.len() / 2);
+        let raiz = caja.join("content");
+        fs::create_dir_all(&raiz).expect("raíz");
+        let trozos = vec![raiz.join("root-paq.00"), raiz.join("root-paq.01")];
+        fs::write(&trozos[0], uno).expect("trozo 0");
+        fs::write(&trozos[1], dos).expect("trozo 1");
+        let sha = sha256_hex(&bytes);
+        (trozos, bytes, sha)
+    }
+
+    /// Corre el guion de preparación con python3 -I. `None` si no hay python3.
+    fn correr_preparar(caja: &Path, trozos: &[PathBuf], sha: &str) -> Option<std::process::Output> {
+        if Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("sin python3: se salta el test del guion de preparación");
+            return None;
+        }
+        let trozos: Vec<String> = trozos
+            .iter()
+            .map(|t| t.to_str().expect("ruta").to_string())
+            .collect();
+        let tar = caja.join("content/paquete.tar.gz");
+        let d = caja.join("root-paquete");
+        let texto = guion_preparar_en(
+            &trozos,
+            tar.to_str().expect("ruta"),
+            d.to_str().expect("ruta"),
+            sha,
+        );
+        let guion = caja.join("preparar.py");
+        fs::write(&guion, texto).expect("guion");
+        Some(
+            Command::new("python3")
+                .arg("-I")
+                .arg(&guion)
+                .output()
+                .expect("python3"),
+        )
+    }
+
+    #[test]
+    fn guion_preparar_une_en_orden_y_con_sha_bueno_extrae() {
+        let caja = tempfile::tempdir().expect("caja");
+        let (trozos, bytes, sha) = partir_paquete(caja.path());
+        let Some(salida) = correr_preparar(caja.path(), &trozos, &sha) else {
+            return;
+        };
+
+        let stderr = String::from_utf8_lossy(&salida.stderr);
+        assert!(salida.status.success(), "{stderr}");
+        assert!(String::from_utf8_lossy(&salida.stdout).contains("ROOT_OK=preparar"));
+        let tar = caja.path().join("content/paquete.tar.gz");
+        assert_eq!(fs::read(&tar).expect("tar"), bytes);
+        assert!(caja.path().join("root-paquete/marca.txt").is_file());
+        assert!(trozos.iter().all(|t| !t.exists()), "quedan trozos");
+    }
+
+    #[test]
+    fn guion_preparar_con_sha_malo_frena_sin_extraer() {
+        let caja = tempfile::tempdir().expect("caja");
+        let (trozos, _, sha) = partir_paquete(caja.path());
+        let malo = "0".repeat(64);
+        let Some(salida) = correr_preparar(caja.path(), &trozos, &malo) else {
+            return;
+        };
+
+        let stderr = String::from_utf8_lossy(&salida.stderr);
+        assert_eq!(salida.status.code(), Some(1), "{stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "ROOT_PAQUETE_SHA_DISTINTO: esperado {malo}, obtenido {sha}"
+            )),
+            "{stderr}"
+        );
+        assert!(!String::from_utf8_lossy(&salida.stdout).contains("ROOT_OK=preparar"));
+        assert!(!caja.path().join("content/paquete.tar.gz").exists());
+        assert!(trozos.iter().all(|t| !t.exists()), "quedan trozos");
+        assert!(
+            !caja.path().join("root-paquete").exists(),
+            "se extrajo igual"
+        );
     }
 }

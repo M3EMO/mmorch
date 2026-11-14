@@ -89,6 +89,7 @@ exec)
   for a in "$@"; do if [ "$prev" = "-f" ]; then f="$a"; fi; prev="$a"; done
   case "$f" in
     */gpu.py) echo "ROOT_GPU=$GPU" ;;
+    */une-trozos.py) echo "ROOT_UNIDO=ok" ;;
     */prepara.py) echo "ROOT_PREPARADO=1" ;;
     */prepara-rust.py) echo "ROOT_RUST=rustup" ;;
     */corre.py)
@@ -456,6 +457,7 @@ exec)
   for a in "$@"; do if [ "$prev" = "-f" ]; then f="$a"; fi; prev="$a"; done
   case "$f" in
     */gpu.py) echo "ROOT_GPU=Tesla T4" ;;
+    */une-trozos.py) echo "ROOT_UNIDO=ok" ;;
     */prepara.py) echo "ROOT_PREPARADO=1" ;;
     */prepara-rust.py) echo "ROOT_RUST=rustup" ;;
     */corre.py) echo "ROOT_LANZADO=1" ;;

@@ -28,6 +28,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use signal_hook::consts::{SIGINT, SIGTERM};
 
 use super::contenedor::{Modo, TOPE_SALIDA_COLAB, leer_con_tope, tamano_legible};
@@ -57,6 +58,8 @@ const SEG_GPU: u64 = 300;
 const SEG_PREPARAR: u64 = 1800;
 /// Tiempo de `exec` para probar el binario de respaldo.
 const SEG_PRUEBA_BINARIO: u64 = 120;
+/// Tiempo de `exec` para unir los trozos subidos en el runtime.
+const SEG_UNIR: u64 = 300;
 /// Tiempo de `exec` para lanzar `correr.sh`. El lanzamiento vuelve enseguida.
 const SEG_CORRER: u64 = 300;
 /// Tiempo de `exec` para leer el estado de `correr.sh`.
@@ -76,10 +79,19 @@ const CAUSA_RUNTIME_NO_ASIGNADO: &str = "runtime-no-asignado";
 const CAUSA_ERROR_CORRIDA: &str = "error-en-corrida";
 /// La única GPU que Root pide.
 const GPU_PEDIDA: &str = "T4";
-/// Nombre del paquete dentro del runtime. Es el mismo en la subida y en la preparación.
-const PAQUETE_REMOTO: &str = "root-paquete.tar.gz";
-/// Carpeta donde `prepara.py` descomprime el paquete en el runtime.
-const CARPETA_REMOTA: &str = "root-paquete";
+/// Nombre local del tar del paquete, en la carpeta temporal de Root.
+const PAQUETE_LOCAL: &str = "root-paquete.tar.gz";
+/// Ruta absoluta del paquete en el runtime. Es donde `guion_unir_trozos` deja el tar unido.
+/// Colab corre en `/content`, pero una ruta relativa dio 400 en la prueba de la 140.
+const PAQUETE_REMOTO: &str = "/content/root-paquete.tar.gz";
+/// Carpeta donde `prepara.py` descomprime el paquete en el runtime. Ruta absoluta, como `PAQUETE_REMOTO`.
+const CARPETA_REMOTA: &str = "/content/root-paquete";
+/// Carpeta raíz del runtime de Colab. Los trozos de subida van aquí.
+const RAIZ_REMOTA: &str = "/content";
+/// Tamaño de cada trozo al subir un archivo grande. La prueba de la 140 subió trozos de 40 MiB
+/// a `/content/paq.NN` en 58 s, con el SHA-256 igual. Un paquete de 182 MB con ruta relativa dio 400,
+/// y con ruta absoluta `/content/...` dio 500.
+pub const TROZO_SUBIDA: u64 = 40 * 1024 * 1024;
 /// Archivo de eventos de Root dentro de `ROOT_HOME`.
 const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
 /// Fase de los eventos `Gate` del runtime.
@@ -149,8 +161,8 @@ print("ROOT_GPU=" + (lineas[0] if r.returncode == 0 and lineas else ""))
 /// Script de preparación. Descomprime el paquete e instala pytest en el runtime. Rust no va acá:
 /// lo prepara `guion_rust`, con `rustup-init` verificado.
 const GUION_PREPARAR: &str = r#"import os, subprocess, sys
-os.makedirs("root-paquete", exist_ok=True)
-subprocess.run(["tar", "-xzf", "root-paquete.tar.gz", "-C", "root-paquete"], check=True)
+os.makedirs("/content/root-paquete", exist_ok=True)
+subprocess.run(["tar", "-xzf", "/content/root-paquete.tar.gz", "-C", "/content/root-paquete"], check=True)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pytest"], check=True)
 print("ROOT_PREPARADO=1")
 "#;
@@ -161,13 +173,13 @@ const GUION_CORRER: &str = r#"import os, subprocess
 env = dict(os.environ)
 env["PATH"] = os.path.expanduser("~/.cargo/bin") + os.pathsep + env.get("PATH", "")
 # Sin DEVNULL en la entrada y en las salidas, el exec de Colab esperaría a que `correr.sh` termine.
-subprocess.Popen(["bash", "-c", "bash correr.sh > correr.log 2>&1; echo $? > estado.rc"], cwd="root-paquete", env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+subprocess.Popen(["bash", "-c", "bash correr.sh > correr.log 2>&1; echo $? > estado.rc"], cwd="/content/root-paquete", env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 print("ROOT_LANZADO=1")
 "#;
 
-/// Script de estado. `correr.sh` terminó cuando existe `root-paquete/estado.rc` con su código.
+/// Script de estado. `correr.sh` terminó cuando existe `/content/root-paquete/estado.rc` con su código.
 const GUION_ESTADO: &str = r#"import os
-RC = os.path.join("root-paquete", "estado.rc")
+RC = os.path.join("/content/root-paquete", "estado.rc")
 codigo = ""
 if os.path.exists(RC):
     with open(RC) as archivo:
@@ -236,8 +248,8 @@ fn guion_probar_binario(nombre: &str) -> String {
     let nombre = serde_json::to_string(nombre).expect("una cadena se serializa");
     format!(
         r#"import os, subprocess
-RUTA = os.path.abspath(os.path.join("root-paquete", "target", "debug", {nombre}))
-CARGO = os.path.abspath(os.path.join("root-paquete", "bin", "cargo"))
+RUTA = os.path.join("/content/root-paquete", "target", "debug", {nombre})
+CARGO = os.path.join("/content/root-paquete", "bin", "cargo")
 
 def correr(opcion):
     return subprocess.run([RUTA, opcion], capture_output=True, timeout=60)
@@ -336,6 +348,41 @@ pub struct SalidaColab {
     pub codigo: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+impl SalidaColab {
+    /// Texto para el usuario: stderr y stdout recortados, sin vacíos, unidos con "; ".
+    /// La CLI escribe algunas fallas en stdout. Oculta el token del proxy.
+    pub fn detalle(&self) -> String {
+        [self.stderr.trim(), self.stdout.trim()]
+            .into_iter()
+            .filter(|parte| !parte.is_empty())
+            .map(ocultar_token_proxy)
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// Marca del token del proxy de Colab en los textos de la CLI.
+const MARCA_TOKEN_PROXY: &str = "colab-runtime-proxy-token=";
+
+/// Cambia el valor de cada `colab-runtime-proxy-token=` por `<oculto>`. El valor termina en
+/// espacio, `&`, comilla o fin del texto.
+fn ocultar_token_proxy(texto: &str) -> String {
+    let mut salida = String::with_capacity(texto.len());
+    let mut resto = texto;
+    while let Some(i) = resto.find(MARCA_TOKEN_PROXY) {
+        salida.push_str(&resto[..i]);
+        salida.push_str(MARCA_TOKEN_PROXY);
+        salida.push_str("<oculto>");
+        let tras = &resto[i + MARCA_TOKEN_PROXY.len()..];
+        let fin = tras
+            .find(|c: char| c.is_whitespace() || matches!(c, '&' | '"' | '\''))
+            .unwrap_or(tras.len());
+        resto = &tras[fin..];
+    }
+    salida.push_str(resto);
+    salida
 }
 
 /// Cómo termina una espera de la CLI.
@@ -791,7 +838,7 @@ pub fn correr_en_colab(
                 Ok(Espera::Termino(salida)) => format!(
                     "colab new salió con código {}: {}",
                     salida.codigo,
-                    salida.stderr.trim()
+                    salida.detalle()
                 ),
                 Ok(Espera::Senal(senal)) => format!("Interrumpido por {senal}"),
                 _ => "colab no respondió a tiempo".to_string(),
@@ -1183,27 +1230,19 @@ fn trabajar(
     }
 
     let tar = empaquetar(trabajo.paquete, tmp)?;
-    let subida = paso(
-        cli,
-        lim,
-        &args(&["upload", "-s", sesion, &ruta(&tar), PAQUETE_REMOTO]),
-        TIMEOUT_LLAMADA,
-    );
+    let sha = sha256_de_archivo(&tar);
+    let subida = subir_en_trozos(cli, lim, sesion, &tar, tmp, TIMEOUT_LLAMADA);
     let _ = borrar_tar(home, &tar);
-    let subida = subida?;
-    if subida.codigo != 0 {
-        return Err(ErrorOraculo::Infra(format!(
-            "no se pudo subir el paquete: {}",
-            subida.stderr.trim()
-        )));
-    }
+    let trozos = subida?;
+    let sha = sha?;
+    unir_en_runtime(cli, lim, sesion, tmp, trozos, PAQUETE_REMOTO, Some(&sha))?;
 
     let guion_preparar = escribir(tmp, "prepara.py", GUION_PREPARAR)?;
     let preparado = exec(cli, lim, sesion, SEG_PREPARAR, &guion_preparar)?;
     if preparado.codigo != 0 || marcador(&preparado.stdout, "ROOT_PREPARADO=").is_none() {
         return Err(ErrorOraculo::Infra(format!(
             "la preparación del runtime falló: {}",
-            preparado.stderr.trim()
+            preparado.detalle()
         )));
     }
 
@@ -1214,7 +1253,7 @@ fn trabajar(
     if lanzada.codigo != 0 || marcador(&lanzada.stdout, "ROOT_LANZADO=").is_none() {
         return Err(ErrorOraculo::Infra(format!(
             "correr.sh no arrancó en el runtime: {}",
-            lanzada.stderr.trim()
+            lanzada.detalle()
         )));
     }
 
@@ -1353,7 +1392,7 @@ fn bajar_junit(
         TIMEOUT_LLAMADA,
     ) {
         Ok(salida) if salida.codigo == 0 && destino.is_file() => Ok(Ok(())),
-        Ok(salida) => Ok(Err(salida.stderr.trim().to_string())),
+        Ok(salida) => Ok(Err(salida.detalle())),
         Err(e) if lim.cancelar.recibida().is_some() || lim.vencido() => Err(e),
         Err(e) => Ok(Err(e.to_string())),
     }
@@ -1370,7 +1409,7 @@ fn estado_terminado(
     if salida.codigo != 0 {
         return Err(ErrorOraculo::Infra(format!(
             "no se pudo leer el estado de correr.sh: {}",
-            salida.stderr.trim()
+            salida.detalle()
         )));
     }
     match marcador(&salida.stdout, "ROOT_ESTADO=").as_deref() {
@@ -1446,7 +1485,7 @@ fn rust_en_runtime(
         return Err(format!(
             "prepara-rust.py salió con código {}: {}",
             salida.codigo,
-            salida.stderr.trim()
+            salida.detalle()
         ));
     }
     match marcador(&salida.stdout, "ROOT_RUST=").as_deref() {
@@ -1490,19 +1529,7 @@ fn binario_local(
         .map_err(|e| e.to_string())?;
     // El binario va donde el `cargo` mínimo lo busca: `target/debug` del paquete (CARGO_TARGET_DIR).
     let destino = format!("{CARPETA_REMOTA}/target/debug/{nombre}");
-    let subida = paso(
-        cli,
-        lim,
-        &args(&["upload", "-s", sesion, &ruta(&binario), &destino]),
-        TIMEOUT_LLAMADA,
-    )
-    .map_err(|e| e.to_string())?;
-    if subida.codigo != 0 {
-        return Err(format!(
-            "no se pudo subir el binario: {}",
-            subida.stderr.trim()
-        ));
-    }
+    subir_binario(cli, lim, sesion, &binario, tmp, &destino).map_err(|e| e.to_string())?;
     let cargo = escribir(tmp, "cargo", &guion_cargo(&nombre)).map_err(|e| e.to_string())?;
     let destino_cargo = format!("{CARPETA_REMOTA}/bin/cargo");
     let subida_cargo = paso(
@@ -1515,7 +1542,7 @@ fn binario_local(
     if subida_cargo.codigo != 0 {
         return Err(format!(
             "no se pudo subir el cargo mínimo: {}",
-            subida_cargo.stderr.trim()
+            subida_cargo.detalle()
         ));
     }
     let guion = escribir(tmp, "prueba-binario.py", &guion_probar_binario(&nombre))
@@ -1529,6 +1556,211 @@ fn binario_local(
             prueba.codigo
         )),
     }
+}
+
+/// Nombre del trozo `i` dentro de la carpeta temporal de Root, con dos cifras o más.
+fn nombre_local_de_trozo(i: usize) -> String {
+    format!("root-paq.{i:02}")
+}
+
+/// Ruta remota del trozo `i`: `/content/root-paq.NN`. Es ruta absoluta, como exige el runtime.
+pub(crate) fn nombre_de_trozo(i: usize) -> String {
+    format!("{RAIZ_REMOTA}/{}", nombre_local_de_trozo(i))
+}
+
+/// Sube `origen` al runtime en trozos de `TROZO_SUBIDA`, de uno a la vez. Cada trozo pasa por
+/// `tmp` y se borra al usarse, también si la subida falla. Devuelve cuántos trozos subió.
+/// Un archivo vacío o chico sube un solo trozo.
+pub(crate) fn subir_en_trozos(
+    cli: &dyn ColabCli,
+    lim: &Limites,
+    sesion: &str,
+    origen: &Path,
+    tmp: &Path,
+    plazo: Duration,
+) -> Result<usize, ErrorOraculo> {
+    let mut archivo = fs::File::open(origen).map_err(|e| infra("abrir el archivo a subir", e))?;
+    let mut subidos = 0usize;
+    loop {
+        let mut bloque = Vec::new();
+        archivo
+            .by_ref()
+            .take(TROZO_SUBIDA)
+            .read_to_end(&mut bloque)
+            .map_err(|e| infra("leer el archivo a subir", e))?;
+        if bloque.is_empty() && subidos > 0 {
+            return Ok(subidos);
+        }
+        let ultimo = (bloque.len() as u64) < TROZO_SUBIDA;
+        subir_trozo(cli, lim, sesion, tmp, subidos, &bloque, plazo)?;
+        subidos += 1;
+        if ultimo {
+            return Ok(subidos);
+        }
+    }
+}
+
+/// Escribe el trozo `i` en `tmp`, lo sube y lo borra. El borrado corre también si la subida falla.
+fn subir_trozo(
+    cli: &dyn ColabCli,
+    lim: &Limites,
+    sesion: &str,
+    tmp: &Path,
+    i: usize,
+    bloque: &[u8],
+    plazo: Duration,
+) -> Result<(), ErrorOraculo> {
+    let local = tmp.join(nombre_local_de_trozo(i));
+    if let Err(e) = fs::write(&local, bloque) {
+        let _ = crate::borrado::borrar_archivo_dentro(tmp, &local);
+        return Err(infra(&format!("escribir el trozo {i}"), e));
+    }
+    let subida = paso(
+        cli,
+        lim,
+        &args(&["upload", "-s", sesion, &ruta(&local), &nombre_de_trozo(i)]),
+        plazo,
+    );
+    let borrado = crate::borrado::borrar_archivo_dentro(tmp, &local);
+    let salida = subida?;
+    if salida.codigo != 0 {
+        return Err(ErrorOraculo::Infra(format!(
+            "no se pudo subir el trozo {i}: {}",
+            salida.detalle()
+        )));
+    }
+    borrado.map_err(|e| infra("borrar el trozo local", e))
+}
+
+/// Guion que une los `n` trozos de `/content` en `destino` y compara su SHA-256 si hay `sha256`.
+pub(crate) fn guion_unir_trozos(n: usize, destino: &str, sha256: Option<&str>) -> String {
+    guion_unir_en(RAIZ_REMOTA, n, destino, sha256)
+}
+
+/// Igual que `guion_unir_trozos`, con la carpeta de los trozos como parámetro (para los tests).
+/// Imprime `ROOT_UNIDO=ok` si todo va bien. Si el SHA-256 difiere, escribe `ROOT_UNIR_ERROR` a stderr,
+/// borra el destino y sale con 1. Al final borra los trozos en todos los caminos.
+fn guion_unir_en(carpeta: &str, n: usize, destino: &str, sha256: Option<&str>) -> String {
+    let trozos: Vec<String> = (0..n)
+        .map(|i| format!("{carpeta}/{}", nombre_local_de_trozo(i)))
+        .collect();
+    let trozos = serde_json::to_string(&trozos).expect("una lista de cadenas se serializa");
+    let destino = serde_json::to_string(destino).expect("una cadena se serializa");
+    let esperado = match sha256 {
+        Some(hash) => serde_json::to_string(hash).expect("una cadena se serializa"),
+        None => "None".into(),
+    };
+    format!(
+        r#"import hashlib, os, sys
+TROZOS = {trozos}
+DESTINO = {destino}
+ESPERADO = {esperado}
+
+def unir():
+    digest = hashlib.sha256()
+    with open(DESTINO, "wb") as salida:
+        for trozo in TROZOS:
+            with open(trozo, "rb") as entrada:
+                for bloque in iter(lambda: entrada.read(1 << 20), b""):
+                    salida.write(bloque)
+                    digest.update(bloque)
+    return digest.hexdigest()
+
+listo = False
+try:
+    os.makedirs(os.path.dirname(DESTINO), exist_ok=True)
+    obtenido = unir()
+    if ESPERADO is not None and obtenido != ESPERADO:
+        sys.stderr.write("ROOT_UNIR_ERROR: sha256 distinto (esperado %s, obtenido %s)\n" % (ESPERADO, obtenido))
+        sys.exit(1)
+    listo = True
+finally:
+    if not listo and os.path.exists(DESTINO):
+        os.remove(DESTINO)
+    for trozo in TROZOS:
+        if os.path.exists(trozo):
+            os.remove(trozo)
+print("ROOT_UNIDO=ok")
+"#
+    )
+}
+
+/// SHA-256 de un archivo en hexadecimal, leído por bloques.
+fn sha256_de_archivo(ruta: &Path) -> Result<String, ErrorOraculo> {
+    let mut archivo = fs::File::open(ruta).map_err(|e| infra("abrir para el sha256", e))?;
+    let mut digest = Sha256::new();
+    let mut bloque = vec![0u8; 1 << 20];
+    loop {
+        let leidos = archivo
+            .read(&mut bloque)
+            .map_err(|e| infra("leer para el sha256", e))?;
+        if leidos == 0 {
+            break;
+        }
+        digest.update(&bloque[..leidos]);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Une `trozos` trozos del runtime en `destino` con `guion_unir_trozos`, y exige `ROOT_UNIDO=ok`.
+fn unir_en_runtime(
+    cli: &dyn ColabCli,
+    lim: &Limites,
+    sesion: &str,
+    tmp: &Path,
+    trozos: usize,
+    destino: &str,
+    sha256: Option<&str>,
+) -> Result<(), ErrorOraculo> {
+    let guion = escribir(
+        tmp,
+        "une-trozos.py",
+        &guion_unir_trozos(trozos, destino, sha256),
+    )?;
+    let unido = exec(cli, lim, sesion, SEG_UNIR, &guion)?;
+    if unido.codigo != 0 || marcador(&unido.stdout, "ROOT_UNIDO=").as_deref() != Some("ok") {
+        return Err(ErrorOraculo::Infra(format!(
+            "no se pudo unir {destino} en el runtime: {}",
+            unido.detalle()
+        )));
+    }
+    Ok(())
+}
+
+/// Sube el binario a `destino`. Si pesa más de `TROZO_SUBIDA`, lo sube en trozos y lo une en el runtime.
+fn subir_binario(
+    cli: &dyn ColabCli,
+    lim: &Limites,
+    sesion: &str,
+    binario: &Path,
+    tmp: &Path,
+    destino: &str,
+) -> Result<(), ErrorOraculo> {
+    let tamano = fs::metadata(binario)
+        .map_err(|e| infra("leer el binario", e))?
+        .len();
+    if tamano <= TROZO_SUBIDA {
+        let subida = paso(
+            cli,
+            lim,
+            &args(&["upload", "-s", sesion, &ruta(binario), destino]),
+            TIMEOUT_LLAMADA,
+        )?;
+        if subida.codigo != 0 {
+            return Err(ErrorOraculo::Infra(format!(
+                "no se pudo subir el binario: {}",
+                subida.detalle()
+            )));
+        }
+        return Ok(());
+    }
+    let trozos = subir_en_trozos(cli, lim, sesion, binario, tmp, TIMEOUT_LLAMADA)?;
+    let sha256 = sha256_de_archivo(binario)?;
+    unir_en_runtime(cli, lim, sesion, tmp, trozos, destino, Some(&sha256))
 }
 
 /// Llama a la CLI con el plazo dado, sin pasar de lo que queda del tope. Una señal o un plazo
@@ -1868,7 +2100,7 @@ pub(crate) fn registrar(home: &Path, corrida: &str, extra: Value) -> Result<(), 
 
 /// Empaqueta el paquete con el `tar` del sistema y argumentos en vector.
 fn empaquetar(paquete: &Path, tmp: &Path) -> Result<PathBuf, ErrorOraculo> {
-    let destino = tmp.join(PAQUETE_REMOTO);
+    let destino = tmp.join(PAQUETE_LOCAL);
     let estado = Command::new("tar")
         .arg("-czf")
         .arg(&destino)
@@ -2112,6 +2344,7 @@ mod tests {
                 let archivo = args.iter().rev().find(|a| a.ends_with(".py")).cloned();
                 match archivo.as_deref() {
                     Some(f) if f.ends_with("gpu.py") => salida(0, &format!("ROOT_GPU={gpu}"), ""),
+                    Some(f) if f.ends_with("une-trozos.py") => salida(0, "ROOT_UNIDO=ok", ""),
                     Some(f) if f.ends_with("prepara.py") => salida(0, "ROOT_PREPARADO=1", ""),
                     Some(f) if f.ends_with("prepara-rust.py") => salida(0, "ROOT_RUST=rustup", ""),
                     Some(f) if f.ends_with("prueba-binario.py") => salida(0, "ROOT_BINARIO=ok", ""),
@@ -2664,7 +2897,7 @@ mod tests {
     /// `corriendo`. Anota su PID en `pid.txt`. `stop_cuerpo` es el cuerpo del caso `stop`.
     fn falso_corre_lenta_stop(dir: &Path, stop_cuerpo: &str) -> PathBuf {
         let guion = format!(
-            "#!/bin/sh\necho \"$*\" >> '{d}/llamadas.log'\ncase \"$1\" in\nexec)\n  case \"$*\" in\n    *gpu.py*) echo 'ROOT_GPU=Tesla T4' ;;\n    *prepara.py*) echo ROOT_PREPARADO=1 ;;\n    *prepara-rust.py*) echo ROOT_RUST=rustup ;;\n    *corre.py*) echo ROOT_LANZADO=1 ;;\n    *estado.py*) echo $$ > '{d}/pid.txt'; echo 'ROOT_ESTADO=corriendo' ;;\n  esac ;;\nstop) {stop_cuerpo} ;;\n*) exit 0 ;;\nesac\nexit 0\n",
+            "#!/bin/sh\necho \"$*\" >> '{d}/llamadas.log'\ncase \"$1\" in\nexec)\n  case \"$*\" in\n    *gpu.py*) echo 'ROOT_GPU=Tesla T4' ;;\n    *une-trozos.py*) echo ROOT_UNIDO=ok ;;\n    *prepara.py*) echo ROOT_PREPARADO=1 ;;\n    *prepara-rust.py*) echo ROOT_RUST=rustup ;;\n    *corre.py*) echo ROOT_LANZADO=1 ;;\n    *estado.py*) echo $$ > '{d}/pid.txt'; echo 'ROOT_ESTADO=corriendo' ;;\n  esac ;;\nstop) {stop_cuerpo} ;;\n*) exit 0 ;;\nesac\nexit 0\n",
             d = dir.display()
         );
         escribir_ejecutable(&dir.join("colab-lenta"), &guion)
@@ -3090,13 +3323,14 @@ mod tests {
             .iter()
             .position(|l| {
                 l.starts_with("upload -s root-memora-1 ")
-                    && l.ends_with(" root-paquete/target/debug/memora")
+                    && l.ends_with(" /content/root-paquete/target/debug/memora")
             })
             .unwrap_or_else(|| panic!("falta la subida del binario: {lineas:?}"));
         let i_cargo = lineas
             .iter()
             .position(|l| {
-                l.starts_with("upload -s root-memora-1 ") && l.ends_with(" root-paquete/bin/cargo")
+                l.starts_with("upload -s root-memora-1 ")
+                    && l.ends_with(" /content/root-paquete/bin/cargo")
             })
             .unwrap_or_else(|| panic!("falta la subida del cargo mínimo: {lineas:?}"));
         let i_prueba = lineas
@@ -3518,6 +3752,7 @@ mod tests {
             "download" => salida(1, "", "todavía no hay junit"),
             "exec" => match guion_de(args).as_deref() {
                 Some(g) if g.ends_with("gpu.py") => salida(0, "ROOT_GPU=Tesla T4", ""),
+                Some(g) if g.ends_with("une-trozos.py") => salida(0, "ROOT_UNIDO=ok", ""),
                 Some(g) if g.ends_with("prepara.py") => salida(0, "ROOT_PREPARADO=1", ""),
                 Some(g) if g.ends_with("prepara-rust.py") => salida(0, "ROOT_RUST=rustup", ""),
                 Some(g) if g.ends_with("prueba-binario.py") => salida(0, "ROOT_BINARIO=ok", ""),
@@ -3903,5 +4138,381 @@ mod tests {
     #[test]
     fn leer_todo_sin_lector_da_vacio() {
         assert_eq!(leer_todo::<&[u8]>(None), "");
+    }
+
+    // Punto A: `detalle` une stderr y stdout, y oculta el token del proxy.
+
+    #[test]
+    fn colab_detalle_oculta_el_token_del_proxy() {
+        let s = salida(
+            1,
+            "[colab] Upload failed: 400 colab-runtime-proxy-token=SECRETO123&otro=1",
+            "",
+        );
+        let detalle = s.detalle();
+        assert!(detalle.contains("Upload failed: 400"), "{detalle}");
+        assert!(!detalle.contains("SECRETO123"), "{detalle}");
+        assert!(
+            detalle.contains("colab-runtime-proxy-token=<oculto>&otro=1"),
+            "{detalle}"
+        );
+    }
+
+    #[test]
+    fn colab_detalle_oculta_el_token_hasta_la_comilla() {
+        let s = salida(1, "", "url \"...?colab-runtime-proxy-token=ABC\" fin");
+        assert_eq!(
+            s.detalle(),
+            "url \"...?colab-runtime-proxy-token=<oculto>\" fin"
+        );
+    }
+
+    #[test]
+    fn colab_detalle_usa_stdout_si_stderr_esta_vacio() {
+        let s = salida(1, "[colab] Upload failed: 400", "");
+        assert_eq!(s.detalle(), "[colab] Upload failed: 400");
+    }
+
+    #[test]
+    fn colab_detalle_une_stderr_y_stdout_con_punto_y_coma() {
+        assert_eq!(
+            salida(1, " salida \n", " error\n").detalle(),
+            "error; salida"
+        );
+    }
+
+    // Punto B: el mensaje de `new` trae el stdout de la CLI, sin el token.
+
+    #[test]
+    fn colab_new_con_fallo_en_stdout_muestra_el_stdout_sin_token() {
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let falso = Falso::nuevo(|_: &[String]| {
+            salida(
+                1,
+                "[colab] Upload failed: 400 colab-runtime-proxy-token=SECRETO",
+                "",
+            )
+        });
+        let r = correr_prueba(
+            &falso,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+        );
+        match r {
+            Err(ErrorOraculo::Infra(m)) => {
+                assert!(m.contains("Upload failed: 400"), "{m}");
+                assert!(!m.contains("SECRETO"), "{m}");
+            }
+            otro => panic!("esperaba error de infraestructura, llegó {otro:?}"),
+        }
+    }
+
+    // Punto C: subida en trozos y unión en el runtime.
+
+    /// Límites holgados para las llamadas de `subir_en_trozos`.
+    fn limites_holgados(senales: &Senales) -> Limites<'_> {
+        Limites {
+            cancelar: senales,
+            inicio: Instant::now(),
+            tope: TOPE_HOLGADO,
+        }
+    }
+
+    /// Archivo esparcido de `tamano` bytes dentro de `base`: no ocupa disco hasta que se escribe.
+    fn archivo_esparcido(base: &Path, nombre: &str, tamano: u64) -> PathBuf {
+        let ruta = base.join(nombre);
+        fs::File::create(&ruta)
+            .expect("crea el archivo")
+            .set_len(tamano)
+            .expect("lo esparce");
+        ruta
+    }
+
+    /// Carpeta `home/tmp` de Root, vacía, dentro de `base`.
+    fn carpeta_tmp(base: &Path) -> PathBuf {
+        let tmp = base.join("home").join("tmp");
+        fs::create_dir_all(&tmp).expect("tmp");
+        tmp
+    }
+
+    /// Archivos `root-paq.*` que quedan en `carpeta`.
+    fn trozos_en(carpeta: &Path) -> Vec<String> {
+        fs::read_dir(carpeta)
+            .expect("lee la carpeta")
+            .map(|e| {
+                e.expect("entrada")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|n| n.starts_with("root-paq."))
+            .collect()
+    }
+
+    fn hex_de(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn colab_subir_en_trozos_100_mib_sube_tres_en_orden() {
+        let base = tempfile::tempdir().expect("base");
+        let tmp = carpeta_tmp(base.path());
+        let origen = archivo_esparcido(base.path(), "paquete.tar.gz", 100 * 1024 * 1024);
+        // Cada subida graba el tamaño del trozo local: debe existir y tener su tamaño al subirse.
+        let vistos: Rc<RefCell<Vec<(String, String, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let vistos_en = Rc::clone(&vistos);
+        let falso = Falso::nuevo(move |args: &[String]| {
+            if args[0] == "upload" {
+                let tam = fs::metadata(&args[3]).map_or(0, |m| m.len());
+                vistos_en
+                    .borrow_mut()
+                    .push((args[3].clone(), args[4].clone(), tam));
+            }
+            salida(0, "", "")
+        });
+        let senales = Senales::default();
+        let lim = limites_holgados(&senales);
+        let n = subir_en_trozos(
+            &falso,
+            &lim,
+            "root-memora-1",
+            &origen,
+            &tmp,
+            Duration::from_secs(60),
+        )
+        .expect("sube el archivo");
+        assert_eq!(n, 3);
+        let subidas = vistos.borrow();
+        let remotos: Vec<&str> = subidas.iter().map(|(_, r, _)| r.as_str()).collect();
+        assert_eq!(
+            remotos,
+            [
+                "/content/root-paq.00",
+                "/content/root-paq.01",
+                "/content/root-paq.02"
+            ]
+        );
+        let tamanos: Vec<u64> = subidas.iter().map(|(_, _, t)| *t).collect();
+        assert_eq!(tamanos, [TROZO_SUBIDA, TROZO_SUBIDA, 20 * 1024 * 1024]);
+        // Punto 4: con éxito no queda ningún trozo local.
+        assert!(trozos_en(&tmp).is_empty(), "{:?}", trozos_en(&tmp));
+    }
+
+    #[test]
+    fn colab_subir_en_trozos_archivo_chico_sube_un_trozo() {
+        let base = tempfile::tempdir().expect("base");
+        let tmp = carpeta_tmp(base.path());
+        let origen = base.path().join("chico.bin");
+        fs::write(&origen, vec![7u8; 1024]).expect("escribe");
+        let falso = Falso::nuevo(|_: &[String]| salida(0, "", ""));
+        let senales = Senales::default();
+        let lim = limites_holgados(&senales);
+        let n = subir_en_trozos(
+            &falso,
+            &lim,
+            "root-memora-1",
+            &origen,
+            &tmp,
+            Duration::from_secs(60),
+        )
+        .expect("sube el archivo");
+        assert_eq!(n, 1);
+        let lineas = falso.lineas();
+        assert_eq!(lineas.len(), 1, "{lineas:?}");
+        assert!(lineas[0].ends_with(" /content/root-paq.00"), "{lineas:?}");
+    }
+
+    #[test]
+    fn colab_subir_en_trozos_un_trozo_que_falla_corta_y_nombra_el_trozo() {
+        let base = tempfile::tempdir().expect("base");
+        let tmp = carpeta_tmp(base.path());
+        let origen = archivo_esparcido(base.path(), "paquete.tar.gz", 100 * 1024 * 1024);
+        let falso = Falso::nuevo(|args: &[String]| {
+            if args[0] == "upload" && args[4] == "/content/root-paq.01" {
+                return salida(1, "[colab] Upload failed: 400 Bad Request", "");
+            }
+            salida(0, "", "")
+        });
+        let senales = Senales::default();
+        let lim = limites_holgados(&senales);
+        let r = subir_en_trozos(
+            &falso,
+            &lim,
+            "root-memora-1",
+            &origen,
+            &tmp,
+            Duration::from_secs(60),
+        );
+        match r {
+            Err(ErrorOraculo::Infra(m)) => {
+                assert!(m.contains("trozo 1"), "{m}");
+                assert!(m.contains("[colab] Upload failed: 400"), "{m}");
+            }
+            otro => panic!("esperaba error de infraestructura, llegó {otro:?}"),
+        }
+        let subidas = falso
+            .lineas()
+            .iter()
+            .filter(|l| l.starts_with("upload"))
+            .count();
+        assert_eq!(subidas, 2, "no sube el tercero: {:?}", falso.lineas());
+        // Punto 4: con error también se borra el trozo local que falló.
+        assert!(trozos_en(&tmp).is_empty(), "{:?}", trozos_en(&tmp));
+    }
+
+    /// Corre un guion de Python con `python3 -I` y un entorno casi vacío.
+    fn correr_python_aislado(guion: &Path) -> std::process::Output {
+        Command::new(python3_del_path())
+            .arg("-I")
+            .arg(guion)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("no se pudo correr python3")
+    }
+
+    #[test]
+    fn colab_guion_unir_une_en_orden_y_verifica_sha() {
+        let base = tempfile::tempdir().expect("base");
+        let trozos = base.path().join("trozos");
+        fs::create_dir_all(&trozos).expect("trozos");
+        fs::write(trozos.join("root-paq.00"), "uno-").expect("escribe");
+        fs::write(trozos.join("root-paq.01"), "dos-").expect("escribe");
+        fs::write(trozos.join("root-paq.02"), "tres").expect("escribe");
+        let destino = base.path().join("salida").join("paquete.tar.gz");
+        let esperado = hex_de(&Sha256::digest(b"uno-dos-tres"));
+        let guiones = base.path().join("guiones");
+        fs::create_dir_all(&guiones).expect("guiones");
+        let guion = guiones.join("une.py");
+        fs::write(
+            &guion,
+            guion_unir_en(
+                &trozos.display().to_string(),
+                3,
+                &destino.display().to_string(),
+                Some(&esperado),
+            ),
+        )
+        .expect("escribe el guion");
+        let salida = correr_python_aislado(&guion);
+        assert_eq!(
+            salida.status.code(),
+            Some(0),
+            "stderr: {}",
+            String::from_utf8_lossy(&salida.stderr)
+        );
+        assert!(String::from_utf8_lossy(&salida.stdout).contains("ROOT_UNIDO=ok"));
+        assert_eq!(
+            fs::read_to_string(&destino).expect("destino"),
+            "uno-dos-tres"
+        );
+        assert!(trozos_en(&trozos).is_empty(), "{:?}", trozos_en(&trozos));
+    }
+
+    #[test]
+    fn colab_guion_unir_sha_distinto_borra_destino_y_trozos() {
+        let base = tempfile::tempdir().expect("base");
+        let trozos = base.path().join("trozos");
+        fs::create_dir_all(&trozos).expect("trozos");
+        fs::write(trozos.join("root-paq.00"), "uno-").expect("escribe");
+        fs::write(trozos.join("root-paq.01"), "dos").expect("escribe");
+        let destino = base.path().join("salida").join("paquete.tar.gz");
+        let guiones = base.path().join("guiones");
+        fs::create_dir_all(&guiones).expect("guiones");
+        let guion = guiones.join("une.py");
+        let malo = "0".repeat(64);
+        fs::write(
+            &guion,
+            guion_unir_en(
+                &trozos.display().to_string(),
+                2,
+                &destino.display().to_string(),
+                Some(&malo),
+            ),
+        )
+        .expect("escribe el guion");
+        let salida = correr_python_aislado(&guion);
+        assert_eq!(salida.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&salida.stderr).contains("ROOT_UNIR_ERROR"),
+            "{}",
+            String::from_utf8_lossy(&salida.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&salida.stdout).contains("ROOT_UNIDO=ok"));
+        assert!(!destino.exists(), "el destino no debe quedar abierto");
+        assert!(trozos_en(&trozos).is_empty(), "{:?}", trozos_en(&trozos));
+    }
+
+    #[test]
+    fn colab_guion_unir_publico_lee_de_content() {
+        let guion = guion_unir_trozos(2, "/content/paquete.tar.gz", None);
+        assert!(guion.contains("/content/root-paq.00"), "{guion}");
+        assert!(guion.contains("/content/root-paq.01"), "{guion}");
+        assert!(guion.contains("/content/paquete.tar.gz"), "{guion}");
+        assert!(guion.contains("ROOT_UNIDO=ok"), "{guion}");
+    }
+
+    // Punto D: toda ruta remota de `upload` y `download` es absoluta.
+
+    /// Cada `upload` lleva su ruta remota como último argumento, y cada `download` como el cuarto.
+    fn comprobar_rutas_remotas(falso: &Falso) {
+        let llamadas = falso.llamadas.borrow();
+        let remotas: Vec<&String> = llamadas
+            .iter()
+            .filter_map(|a| match a.first().map(String::as_str) {
+                Some("upload") => a.last(),
+                Some("download") => a.get(3),
+                _ => None,
+            })
+            .collect();
+        assert!(!remotas.is_empty(), "{:?}", falso.lineas());
+        for remota in remotas {
+            assert!(remota.starts_with('/'), "ruta remota relativa: {remota}");
+        }
+    }
+
+    #[test]
+    fn colab_toda_ruta_remota_es_absoluta() {
+        // Flujo del paquete: trozos, unión y junit.
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let falso = Falso::nuevo(feliz("Tesla T4"));
+        correr_prueba(
+            &falso,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+        )
+        .expect("la corrida buena termina");
+        comprobar_rutas_remotas(&falso);
+
+        // Respaldo de binario: binario, cargo mínimo y junit.
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let falso = Falso::nuevo(cambiando(
+            feliz("Tesla T4"),
+            "prepara-rust.py",
+            "ROOT_RUST=falla:hash",
+        ));
+        let compilador = CompiladorFalso {
+            llamadas: Cell::new(0),
+            binario: binario_falso(base.path()),
+        };
+        correr_en_colab(
+            &falso,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+            &Senales::default(),
+            TOPE_HOLGADO,
+            &compilador,
+        )
+        .expect("el respaldo de binario termina");
+        comprobar_rutas_remotas(&falso);
     }
 }
