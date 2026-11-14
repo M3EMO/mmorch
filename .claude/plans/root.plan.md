@@ -11707,3 +11707,133 @@ Actualizo esas tres líneas en `docs/builds/brief-local-142.md`. Ningún builder
 | 14 | La validez sobre el final sellado | Los pasos 1 a 13 | Colab, notebook si usa el juez | Según el final |
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (60): la sonda que perdió su inicio, y la carga que se mide a sí misma
+
+**Estado.**
+- La calibración v5 de Eficiencia terminó: t1 en 1287 s, t2 en 1591 s y t3 en 1599 s. Las tres dan lo mismo.
+- En cada tarea, los 2 defectos quedan no aplicables con el motivo "sonda de lastre: sin salida; el comando no llegó a sus marcas".
+- Los limpios dan bien: especificidad 1,0. `memoria_pico` da razones de 0,9987 a 1,0033, con ruido 0,02.
+- El tiempo de tests y el de compilación quedan sin valor en todos los casos: "carga 14.08/7.32/7.59 con 8 núcleos".
+- Las Tareas 146 y 147 compilan ahora en la laptop. `laptop/tarea-146` tiene el punto 1. `laptop/tarea-147` todavía no tiene commits.
+
+## 1. Por qué la sonda no ve sus marcas
+
+**La sonda sí corrió y sí imprimió sus marcas.** El journal de la laptop guarda la salida de cada contenedor. En t1, el contenedor `root-oraculo-3786070-32` imprimió `ROOT_SONDA_INICIO`, 203 funciones y `ROOT_SONDA_FIN`. Los tests comunes pasaron: 34 de 34. t2 y t3 muestran lo mismo.
+
+**Root guarda solo la cola de 4000 caracteres.** `resultado_de`, en `src/oracle/contenedor.rs`, arma el `stdout` con `cola(&stdout)`. `COLA` vale 4000 caracteres. El bloque de marcas mide 4514 caracteres en t1, 5818 en t2 y 6205 en t3. La cola conserva `ROOT_SONDA_FIN`, pero pierde `ROOT_SONDA_INICIO`. Sin inicio, `tramo` da `None`, y `medir_lastre` devuelve el error de la línea 670.
+
+**El test de punta a punta de la 143 dio verde por dos motivos.**
+1. Usa un ejecutor falso, `fabrica_lastre`. Ese ejecutor devuelve el stdout entero, sin la cola de 4000.
+2. Su repo tiene cuatro funciones. El bloque cabe en cualquier cola.
+
+**No hace falta un comando más.** El código y el journal alcanzan. El orquestador puede revisar el bloque con `journalctl --user --since <hora> -o cat _PID=<pid>`.
+
+**Arreglo: la lista viaja por un archivo, no por el stdout.** El comando escribe la lista en `/salida/root-sonda.lista`. Root lee ese archivo en la carpeta de salida. Sin archivo, el comando no llegó al final. Un archivo no tiene tope. Va en la Tarea 148, punto 1.
+
+**Error mío.** El brief de la 143 pidió un test de punta a punta, pero no pidió que el ejecutor falso recortara el stdout como el real. Un test con un ejecutor falso no prueba el camino del ejecutor real. Desde ahora, un brief que lee marcas del stdout pide un test con la cola real.
+
+## 2. Por qué la carga pasó de 7 sin otro trabajo
+
+**La carga de un minuto cuenta el trabajo de Root.** `/proc/loadavg` cuenta los procesos listos o en espera de todo el host. Los procesos de los contenedores de Root también cuentan.
+
+**El control lee la carga en el peor momento.** `con_control_de_carga` lee una vez antes de `medir_tests` y otra vez después de `medir_compilacion`. La segunda lectura llega justo después de las compilaciones `--release`. Cargo usa los 8 núcleos y lanza más hilos que núcleos. Por eso la carga de un minuto llegó a 14,08.
+
+**La base contagia a todos los casos.** La referencia guarda el motivo de carga de la base. Cada caso lo hereda en `medir_contra_referencia`. Con este control, ningún tiempo de Eficiencia puede tener valor en una máquina de 8 núcleos.
+
+**La carga de 15 minutos lo confirma.** Vale 7,59. Es el promedio de 15 minutos de compilaciones de Root, una tras otra.
+
+**Error mío.** En el brief de la 144 elegí la carga de un minuto, y la leí después de las corridas. No separé el trabajo propio del ajeno.
+
+## 3. Un control de carga que no se mide a sí mismo
+
+**La idea: medir solo la CPU ajena, en cada corrida medida.**
+1. Cada comando medido imprime `ROOT_CPU_US`, el `usage_usec` de `/sys/fs/cgroup/cpu.stat`. Es la CPU de su propio contenedor. Se lee igual que `memory.peak`.
+2. Root lee la línea `cpu` de `/proc/stat` del host justo antes y justo después de esa corrida.
+3. La CPU ajena es la CPU ocupada del host menos la CPU del contenedor, en esa ventana.
+4. La carga ajena es esa CPU dividida por el reloj de la corrida. Se mide en núcleos.
+5. Si una corrida medida supera `FRACCION_DE_NUCLEOS_CARGADA` por los núcleos, los tiempos del caso no tienen valor.
+
+**Por qué no se mide a sí mismo.** La ventana empieza y termina con la corrida. La CPU del contenedor se resta. Fuera de la ventana, el trabajo de Root no cuenta. Queda solo un resto chico: el arranque de podman, conmon y el propio `r00t`.
+
+**Por qué no alcanza esperar a que la carga baje.** La carga de un minuto tarda minutos en bajar. Esperar en cada caso suma horas a la calibración. Además, una lectura antes de la corrida no ve el trabajo que empieza durante ella.
+
+**Lo que no cambia.**
+- El umbral sigue en la mitad de los núcleos. Cada caso suma un aviso con su mayor carga ajena. Con esos datos, el umbral se revisa.
+- La base sigue pasando su motivo a los casos.
+- `memoria_pico` y `tamano_binario` no dependen de la carga.
+
+**Sin `ROOT_CPU_US`, la corrida no tiene control.** Sus tiempos quedan sin valor, con el motivo "sin cpu.stat del contenedor". Nunca se supone que la carga es cero.
+
+Va en la Tarea 148, punto 2.
+
+## 4. La Tarea 148 y su base
+
+- **Punto 1, la lista por archivo:** `src/oracle/calibra/sonda_lastre.rs` y `src/oracle/mod.rs`.
+- **Punto 2, la carga ajena:** `src/oracle/eficiencia.rs`.
+- `mod.rs` es un archivo de la 146. `eficiencia.rs` es un archivo de la 147.
+- **La base es la cadena con las dos:** `laptop/cadena-110-147`. El orquestador la arma sobre `laptop/cadena-110-145` cuando la 146 y la 147 terminen.
+- La variable `ROOT_LOADAVG` de la 147 deja de servir. La 148 la cambia por `ROOT_PROC_STAT`, con el mismo uso en los tests de `tests/`.
+
+Brief: `docs/builds/brief-local-148.md`.
+
+## 5. ¿Puede correr en Colab una parte de la calibración de Eficiencia?
+
+**Hoy no.** La Tarea 141 ya lo rechaza: `validar_trabajos` da "Eficiencia necesita el cgroup del contenedor". El rechazo es correcto por tres motivos.
+
+1. **`memoria_pico` no tiene cgroup propio en bwrap.** bwrap no crea un cgroup por corrida. Además, monta `/` entero, así que `/sys/fs/cgroup/memory.peak` sí existe. Ese archivo es el pico del runtime entero, desde que arrancó. Daría un número falso sin aviso.
+2. **La detección necesita la memoria.** Por el control de la vuelta (59), una detección cuenta solo si `memoria_pico` marcó regresión. Sin memoria, Colab no puede dar una detección válida.
+3. **La calibración no se parte.** El valor de Eficiencia es el mínimo de sus medidas en el mismo caso. Medir la memoria en la laptop y el tiempo en Colab mezcla dos máquinas en un caso.
+
+**Lo que sí funciona en Colab:** el backend bwrap de la 139, el guion de la 140 y el transporte de la 141 y la 145. El tiempo y el tamaño se pueden medir ahí. Falta solo un cgroup por corrida.
+
+**Un camino posible: un cgroup hijo por corrida.** En Colab, el runtime corre como root. Si puede crear un cgroup hijo con el controlador de memoria, Root mete cada bwrap en ese hijo. Entonces `memory.peak` vale por corrida, igual que con podman.
+
+**Prueba 0e, para decidirlo.** El orquestador la corre con `colab exec` en un runtime de CPU. No usa claves. Cuesta menos de 0,01 unidades.
+
+```sh
+uname -r; stat -fc %T /sys/fs/cgroup; echo "CTRL $(cat /sys/fs/cgroup/cgroup.controllers)"; echo "SUB $(cat /sys/fs/cgroup/cgroup.subtree_control)"; mkdir /sys/fs/cgroup/root-prueba && echo MKDIR_OK; echo +memory > /sys/fs/cgroup/cgroup.subtree_control && echo MEMORIA_OK; ls /sys/fs/cgroup/root-prueba | grep -c '^memory.peak$'; sh -c 'echo $$ > /sys/fs/cgroup/root-prueba/cgroup.procs && python3 -c "b=bytearray(200*2**20)" && echo "PICO $(cat /sys/fs/cgroup/root-prueba/memory.peak)"'; rmdir /sys/fs/cgroup/root-prueba
+```
+
+**Qué buscar:**
+- `cgroup2fs` en la segunda línea. Sin cgroup v2, el camino no existe.
+- `MKDIR_OK`. Sin él, el runtime no deja crear cgroups.
+- `MEMORIA_OK`, o `memory` en la línea `SUB`. Sin el controlador, el hijo no tiene `memory.peak`.
+- `PICO` con un valor de 200000000 o más. Ese valor prueba la medida por corrida.
+
+**Si la Prueba 0e pasa,** una tarea nueva mete cada bwrap en un cgroup hijo y quita el rechazo de la 141. Si falla, va la pregunta P111.
+
+## 6. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | Las Tareas 146 y 147 | Nada; compilan ahora | Laptop | No |
+| 2 | Armar `laptop/cadena-110-147` | El paso 1 | Laptop | No |
+| 3 | La Tarea 148 | El paso 2 | Laptop | No |
+| 4 | La Prueba 0e | Nada; puede correr ya | Colab, CPU | No |
+| 5 | La suite con podman de la cadena con la 148 | El paso 3 | Laptop | No |
+| 6 | La calibración v6 de Eficiencia, t1 a t3, n=4, semilla 42 | El paso 5 y P111 si la Prueba 0e falla | Laptop, sin trabajo ajeno | No |
+| 7 | El paso 0 y las pruebas de Colab de la 140 y la 139 | El usuario | Laptop (con `nice`) y Colab | No |
+| 8 | La prueba de la 141 | Los pasos 2 y 7 | Colab | No |
+| 9 | La Prueba 1 | El usuario | Colab, notebook | No |
+| 10 | La Tarea 142 | Los pasos 2 y 9 | Laptop | No |
+| 11 | Las cinco etapas de P107 a, en una sesión del notebook | Los pasos 8 y 10 | Colab, notebook | Hasta 18,45 USD |
+| 12 | La mezcla de la cadena 110 a 148 | La orden del usuario | — | No |
+| 13 | Congelar la versión | Los pasos 6 y 11 | — | No |
+| 14 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 8 y 13 | Colab, cuatro runtimes | No |
+| 15 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 16 | P98 c: el final con 15 defectos reales | El paso 15 | — | No |
+| 17 | La validez sobre el final sellado | Los pasos 1 a 16 | Colab, notebook si usa el juez | Según el final |
+
+**Sobre el paso 6.** Con el control nuevo, el trabajo de Root ya no anula los tiempos. El trabajo ajeno sí los anula, como antes. Ningún builder debe compilar durante la v6.
+
+**Si la Prueba 0e pasa,** el paso 6 cambia de lugar. Antes va una tarea del cgroup hijo, y la v6 corre en Colab.
+
+## 7. Pregunta al usuario
+
+**P111. Si la Prueba 0e falla, ¿dónde se calibra Eficiencia?** La decisión C a manda las mediciones a Colab. Colab no puede medir la memoria por corrida sin un cgroup hijo.
+
+- **a) En la laptop, como única excepción a C a.** La medida ya funciona ahí con podman. La v6 tarda cerca de 75 minutos. Pide una ventana sin builders. *(recomendada)*
+- **b) En Colab, con otra medida de memoria.** `memoria_pico` pasa a ser el máximo de memoria de un solo proceso. Esa medida no suma los procesos de los tests. Cambia lo que mide la dimensión, y los números de t1 a t3 dejan de valer.
+
+Recomiendo la (a), porque la (b) cambia la dimensión para ganar solo una calibración.
