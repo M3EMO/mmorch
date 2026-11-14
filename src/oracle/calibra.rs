@@ -965,7 +965,8 @@ impl Drop for CarpetaMutacion<'_> {
 struct Ronda<'a> {
     semilla: u64,
     dimension: Dimension,
-    defectos: &'a [Defecto],
+    /// Defectos que rota `defecto_de`: los que pueden bajar su ítem, o todos si ninguno puede.
+    rotacion: &'a [Defecto],
     repo_bueno: &'a Path,
     /// Carpeta temporal de la medición. Cada caso usa `caso-{i}` dentro.
     tmp: &'a Path,
@@ -1232,7 +1233,7 @@ fn preelegir(r: &Ronda, n: usize) -> Result<Preelegidas, ErrorOraculo> {
     let mut usadas = r.curadas.clone();
     let mut con_principal = Vec::new();
     for i in (0..n).step_by(2) {
-        let defecto = defecto_de(r, i);
+        let defecto = defecto_de(r.rotacion, i);
         let semilla = semilla_de(r, i, 0);
         let copia = r.tmp.join(format!("pre-{i}"));
         let previo = usadas.clone();
@@ -1254,7 +1255,7 @@ fn preelegir(r: &Ronda, n: usize) -> Result<Preelegidas, ErrorOraculo> {
     for k in 1..=MAX_REEMPLAZOS {
         let mut siguen = Vec::new();
         for i in vivos {
-            let defecto = defecto_de(r, i);
+            let defecto = defecto_de(r.rotacion, i);
             let semilla = semilla_de(r, i, k);
             let copia = r.tmp.join(format!("pre-{i}"));
             let previo = usadas.clone();
@@ -1272,9 +1273,28 @@ fn preelegir(r: &Ronda, n: usize) -> Result<Preelegidas, ErrorOraculo> {
     Ok(pre)
 }
 
-/// Defecto del caso `i`: el de `defectos[(i / 2) % len]`, la misma rotación de los casos en serie.
-fn defecto_de(r: &Ronda, i: usize) -> Defecto {
-    r.defectos[(i / 2) % r.defectos.len()]
+/// Defecto del caso `i`: el de `rotacion[(i / 2) % len]`, la misma rotación de los casos en serie.
+fn defecto_de(rotacion: &[Defecto], i: usize) -> Defecto {
+    rotacion[(i / 2) % rotacion.len()]
+}
+
+/// Defectos que rota `defecto_de`: primero los que pueden bajar su ítem, en el orden de `defectos`. Si ninguno
+/// puede, todos. Un defecto sin nivel base para su ítem puede bajar: `en_piso` da `false` en ese caso.
+fn defectos_a_rotar(
+    defectos: &[Defecto],
+    niveles_base: &BTreeMap<String, u8>,
+    dimension: Dimension,
+) -> Vec<Defecto> {
+    let aptos: Vec<Defecto> = defectos
+        .iter()
+        .copied()
+        .filter(|d| !en_piso(niveles_base, Some(d.item()), dimension))
+        .collect();
+    if aptos.is_empty() {
+        defectos.to_vec()
+    } else {
+        aptos
+    }
 }
 
 /// Semilla del candidato `k` del caso `i`. `k` 0 es la principal. Cada reserva cambia la semilla.
@@ -1316,7 +1336,7 @@ fn cuantos_equivalentes(tarea: &Tarea) -> u32 {
         .len() as u32
 }
 
-/// Mide el caso `i`. Los pares llevan un defecto: el de `defectos[(i / 2) % len]`, la misma rotación de los
+/// Mide el caso `i`. Los pares llevan un defecto: el de `rotacion[(i / 2) % len]`, la misma rotación de los
 /// casos en serie. Los impares son limpios. Un defecto sin candidato medible da un caso no aplicable.
 fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     if i % 2 == 1 {
@@ -1373,7 +1393,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             no_aplicable: None,
         });
     }
-    let defecto = defecto_de(r, i);
+    let defecto = defecto_de(r.rotacion, i);
     // Un caso agotado: todos sus candidatos distintos ya los inyectan otros casos. No copia ni evalúa.
     if r.agotado[i] {
         return Ok(Medido {
@@ -1721,10 +1741,15 @@ fn calibrar_medida_con_hilos(
     let cambios = bootstrap
         .is_dir()
         .then(|| crate::oracle::cambios::rangos_cambiados(&bootstrap, repo_bueno));
+    let rotacion = defectos_a_rotar(
+        &defectos,
+        &niveles_de(puntaje_de(&base, dimension)),
+        dimension,
+    );
     let mut ronda = Ronda {
         semilla,
         dimension,
-        defectos: &defectos,
+        rotacion: &rotacion,
         repo_bueno,
         tmp: tmp.path(),
         carpeta_mutacion: carpeta_mutacion.ruta(),
@@ -2775,14 +2800,13 @@ fn escribir_casos(
 }
 
 /// Ítem y lugar con que `regla::detecta_con_juez` evalúa cada caso, en el orden de `casos`. Un defecto usa los
-/// suyos. Un limpio `i` usa los del defecto `i-1`, que es el que le tocaba medir: el ítem sale de la lista de
-/// defectos de la dimensión, así vale aunque ese defecto no esté en `casos`. El lugar sale de `casos`, y es
+/// suyos. Un limpio `i` usa los del defecto `i-1`, que es el que le tocaba medir: el ítem sale de `rotacion`, con
+/// `defecto_de`, así vale aunque ese defecto no esté en `casos`. El lugar sale de `casos`, y es
 /// `None` si el defecto no se midió.
 fn item_y_lugar_de(
-    dimension: Dimension,
+    rotacion: &[Defecto],
     casos: &[Caso],
 ) -> Vec<(Option<&'static str>, Option<regla::Lugar>)> {
-    let defectos = inyectar::de_dimension(dimension);
     let lugar_de = |i: &Inyeccion| regla::Lugar {
         archivo: i.archivo.clone(),
         linea: i.linea,
@@ -2794,10 +2818,10 @@ fn item_y_lugar_de(
             if caso.es_defecto {
                 return (caso.item_defecto, caso.inyeccion.as_ref().map(lugar_de));
             }
-            // Los limpios son impares: el defecto `i-1` es el de `defectos[((i-1)/2) % len]`.
+            // Los limpios son impares: el defecto `i-1` es el que `defecto_de` da a `i-1`.
             let anterior = caso.indice.saturating_sub(1);
-            let item = (!defectos.is_empty())
-                .then(|| defectos[((anterior / 2) as usize) % defectos.len()].item());
+            let item =
+                (!rotacion.is_empty()).then(|| defecto_de(rotacion, anterior as usize).item());
             let lugar = por_indice
                 .get(&anterior)
                 .and_then(|c| c.inyeccion.as_ref())
@@ -2819,7 +2843,12 @@ fn finalizar_casos(
     muertos: &[MutanteMuerto],
     casos: &mut [Caso],
 ) -> BTreeSet<String> {
-    let contexto = item_y_lugar_de(dimension, casos);
+    let rotacion = defectos_a_rotar(
+        &inyectar::de_dimension(dimension),
+        &niveles_de(puntaje_de(base, dimension)),
+        dimension,
+    );
+    let contexto = item_y_lugar_de(&rotacion, casos);
     // Tests que variaron entre la base y los limpios: no cuentan para detectar (Tarea 63, punto 4).
     let ruidosos = {
         let limpios: Vec<&Veredicto> = casos
@@ -8461,6 +8490,94 @@ mod tests {
             &mut casos,
         );
         assert!(!CasoGuardado::de(&casos[0]).piso);
+    }
+
+    /// Niveles de base por ítem, para probar la rotación sin armar un veredicto entero.
+    fn niveles(pares: &[(&str, u8)]) -> BTreeMap<String, u8> {
+        pares
+            .iter()
+            .map(|(item, nivel)| ((*item).to_string(), *nivel))
+            .collect()
+    }
+
+    /// Defectos que elige `defecto_de` para los casos con defecto 0, 2, 4 y 6.
+    fn elegidos_en_pares(rotacion: &[Defecto]) -> Vec<Defecto> {
+        (0..8).step_by(2).map(|i| defecto_de(rotacion, i)).collect()
+    }
+
+    #[test]
+    fn rotacion_prefiere_el_defecto_cuyo_item_puede_bajar() {
+        // Seguridad tiene dos defectos. Secretos está en piso (nivel 0); panico puede bajar (nivel 3).
+        let defectos = inyectar::de_dimension(Dimension::Seguridad);
+        assert_eq!(
+            defectos,
+            vec![Defecto::SecretoEnCodigo, Defecto::PanicoEnEntrada]
+        );
+        let base = niveles(&[
+            ("seguridad.secretos", 0),
+            ("seguridad.panico_en_entrada", 3),
+        ]);
+        let rotacion = defectos_a_rotar(&defectos, &base, Dimension::Seguridad);
+        assert_eq!(
+            elegidos_en_pares(&rotacion),
+            vec![Defecto::PanicoEnEntrada; 4]
+        );
+    }
+
+    #[test]
+    fn rotacion_con_los_dos_items_en_piso_alterna_los_dos() {
+        // Guarda: si ninguno puede bajar, la rotación usa todos, como hoy.
+        let defectos = inyectar::de_dimension(Dimension::Seguridad);
+        let base = niveles(&[
+            ("seguridad.secretos", 0),
+            ("seguridad.panico_en_entrada", 0),
+        ]);
+        let rotacion = defectos_a_rotar(&defectos, &base, Dimension::Seguridad);
+        assert_eq!(
+            elegidos_en_pares(&rotacion),
+            vec![
+                Defecto::SecretoEnCodigo,
+                Defecto::PanicoEnEntrada,
+                Defecto::SecretoEnCodigo,
+                Defecto::PanicoEnEntrada,
+            ]
+        );
+    }
+
+    #[test]
+    fn rotacion_con_un_solo_defecto_es_ese_defecto() {
+        // Guarda: con un defecto, da igual que pueda bajar o no. La rotación es ese defecto.
+        for nivel in [0, 3] {
+            let base = niveles(&[("seguridad.secretos", nivel)]);
+            let rotacion =
+                defectos_a_rotar(&[Defecto::SecretoEnCodigo], &base, Dimension::Seguridad);
+            assert_eq!(
+                elegidos_en_pares(&rotacion),
+                vec![Defecto::SecretoEnCodigo; 4],
+                "nivel {nivel}"
+            );
+        }
+    }
+
+    #[test]
+    fn rotacion_defecto_sin_nivel_base_cuenta_como_apto() {
+        // Secretos no tiene nivel en la base: no está en piso, así que puede bajar. Panico sí está en piso.
+        let defectos = inyectar::de_dimension(Dimension::Seguridad);
+        let base = niveles(&[("seguridad.panico_en_entrada", 0)]);
+        let rotacion = defectos_a_rotar(&defectos, &base, Dimension::Seguridad);
+        assert_eq!(
+            elegidos_en_pares(&rotacion),
+            vec![Defecto::SecretoEnCodigo; 4]
+        );
+    }
+
+    #[test]
+    fn limpio_toma_el_item_del_defecto_que_le_toca_segun_la_rotacion() {
+        // El limpio 1 mide el defecto del caso 0. Con la rotación [panico, secretos], ese defecto es panico.
+        let casos = [Caso::nuevo(1, None, Veredicto::default())];
+        let rotacion = [Defecto::PanicoEnEntrada, Defecto::SecretoEnCodigo];
+        let contexto = item_y_lugar_de(&rotacion, &casos);
+        assert_eq!(contexto[0].0, Some("seguridad.panico_en_entrada"));
     }
 
     #[test]
