@@ -55,6 +55,36 @@ const PERFIL_SIN_DEBUGINFO: [(&str, &str); 2] = [
     ("CARGO_PROFILE_TEST_DEBUG", "0"),
 ];
 
+/// Variable que elige el motor del contenedor. Sin valor, o con otro valor, el motor es podman.
+pub const VARIABLE_CONTENEDOR_MODO: &str = "ROOT_CONTENEDOR_MODO";
+/// Valor de `VARIABLE_CONTENEDOR_MODO` que elige bubblewrap.
+pub const MODO_BWRAP: &str = "bwrap";
+/// Archivo con el entorno de la imagen para el modo bwrap. Una línea `CLAVE=valor` por variable.
+pub const VARIABLE_BWRAP_ENTORNO: &str = "ROOT_BWRAP_ENTORNO";
+/// Variable con el id de la imagen que usa el modo bwrap.
+pub const VARIABLE_BWRAP_IMAGEN_ID: &str = "ROOT_BWRAP_IMAGEN_ID";
+
+/// Motor que corre el contenedor de evaluación.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Podman,
+    Bwrap,
+}
+
+/// Motor que elige `valor`. Solo `bwrap` exacto elige bubblewrap. Todo lo demás es podman.
+pub fn backend_de(valor: Option<&str>) -> Backend {
+    match valor {
+        Some(MODO_BWRAP) => Backend::Bwrap,
+        _ => Backend::Podman,
+    }
+}
+
+/// Motor que elige la variable `ROOT_CONTENEDOR_MODO` del proceso.
+pub fn backend_actual() -> Backend {
+    let valor = std::env::var(VARIABLE_CONTENEDOR_MODO).ok();
+    backend_de(valor.as_deref())
+}
+
 /// Qué correr, con qué montajes y con qué límite de tiempo. Su `Debug` oculta el valor de los secretos.
 #[derive(Clone)]
 pub struct Ejecucion {
@@ -131,16 +161,148 @@ pub fn argumentos(e: &Ejecucion, nombre: &str) -> Vec<String> {
 /// Lleva `--userns=keep-id`: el proceso corre como el usuario del host, sin privilegios dentro. Así el
 /// producto no reemplaza `/bin/sh` ni `/usr/bin/timeout` de la imagen. `argumentos` (run --rm) no lo lleva.
 pub(crate) fn argumentos_separado(e: &Ejecucion, nombre: &str, comando: &[&str]) -> Vec<String> {
-    let Some((entrada, resto)) = comando.split_first() else {
-        return Vec::new();
+    // En modo bwrap no hay contenedor separado. Se devuelve vacío, la misma señal de "sin comando".
+    argumentos_separado_con(backend_actual(), e, nombre, comando).unwrap_or_default()
+}
+
+/// Igual que `argumentos_separado`, con el motor pasado por quien llama. En bwrap da error: no hay
+/// contenedor separado. Con podman arma los argumentos de `podman run -d`.
+pub(crate) fn argumentos_separado_con(
+    backend: Backend,
+    e: &Ejecucion,
+    nombre: &str,
+    comando: &[&str],
+) -> Result<Vec<String>, ErrorOraculo> {
+    match backend {
+        Backend::Bwrap => Err(ErrorOraculo::Infra(
+            "el contenedor separado de Entrega no existe en modo bwrap".into(),
+        )),
+        Backend::Podman => {
+            let Some((entrada, resto)) = comando.split_first() else {
+                return Ok(Vec::new());
+            };
+            let mut args: Vec<String> = ["run", "-d", "--name", nombre].map(String::from).into();
+            args.push("--userns=keep-id".into());
+            args.extend(opciones(e));
+            args.extend(["--entrypoint", entrada].map(String::from));
+            args.push(e.imagen.clone());
+            args.extend(resto.iter().map(|a| a.to_string()));
+            Ok(args)
+        }
+    }
+}
+
+/// Argumentos de `bwrap` para la ejecución, sin el binario `bwrap`. Corre sin podman y sin secretos.
+/// Los montajes siguen el orden y los destinos de `opciones`. `entorno` es el de la imagen.
+pub fn argumentos_bwrap(
+    e: &Ejecucion,
+    entorno: &[(String, String)],
+) -> Result<Vec<String>, ErrorOraculo> {
+    if !e.secretos.is_empty() {
+        return Err(ErrorOraculo::Infra(
+            "en modo bwrap no hay secretos: en Colab no hay claves".into(),
+        ));
+    }
+    let mut args: Vec<String> = Vec::new();
+    args.extend(
+        [
+            "--die-with-parent",
+            "--unshare-user",
+            "--uid",
+            "0",
+            "--gid",
+            "0",
+            "--unshare-pid",
+        ]
+        .map(String::from),
+    );
+    if !e.red {
+        args.push("--unshare-net".into());
+    }
+    args.extend(
+        [
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev-bind",
+            "/dev",
+            "/dev",
+            "--ro-bind",
+            "/proc",
+            "/proc",
+            "--tmpfs",
+            "/tmp",
+        ]
+        .map(String::from),
+    );
+    if let Some(repo) = &e.repo {
+        montaje_bwrap(&mut args, "--ro-bind", repo, "/repo");
+    }
+    if let Some(trabajo) = &e.trabajo {
+        montaje_bwrap(&mut args, "--ro-bind", trabajo, "/trabajo");
+    }
+    if let Some(oraculo) = &e.oraculo {
+        let destino = e.oraculo_destino.as_deref().unwrap_or("/oraculo");
+        montaje_bwrap(&mut args, "--ro-bind", oraculo, destino);
+    }
+    if let Some(cache) = &e.cache {
+        let flag = if e.cache_rw { "--bind" } else { "--ro-bind" };
+        montaje_bwrap(&mut args, flag, cache, "/cache");
+    }
+    if let Some(rustsec) = &e.rustsec {
+        montaje_bwrap(&mut args, "--ro-bind", rustsec, "/rustsec");
+    }
+    montaje_bwrap(&mut args, "--bind", &e.salida, "/salida");
+    args.push("--clearenv".into());
+    let perfil = PERFIL_SIN_DEBUGINFO
+        .iter()
+        .map(|(clave, valor)| (clave.to_string(), valor.to_string()));
+    let variables = entorno
+        .iter()
+        .cloned()
+        .chain(perfil)
+        .chain(e.env.iter().cloned());
+    for (clave, valor) in variables {
+        args.extend(["--setenv".to_string(), clave, valor]);
+    }
+    args.extend(["--chdir", "/", "sh", "-c"].map(String::from));
+    args.push(e.cmd.clone());
+    Ok(args)
+}
+
+fn montaje_bwrap(args: &mut Vec<String>, flag: &str, origen: &Path, destino: &str) {
+    args.push(flag.into());
+    args.push(origen.display().to_string());
+    args.push(destino.into());
+}
+
+/// Entorno de la imagen para el modo bwrap. Lee `ruta`: una línea `CLAVE=valor` por variable.
+/// Sin ruta, o si el archivo no se lee, da entorno vacío y un aviso. Las líneas sin `=` se ignoran.
+pub fn entorno_de_imagen(ruta: Option<&str>) -> (Vec<(String, String)>, Option<String>) {
+    let Some(ruta) = ruta else {
+        let aviso =
+            format!("falta el entorno de la imagen: {VARIABLE_BWRAP_ENTORNO} no tiene ruta");
+        return (Vec::new(), Some(aviso));
     };
-    let mut args: Vec<String> = ["run", "-d", "--name", nombre].map(String::from).into();
-    args.push("--userns=keep-id".into());
-    args.extend(opciones(e));
-    args.extend(["--entrypoint", entrada].map(String::from));
-    args.push(e.imagen.clone());
-    args.extend(resto.iter().map(|a| a.to_string()));
-    args
+    match std::fs::read_to_string(ruta) {
+        Ok(texto) => (parsear_entorno(&texto), None),
+        Err(error) => {
+            let aviso = format!(
+                "falta el entorno de la imagen: no se lee {ruta} ({VARIABLE_BWRAP_ENTORNO}): {error}"
+            );
+            (Vec::new(), Some(aviso))
+        }
+    }
+}
+
+/// Pares `CLAVE=valor` de un texto. Parte en el primer `=`. Descarta líneas sin `=` y claves vacías.
+fn parsear_entorno(texto: &str) -> Vec<(String, String)> {
+    texto
+        .lines()
+        .filter_map(|linea| linea.split_once('='))
+        .filter(|(clave, _)| !clave.is_empty())
+        .map(|(clave, valor)| (clave.to_string(), valor.to_string()))
+        .collect()
 }
 
 /// Opciones de `podman run` de la ejecución: endurecimiento, límites, montajes y variables. Van
@@ -1480,6 +1642,207 @@ mod tests {
             inicio.elapsed() < Duration::from_secs(10),
             "terminar tardó {:?}",
             inicio.elapsed()
+        );
+    }
+
+    // Tests del modo bwrap (Colab sin podman).
+
+    fn ventana_de_tres(args: &[String], a: &str, b: &str, c: &str) -> bool {
+        args.windows(3).any(|w| w[0] == a && w[1] == b && w[2] == c)
+    }
+
+    #[test]
+    fn bwrap_monta_repo_oraculo_cache_y_salida() {
+        let mut e = ejecucion();
+        e.cache = Some(PathBuf::from("/tmp/c"));
+        let args = argumentos_bwrap(&e, &[]).expect("arma");
+        assert!(
+            ventana_de_tres(&args, "--ro-bind", "/tmp/r", "/repo"),
+            "{args:?}"
+        );
+        assert!(
+            ventana_de_tres(&args, "--ro-bind", "/tmp/o", "/oraculo"),
+            "{args:?}"
+        );
+        assert!(
+            ventana_de_tres(&args, "--ro-bind", "/tmp/c", "/cache"),
+            "{args:?}"
+        );
+        assert!(
+            ventana_de_tres(&args, "--bind", "/tmp/s", "/salida"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn bwrap_cache_rw_monta_cache_con_bind() {
+        let mut e = ejecucion();
+        e.cache = Some(PathBuf::from("/tmp/c"));
+        e.cache_rw = true;
+        let args = argumentos_bwrap(&e, &[]).expect("arma");
+        assert!(
+            ventana_de_tres(&args, "--bind", "/tmp/c", "/cache"),
+            "{args:?}"
+        );
+        assert!(
+            !ventana_de_tres(&args, "--ro-bind", "/tmp/c", "/cache"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn bwrap_red_false_lleva_unshare_net_y_red_true_no() {
+        let sin_red = argumentos_bwrap(&ejecucion(), &[]).expect("arma");
+        assert!(
+            sin_red.contains(&"--unshare-net".to_string()),
+            "{sin_red:?}"
+        );
+
+        let mut con_red = ejecucion();
+        con_red.red = true;
+        let args = argumentos_bwrap(&con_red, &[]).expect("arma");
+        assert!(!args.contains(&"--unshare-net".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn bwrap_clearenv_va_antes_del_primer_setenv_y_termina_con_sh_c() {
+        let args =
+            argumentos_bwrap(&ejecucion(), &[("LANG".into(), "C.UTF-8".into())]).expect("arma");
+        let clearenv = args.iter().position(|a| a == "--clearenv");
+        let setenv = args.iter().position(|a| a == "--setenv");
+        assert!(clearenv.is_some() && clearenv < setenv, "{args:?}");
+        let fin: Vec<&str> = args[args.len() - 5..].iter().map(String::as_str).collect();
+        assert_eq!(fin, ["--chdir", "/", "sh", "-c", "pytest -q"], "{args:?}");
+    }
+
+    #[test]
+    fn bwrap_setenv_va_en_orden_entorno_perfil_y_env_propio() {
+        let mut e = ejecucion();
+        e.env.push(("CARGO_PROFILE_DEV_DEBUG".into(), "1".into()));
+        let entorno = vec![("LANG".to_string(), "C.UTF-8".to_string())];
+        let args = argumentos_bwrap(&e, &entorno).expect("arma");
+        let pares: Vec<(String, String)> = args
+            .windows(3)
+            .filter(|w| w[0] == "--setenv")
+            .map(|w| (w[1].clone(), w[2].clone()))
+            .collect();
+        let esperado = vec![
+            ("LANG".to_string(), "C.UTF-8".to_string()),
+            ("CARGO_PROFILE_DEV_DEBUG".to_string(), "0".to_string()),
+            ("CARGO_PROFILE_TEST_DEBUG".to_string(), "0".to_string()),
+            ("PYTHONPATH".to_string(), "/repo".to_string()),
+            ("CARGO_PROFILE_DEV_DEBUG".to_string(), "1".to_string()),
+        ];
+        assert_eq!(pares, esperado, "{args:?}");
+    }
+
+    #[test]
+    fn bwrap_arranca_como_root_del_usuario_con_pid_propio() {
+        let args = argumentos_bwrap(&ejecucion(), &[]).expect("arma");
+        let inicio: Vec<&str> = args[..9].iter().map(String::as_str).collect();
+        assert_eq!(
+            inicio,
+            [
+                "--die-with-parent",
+                "--unshare-user",
+                "--uid",
+                "0",
+                "--gid",
+                "0",
+                "--unshare-pid",
+                "--unshare-net",
+                "--ro-bind",
+            ],
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn bwrap_con_secreto_da_error_que_nombra_los_secretos() {
+        let mut e = ejecucion();
+        e.secretos = vec![("DEEPSEEK_API_KEY".into(), "sk-xyz".into())];
+        match argumentos_bwrap(&e, &[]) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("secretos"), "{mensaje}");
+                assert!(!mensaje.contains("sk-xyz"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra: {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn bwrap_no_lleva_limites_de_memoria_pids_ni_nombre() {
+        let args = argumentos_bwrap(&ejecucion(), &[]).expect("arma");
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "--memory" || a.starts_with("--memory")),
+            "{args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "--pids-limit" || a.starts_with("--pids-limit")),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|a| a == "--name"), "{args:?}");
+    }
+
+    #[test]
+    fn backend_de_solo_bwrap_exacto_es_bwrap() {
+        assert_eq!(backend_de(Some("bwrap")), Backend::Bwrap);
+        assert_eq!(backend_de(None), Backend::Podman);
+        assert_eq!(backend_de(Some("podman")), Backend::Podman);
+        assert_eq!(backend_de(Some("BWRAP")), Backend::Podman);
+        assert_eq!(backend_de(Some("")), Backend::Podman);
+    }
+
+    #[test]
+    fn bwrap_guarda_argumentos_de_podman_siguen_igual() {
+        let args = argumentos(&ejecucion(), "n");
+        assert_eq!(args.first().map(String::as_str), Some("run"));
+        assert!(!args.iter().any(|a| a == "--unshare-net"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--clearenv"), "{args:?}");
+    }
+
+    #[test]
+    fn bwrap_separado_con_bwrap_da_error_y_con_podman_da_lo_de_hoy() {
+        let comando = ["sleep", "600"];
+        assert!(matches!(
+            argumentos_separado_con(Backend::Bwrap, &ejecucion(), "n", &comando),
+            Err(ErrorOraculo::Infra(_))
+        ));
+        let con_podman = argumentos_separado_con(Backend::Podman, &ejecucion(), "n", &comando)
+            .expect("podman arma");
+        assert_eq!(con_podman, argumentos_separado(&ejecucion(), "n", &comando));
+    }
+
+    #[test]
+    fn bwrap_entorno_de_imagen_cubre_sin_ruta_archivo_malo_y_archivo_bueno() {
+        let (vacio, aviso) = entorno_de_imagen(None);
+        assert!(vacio.is_empty());
+        assert!(aviso.is_some_and(|a| a.contains("ROOT_BWRAP_ENTORNO")));
+
+        let dir = tempfile::tempdir().expect("temporal");
+        let falta = dir.path().join("no-existe");
+        let (vacio, aviso) = entorno_de_imagen(falta.to_str());
+        assert!(vacio.is_empty());
+        assert!(aviso.is_some_and(|a| a.contains("ROOT_BWRAP_ENTORNO")));
+
+        let ruta = dir.path().join("entorno");
+        std::fs::write(
+            &ruta,
+            "PATH=/usr/bin:/bin\n\nRUTA_CON_IGUAL=a=b\nSIN_IGUAL\n",
+        )
+        .expect("escribe");
+        let (entorno, aviso) = entorno_de_imagen(ruta.to_str());
+        assert_eq!(aviso, None);
+        assert_eq!(
+            entorno,
+            vec![
+                ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+                ("RUTA_CON_IGUAL".to_string(), "a=b".to_string()),
+            ]
         );
     }
 }
