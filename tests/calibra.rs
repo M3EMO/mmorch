@@ -9,8 +9,8 @@ use std::sync::Mutex;
 use root::config::{Config, Precio};
 use root::observe;
 use root::oracle::calibra::{
-    ARCHIVO, Calibraciones, CasoGuardado, Fila, Presupuesto, agregar, calibrar_tarea,
-    calibrar_tarea_con, global_de,
+    ARCHIVO, Calibraciones, CasoGuardado, Fila, Presupuesto, agregar, calibrar_tarea_con_lector,
+    global_de,
 };
 use root::oracle::tarea::Tarea;
 use root::oracle::{ErrorOraculo, OpcionesOraculo, Partes};
@@ -23,6 +23,11 @@ use serde_json::json;
 
 mod common;
 use common::{Servidor, sse_deepseek};
+
+/// Lector de digest falso: no corre podman. Devuelve el mismo digest para cualquier imagen.
+fn digest_falso(_: &str) -> Option<String> {
+    Some("sha256:fijo".to_string())
+}
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -182,15 +187,18 @@ fn calibra_tarea_dos_corridas_agregan_filas_y_no_borran_las_anteriores() {
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| Ok(veredicto_plano());
     let mut rutas = Vec::<PathBuf>::new();
     for semilla in [42, 43] {
-        calibrar_tarea(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "seguridad",
             4,
             semilla,
             Some(Path::new(FIXTURE)),
+            None,
             &evaluador,
+            &digest_falso,
         )
+        .map(|c| c.fila)
         .expect("calibra");
         rutas.push(home.path().join(ARCHIVO));
     }
@@ -209,15 +217,18 @@ fn calibra_tarea_evalua_la_base_y_cada_caso_con_las_partes_de_su_dimension() {
         vistas.lock().expect("lock").push(o.partes);
         Ok(veredicto_plano())
     };
-    calibrar_tarea(
+    calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "seguridad",
         4,
         42,
         Some(Path::new(FIXTURE)),
+        None,
         &evaluador,
+        &digest_falso,
     )
+    .map(|c| c.fila)
     .expect("calibra");
     let vistas = vistas.lock().expect("lock");
     // Línea base más cuatro casos: todos con las partes de Seguridad.
@@ -312,7 +323,7 @@ fn calibra_tope_detiene_antes_del_caso_que_no_entra() {
         let _ = juicio(home.path(), &servidor.url);
         Ok(veredicto_plano())
     };
-    let error = calibrar_tarea_con(
+    let error = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "seguridad",
@@ -321,6 +332,7 @@ fn calibra_tope_detiene_antes_del_caso_que_no_entra() {
         Some(Path::new(FIXTURE)),
         Some(&presupuesto),
         &evaluador,
+        &digest_falso,
     )
     .expect_err("el tope detiene la calibración");
     assert_eq!(error.codigo_de_salida(), 3);
@@ -355,7 +367,7 @@ fn calibra_tope_suficiente_da_fila_completa_y_sin_gate() {
         let _ = juicio(home.path(), &servidor.url);
         Ok(veredicto_plano())
     };
-    let fila = calibrar_tarea_con(
+    let fila = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "seguridad",
@@ -364,6 +376,7 @@ fn calibra_tope_suficiente_da_fila_completa_y_sin_gate() {
         Some(Path::new(FIXTURE)),
         Some(&presupuesto),
         &evaluador,
+        &digest_falso,
     )
     .expect("con tope suficiente, la calibración termina")
     .fila;
@@ -384,7 +397,7 @@ fn calibra_tope_con_la_base_rechazada_no_escribe_fila() {
         let _ = juicio(home.path(), &servidor.url);
         Ok(veredicto_plano())
     };
-    let error = calibrar_tarea_con(
+    let error = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "seguridad",
@@ -393,6 +406,7 @@ fn calibra_tope_con_la_base_rechazada_no_escribe_fila() {
         Some(Path::new(FIXTURE)),
         Some(&presupuesto),
         &evaluador,
+        &digest_falso,
     )
     .expect_err("la base no entra");
     assert_eq!(error.codigo_de_salida(), 3);
@@ -411,7 +425,7 @@ fn calibra_tope_tras_la_base_sin_casos_no_escribe_fila() {
         let _ = juicio(home.path(), &servidor.url);
         Ok(veredicto_plano())
     };
-    let error = calibrar_tarea_con(
+    let error = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "seguridad",
@@ -420,6 +434,7 @@ fn calibra_tope_tras_la_base_sin_casos_no_escribe_fila() {
         Some(Path::new(FIXTURE)),
         Some(&presupuesto),
         &evaluador,
+        &digest_falso,
     )
     .expect_err("el tope detiene tras la base");
     assert_eq!(error.codigo_de_salida(), 3);
@@ -441,7 +456,7 @@ fn calibra_tope_incompleta_con_la_misma_semilla_se_repite() {
             let _ = juicio(home.path(), &servidor.url);
             Ok(veredicto_plano())
         };
-        let _ = calibrar_tarea_con(
+        let _ = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "seguridad",
@@ -450,6 +465,7 @@ fn calibra_tope_incompleta_con_la_misma_semilla_se_repite() {
             Some(Path::new(FIXTURE)),
             Some(&presupuesto),
             &evaluador,
+            &digest_falso,
         );
         Calibraciones::cargar(home.path()).expect("carga").filas
     };
@@ -590,7 +606,7 @@ fn renglones(ruta: &Path) -> Vec<CasoGuardado> {
 fn calibra_casos_guarda_un_renglon_por_caso_medido_en_orden() {
     let home = home_con_tarea("");
     let evaluador = evaluador_con_defectos(None);
-    let calibrada = calibrar_tarea_con(
+    let calibrada = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "seguridad",
@@ -599,6 +615,7 @@ fn calibra_casos_guarda_un_renglon_por_caso_medido_en_orden() {
         Some(Path::new(FIXTURE)),
         None,
         &evaluador,
+        &digest_falso,
     )
     .expect("calibra");
     let ruta = calibrada.casos.clone().expect("hay casos guardados");
@@ -654,7 +671,7 @@ fn calibra_casos_guarda_un_renglon_por_caso_medido_en_orden() {
 fn calibra_casos_defecto_sin_veredicto_guarda_el_motivo_y_no_detecta() {
     let home = home_con_tarea("");
     let evaluador = evaluador_con_defectos(Some("sin sonda"));
-    calibrar_tarea_con(
+    calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "seguridad",
@@ -663,6 +680,7 @@ fn calibra_casos_defecto_sin_veredicto_guarda_el_motivo_y_no_detecta() {
         Some(Path::new(FIXTURE)),
         None,
         &evaluador,
+        &digest_falso,
     )
     .expect("calibra");
     let archivos = archivos_de_casos(home.path());
@@ -688,7 +706,7 @@ fn calibra_casos_detencion_por_tope_guarda_los_casos_hechos() {
         let _ = juicio(home.path(), &servidor.url);
         evaluador_con_defectos(None)(tarea, ruta, opciones)
     };
-    let error = calibrar_tarea_con(
+    let error = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "seguridad",
@@ -697,6 +715,7 @@ fn calibra_casos_detencion_por_tope_guarda_los_casos_hechos() {
         Some(Path::new(FIXTURE)),
         Some(&presupuesto),
         &evaluador,
+        &digest_falso,
     )
     .expect_err("el tope detiene la calibración");
     assert_eq!(error.codigo_de_salida(), 3);
@@ -718,7 +737,7 @@ fn calibra_casos_sin_casos_medidos_no_escribe_archivo() {
         let _ = juicio(home.path(), &servidor.url);
         base(tarea, ruta, opciones)
     };
-    calibrar_tarea_con(
+    calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "seguridad",
@@ -727,6 +746,7 @@ fn calibra_casos_sin_casos_medidos_no_escribe_archivo() {
         Some(Path::new(FIXTURE)),
         Some(&presupuesto),
         &evaluador,
+        &digest_falso,
     )
     .expect_err("el tope detiene la calibración");
     assert!(
@@ -741,7 +761,7 @@ fn calibra_casos_dos_calibraciones_no_se_pisan() {
     let evaluador = evaluador_con_defectos(None);
     let mut rutas = Vec::<PathBuf>::new();
     for semilla in [42, 43] {
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "seguridad",
@@ -750,6 +770,7 @@ fn calibra_casos_dos_calibraciones_no_se_pisan() {
             Some(Path::new(FIXTURE)),
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra");
         rutas.push(calibrada.casos.expect("hay casos guardados"));
@@ -772,7 +793,7 @@ fn calibra_casos_defecto_no_aplicable_deja_renglon_y_no_suma_a_n() {
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
         Ok::<Veredicto, ErrorOraculo>(veredicto_con(Dimension::Eficiencia, 1.0, None))
     };
-    let calibrada = calibrar_tarea_con(
+    let calibrada = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "eficiencia",
@@ -781,6 +802,7 @@ fn calibra_casos_defecto_no_aplicable_deja_renglon_y_no_suma_a_n() {
         Some(Path::new(FIXTURE)),
         None,
         &evaluador,
+        &digest_falso,
     )
     .expect("calibra");
     assert_eq!(
@@ -813,7 +835,7 @@ fn calibra_casos_todos_no_aplicables_escriben_el_archivo_con_sus_renglones() {
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
         Ok::<Veredicto, ErrorOraculo>(veredicto_con(Dimension::Eficiencia, 1.0, None))
     };
-    let calibrada = calibrar_tarea_con(
+    let calibrada = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "eficiencia",
@@ -822,6 +844,7 @@ fn calibra_casos_todos_no_aplicables_escriben_el_archivo_con_sus_renglones() {
         Some(Path::new(FIXTURE)),
         None,
         &evaluador,
+        &digest_falso,
     )
     .expect("calibra");
     assert_eq!((calibrada.fila.n, calibrada.fila.no_aplicable), (0, 1));
@@ -857,7 +880,7 @@ fn eficiencia_sin_bloque_no_aplica_y_no_llama_al_evaluador() {
     let home = home_con_tarea("");
     let llamadas = Mutex::new(0u32);
     let evaluador = evaluador_contador(&llamadas);
-    let calibrada = calibrar_tarea_con(
+    let calibrada = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "eficiencia",
@@ -866,6 +889,7 @@ fn eficiencia_sin_bloque_no_aplica_y_no_llama_al_evaluador() {
         Some(Path::new(FIXTURE)),
         None,
         &evaluador,
+        &digest_falso,
     )
     .expect("una dimensión que no aplica no es error");
     assert_eq!(
@@ -893,7 +917,7 @@ fn eficiencia_no_aplicable_queda_en_calibracion_json() {
     let home = home_con_tarea("");
     let llamadas = Mutex::new(0u32);
     let evaluador = evaluador_contador(&llamadas);
-    calibrar_tarea_con(
+    calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "eficiencia",
@@ -902,6 +926,7 @@ fn eficiencia_no_aplicable_queda_en_calibracion_json() {
         Some(Path::new(FIXTURE)),
         None,
         &evaluador,
+        &digest_falso,
     )
     .expect("calibra");
     let leido = Calibraciones::cargar(home.path()).expect("carga calibracion.json");
@@ -914,7 +939,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
     let home = home_con_tarea("");
     let llamadas = Mutex::new(0u32);
     let evaluador = evaluador_contador(&llamadas);
-    calibrar_tarea_con(
+    calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "eficiencia",
@@ -923,6 +948,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
         Some(Path::new(FIXTURE)),
         None,
         &evaluador,
+        &digest_falso,
     )
     .expect("calibra");
     // Seguridad calibrada en la misma tarea: `global` la cuenta y Eficiencia no.
@@ -1063,7 +1089,7 @@ fn eficiencia_con_bloque_mantiene_la_medicion_previa() {
     let home = home_con_tarea(EFICIENCIA);
     let llamadas = Mutex::new(0u32);
     let evaluador = evaluador_contador(&llamadas);
-    let error = calibrar_tarea_con(
+    let error = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "eficiencia",
@@ -1072,6 +1098,7 @@ fn eficiencia_con_bloque_mantiene_la_medicion_previa() {
         Some(Path::new(FIXTURE)),
         None,
         &evaluador,
+        &digest_falso,
     )
     .expect_err("sin veredicto de la base no hay fila");
     assert!(*llamadas.lock().expect("lock") >= 1, "la base sí corre");
@@ -1167,7 +1194,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
     agregar(home.path(), &antes).expect("agrega");
     let llamadas = Mutex::new(0u32);
     let evaluador = evaluador_contador(&llamadas);
-    calibrar_tarea_con(
+    calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "eficiencia",
@@ -1176,6 +1203,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
         Some(Path::new(FIXTURE)),
         None,
         &evaluador,
+        &digest_falso,
     )
     .expect("calibra");
     let leido = Calibraciones::cargar(home.path()).expect("carga");
@@ -1217,7 +1245,7 @@ fn calibra_casos_inyeccion_invalida_reemplazada_queda_en_el_renglon() {
                 veredicto_con(Dimension::Estructura, 0.0, None)
             })
         };
-    let calibrada = calibrar_tarea_con(
+    let calibrada = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "estructura",
@@ -1226,6 +1254,7 @@ fn calibra_casos_inyeccion_invalida_reemplazada_queda_en_el_renglon() {
         Some(Path::new(FIXTURE)),
         None,
         &evaluador,
+        &digest_falso,
     )
     .expect("calibra");
     assert_eq!(calibrada.fila.reemplazos, 1);

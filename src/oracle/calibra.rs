@@ -1999,6 +1999,33 @@ pub fn calibrar_tarea_con(
     presupuesto: Option<&Presupuesto>,
     evaluador: &(dyn Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + Sync),
 ) -> Result<Calibrada, ErrorOraculo> {
+    calibrar_tarea_con_lector(
+        home,
+        nombre,
+        dimension,
+        n,
+        semilla,
+        repo_cli,
+        presupuesto,
+        evaluador,
+        &target::digest_de_imagen,
+    )
+}
+
+/// Como `calibrar_tarea_con`, con el lector de digest inyectado. `leer_digest` recibe el nombre de la imagen
+/// de la tarea. Los tests lo pasan falso para no llamar a podman.
+#[allow(clippy::too_many_arguments)]
+pub fn calibrar_tarea_con_lector(
+    home: &Path,
+    nombre: &str,
+    dimension: &str,
+    n: u32,
+    semilla: u64,
+    repo_cli: Option<&Path>,
+    presupuesto: Option<&Presupuesto>,
+    evaluador: &(dyn Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + Sync),
+    leer_digest: &(dyn Fn(&str) -> Option<String> + Sync),
+) -> Result<Calibrada, ErrorOraculo> {
     let dim = Dimension::desde_clave(dimension)
         .ok_or_else(|| ErrorOraculo::Uso(format!("dimensión desconocida: {dimension}")))?;
     let tarea = super::tarea::cargar_en(home, nombre)?;
@@ -2103,7 +2130,7 @@ pub fn calibrar_tarea_con(
         &evaluar_caso,
         tope.as_ref(),
         &|| memo.mutantes_muertos(&tarea),
-        &|| target::digest_de_imagen(&tarea.imagen),
+        &|| leer_digest(&tarea.imagen),
         compartidos.as_ref(),
         Some(home),
     )?;
@@ -3561,17 +3588,115 @@ mod tests {
             vistos.lock().expect("lock").push(ruta.to_path_buf());
             Ok(veredicto_base())
         };
-        calibrar_tarea(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "seguridad",
             2,
             42,
             None,
+            None,
             &evaluador,
+            &digest_falso,
         )
+        .map(|c| c.fila)
         .expect("calibra con el repo de la tarea");
         assert_eq!(vistos.lock().expect("lock")[0], repo);
+    }
+
+    /// Lector de digest falso: no corre podman. Devuelve el mismo digest para cualquier imagen.
+    fn digest_falso(_: &str) -> Option<String> {
+        Some("sha256:fijo".to_string())
+    }
+
+    /// Home con la tarea `calibra-fixture` y su repo bueno en `repo-bueno`. El home vive con el test.
+    fn home_de_calibracion() -> TempDir {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        std::fs::create_dir_all(&carpeta).expect("carpeta");
+        let repo = carpeta.join("repo-bueno");
+        std::fs::create_dir_all(&repo).expect("repo");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
+        let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
+        home
+    }
+
+    #[test]
+    fn calibra_tarea_usa_el_digest_del_lector_para_decidir_el_reuso() {
+        let home = home_de_calibracion();
+        // La primera lectura es la de la base: `fijo`. Las demás dan otro digest, así que ningún caso reusa.
+        let lecturas = AtomicUsize::new(0);
+        let imagenes = Mutex::new(Vec::<String>::new());
+        let lector = |imagen: &str| {
+            imagenes.lock().expect("lock").push(imagen.to_string());
+            let n = lecturas.fetch_add(1, Ordering::SeqCst);
+            Some(if n == 0 { "sha256:fijo" } else { "sha256:otro" }.to_string())
+        };
+        let registro = Mutex::new(Vec::<&'static str>::new());
+        let evaluador = |_: &Tarea, _: &Path, opciones: &OpcionesOraculo| {
+            let quien = match &opciones.target {
+                Target::Guardar(destino) => {
+                    fs::create_dir_all(destino).expect("carpeta del target de la base");
+                    "guardar"
+                }
+                Target::Inicial(_) => "inicial",
+                Target::Ninguno => "ninguno",
+            };
+            registro.lock().expect("lock").push(quien);
+            Ok(veredicto_base())
+        };
+        calibrar_tarea_con_lector(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+            &lector,
+        )
+        .expect("calibra con el lector");
+        assert_eq!(imagenes.lock().expect("lock")[0], "root-oraculo-rust:1");
+        let registro = registro.into_inner().expect("lock");
+        assert_eq!(registro[0], "guardar", "{registro:?}");
+        assert!(registro.len() > 1, "hay casos: {registro:?}");
+        assert!(
+            registro[1..].iter().all(|q| *q == "ninguno"),
+            "con otro digest ningún caso reusa el target: {registro:?}"
+        );
+    }
+
+    #[test]
+    fn calibra_tarea_lee_el_digest_una_vez_en_la_base_y_una_por_caso() {
+        let home = home_de_calibracion();
+        let llamadas = AtomicUsize::new(0);
+        let lector = |_: &str| {
+            llamadas.fetch_add(1, Ordering::SeqCst);
+            Some("sha256:fijo".to_string())
+        };
+        let evaluador = |_: &Tarea, _: &Path, opciones: &OpcionesOraculo| {
+            if let Target::Guardar(destino) = &opciones.target {
+                fs::create_dir_all(destino).expect("carpeta del target de la base");
+            }
+            Ok(veredicto_base())
+        };
+        calibrar_tarea_con_lector(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+            &lector,
+        )
+        .expect("calibra con el lector");
+        // Hallazgo: no cambia el producto. El lector corre una vez en la base.
+        // Después corre una vez por cada evaluación de caso (`evaluar_copia`).
+        // Con n = 2 son 3 llamadas.
+        assert_eq!(llamadas.load(Ordering::SeqCst), 1 + 2);
     }
 
     /// Pruebas con `con_tests/` en la tarea: usa esa carpeta aunque venga `--repo`, y la fila lo dice.
@@ -3590,7 +3715,7 @@ mod tests {
             vistos.lock().expect("lock").push(ruta.to_path_buf());
             Ok(veredicto_de_pruebas())
         };
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "pruebas",
@@ -3599,6 +3724,7 @@ mod tests {
             Some(repo_cli.as_path()),
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra Pruebas con con_tests");
         assert_eq!(vistos.lock().expect("lock")[0], con_tests);
@@ -3619,7 +3745,7 @@ mod tests {
         super::inyectar::pruebas::copiar(Path::new(FIXTURE), &con_tests);
         let _ = tarea_en(&carpeta, "");
         let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| Ok(veredicto_de_pruebas());
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "pruebas",
@@ -3628,6 +3754,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra Pruebas con con_tests sin --repo");
         assert!(calibrada.avisos.is_empty(), "sin --repo no hay aviso");
@@ -3646,7 +3773,7 @@ mod tests {
             vistos.lock().expect("lock").push(ruta.to_path_buf());
             Ok(veredicto_de_pruebas())
         };
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "pruebas",
@@ -3655,6 +3782,7 @@ mod tests {
             Some(repo_cli.as_path()),
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra Pruebas con --repo sin con_tests");
         assert_eq!(vistos.lock().expect("lock")[0], repo_cli);
@@ -3674,7 +3802,7 @@ mod tests {
             vistos.lock().expect("lock").push(ruta.to_path_buf());
             Ok(veredicto_de_pruebas())
         };
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "pruebas",
@@ -3683,6 +3811,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra Pruebas sin con_tests");
         assert_eq!(vistos.lock().expect("lock")[0], repo);
@@ -3701,7 +3830,7 @@ mod tests {
             }
             Ok(veredicto_base())
         };
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "seguridad",
@@ -3710,6 +3839,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra");
         let vistos = destinos.lock().expect("lock");
@@ -3734,7 +3864,7 @@ mod tests {
                 }
                 Err(ErrorOraculo::Infra("evaluador roto".into()))
             };
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "seguridad",
@@ -3743,6 +3873,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect_err("el evaluador falla");
         let vistos = destinos.lock().expect("lock");
@@ -3768,7 +3899,7 @@ mod tests {
             llamadas.fetch_add(1, Ordering::SeqCst);
             Ok(Veredicto::default())
         };
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "entrega",
@@ -3777,6 +3908,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("una entrega no aplicable sale con Ok");
         assert_eq!(llamadas.load(Ordering::SeqCst), 0, "el evaluador no corre");
@@ -3805,7 +3937,7 @@ mod tests {
             llamadas.fetch_add(1, Ordering::SeqCst);
             Ok(Veredicto::default())
         };
-        let resultado = calibrar_tarea_con(
+        let resultado = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "entrega",
@@ -3814,6 +3946,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         );
         assert!(
             llamadas.load(Ordering::SeqCst) > 0,
@@ -3887,7 +4020,7 @@ mod tests {
             }
             Ok(veredicto_de_pruebas())
         };
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "pruebas",
@@ -3896,6 +4029,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra");
         let vistos = con_memo.lock().expect("lock");
@@ -3944,7 +4078,7 @@ mod tests {
             }
             Ok(veredicto_de_pruebas())
         };
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "pruebas",
@@ -3953,6 +4087,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra");
         let ruta = calibrada.casos.expect("hay casos guardados");
@@ -4038,7 +4173,7 @@ mod tests {
             }
             Ok(veredicto_de_pruebas())
         };
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "pruebas",
@@ -4047,6 +4182,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra");
         let vistos = acotados.lock().expect("lock");
@@ -4094,7 +4230,7 @@ mod tests {
             }
             Ok(veredicto_de_pruebas())
         };
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "pruebas",
@@ -4103,6 +4239,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra");
         let ruta = calibrada.casos.expect("hay casos guardados");
@@ -4303,7 +4440,7 @@ mod tests {
         carpeta_con_repo_bueno(home.path());
         let llamadas = Mutex::new(Vec::<Llamada>::new());
         let evaluador = evaluador_con_registro(&llamadas, || diseno_con(&[(ITEM_MODULARIDAD, 2)]));
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "diseno",
@@ -4312,6 +4449,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra");
         let llamadas = llamadas.lock().expect("lock");
@@ -4375,7 +4513,7 @@ mod tests {
         std::fs::write(repo.join("tests/protocolo.rs"), TEST_DE_LEER_NUMERO).expect("test");
         let llamadas = Mutex::new(Vec::<Llamada>::new());
         let evaluador = evaluador_con_registro(&llamadas, veredicto_de_pruebas);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "pruebas",
@@ -4384,6 +4522,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra");
         let llamadas = llamadas.lock().expect("lock");
@@ -4433,7 +4572,7 @@ mod tests {
         let llamadas = Mutex::new(Vec::<Llamada>::new());
         let evaluador =
             evaluador_con_juez_y_tests(&llamadas, || diseno_con(&[(ITEM_MODULARIDAD, 2)]), true);
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "diseno",
@@ -4442,6 +4581,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra");
         let llamadas = llamadas.lock().expect("lock");
@@ -4517,7 +4657,7 @@ mod tests {
                 || veredicto_de(Dimension::Diseno, 1.0, None),
                 usar_reuso,
             );
-            calibrar_tarea_con(
+            calibrar_tarea_con_lector(
                 home.path(),
                 "calibra-fixture",
                 "diseno",
@@ -4526,6 +4666,7 @@ mod tests {
                 None,
                 None,
                 &evaluador,
+                &digest_falso,
             )
             .expect("calibra")
             .fila
@@ -4550,15 +4691,18 @@ mod tests {
             historiales.lock().expect("lock").push(o.historial);
             Ok(veredicto_base())
         };
-        calibrar_tarea(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "seguridad",
             2,
             42,
             Some(Path::new(FIXTURE)),
+            None,
             &evaluador,
+            &digest_falso,
         )
+        .map(|c| c.fila)
         .expect("calibra");
         let vistos = historiales.lock().expect("lock");
         assert!(!vistos.is_empty(), "el evaluador no recibió llamadas");
@@ -4572,15 +4716,18 @@ mod tests {
         std::fs::create_dir_all(&carpeta).expect("carpeta");
         let _ = tarea_en(&carpeta, "");
         let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| Ok(veredicto_base());
-        let error = calibrar_tarea(
+        let error = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "seguridad",
             2,
             42,
             None,
+            None,
             &evaluador,
+            &digest_falso,
         )
+        .map(|c| c.fila)
         .expect_err("sin repo no hay calibración");
         assert_eq!(error.codigo_de_salida(), 2);
         assert!(!home.path().join(ARCHIVO).exists(), "no escribe nada");
@@ -4671,7 +4818,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         carpeta_con_repo_bueno(home.path());
         let arquitectura = AtomicUsize::new(0);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "arquitectura",
@@ -4680,6 +4827,7 @@ mod tests {
             None,
             None,
             &evaluador_con_limpios(&arquitectura, |_| veredicto_arq_dis(1.0)),
+            &digest_falso,
         )
         .expect("calibra arquitectura");
         assert_eq!(
@@ -4688,7 +4836,7 @@ mod tests {
             "dos limpios con n 4"
         );
         let diseno = AtomicUsize::new(0);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "diseno",
@@ -4697,6 +4845,7 @@ mod tests {
             None,
             None,
             &evaluador_con_limpios(&diseno, |_| veredicto_arq_dis(1.0)),
+            &digest_falso,
         )
         .expect("calibra diseño");
         assert_eq!(
@@ -4727,7 +4876,7 @@ mod tests {
             veredicto_de(Dimension::Seguridad, if limpia { 0.8 } else { 0.2 }, None)
         });
         let evaluador = |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| ev(ruta);
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "seguridad",
@@ -4736,6 +4885,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra seguridad");
         let guardados = renglones_guardados(&calibrada);
@@ -4760,7 +4910,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         carpeta_con_repo_bueno(home.path());
         let arquitectura = AtomicUsize::new(0);
-        let primera = calibrar_tarea_con(
+        let primera = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "arquitectura",
@@ -4769,10 +4919,11 @@ mod tests {
             None,
             None,
             &evaluador_con_limpios(&arquitectura, |_| veredicto_arq_dis(1.0)),
+            &digest_falso,
         )
         .expect("calibra arquitectura");
         let diseno = AtomicUsize::new(0);
-        let segunda = calibrar_tarea_con(
+        let segunda = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "diseno",
@@ -4781,6 +4932,7 @@ mod tests {
             None,
             None,
             &evaluador_con_limpios(&diseno, |_| veredicto_arq_dis(1.0)),
+            &digest_falso,
         )
         .expect("calibra diseño");
         let de_arquitectura = renglones_guardados(&primera);
@@ -4829,7 +4981,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         carpeta_con_repo_bueno(home.path());
         let arquitectura = AtomicUsize::new(0);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "arquitectura",
@@ -4838,10 +4990,11 @@ mod tests {
             None,
             None,
             &evaluador_con_limpios(&arquitectura, veredicto_arq_con_diseno_no_medido),
+            &digest_falso,
         )
         .expect("calibra arquitectura");
         let diseno = AtomicUsize::new(0);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "diseno",
@@ -4850,6 +5003,7 @@ mod tests {
             None,
             None,
             &evaluador_con_limpios(&diseno, |_| veredicto_arq_dis(1.0)),
+            &digest_falso,
         )
         .expect("calibra diseño");
         assert_eq!(
@@ -4864,7 +5018,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         carpeta_con_repo_bueno(home.path());
         let arquitectura = AtomicUsize::new(0);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "arquitectura",
@@ -4875,6 +5029,7 @@ mod tests {
             &evaluador_con_limpios(&arquitectura, |_| {
                 veredicto_de(Dimension::Arquitectura, 1.0, None)
             }),
+            &digest_falso,
         )
         .expect("calibra arquitectura");
         let sin_diseno = veredictos_limpios(home.path());
@@ -4885,7 +5040,7 @@ mod tests {
             "el cache de Arquitectura no trae Diseño"
         );
         let diseno = AtomicUsize::new(0);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "diseno",
@@ -4894,6 +5049,7 @@ mod tests {
             None,
             None,
             &evaluador_con_limpios(&diseno, |_| veredicto_arq_dis(1.0)),
+            &digest_falso,
         )
         .expect("calibra diseño");
         assert_eq!(
@@ -4914,7 +5070,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let carpeta = carpeta_con_repo_bueno(home.path());
         let primera = AtomicUsize::new(0);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "diseno",
@@ -4923,12 +5079,13 @@ mod tests {
             None,
             None,
             &evaluador_con_limpios(&primera, |_| veredicto_arq_dis(1.0)),
+            &digest_falso,
         )
         .expect("calibra");
         std::fs::write(carpeta.join("repo-bueno").join("NOTA.txt"), "otra versión")
             .expect("cambia el repo");
         let segunda = AtomicUsize::new(0);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "diseno",
@@ -4937,6 +5094,7 @@ mod tests {
             None,
             None,
             &evaluador_con_limpios(&segunda, |_| veredicto_arq_dis(1.0)),
+            &digest_falso,
         )
         .expect("calibra con el repo cambiado");
         assert_eq!(
@@ -4951,7 +5109,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         carpeta_con_repo_bueno(home.path());
         let primera = AtomicUsize::new(0);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "diseno",
@@ -4960,13 +5118,14 @@ mod tests {
             None,
             None,
             &evaluador_con_limpios(&primera, |_| veredicto_arq_dis(1.0)),
+            &digest_falso,
         )
         .expect("calibra");
         for ruta in archivos_limpios(home.path()) {
             std::fs::write(&ruta, "{ no es json").expect("corrompe el cache");
         }
         let segunda = AtomicUsize::new(0);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "diseno",
@@ -4975,6 +5134,7 @@ mod tests {
             None,
             None,
             &evaluador_con_limpios(&segunda, |_| veredicto_arq_dis(1.0)),
+            &digest_falso,
         )
         .expect("calibra con cache corrupto");
         assert_eq!(
@@ -4995,7 +5155,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         carpeta_con_repo_bueno(home.path());
         let seguridad = AtomicUsize::new(0);
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "seguridad",
@@ -5006,6 +5166,7 @@ mod tests {
             &evaluador_con_limpios(&seguridad, |_| {
                 veredicto_de(Dimension::Seguridad, 1.0, None)
             }),
+            &digest_falso,
         )
         .expect("calibra seguridad");
         assert_eq!(
@@ -5026,7 +5187,7 @@ mod tests {
             carpeta_con_repo_bueno(home.path());
             let llamadas = AtomicUsize::new(0);
             limpios_medidos(
-                &calibrar_tarea_con(
+                &calibrar_tarea_con_lector(
                     home.path(),
                     "calibra-fixture",
                     "diseno",
@@ -5035,6 +5196,7 @@ mod tests {
                     None,
                     None,
                     &evaluador_con_limpios(&llamadas, veredicto_limpio_sin_juez),
+                    &digest_falso,
                 )
                 .expect("calibra sin cache"),
             )
@@ -5043,7 +5205,7 @@ mod tests {
             let home = tempfile::tempdir().expect("home");
             carpeta_con_repo_bueno(home.path());
             let llamadas = AtomicUsize::new(0);
-            calibrar_tarea_con(
+            calibrar_tarea_con_lector(
                 home.path(),
                 "calibra-fixture",
                 "arquitectura",
@@ -5052,10 +5214,11 @@ mod tests {
                 None,
                 None,
                 &evaluador_con_limpios(&llamadas, veredicto_limpio_sin_juez),
+                &digest_falso,
             )
             .expect("calibra arquitectura");
             let segunda = AtomicUsize::new(0);
-            let calibrada = calibrar_tarea_con(
+            let calibrada = calibrar_tarea_con_lector(
                 home.path(),
                 "calibra-fixture",
                 "diseno",
@@ -5064,6 +5227,7 @@ mod tests {
                 None,
                 None,
                 &evaluador_con_limpios(&segunda, veredicto_limpio_sin_juez),
+                &digest_falso,
             )
             .expect("calibra diseño");
             assert_eq!(segunda.load(Ordering::SeqCst), 0, "usa el cache");
@@ -5177,15 +5341,18 @@ mod tests {
         let _ = tarea_en(&carpeta, "");
         let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| Ok(veredicto_base());
         for _ in 0..2 {
-            calibrar_tarea(
+            calibrar_tarea_con_lector(
                 home.path(),
                 "calibra-fixture",
                 "seguridad",
                 2,
                 42,
                 Some(Path::new(FIXTURE)),
+                None,
                 &evaluador,
+                &digest_falso,
             )
+            .map(|c| c.fila)
             .expect("calibra");
         }
         let leido = Calibraciones::cargar(home.path()).expect("carga");
@@ -5197,15 +5364,18 @@ mod tests {
     fn calibra_tarea_dimension_desconocida_es_uso() {
         let home = tempfile::tempdir().expect("home");
         let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| Ok(veredicto_base());
-        let error = calibrar_tarea(
+        let error = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "magia",
             2,
             42,
             None,
+            None,
             &evaluador,
+            &digest_falso,
         )
+        .map(|c| c.fila)
         .expect_err("dimensión inventada");
         assert_eq!(error.codigo_de_salida(), 2);
     }
@@ -8814,7 +8984,7 @@ mod tests {
             let _ = pedir_juicio_limitado(home.path());
             Ok(veredicto_base())
         };
-        let error = calibrar_tarea_con(
+        let error = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "seguridad",
@@ -8823,6 +8993,7 @@ mod tests {
             None,
             Some(&presupuesto),
             &evaluador,
+            &digest_falso,
         )
         .expect_err("el tope detiene la calibración");
         let texto = error.to_string();
@@ -9560,7 +9731,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         carpeta_sin_red(home.path());
         let de_arquitectura = Cuentas::default();
-        calibrar_tarea_con(
+        calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "arquitectura",
@@ -9569,6 +9740,7 @@ mod tests {
             None,
             None,
             &evaluador_real(home.path(), &de_arquitectura),
+            &digest_falso,
         )
         .expect("calibra arquitectura");
         // Guarda: Arquitectura sí llama al juez en sus limpios. Sin esto, el cero de Diseño no probaría nada.
@@ -9581,7 +9753,7 @@ mod tests {
             "Arquitectura llama al juez en sus limpios"
         );
         let de_diseno = Cuentas::default();
-        let segunda = calibrar_tarea_con(
+        let segunda = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "diseno",
@@ -9590,6 +9762,7 @@ mod tests {
             None,
             None,
             &evaluador_real(home.path(), &de_diseno),
+            &digest_falso,
         )
         .expect("calibra diseño");
         let renglones = renglones_guardados(&segunda);
@@ -9906,7 +10079,7 @@ mod tests {
             };
             crate::oracle::evaluar_con(repo, tarea, &con_home, deps)
         };
-        let calibrada = calibrar_tarea_con(
+        let calibrada = calibrar_tarea_con_lector(
             home.path(),
             "calibra-fixture",
             "pruebas",
@@ -9915,6 +10088,7 @@ mod tests {
             None,
             None,
             &evaluador,
+            &digest_falso,
         )
         .expect("calibra Pruebas");
         let casos = renglones_guardados(&calibrada);
