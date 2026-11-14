@@ -427,3 +427,90 @@ fn preparar_termina_llamando_a_verificar() {
         );
     }
 }
+
+/// Corre el guion sin RUSTUP_HOME ni CARGO_HOME del entorno. Si `rustup_home` es `Some`, lo exporta.
+fn correr_sin_rustup(e: &Escenario, rustup_home: Option<&str>) -> Output {
+    let path = format!(
+        "{}:{}",
+        e.falsos.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut orden = Command::new("bash");
+    orden
+        .arg(SCRIPT)
+        .arg(&e.paquete)
+        .env("PATH", path)
+        .env("ROOT_BIN_DIR", &e.bin)
+        .env("ROOT_ETC_DIR", &e.etc)
+        .env("ROOT_RAIZ_DIR", &e.runtime)
+        .env_remove("RUSTUP_HOME")
+        .env_remove("CARGO_HOME");
+    if let Some(valor) = rustup_home {
+        orden.env("RUSTUP_HOME", valor);
+    }
+    orden.output().expect("lanza bash")
+}
+
+/// Pone un rustc falso que escribe su RUSTUP_HOME y su CARGO_HOME en `e.falsos/entorno.txt`.
+/// Devuelve la ruta de ese archivo.
+fn rustc_que_registra_entorno(e: &Escenario) -> PathBuf {
+    let registro = e.falsos.join("entorno.txt");
+    let guion = format!(
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"${{RUSTUP_HOME:-ausente}}\" \"${{CARGO_HOME:-ausente}}\" > '{}'\necho 'rustc 1.90.0 (abc 2026-01-01)'\n",
+        registro.display()
+    );
+    escribir_ejecutable(&e.falsos.join("rustc"), &guion);
+    registro
+}
+
+#[test]
+fn sin_rustup_home_el_guion_fija_las_rutas_de_rust() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea sin_rustup_home_el_guion_fija_las_rutas_de_rust");
+        return;
+    }
+    let e = escenario();
+    let shas = shas_de_bin(&e);
+    escribir_versiones(&e, "1.90.0", &shas);
+    let registro = rustc_que_registra_entorno(&e);
+    let salida = correr_sin_rustup(&e, None);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let vistos: Vec<String> = fs::read_to_string(&registro)
+        .expect("lee el registro del rustc falso")
+        .lines()
+        .map(String::from)
+        .collect();
+    assert_eq!(
+        vistos,
+        vec!["/usr/local/rustup", "/usr/local/cargo"],
+        "rustc debe ver RUSTUP_HOME y CARGO_HOME del guion"
+    );
+}
+
+#[test]
+fn rustup_home_del_entorno_se_conserva() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea rustup_home_del_entorno_se_conserva");
+        return;
+    }
+    let e = escenario();
+    let shas = shas_de_bin(&e);
+    escribir_versiones(&e, "1.90.0", &shas);
+    let registro = rustc_que_registra_entorno(&e);
+    let salida = correr_sin_rustup(&e, Some("/otro"));
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let visto = fs::read_to_string(&registro).expect("lee el registro del rustc falso");
+    assert_eq!(
+        visto.lines().next(),
+        Some("/otro"),
+        "el guion debe conservar RUSTUP_HOME del entorno"
+    );
+}

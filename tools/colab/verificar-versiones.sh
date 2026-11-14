@@ -8,6 +8,11 @@ ROOT_BIN_DIR="${ROOT_BIN_DIR:-/usr/local/bin}"
 ROOT_ETC_DIR="${ROOT_ETC_DIR:-/etc/root-oraculo}"
 ROOT_RAIZ_DIR="${ROOT_RAIZ_DIR:-}"
 
+# Rust vive en /usr/local. Sin estas rutas, el proxy rustup falla.
+# Copia de RUSTUP_HOME y CARGO_HOME en preparar-runtime.sh. Si cambia una, cambiar la otra.
+export RUSTUP_HOME="${RUSTUP_HOME:-/usr/local/rustup}"
+export CARGO_HOME="${CARGO_HOME:-/usr/local/cargo}"
+
 # Carpetas que bwrap no puede crear. Son los destinos de argumentos_bwrap en src/oracle/contenedor.rs.
 # Copia de CARPETAS_RUNTIME en preparar-runtime.sh. Si cambia una, cambiar la otra y contenedor.rs.
 CARPETAS_RUNTIME=(/repo /salida /oraculo /cache /rustsec /trabajo)
