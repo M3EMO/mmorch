@@ -400,15 +400,15 @@ impl Prng {
 }
 
 /// Partes de un texto por `\n`. Unirlas de nuevo con `unir` da el texto original, con su último salto.
-fn partir(texto: &str) -> Vec<String> {
+pub(super) fn partir(texto: &str) -> Vec<String> {
     texto.split('\n').map(str::to_string).collect()
 }
 
-fn unir(lineas: &[String]) -> String {
+pub(super) fn unir(lineas: &[String]) -> String {
     lineas.join("\n")
 }
 
-fn leer(dir: &Path, relativa: &str) -> io::Result<String> {
+pub(super) fn leer(dir: &Path, relativa: &str) -> io::Result<String> {
     fs::read_to_string(dir.join(relativa))
 }
 
@@ -425,7 +425,7 @@ fn linea_de(texto: &str, patron: &str) -> u32 {
 }
 
 /// Líneas de producción: las de antes del primer `#[cfg(test)]`. El resto es de tests.
-fn limite_de_produccion(lineas: &[String]) -> usize {
+pub(super) fn limite_de_produccion(lineas: &[String]) -> usize {
     lineas
         .iter()
         .position(|l| l.trim() == "#[cfg(test)]")
@@ -544,7 +544,7 @@ const BUCLE: &str =
 /// Nombre de la función que declara `linea` (`pub fn procesar(` da `procesar`). `None` si no declara una.
 /// Acepta visibilidad (`pub`, `pub(crate)`, `pub(super)`) y los calificadores `const`, `async` y `unsafe`,
 /// en cualquier orden.
-fn nombre_de_funcion(linea: &str) -> Option<&str> {
+pub(super) fn nombre_de_funcion(linea: &str) -> Option<&str> {
     let mut t = linea.trim_start();
     if let Some(resto) = ["pub(crate) ", "pub(super) ", "pub "]
         .iter()
@@ -816,18 +816,18 @@ fn modulo_borrado(
 /// Un cuerpo de función en un archivo: la línea de la firma, la de la `{` de apertura y la de la `}` de cierre
 /// (0-based), con la posición de cada llave en su línea. Las posiciones son bytes de la línea original.
 #[derive(Debug, Clone, Copy)]
-struct Cuerpo {
-    firma: usize,
-    abre: usize,
-    abre_pos: usize,
-    cierra: usize,
-    cierra_pos: usize,
+pub(super) struct Cuerpo {
+    pub(super) firma: usize,
+    pub(super) abre: usize,
+    pub(super) abre_pos: usize,
+    pub(super) cierra: usize,
+    pub(super) cierra_pos: usize,
 }
 
 /// Cuerpo de la función que declara la línea `firma`. La firma puede ocupar varias líneas: el cuerpo empieza en la
 /// primera `{` fuera de paréntesis y corchetes. `None` si la firma termina en `;` (declaración), si no cierra, o si
 /// abre y cierra en la misma línea. `limpias` es el archivo entero de `limpias_de`: sin comentarios ni cadenas.
-fn cuerpo_de(limpias: &[String], firma: usize) -> Option<Cuerpo> {
+pub(super) fn cuerpo_de(limpias: &[String], firma: usize) -> Option<Cuerpo> {
     let mut nivel = 0i32;
     let mut apertura = None;
     'firma: for (j, limpia) in limpias.iter().enumerate().skip(firma) {
@@ -1052,7 +1052,7 @@ fn es_mod_en_linea(limpia: &str) -> bool {
 
 /// `true` si la función de la línea `firma` no es `const fn` ni `unsafe fn`, y no es de test: sin `#[test]`
 /// ni `#[cfg(test)]` entre los atributos que la preceden.
-fn es_fn_normal(lineas: &[String], firma: usize) -> bool {
+pub(super) fn es_fn_normal(lineas: &[String], firma: usize) -> bool {
     let antes_de_fn = lineas[firma].split("fn ").next().unwrap_or("");
     let calificada = antes_de_fn
         .split_whitespace()
@@ -1632,7 +1632,7 @@ fn es_parte_de_palabra(c: char) -> bool {
 
 /// Texto limpio de cada línea del archivo, en el mismo orden.
 /// `analizar` recuerda el estado entre líneas. Un comentario o una cadena que cruza líneas queda en blanco.
-fn limpias_de(lineas: &[String]) -> Vec<String> {
+pub(super) fn limpias_de(lineas: &[String]) -> Vec<String> {
     analizar(lineas)
         .into_iter()
         .map(|l| sin_caracteres(&l.limpia))
