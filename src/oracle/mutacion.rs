@@ -777,9 +777,11 @@ fn comando_de_corrida(tarea: &Tarea, filtro: &str) -> String {
     let exclusion = exclusion_de_mutantes();
     let pasos = pasos_previos();
     let in_place = flag_in_place();
+    // cargo-mutants 27 rechaza `--in-place` con `--jobs`, y `--in-place` ya corre un solo trabajo.
+    let jobs = if hay_carpeta_fija() { "" } else { " --jobs 1" };
     format!(
         "{PRELUDIO}{pasos} && \
-         CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle{in_place} --jobs 1{plazo}{exclusion} \
+         CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle{in_place}{jobs}{plazo}{exclusion} \
          --output /salida/mutants{filtro} -- --offline; \
          (cd /salida/mutants/mutants.out && grep -H '^test .* \\.\\.\\. FAILED$' log/*.log) \
          > /salida/{ARCHIVO_TESTS_FALLIDOS} 2>/dev/null; \
@@ -2400,6 +2402,21 @@ mod tests {
         assert!(cmd.contains("--in-place"), "{cmd}");
         assert!(cmd.contains("CARGO_TARGET_DIR=/salida/target"), "{cmd}");
         assert!(es_comando_de_mutacion(&cmd), "{cmd}");
+    }
+
+    #[test]
+    fn mutacion_con_carpeta_fija_la_corrida_no_lleva_jobs() {
+        let t = tarea_pruebas(5);
+        let cmd = con_carpeta_de_mutacion(Some(Path::new("/tmp/c")), || comando_de_corrida(&t, ""));
+        assert!(!cmd.contains("--jobs"), "{cmd}");
+        assert!(es_comando_de_mutacion(&cmd), "{cmd}");
+    }
+
+    #[test]
+    fn mutacion_con_carpeta_fija_el_listado_no_lleva_jobs() {
+        let cmd = con_carpeta_de_mutacion(Some(Path::new("/tmp/c")), comando_de_listado);
+        assert!(!cmd.contains("--jobs"), "{cmd}");
+        assert!(es_comando_de_listado(&cmd), "{cmd}");
     }
 
     #[test]
