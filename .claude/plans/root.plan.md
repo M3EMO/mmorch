@@ -10589,3 +10589,173 @@ Los briefs son `docs/builds/brief-local-137.md` y `docs/builds/brief-local-138.m
 **Lista de limpiezas, nueva entrada:** los dos tests de la 135 con nombres viejos.
 
 **Preguntas al usuario:** P107 sigue abierta.
+
+## Vuelta del 2026-11-14 (52): P107 a, el disco libre, y las calibraciones en Colab
+
+**Respuestas del usuario, textuales (2026-11-14):**
+- P107: "a) 25 USD". El tope de S2 sube a 25 USD.
+- "Borrar las cosas sin uso para liberar disco" y "Los root test sin uso tambien borrar."
+- "acordate de usar colab para temas de root". El 2026-11-13 eligió "C. Colab a) Mover las mediciones a Colab, dentro de 50 unidades".
+
+**Un error que reconozco.** Desde el 2026-11-13, yo planeé todas las mediciones para la laptop: la recalibración de oráculo, los repartos y las tres calibraciones de Eficiencia. Debí planearlas para Colab. Desde esta vuelta, toda medición larga de Root se planea para Colab, y la laptop queda como respaldo.
+
+**Estado.**
+- El disco quedó al 46 %, con 247 GB libres. Se borraron 147 targets de `~/.cache/root-tests`, 19 worktrees limpios y 8 carpetas de medición.
+- Las Tareas 137 y 138 corren ahora en la laptop. La serie 138 las encadena, corre la suite con podman y calibra Eficiencia en la laptop.
+- S2 lleva gastados cerca de 6,55 USD, de 25.
+- `src/oracle/colab.rs` corre los tests pendientes en una T4, con los verbos `new`, `upload`, `exec`, `download` y `stop` de la CLI `colab`. La calibración nunca corrió en Colab.
+
+## 1. ¿Corre podman en Colab? No se sabe. Hay que probarlo
+
+**Lo que dicen las fuentes:**
+- Ninguna fuente muestra podman andando en Colab.
+- Varios usuarios dicen que el daemon de Docker no corre en Colab, porque Colab ya corre dentro de un contenedor.
+- `udocker`, que corre contenedores sin privilegios, sí anda en Colab según varios reportes.
+- podman dentro de otro contenedor pide espacios de nombres, cgroups y a veces privilegios que un entorno aislado puede no dar.
+
+**La prueba barata, la Prueba 0.** Un runtime de CPU, unos 10 minutos, sin claves. Corre las mismas opciones de seguridad que usa Root (`opciones`, `src/oracle/contenedor.rs:141`). El script va al runtime con `upload` y corre con `exec`, como hace `colab.rs`:
+
+```bash
+#!/usr/bin/env bash
+# Prueba 0: ¿corre podman en Colab con las opciones de Root? No imprime ninguna clave.
+set -u
+echo "== sistema"; head -3 /etc/os-release; nproc; free -g | head -2; df -h / | tail -1; id
+echo "== cgroups"; cat /sys/fs/cgroup/cgroup.controllers 2>&1 | head -1
+echo "== capacidades"; grep -E '^Cap(Eff|Bnd)' /proc/self/status
+echo "== podman"
+apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq podman >/dev/null 2>&1
+podman --version 2>&1
+podman info --format '{{.Host.CgroupsVersion}} {{.Store.GraphDriverName}} {{.Host.OCIRuntime.Name}}' 2>&1 | tail -2
+mkdir -p /content/p/ro && echo hola > /content/p/ro/a
+podman run --rm --network none --cap-drop=all --security-opt=no-new-privileges \
+  --pids-limit=4096 --memory=4g --tmpfs /tmp:rw -v /content/p/ro:/repo:ro \
+  docker.io/library/alpine:3.20 sh -c 'cat /repo/a; cat /sys/fs/cgroup/memory.peak; id' 2>&1 | tail -5
+echo "rc=$?"
+echo "== secretos"
+python3 -c "from google.colab import userdata; print('clave presente:', bool(userdata.get('DEEPSEEK_API_KEY')))" 2>&1 | tail -1
+```
+
+**Lo que decide cada resultado:**
+- **Si `podman run` da `hola`, un número de `memory.peak` y `rc=0`:** Root corre en Colab con podman, igual que en la laptop. Es el camino A.
+- **Si falla:** Root corre en Colab sin contenedor, directo en el runtime. Es el camino B.
+- **La línea de secretos** dice si un proceso de `exec` puede leer Colab Secrets. Imprime solo verdadero o falso, nunca la clave.
+- El orquestador anota también las unidades antes y después de la prueba.
+
+## 2. Los dos caminos
+
+**Camino A: podman en Colab.**
+- La imagen `root-oraculo-rust:4` se construye en el runtime desde `imagenes/oraculo-rust/Containerfile`. Subir la imagen guardada pesa varios GB, y construirla tarda unos 15 minutos.
+- Todo lo demás corre igual que en la laptop, también `memory.peak`.
+
+**Camino B: sin contenedor.**
+- El runtime de Colab es una máquina de un solo uso, de la cuenta del usuario. Sirve de aislamiento entre corridas.
+- **Lo que se pierde:** la red apagada y los montajes de solo lectura. En la calibración, el código es broot con los defectos que inyecta Root, no código de un builder. El riesgo es bajo, pero no es cero.
+- **Las claves.** Los procesos hijos (cargo, nextest, cargo-mutants) no deben ver la clave. Corren con el entorno limpio y como un usuario sin privilegios, `rootci`, como en la vuelta (38).
+- **Eficiencia no puede ir por este camino.** `memory.peak` sale del cgroup de un contenedor. Sin contenedor, la memoria se mediría de otra forma. La dimensión calibrada no sería la que la evaluación mide en la laptop. Si la Prueba 0 falla, Eficiencia se calibra en la laptop.
+- **El costo en código:** un modo nativo para `contenedor::ejecutar`. Es una tarea grande, la 140, y solo se escribe si la Prueba 0 falla.
+
+## 3. Cómo viajan las cosas, y cómo vuelven
+
+**Lo que viaja a Colab, en un paquete:**
+1. **El código de Root:** un `git bundle` del commit de la cadena. El binario de la laptop no sirve: Fedora 44 tiene una glibc más nueva que Ubuntu 22.04 de Colab. Root se compila en el runtime con `prepara-rust.py`, que ya existe en `colab.rs`.
+2. **El `ROOT_HOME` necesario:** `oraculos/<tarea>/` de cada tarea, la caché de dependencias de cada tarea (`cache/rust/<hash>`), `calibracion.json`, `configs/` y `root.toml`. Nunca `eventos.jsonl` entero, ni `runs.jsonl`, ni transcripts.
+3. **Los repos de S2:** `mineria/s2/rep/tN-ref`.
+4. **Un manifiesto** con el SHA-256 de cada archivo, el commit de Root y la huella de cada dimensión.
+
+**Lo que vuelve:**
+1. Las filas nuevas de `calibracion.json`.
+2. Los `.casos.jsonl` nuevos.
+3. Las líneas de `eventos.jsonl` con el gasto de API, para contar el gasto de S2.
+4. El mismo manifiesto, con el SHA-256 de lo que vuelve.
+
+**Cómo entra al `ROOT_HOME` de la laptop:** un comando nuevo, `r00t colab importar`.
+- Antes de escribir, guarda un respaldo de `calibracion.json` con reflink.
+- Revisa que el commit de Root, la huella y el `tarea_hash` de cada fila coincidan con los de la laptop. Una fila que no coincide no entra, y el comando lo dice.
+- Agrega las filas con `calibra::agregar`, que ya es público. Copia los `.casos.jsonl`. Agrega las líneas de gasto a `eventos.jsonl`, con una marca de origen.
+
+**El paquete, la importación y el ciclo del runtime son la Tarea 139.** No dependen del camino A o B. El ciclo sigue la forma de `colab.rs`: anotar la sesión en `activo.json`, sondear, y liberar el runtime al terminar, con una señal o con un tope.
+
+## 4. El runtime y las unidades
+
+**Alcanza un runtime de CPU.** Ninguna calibración usa GPU. Una T4 gastaría unidades sin ganar nada. La CPU de Colab tiene 2 núcleos y unos 12 GB, contra 8 núcleos y 15 GB de la laptop. Las calibraciones van a tardar más.
+
+**Las unidades, estimadas.** No tengo el precio exacto de un runtime de CPU. Lo dice la Prueba 0. Con un precio cercano a 0,1 unidades por hora:
+
+| Calibración | Tiempo estimado en Colab | Unidades estimadas |
+|---|---|---|
+| Preparar el runtime (Rust, imagen o herramientas) | 20 a 30 min | 0,05 |
+| Eficiencia de t1 a t3 | 3 a 4 h | 0,4 |
+| Oráculo de t1 a t3 (cuatro dimensiones) | 1,5 a 2 h | 0,2 |
+| Juez de t1 a t3 (tres dimensiones) | 3 a 5 h, casi todo en espera de la API | 0,5 |
+
+Todo junto queda muy por debajo de 50. Si la Prueba 0 da un precio mucho mayor, recalculo antes de lanzar.
+
+**Las claves.** Solo entran por Colab Secrets. La Prueba 0 dice si un proceso de `exec` las puede leer. Si no puede, la calibración con juez corre desde una celda del notebook con el MCP `colab-mcp`, que sí lee Secrets. Esa variante la decido con el resultado.
+
+## 5. El ruido de Eficiencia en Colab
+
+- **Una máquina de Colab es compartida.** Su ruido va a ser mayor que el de la laptop.
+- **El método no depende de la máquina.** El ruido se mide en cada corrida: el ancla, la mediana y los cuartiles de la 138.
+- **Lo que sí cambia:** con más ruido, el umbral sube. Una regresión chica se ve menos. La especificidad medida en Colab vale para la laptop. La sensibilidad medida en Colab es más baja, y por eso es una cota conservadora.
+- **Lo que hace falta saber:** en qué máquina se midió cada fila. Lo guarda el manifiesto de la 139. Sumar un campo a la fila toca `calibra.rs`, que es de la 137. Va después de la cadena 138.
+- **La regla:** si en Colab los limpios dan bien y los lastres de memoria se ven, la fila vale. Si los limpios de Colab fallan por ruido, Eficiencia se calibra en la laptop.
+
+## 6. P107 a: el plan del juez, con 25 USD
+
+**Lo que queda:** cerca de 18,45 USD.
+
+**Lo que dice P102 a sobre el juez, y un aviso honesto.** P102 a pide una cota de Wilson de 0,8 en cada clase, con las tareas juntas. **La cota nunca pasa la proporción real.** Si la sensibilidad real del juez es 0,5, ninguna cantidad de casos llega a 0,8. Diseño de t1 dio 1 de 2 con veredicto. Por eso, el plan mide primero, y para si la proporción no alcanza.
+
+**El plan, en etapas:**
+
+| Etapa | Qué | Gasto estimado | Para si |
+|---|---|---|---|
+| 1 | Prueba de dos casos de Diseño en t1 | 0,35 USD | Algún caso queda sin veredicto por un error de Root |
+| 2 | Arquitectura de t1 a t3, n=12 por tarea | 4,5 USD | La sensibilidad con las tareas juntas da menos de 0,85 |
+| 3 | Diseño de t1 a t3, n=12 por tarea | 6 USD | Igual que la etapa 2 |
+| 4 | Estructura de t1 a t3, n=12 por tarea | 4,5 USD | Igual que la etapa 2 |
+| 5 | Más casos para la dimensión que esté más cerca de 0,8 | Lo que quede | El tope de 25 USD |
+
+- Cada corrida lleva `--tope-usd` con lo que queda de su etapa. El control por llamada frena antes de pasarlo.
+- **Con n=12 por tarea,** cada dimensión junta unos 18 defectos y 18 limpios. Con todo bien, la cota de Wilson de 18 de 18 es 0,82.
+- **El umbral de parada de 0,85** deja margen: con una proporción menor, la cota no llega a 0,8 con casos que alcancen el tope.
+
+**Qué puede correr ya y qué espera:**
+- **La etapa 1 no depende de la 137 ni de la 138.** Esas tareas son de Eficiencia. La 128 y la 129, que la etapa 1 prueba, ya están en la cadena 110 a 136.
+- **Pero las mediciones van a Colab.** Correrla hoy en la laptop iría contra la decisión C a. Le pregunto al usuario, en P108.
+- **Las etapas 2 a 5 esperan a Colab:** la Prueba 0 y la 139. Si la 139 tarda, también caben en la laptop, porque casi todo su tiempo es espera de la API.
+
+**P108: ¿la prueba de dos casos de Diseño corre ya en la laptop, o espera a Colab?**
+- **a)** Corre ya en la laptop. Son unos 10 minutos y 0,35 USD, casi todo en espera de la API. *(Recomendada: no carga la máquina, y su resultado decide si las etapas 2 a 5 valen la pena antes de construir el camino a Colab.)*
+- **b)** Espera a Colab, como toda medición desde la decisión C a.
+
+## 7. La Tarea 139
+
+| Tarea | Qué | Archivos |
+|---|---|---|
+| 139 | El paquete de ida, la importación de vuelta, y el ciclo del runtime de una calibración en Colab | `src/colab_calibra.rs` (nuevo), `src/cli.rs`, `src/lib.rs`, `src/oracle/colab.rs` (solo para abrir sus funciones de la CLI a `pub(crate)`) |
+
+**¿Choca con la 137 o la 138? No.** El módulo nuevo vive en `src/`, y se registra en `src/lib.rs`, que ninguna de las dos toca. Usa las funciones de la CLI de `oracle::colab`, abiertas a `pub(crate)`, y `oracle::calibra::agregar`, que ya es público. `colab.rs` no es de la 137 ni de la 138. La 139 corre en paralelo con la 137 y la 138, con base en la punta de `laptop/cadena-110-136`.
+
+**La 139 no elige el camino A o B.** Corre la calibración en el runtime con un comando que recibe del manifiesto. Así sirve a los dos caminos.
+
+El brief es `docs/builds/brief-local-139.md`. La 140, el modo sin contenedor, solo se escribe si la Prueba 0 falla.
+
+## 8. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | La Prueba 0 | Nada | Colab, CPU | No |
+| 2 | La etapa 1 de P107 a: dos casos de Diseño | **P108** | Laptop o Colab | 0,35 USD |
+| 3 | La serie 138: la 137 y la 138, su suite y Eficiencia | Nada; ya corre | Laptop | No |
+| 4 | La Tarea 139 | Nada | Laptop, sin podman | No |
+| 5 | La Tarea 140, solo si la Prueba 0 falla | El paso 1 | Laptop | No |
+| 6 | La mezcla de la cadena 110 a 139 | La orden del usuario | — | No |
+| 7 | Las etapas 2 a 5 de P107 a | Los pasos 2 y 4 | Colab | Hasta 18,45 USD |
+| 8 | Si Eficiencia no cumple con la serie 138, su calibración otra vez | El paso 4 | Colab, solo por el camino A | No |
+| 9 | Congelar la versión | El paso 7 | — | No |
+| 10 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 11 | P98 c: el final con 15 defectos reales | El paso 10 | — | No |
+| 12 | La validez sobre el final sellado | Los pasos 1 a 11 | Colab | Según el final |
+
+**Preguntas al usuario:** P108.
