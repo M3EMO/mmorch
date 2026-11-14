@@ -36,7 +36,9 @@ use crate::oracle::tarea::{Tarea, cargar_en};
 use crate::oracle::{ErrorOraculo, OpcionesOraculo, comando_git};
 use crate::route::comando::{etiqueta_via, rutear_en};
 use crate::route::politica::nombre_rol;
-use crate::tipos::{Eleccion, Evento, Fila, Rol, TipoEvento, Veredicto, Via};
+use crate::tipos::{
+    Decision, Eleccion, Evento, Fila, MedidaEficiencia, Rol, TipoEvento, Veredicto, Via,
+};
 use crate::track;
 
 /// Tokens que `r00t corre` pasa a `route` por cada rol: 0, como `r00t route` sin `--tokens`.
@@ -728,6 +730,32 @@ fn resultado_exitoso(stdout: &[u8]) -> Result<String, String> {
         Some(otro) => Err(format!("terminó con subtype {otro}")),
         None => Err("la línea result no trae subtype".into()),
     }
+}
+
+/// Medidas de `eficiencia_auto` con regresión que justifican una vuelta. Vacío quiere decir: no hay vuelta.
+#[cfg_attr(not(test), allow(dead_code))]
+fn regresiones_de_vuelta(
+    veredicto: &Veredicto,
+    roles: &[Rol],
+    lanzados: &[Lanzado],
+) -> Vec<MedidaEficiencia> {
+    let terminaron_bien = lanzados.len() == roles.len() && lanzados.iter().all(|l| l.codigo == 0);
+    if !terminaron_bien {
+        return Vec::new();
+    }
+    if veredicto
+        .informe
+        .as_ref()
+        .is_some_and(|informe| informe.decision == Decision::Bloqueado)
+    {
+        return Vec::new();
+    }
+    veredicto
+        .eficiencia_auto
+        .iter()
+        .filter(|medida| medida.regresion)
+        .cloned()
+        .collect()
 }
 
 /// Motivo de un `result` con `is_error` true. Si el token venció, lo dice.
@@ -2254,6 +2282,111 @@ mod tests {
             !motivo.contains("Invalid API key"),
             "no copia el texto: {motivo}"
         );
+    }
+
+    /// Medida de eficiencia con los valores mínimos para la regla de vuelta.
+    fn medida_eficiencia(medida: &str, regresion: bool) -> MedidaEficiencia {
+        MedidaEficiencia {
+            medida: medida.into(),
+            referencia: Some(10.0),
+            repo: Some(13.0),
+            razon: Some(1.3),
+            ruido: Some(0.05),
+            regresion,
+            motivo: None,
+        }
+    }
+
+    fn lanzado_de(n: u32, rol: Rol, codigo: i32) -> Lanzado {
+        Lanzado {
+            n,
+            rol,
+            codigo,
+            linea: String::new(),
+        }
+    }
+
+    fn veredicto_con_eficiencia(medidas: Vec<MedidaEficiencia>) -> Veredicto {
+        Veredicto {
+            informe: Some(informe()),
+            eficiencia_auto: medidas,
+            ..Veredicto::default()
+        }
+    }
+
+    #[test]
+    fn regresiones_de_vuelta_regresion_de_1_3_veces_da_vuelta() {
+        let veredicto = veredicto_con_eficiencia(vec![medida_eficiencia("tiempo_tests", true)]);
+        let roles = [Rol::Planifica];
+        let lanzados = [lanzado_de(1, Rol::Planifica, 0)];
+        let vuelta = regresiones_de_vuelta(&veredicto, &roles, &lanzados);
+        assert_eq!(vuelta.len(), 1, "una regresión da vuelta: {vuelta:?}");
+        assert_eq!(vuelta[0].medida, "tiempo_tests");
+    }
+
+    #[test]
+    fn regresiones_de_vuelta_medida_sin_regresion_no_da_vuelta() {
+        let veredicto = veredicto_con_eficiencia(vec![medida_eficiencia("tiempo_tests", false)]);
+        let roles = [Rol::Planifica];
+        let lanzados = [lanzado_de(1, Rol::Planifica, 0)];
+        let vuelta = regresiones_de_vuelta(&veredicto, &roles, &lanzados);
+        assert!(vuelta.is_empty(), "sin regresión no hay vuelta: {vuelta:?}");
+    }
+
+    #[test]
+    fn regresiones_de_vuelta_sin_eficiencia_auto_no_da_vuelta() {
+        let veredicto = veredicto_con_eficiencia(Vec::new());
+        let roles = [Rol::Planifica];
+        let lanzados = [lanzado_de(1, Rol::Planifica, 0)];
+        let vuelta = regresiones_de_vuelta(&veredicto, &roles, &lanzados);
+        assert!(vuelta.is_empty(), "sin medidas no hay vuelta: {vuelta:?}");
+    }
+
+    #[test]
+    fn regresiones_de_vuelta_bloqueado_con_regresion_no_da_vuelta() {
+        let mut veredicto = veredicto_con_eficiencia(vec![medida_eficiencia("tiempo_tests", true)]);
+        veredicto.informe = Some(Informe {
+            decision: Decision::Bloqueado,
+            ..informe()
+        });
+        let roles = [Rol::Planifica];
+        let lanzados = [lanzado_de(1, Rol::Planifica, 0)];
+        let vuelta = regresiones_de_vuelta(&veredicto, &roles, &lanzados);
+        assert!(vuelta.is_empty(), "bloqueado no da vuelta: {vuelta:?}");
+    }
+
+    #[test]
+    fn regresiones_de_vuelta_rol_que_salio_con_1_no_da_vuelta() {
+        let veredicto = veredicto_con_eficiencia(vec![medida_eficiencia("tiempo_tests", true)]);
+        let roles = [Rol::Planifica];
+        let lanzados = [lanzado_de(1, Rol::Planifica, 1)];
+        let vuelta = regresiones_de_vuelta(&veredicto, &roles, &lanzados);
+        assert!(vuelta.is_empty(), "un código 1 no da vuelta: {vuelta:?}");
+    }
+
+    #[test]
+    fn regresiones_de_vuelta_rol_sin_lanzado_no_da_vuelta() {
+        let veredicto = veredicto_con_eficiencia(vec![medida_eficiencia("tiempo_tests", true)]);
+        let roles = [Rol::Planifica, Rol::Construye];
+        let lanzados = [lanzado_de(1, Rol::Planifica, 0)];
+        let vuelta = regresiones_de_vuelta(&veredicto, &roles, &lanzados);
+        assert!(
+            vuelta.is_empty(),
+            "falta un lanzado, no hay vuelta: {vuelta:?}"
+        );
+    }
+
+    #[test]
+    fn regresiones_de_vuelta_solo_devuelve_las_medidas_con_regresion() {
+        let veredicto = veredicto_con_eficiencia(vec![
+            medida_eficiencia("tiempo_tests", true),
+            medida_eficiencia("memoria_pico", false),
+        ]);
+        let roles = [Rol::Planifica];
+        let lanzados = [lanzado_de(1, Rol::Planifica, 0)];
+        let vuelta = regresiones_de_vuelta(&veredicto, &roles, &lanzados);
+        assert_eq!(vuelta.len(), 1, "solo la medida con regresión: {vuelta:?}");
+        assert_eq!(vuelta[0].medida, "tiempo_tests");
     }
 
     #[test]
