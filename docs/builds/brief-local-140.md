@@ -1,5 +1,7 @@
 # Brief de la Tarea 140 para el builder local
 
+> **SIN USO desde la vuelta (54). No se construye.** La Prueba 0b falló: con `--network host --cgroups=disabled`, crun no puede montar `proc` en Colab. El kernel lo impide (`mount_too_revealing`), porque Docker tapa entradas de `/proc`.
+
 Este brief vale solo. No necesita otra conversación. La fuente de verdad es `.claude/plans/root.plan.md`.
 
 **Esta tarea arranca solo si la Prueba 0b del orquestador dio `rc=0`.** La Prueba 0b está en la vuelta (53), sección 3. Si no dio `rc=0`, no arranques: el planner vuelve a decidir.

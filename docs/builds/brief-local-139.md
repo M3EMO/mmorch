@@ -1,5 +1,7 @@
 # Brief de la Tarea 139 para el builder local
 
+> **EN PAUSA desde la vuelta (54). No arranques.** La Prueba 0b mostró que ningún contenedor anidado corre en Colab. Este brief corre `r00t` con el modo de la Tarea 140, que no sirve. El planner lo reescribe según la respuesta del usuario a P110.
+
 Este brief vale solo. No necesita otra conversación. La fuente de verdad es `.claude/plans/root.plan.md`. Reemplaza la versión de la vuelta (52).
 
 ## Qué es Root

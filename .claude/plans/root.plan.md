@@ -10912,3 +10912,106 @@ El builder 139 no arrancó. Reescribí `docs/builds/brief-local-139.md` con esto
 **Una nota:** la CLI de Colab avisa una versión nueva, 0.8.0. La laptop tiene 0.7.4. Actualizarla es un cambio de herramienta del usuario. El orquestador lo puede proponer aparte.
 
 **Preguntas al usuario:** P109. P108 queda retirada.
+
+## Vuelta del 2026-11-14 (54): ningún contenedor anidado en Colab, y si Colab vale la pena ahora
+
+**Estado.**
+- **La Prueba 0b falló.** Con `--network host --cgroups=disabled`, crun dio `mount proc to proc: Permission denied` (rc 126).
+- **La Prueba 0c del orquestador:** el runtime no es gVisor. Es un contenedor de Docker sin privilegios, con AppArmor, sobre Linux 6.6 de Container-Optimized OS. `--pid=host` falla, `--privileged` falla al montar `proc`, y `unshare --mount --pid --fork --mount-proc true` falla igual.
+- El brief 140 queda sin uso. El orquestador frenó al builder 139, porque su brief usaba el modo de la 140.
+- La serie 138 sigue calibrando Eficiencia en la laptop. P109 espera al usuario. El saldo de Colab es 769,72 unidades.
+
+**Un error mío.** En la vuelta (53) elegí una salida sin probarla, y escribí dos briefs que dependían de ella. Debí escribir solo la prueba, y los briefs después de su resultado.
+
+## 1. La conclusión del orquestador, revisada: es correcta
+
+**La causa tiene nombre en el kernel.** `mount_too_revealing()` impide montar un `procfs` nuevo cuando el `/proc` que se ve tiene entradas tapadas. Docker tapa entradas como `/proc/kcore` por defecto. Por eso falla todo lo que monta un `/proc` nuevo: podman, `unshare --mount-proc` y `bwrap --proc`.
+
+**El arreglo conocido no está a nuestro alcance.** Las fuentes nombran `--security-opt systempaths=unconfined` o una opción `ProcMount` del contenedor de afuera. El contenedor de afuera es el de Colab, y no lo controlamos.
+
+**Lo que la conclusión no cubre:** una herramienta que no monte un `/proc` nuevo. `bubblewrap` puede reusar el `/proc` actual con `--ro-bind /proc /proc`, en vez de `--proc /proc`. Nadie lo probó en Colab.
+
+## 2. Las tres opciones
+
+| Opción | Aislamiento que queda | Costo en código | Fidelidad con la laptop |
+|---|---|---|---|
+| **B: el runtime como aislamiento, sin contenedor** | Solo el runtime de un solo uso. El código ve todo el runtime y la red | Grande: un backend nativo para cada ejecución, y un script que instale las herramientas con sus versiones | Baja: Ubuntu 24.04 en vez de la imagen Debian, y herramientas instaladas a mano |
+| **bubblewrap sin `/proc` nuevo** | El sistema de archivos de solo lectura, un `/tmp` propio, y quizás la red cerrada con un espacio de usuario y de red propios. El código ve los procesos del runtime | Grande: un backend de `bwrap` en `contenedor.rs`, más el mismo script de herramientas de B | Baja, por la misma razón que B. La imagen no se puede construir en Colab, porque sus pasos `RUN` necesitan un contenedor |
+| **Dejar las calibraciones en la laptop** | El de hoy: podman con la red apagada, límites y cgroups | Ninguno | Total |
+
+**La imagen no se construye en Colab, en ninguna opción.** `podman build` corre sus pasos `RUN` en un contenedor, y en Colab ningún contenedor corre. Se podría subir la imagen guardada, de varios GB, y abrir sus capas a mano. Es más trabajo, y no lo propongo.
+
+## 3. ¿Vale la pena para las cuatro dimensiones de oráculo?
+
+**No ahora.**
+- **Seguridad, Funciona, Completitud y Pruebas ya cumplen P102 a.** No hace falta medirlas otra vez hasta congelar la versión.
+- **Al congelar, las doce calibraciones tardan cerca de 30 minutos en la laptop,** con la 130 adentro. Es una vez.
+- **Llevarlas a Colab cuesta dos tareas grandes:** un backend y un script de herramientas. Además, mide en otro sistema y con otras herramientas.
+- **Eficiencia y el juez no pueden ir a Colab en ninguna opción.** Eficiencia necesita el cgroup del contenedor. El juez necesita Colab Secrets, que `exec` no lee.
+
+**Lo que Colab sí puede dar más adelante:** correr la suite sin podman de Root, como en la vuelta (38). Esa suite no necesita contenedores, y ya se probó ahí.
+
+## 4. Lo que no puedo decidir solo
+
+El usuario decidió el 2026-11-13: "C. Colab a) Mover las mediciones a Colab, dentro de 50 unidades". Con estos datos, recomiendo no hacerlo por ahora. Esa decisión es del usuario, no mía.
+
+**P110: con estos datos, ¿qué hace Root con Colab?**
+- **a)** Las calibraciones quedan en la laptop por ahora. Colab se usa para la suite sin podman, y se vuelve a mirar si cambia el runtime de Colab. *(Recomendada: las dimensiones que podrían ir ya cumplen P102 a, Eficiencia y el juez no pueden ir, y el costo es de dos tareas grandes con menos fidelidad.)*
+- **b)** Probar bubblewrap con la Prueba 0d. Si anda, construir su backend y el script de herramientas, y llevar ahí las cuatro dimensiones de oráculo.
+- **c)** Construir el camino B, sin contenedor, aceptando que el código ve todo el runtime.
+
+## 5. La Prueba 0d, por si el usuario elige b
+
+Cuesta unos 5 minutos en un runtime de CPU, sin claves. No hace falta correrla si el usuario elige a o c.
+
+```bash
+#!/usr/bin/env bash
+# Prueba 0d: bubblewrap sin montar un /proc nuevo.
+set -u
+apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq bubblewrap iproute2 >/dev/null 2>&1
+bwrap --version
+mkdir -p /content/p/ro /content/p/sal && echo hola > /content/p/ro/a
+COMUN="--ro-bind / / --dev-bind /dev /dev --ro-bind /proc /proc --tmpfs /tmp --ro-bind /content/p/ro /repo --bind /content/p/sal /salida"
+echo "== d1: solo montajes"
+bwrap $COMUN -- sh -c 'cat /repo/a; touch /repo/b 2>&1 | head -1; touch /salida/c && echo escribe_salida'
+echo "rc_d1=$?"
+echo "== d2: usuario y red propios"
+bwrap --unshare-user --uid 0 --gid 0 --unshare-net $COMUN -- sh -c 'cat /repo/a; ip -o link | head -2; timeout 3 bash -c "</dev/tcp/8.8.8.8/53" && echo red_abierta || echo red_cerrada'
+echo "rc_d2=$?"
+echo "== d3: d2 más procesos propios, con el /proc viejo"
+bwrap --unshare-user --uid 0 --gid 0 --unshare-net --unshare-pid $COMUN -- sh -c 'echo pid=$$'
+echo "rc_d3=$?"
+```
+
+**Lo que debe dar para seguir:** `rc_d1=0` y `rc_d2=0`, con `red_cerrada` en d2. Si d2 falla, bubblewrap no cierra la red, y no da más que el camino B.
+
+## 6. Los briefs
+
+- **`docs/builds/brief-local-139.md` queda en pausa.** Le sumo un aviso arriba. Si P110 es b o c, lo reescribo con el backend que corresponda.
+- **`docs/builds/brief-local-140.md` queda sin uso.** Le sumo un aviso arriba. No se construye.
+- **No escribo otra tarea ahora.** Las dos salidas en Colab dependen de P110.
+
+## 7. Qué hace el orquestador con el tiempo
+
+1. **Termina la serie 138 en la laptop:** la 137, la 138, su suite con podman y la calibración de Eficiencia.
+2. **Espera P109.** Con "a", corre la etapa 1 de P107 a en la laptop: dos casos de Diseño, cerca de 0,35 USD.
+3. **No lanza otra calibración en la laptop** fuera de esas dos, hasta P110. La decisión C a sigue en pie.
+4. **Puede usar Colab para la suite sin podman** de la cadena 110 a 138, si quiere liberar la laptop. Usa las reglas de la vuelta (38): usuario `rootci`, `tools/test-seguro.sh` y `ROOT_SIN_PODMAN=1`.
+
+## 8. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | La serie 138: la 137, la 138, su suite y Eficiencia | Nada; ya corre | Laptop | No |
+| 2 | La etapa 1 de P107 a: dos casos de Diseño | **P109** | Laptop | 0,35 USD |
+| 3 | Las etapas 2 a 5 de P107 a | El paso 2 y **P109** | Laptop | Hasta 18,45 USD |
+| 4 | Según **P110**: nada, o la Prueba 0d y sus tareas, o el camino B | **P110** | — | No |
+| 5 | La mezcla de la cadena 110 a 138 | La orden del usuario | — | No |
+| 6 | Si Eficiencia no cumple con la serie 138, su calibración otra vez | El paso 1 | Laptop | No |
+| 7 | Congelar la versión | El paso 3 | — | No |
+| 8 | Las doce calibraciones de oráculo con la versión congelada | El paso 7 | Laptop, o Colab según **P110** | No |
+| 9 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 10 | P98 c: el final con 15 defectos reales | El paso 9 | — | No |
+| 11 | La validez sobre el final sellado | Los pasos 1 a 10 | Laptop si usa el juez | Según el final |
+
+**Preguntas al usuario:** P109 y P110.
