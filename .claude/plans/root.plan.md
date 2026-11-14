@@ -11837,3 +11837,150 @@ uname -r; stat -fc %T /sys/fs/cgroup; echo "CTRL $(cat /sys/fs/cgroup/cgroup.con
 - **b) En Colab, con otra medida de memoria.** `memoria_pico` pasa a ser el máximo de memoria de un solo proceso. Esa medida no suma los procesos de los tests. Cambia lo que mide la dimensión, y los números de t1 a t3 dejan de valer.
 
 Recomiendo la (a), porque la (b) cambia la dimensión para ganar solo una calibración.
+
+## Vuelta del 2026-11-14 (61): la memoria por proceso, la carga sin cgroup y la subida en trozos
+
+**Estado.**
+- La 146 y la 147 terminaron en verde sin podman: 3793/0/5 y 3783/0/5.
+- `laptop/cadena-110-147` las suma sin conflictos. Su suite con podman dio 3790/0/5.
+- La Prueba 0e falló. `/sys/fs/cgroup` es de solo lectura en el runtime, y `mkdir` no anda.
+- **P111, respuesta del usuario: "b) Colab, otra memoria".** `memoria_pico` pasa a ser el máximo de memoria de un solo proceso. Eficiencia se calibra en Colab. Los números de t1 a t3 de la laptop dejan de valer.
+- El paso 0 y las pruebas de la 140 y la 139 corrieron en Colab. La de la 139 dio Seguridad de s2-t1 igual que en la laptop.
+- La prueba de la 141 corre ahora. Su resultado llega en la vuelta siguiente.
+
+## 1. Las tres preguntas de la 146
+
+1. **El pid como nombre en modo bwrap.** Acepto la decisión. El pid identifica el proceso que se mató, y no repite la palabra.
+2. **`empaquetar_cli` sin uso propio.** Hoy `lib.rs:640` la llama con los valores por defecto, y `empaquetar_cli_con` hace lo mismo con 4 y 42. Dos entradas para lo mismo es superficie de más. La Tarea 150 borra `empaquetar_cli`, y `lib.rs` llama siempre a `empaquetar_cli_con`.
+3. **`motor` como `&'static str`.** Acepto la decisión. Solo hay dos motores, y el campo solo arma un texto.
+
+## 2. Las cuatro preguntas de la 147
+
+1. **Un enlace llamado `.git` o `target` hace fallar el empaquetado.** Acepto la decisión. Un enlace en esos lugares es raro, y saltarlo en silencio cambia lo que Colab ve.
+2. **El sufijo "su paquete de vuelta no llegó" con un SHA distinto.** No acepto la decisión. El texto dice algo falso: el paquete sí llegó, pero no coincide. La Tarea 150 da a ese caso su propio texto: "su paquete de vuelta llegó con otro SHA-256 y no se abrió".
+3. **`MOTIVO_LASTRE_SIN_LUGAR` habla de "función vieja".** Desde la 143, el lugar sale de la sonda, no de la edad de la función. La Tarea 148 reescribe el texto y su test juntos.
+4. **`lugar_por` conserva `nombre` para filas viejas.** Acepto la decisión.
+
+## 3. La nueva `memoria_pico`: el máximo de un solo proceso de test
+
+**Qué mide.** El mayor pico de memoria residente de un proceso de test, en las corridas medidas de un lado. La medida no suma procesos. No cuenta a `cargo` ni a `nextest`.
+
+**Por qué excluir a `cargo` y a `nextest`.** El lastre suma 64 MiB a un proceso de test. `cargo nextest` puede ocupar decenas de MiB por sí solo. Si entrara en el máximo, el lastre podría quedar debajo de él, y la medida no lo vería.
+
+**Cómo se mide sin cgroup.**
+1. Root escribe un guion de Python, `root-medir.py`, en la carpeta de salida de cada lado. `python3` está en la imagen del oráculo y en el runtime de Colab.
+2. Las corridas de memoria fijan `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER` a ese guion. nextest lanza cada binario de test a través del runner.
+3. El guion lanza el binario, espera su fin y lee `getrusage(RUSAGE_CHILDREN).ru_maxrss`. Ese valor es el pico del mayor proceso que esperó, con sus hijos esperados.
+4. El guion agrega el pico, en bytes, a `/salida/root-rss.lista`.
+5. Al final, el comando imprime `ROOT_MEM` con el mayor valor de la lista. La marca conserva su nombre, así los ejecutores falsos de hoy siguen sirviendo.
+
+**Corridas aparte.** El runner suma el arranque de Python a cada proceso de test. Eso cambiaría `tiempo_tests`. Por eso la memoria corre en sus propias corridas: 4 por lado, alternadas. Cuatro es `MIN_CORRIDAS_CUARTILES`, así la comparación usa cuartiles. Las 10 corridas de tiempo no usan el runner.
+
+**Sin medida, sin valor.** Una lista vacía o sin número deja `memoria_pico` sin valor, con el motivo "sin medida de memoria por proceso". Nunca se supone un valor. Si el runner no se aplica, la lista queda vacía, y la falla se ve.
+
+**Lo que se pierde.** Un lastre en un proceso que nadie espera, como un demonio, no se mide. Los lastres de la calibración corren dentro de los tests, así que no les afecta.
+
+**El esquema no cambia.** La medida conserva su id, `memoria_pico`. Su documentación dice lo que mide ahora. Las filas de Eficiencia de la v5 no se usan para nada.
+
+## 4. Un control de carga que vale en Colab y en la laptop
+
+**El problema.** El diseño de la vuelta (60) restaba la CPU del cgroup del contenedor. En bwrap no hay cgroup propio.
+
+**La solución: la CPU propia sale de `getrusage`, no del cgroup.**
+1. Cada comando medido corre bajo `root-medir.py`, en modo `cpu`. El guion lanza el comando y espera su fin.
+2. Al final, el guion imprime `ROOT_CPU_US`: la CPU de usuario y de sistema de sus hijos esperados, más la suya.
+3. Root lee la línea `cpu` de `/proc/stat` antes y después de esa corrida. La resta da la CPU ocupada de toda la máquina.
+4. La carga ajena es la CPU de la máquina menos `ROOT_CPU_US`, dividida por el reloj de la corrida. Se mide en núcleos.
+5. Si una corrida supera `FRACCION_DE_NUCLEOS_CARGADA` por los núcleos, los tiempos del caso quedan sin valor.
+
+**Por qué vale en los dos lugares.** `getrusage` funciona igual dentro de podman y dentro de bwrap. `/proc/stat` existe en la laptop y en el runtime. En Colab, `/proc/stat` incluye el `steal`: la CPU que la máquina virtual perdió. Eso también es carga ajena.
+
+**El resto que no se resta.** Queda el arranque de podman o de bwrap, y el propio `r00t`. En una corrida de tests es una fracción de núcleo. El umbral es la mitad de los núcleos: 4 en la laptop y 1 en un runtime de 2 núcleos.
+
+**Sin `ROOT_CPU_US`, sin valor.** Los tiempos quedan sin valor, con "sin medida de CPU propia". Cada caso suma un aviso con su mayor carga ajena. Con esos datos se revisa el umbral.
+
+## 5. Qué medidas de Eficiencia valen en un runtime de Colab
+
+| Medida | ¿Vale en Colab? | Motivo |
+|---|---|---|
+| `memoria_pico` nueva | Sí | `getrusage` no necesita cgroup |
+| `tamano_binario` | Sí | El tamaño no depende de la máquina, solo de la versión de Rust, que está fijada |
+| `tiempo_tests` | Sí, con el control de carga ajena | El runtime tiene 2 núcleos y vecinos. El control ve el `steal` |
+| `tiempo_compilacion` | Sí, con el mismo control | Compila más lento con 2 núcleos, pero compara contra el ancla del mismo runtime |
+
+**El riesgo que queda: los limpios.** Una detección cuenta solo por la memoria. Pero un limpio marcado por ruido de tiempo rompe la especificidad. El control de carga cubre la carga ajena, pero no todo el ruido. La calibración en Colab lo mide. Si un limpio cae por tiempo sin carga ajena, el orquestador lo informa y no repite.
+
+**La base y los casos corren en el mismo runtime.** Un trabajo `tarea:dimension:n` corre entero en un runtime. Así, la referencia, el ancla y los casos comparten máquina.
+
+**Costo.** Cada tarea va en su propio runtime de CPU. Con 2 núcleos, una tarea tarda de 1,5 a 2 horas, debajo del tope de 4 horas. Las tres tareas juntas cuestan cerca de 0,5 unidades.
+
+## 6. La subida y la verificación en Colab
+
+**La subida de `colab calibrar` tiene un defecto.** `PAQUETE_REMOTO_IDA` vale `paquete.tar.gz`, una ruta relativa. El guion de preparación lo busca en `/content/paquete.tar.gz`. La prueba de la 140 mostró que una ruta relativa no deja el archivo en `/content`. `src/oracle/colab.rs` tiene el mismo defecto con `root-paquete.tar.gz`.
+
+**Lo que cambia, en la Tarea 150:**
+1. **Toda ruta remota es absoluta,** bajo `/content`.
+2. **La subida va siempre en trozos de 40 MiB,** con nombres `/content/root-paq.NN`. La prueba de la 140 subió así 182 MB en 58 s. Un paquete chico va en un solo trozo, por el mismo camino.
+3. **El guion de preparación une los trozos en orden** y revisa el SHA-256 contra el valor que Root le pasa. Si difiere, el guion falla con su marca, y no abre nada.
+4. **Por qué siempre en trozos.** No sabemos si el "400 Bad Request" vino del tamaño o de la ruta relativa. Un camino único y probado es más simple que dos.
+
+**La verificación de versiones tiene otro defecto, y no es el PATH.** `preparar-runtime.sh` instala Rust en `/usr/local/cargo`, con `RUSTUP_HOME=/usr/local/rustup`. `verificar-versiones.sh` ya agrega `/usr/local/cargo/bin` al PATH. Pero ese `rustc` es el proxy de rustup. Sin `RUSTUP_HOME`, el proxy busca en `~/.rustup`, no encuentra el toolchain y falla. La verificación interna dio `ok` porque hereda las variables de `preparar-runtime.sh`.
+
+**Arreglo, en la Tarea 150.** `verificar-versiones.sh` fija `RUSTUP_HOME` y `CARGO_HOME`, si no vienen, con los mismos valores que `preparar-runtime.sh`.
+
+**Comprobación barata, si el orquestador tiene un runtime preparado:**
+
+```sh
+/usr/local/cargo/bin/rustc --version; RUSTUP_HOME=/usr/local/rustup /usr/local/cargo/bin/rustc --version
+```
+
+La primera debe fallar. La segunda debe dar `1.99.1`.
+
+**Lo que esto anticipa de la prueba de la 141, que corre ahora.**
+- Puede fallar en la subida, por la ruta relativa. Ese es el defecto del punto 1.
+- Si pasa la subida, `verificacion.txt` del cierre puede decir "mal rustc" y "mal clippy". El cierre llama a `verificar-versiones.sh` aparte, sin `RUSTUP_HOME`.
+- Cualquiera de las dos es un defecto conocido. No hace falta repetir la prueba antes de la 150.
+
+## 7. Las tareas nuevas
+
+Las tres arrancan desde la punta de `laptop/cadena-110-147`. No comparten archivos.
+
+| Tarea | Qué | Archivos |
+|---|---|---|
+| 148 | La lista de la sonda por archivo, y el texto de `MOTIVO_LASTRE_SIN_LUGAR` | `src/oracle/calibra/sonda_lastre.rs`, `src/oracle/mod.rs`, `src/oracle/calibra.rs` |
+| 149 | La memoria por proceso y la carga ajena con `getrusage` | `src/oracle/eficiencia.rs` |
+| 150 | Las rutas absolutas y los trozos, el SHA de ida, el texto del SHA distinto, `empaquetar_cli` fuera, Eficiencia aceptada en Colab, y `verificar-versiones.sh` | `src/colab_calibra.rs`, `src/oracle/colab.rs`, `src/lib.rs`, `tools/colab/verificar-versiones.sh` |
+
+**La 150 quita el rechazo de Eficiencia** en `validar_trabajos`. Ese rechazo existía porque faltaba el cgroup. Con la 149, la memoria ya no lo necesita. La mezcla junta las dos antes de cualquier calibración en Colab.
+
+**La 148 y la 149 arrancan ya.** La 150 espera el resultado de la prueba de la 141. Esa prueba recorre justo los archivos de la 150, y un defecto nuevo entra en el mismo brief.
+
+Briefs: `docs/builds/brief-local-148.md` (rehecho), `brief-local-149.md` y `brief-local-150.md`.
+
+## 8. La Tarea 142
+
+**Su contenido sigue igual.** Su base cambia: la punta de `laptop/cadena-110-150`, la cadena 110 a 147 con la 148, la 149 y la 150. Motivo: la 142 toca `src/colab_calibra.rs`, igual que la 150.
+
+**Un punto se ajusta.** En el punto 3, si la forma de la Prueba 1 usa `colab upload`, la 142 usa la subida en trozos de la 150. Actualicé el brief de la 142.
+
+## 9. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | Las Tareas 148 y 149, a la vez | Nada | Laptop | No |
+| 2 | El resultado de la prueba de la 141 | Corre ahora | Colab | No |
+| 3 | La Tarea 150 | El paso 2 | Laptop | No |
+| 4 | Armar `laptop/cadena-110-150` y su suite con podman | Los pasos 1 y 3 | Laptop | No |
+| 5 | La prueba de la 141 otra vez, con la cadena 150 | El paso 4 | Colab | No |
+| 6 | La calibración de Eficiencia, t1 a t3, n=4, semilla 42, en tres runtimes de CPU | El paso 5 | Colab | No |
+| 7 | La Prueba 1 | El usuario | Colab, notebook | No |
+| 8 | La Tarea 142 | Los pasos 4 y 7 | Laptop | No |
+| 9 | Las cinco etapas de P107 a, en una sesión del notebook | Los pasos 5 y 8 | Colab, notebook | Hasta 18,45 USD |
+| 10 | La mezcla de la cadena 110 a 150 y la 142 | La orden del usuario | — | No |
+| 11 | Congelar la versión | Los pasos 6 y 9 | — | No |
+| 12 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 5 y 11 | Colab, cuatro runtimes | No |
+| 13 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 14 | P98 c: el final con 15 defectos reales | El paso 13 | — | No |
+| 15 | La validez sobre el final sellado | Los pasos 1 a 14 | Colab, notebook si usa el juez | Según el final |
+
+**Preguntas al usuario:** ninguna nueva.

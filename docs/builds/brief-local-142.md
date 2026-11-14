@@ -10,7 +10,7 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 ## Base, rama y roles
 
-- Arrancá desde la punta de la cadena que suma la 146 y la 147 sobre `laptop/cadena-110-145`. El orquestador te da su nombre. Esa cadena trae la 139 a la 141, la 143 a la 147, y la 127b.
+- Arrancá desde la punta de `laptop/cadena-110-150`. Es la cadena 110 a 147 con las Tareas 148, 149 y 150. Trae la 127b.
 - **Desde la Tarea 145, el paquete de vuelta y su manifiesto se arman en el runtime,** en el guion de cierre de `src/colab_calibra.rs`. Cada trabajo lleva su `n` y su semilla, con la forma `tarea:dimension:n`.
 - **El punto 3 espera la Prueba 1 del orquestador.** Los puntos 1, 2 y 4 no la esperan. Si la Prueba 1 no terminó, hacé el 1, el 2 y el 4, y dejá el 3 para el final.
 - No uses `isolation: "worktree"` para tus subagentes.
@@ -103,7 +103,8 @@ La regla que manda: **una calibración con juez corre en el runtime del notebook
 1. **Implementá la forma que diga la Prueba 1,** y ninguna otra.
 2. **Si es Drive,** el guion del punto 4 monta Drive y copia el paquete a `/content/paquete.tar`. El montaje pide su propia aprobación del usuario.
 3. **En todos los casos,** el guion revisa el SHA-256 del paquete contra el manifiesto antes de usarlo.
-4. **Si la Prueba 1 no terminó cuando llegues a este punto,** dejalo sin hacer y anotalo.
+4. **Si la forma usa `colab upload`,** usá la subida en trozos de la Tarea 150, con rutas absolutas. No armes otra.
+5. **Si la Prueba 1 no terminó cuando llegues a este punto,** dejalo sin hacer y anotalo.
 
 **Tests en rojo primero:**
 - Los que pida la forma elegida, con falsos.

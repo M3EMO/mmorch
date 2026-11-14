@@ -1,6 +1,6 @@
 # Brief de la Tarea 148 para el builder local
 
-Este brief vale solo. No necesita otra conversación. La fuente de verdad es `.claude/plans/root.plan.md`, vuelta (60).
+Este brief vale solo. No necesita otra conversación. La fuente de verdad es `.claude/plans/root.plan.md`, vueltas (60) y (61).
 
 ## Qué es Root
 
@@ -10,8 +10,9 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 ## Base, rama y roles
 
-- Arrancá desde la punta de `laptop/cadena-110-147`. Trae las Tareas 84 a 147 y la 127b. El orquestador la arma cuando la 146 y la 147 terminen.
-- Ningún otro builder corre a la vez.
+- Arrancá desde la punta de `laptop/cadena-110-147`. Trae las Tareas 84 a 147 y la 127b.
+- La 149 se construye a la vez. Toca `src/oracle/eficiencia.rs`. No toques ese archivo.
+- La 150 se construye después. Toca `src/colab_calibra.rs`, `src/oracle/colab.rs`, `src/lib.rs` y `tools/colab/verificar-versiones.sh`. No toques esos archivos.
 - No uses `isolation: "worktree"` para tus subagentes.
 - Trabajá en tu propio worktree, en una rama nueva: `laptop/tarea-148`. Después de `git worktree add`, fijá `git config --worktree core.hooksPath .githooks`. Preguntale al orquestador qué worktree usar.
 - La mezcla espera la orden del usuario.
@@ -24,11 +25,11 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 | Punto | Podés tocar |
 |---|---|
 | 1, la lista de la sonda por archivo | `src/oracle/calibra/sonda_lastre.rs`, `src/oracle/mod.rs` |
-| 2, la carga ajena por corrida | `src/oracle/eficiencia.rs` |
+| 2, el texto de `MOTIVO_LASTRE_SIN_LUGAR` | `src/oracle/calibra.rs` |
 
 - Los dos puntos no comparten archivos. Corren en paralelo.
 - **Tests de otros archivos.** Podés editar un test de cualquier archivo si lee un literal o una firma que esta tarea cambia. Solo el test, no código de producción. Anotá cada uno en el informe.
-- **No toques:** `src/oracle/contenedor.rs`, `src/tipos.rs`, el resto de `src/`, `imagenes/`, `rubricas/` y `$ROOT_HOME/`.
+- **No toques:** los archivos de la 149 y la 150, `src/oracle/contenedor.rs`, `src/tipos.rs`, el resto de `src/`, `imagenes/`, `rubricas/` y `$ROOT_HOME/`.
 - **Sin cambio de esquema.**
 - **Sin dependencias nuevas** en `Cargo.toml`.
 - Si un arreglo necesita un archivo fuera de tu lista, detenete y escribilo en el informe.
@@ -44,15 +45,13 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 ## Por qué
 
-**La calibración v5 de Eficiencia no midió nada útil.** Los 6 defectos quedaron no aplicables, y ningún tiempo tuvo valor. Hay dos causas.
+**1. La sonda pierde el inicio de su lista.** En la calibración v5, los 6 defectos de Eficiencia quedaron no aplicables. La sonda corrió bien en el contenedor. El journal muestra `ROOT_SONDA_INICIO`, 203 funciones y `ROOT_SONDA_FIN`. Pero `resultado_de`, en `src/oracle/contenedor.rs`, guarda solo la cola de 4000 caracteres del stdout (`COLA`). El bloque mide de 4514 a 6205 caracteres. La cola pierde `ROOT_SONDA_INICIO`. Sin inicio, `salida_valida` da falso, y `medir_lastre` da "sin salida; el comando no llegó a sus marcas". El test de punta a punta de la 143 no lo vio: su ejecutor falso devuelve el stdout entero, y su repo tiene cuatro funciones.
 
-**1. La sonda pierde el inicio de su lista.** La sonda corrió bien en el contenedor. El journal muestra `ROOT_SONDA_INICIO`, 203 funciones y `ROOT_SONDA_FIN`. Pero `resultado_de`, en `src/oracle/contenedor.rs`, guarda solo la cola de 4000 caracteres del stdout (`COLA`). El bloque mide de 4514 a 6205 caracteres. La cola pierde `ROOT_SONDA_INICIO`. Sin inicio, `salida_valida` da falso, y `medir_lastre` da "sin salida; el comando no llegó a sus marcas". El test de punta a punta de la 143 no lo vio: su ejecutor falso devuelve el stdout entero, y su repo tiene cuatro funciones.
-
-**2. El control de carga mide el trabajo de Root.** `con_control_de_carga` lee la carga de un minuto de `/proc/loadavg` antes de las corridas y después de ellas. La segunda lectura llega justo después de las compilaciones `--release`, que usan los 8 núcleos. En v5 dio 14,08. La carga cuenta los procesos de los contenedores de Root. La base pasa su motivo a todos los casos. Así, ningún tiempo puede tener valor.
+**2. Un motivo habla de una regla que ya no existe.** `MOTIVO_LASTRE_SIN_LUGAR` dice "función vieja". Desde la 143, el lugar del lastre sale de la sonda. La 147 borró la regla de la función vieja. El informe de la 147 lo anotó en su pregunta 3.
 
 ## Tarea
 
-La regla que manda: **una medida no depende del tamaño de un stdout recortado, y la carga cuenta solo el trabajo ajeno.** Hacé un commit por punto. Cada punto empieza con su test en rojo.
+La regla que manda: **una medida no depende del tamaño de un stdout recortado, y un motivo nombra la regla que corre.** Hacé un commit por punto. Cada punto empieza con su test en rojo.
 
 ### 1. La lista de la sonda por archivo
 
@@ -67,35 +66,22 @@ La regla que manda: **una medida no depende del tamaño de un stdout recortado, 
 - Unitario: el ejecutor falso no escribe el archivo. `medir_lastre` da "el comando no llegó a sus marcas".
 - Guarda: el test de punta a punta de la 143 sigue verde. Su ejecutor falso pasa a escribir el archivo.
 
-### 2. La carga ajena por corrida
+### 2. El texto de `MOTIVO_LASTRE_SIN_LUGAR`
 
-1. **Cada comando medido imprime `ROOT_CPU_US`.** Es el valor de `usage_usec` en `/sys/fs/cgroup/cpu.stat`, al final del comando. Va en `cmd_tests` y en `cmd_compilacion`, junto a `ROOT_MEM` y `ROOT_NS`.
-2. **Root lee la línea `cpu` de `/proc/stat`** justo antes y justo después de cada corrida medida: cada `correr_tests` y cada `correr_build` medido. Mide también el reloj de esa corrida.
-3. **La CPU ocupada del host** es la suma de `user`, `nice`, `system`, `irq`, `softirq` y `steal`. Las unidades son de 1/100 s. Escribí ese 100 como constante con su motivo.
-4. **La carga ajena de una corrida** es `(CPU ocupada del host − ROOT_CPU_US) / reloj`, en núcleos. Un valor negativo cuenta como cero.
-5. **Un caso queda cargado** si alguna corrida medida supera `FRACCION_DE_NUCLEOS_CARGADA` por los núcleos. Sus tiempos quedan sin valor. El motivo dice "la máquina tenía carga ajena: X núcleos de N".
-6. **Sin `ROOT_CPU_US` en una corrida,** los tiempos del caso quedan sin valor, con el motivo "sin cpu.stat del contenedor". Nunca se supone carga cero.
-7. **Cada caso suma un aviso** con su mayor carga ajena, aunque no esté cargado. Con esos datos se revisa el umbral. Si el aviso no llega a la fila sin cambio de esquema, anotalo.
-8. **La base sigue pasando su motivo** a los casos, como hoy.
-9. **La lectura de `/proc/loadavg` sale,** con `leer_carga` y `motivo_de_carga` si quedan sin uso.
-10. **`ROOT_LOADAVG` de la 147 pasa a `ROOT_PROC_STAT`.** Sin la variable, la ruta es `/proc/stat`. Los tests de `tests/` que llaman a `medir` la usan como hoy usan `ROOT_LOADAVG`.
-11. **Revisá el memo y el reuso de sondas.** Una corrida de Eficiencia servida desde un memo no tiene ventana real. Anotá si alguna corrida medida puede pasar por el memo.
+1. **El texto nombra la sonda.** Dice que la sonda no encontró ninguna función que corra en los tests comunes. No habla de funciones viejas.
+2. **Su test cambia junto con el texto,** en el mismo commit.
+3. **Buscá el literal viejo** en todo el repo con `grep`, también en `docs/`. Anotá cada lugar en el informe. Un documento fuera de tu tabla se anota, no se toca.
 
-**Tests en rojo primero:**
-- Unitario: una corrida con la CPU del host igual a la del contenedor no queda cargada, aunque use los 8 núcleos. Hoy, una carga de un minuto de 14 la deja sin valor.
-- Unitario: una corrida con 6 núcleos ajenos de 8 deja sin valor los tiempos, con el motivo de carga ajena.
-- Unitario: una corrida sin `ROOT_CPU_US` deja sin valor los tiempos, con "sin cpu.stat del contenedor".
-- Unitario: `cmd_tests` y `cmd_compilacion` imprimen `ROOT_CPU_US`.
-- Guarda: `memoria_pico` y `tamano_binario` no cambian con la carga.
-- Guarda: un caso hereda el motivo de una base cargada.
+**Test en rojo primero:**
+- Unitario: el motivo no contiene "vieja". Hoy lo contiene.
 
 No corras la validez, `corre`, `calibrar` ni la pasada reales. Las corre el orquestador.
 
 ## Tests con podman que quedan sin probar
 
 El builder no corre suites con podman. Quedan para el orquestador:
-- La suite con podman de la cadena con la 148.
-- La calibración v6 de Eficiencia, de t1 a t3. Ahí se ve si `cpu.stat` existe en el contenedor de podman rootless, y si la sonda da su lista.
+- La suite con podman de la cadena con la 148, la 149 y la 150.
+- La calibración de Eficiencia en Colab. Ahí se ve si la sonda da su lista entera.
 
 ## Reglas
 
