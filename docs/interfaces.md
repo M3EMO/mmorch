@@ -628,6 +628,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "Una medición de una dimensión de una tarea, con su muestra.",
       "type": "object",
       "properties": {
+        "base_sin_veredicto": {
+          "description": "Un juicio de la base no dio veredicto de la dimensión. La fila no mide casos. El texto dice qué juicio\nfalló y por qué. Una fila sin el campo vale `None`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "casos_ruidosos": {
           "description": "Casos medidos con `mutantes_cambiados` no vacío. Siguen contando para las métricas. Sin el campo vale 0.",
           "type": "integer",

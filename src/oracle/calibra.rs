@@ -141,6 +141,10 @@ pub struct Fila {
     /// Una fila sin el campo vale `None`.
     #[serde(default)]
     pub inestable: Option<String>,
+    /// Un juicio de la base no dio veredicto de la dimensión. La fila no mide casos. El texto dice qué juicio
+    /// falló y por qué. Una fila sin el campo vale `None`.
+    #[serde(default)]
+    pub base_sin_veredicto: Option<String>,
     /// Inyecciones inválidas reemplazadas en la calibración, incluidas las del caso agotado.
     #[serde(default)]
     pub reemplazos: u32,
@@ -310,6 +314,7 @@ impl Calibraciones {
         self.filas
             .iter()
             .filter(|f| f.tarea == tarea && f.dimension == dimension)
+            .filter(|f| f.base_sin_veredicto.is_none())
             .filter(|f| huella_actual(f, dimension) && f.tarea_hash.as_deref() == Some(tarea_hash))
             .max_by(|a, b| a.ts.total_cmp(&b.ts))
             .map_or(&[], |fila| fila.inestables.as_slice())
@@ -407,13 +412,15 @@ fn aciertos_de(valor: Option<f32>, total: u32) -> u32 {
 }
 
 /// La fila cuenta para la versión: su `tarea_hash` es `hash_actual`, trae `inyecciones_distintas` y no es
-/// incompleta, `no_aplica` ni inestable.
+/// incompleta, `no_aplica`, inestable ni `base_sin_veredicto`. Una fila con `base_sin_veredicto` no mide la
+/// dimensión.
 fn cuenta(fila: &Fila, hash_actual: &str) -> bool {
     fila.tarea_hash.as_deref() == Some(hash_actual)
         && fila.inyecciones_distintas.is_some()
         && !fila.incompleta
         && fila.no_aplica.is_none()
         && fila.inestable.is_none()
+        && fila.base_sin_veredicto.is_none()
 }
 
 /// Hash actual del `tarea.toml` de `tarea`. Para la tarea evaluada, es `tarea_hash`. Para las otras, es el de
@@ -607,7 +614,7 @@ const CARPETA_CASOS: &str = "calibracion";
 
 /// Calibra `dimension` de `tarea` con `n` casos y la semilla `semilla`, sobre el repo bueno `repo_bueno`.
 /// `evaluador` corre el Oracle sobre una ruta. Es `Sync`: los casos corren de a `CASOS_EN_PARALELO` hilos.
-/// Sin defectos para la dimensión, `n` cero o una base sin veredicto, no hay fila.
+/// Sin defectos para la dimensión o con `n` cero, no hay fila. Una base sin veredicto da fila sin casos.
 pub fn calibrar_con(
     tarea: &Tarea,
     dimension: Dimension,
@@ -1477,6 +1484,7 @@ fn la_suite_no_la_ejecuta(
 /// Antes de cada reemplazo de una inyección inválida, un caso hace lo mismo. Un juez rechazado no mide su caso.
 /// Un error de caso deja de lanzar y espera a los que están en vuelo; devuelve el error del índice más bajo.
 /// Los casos se ordenan por índice antes de armar la fila, así el resultado no depende del orden de término.
+/// Un juicio de la base sin veredicto de la dimensión no mide casos: la fila lleva `base_sin_veredicto`.
 #[allow(clippy::too_many_arguments)]
 fn calibrar_medida_con_hilos(
     tarea: &Tarea,
@@ -1541,32 +1549,29 @@ fn calibrar_medida_con_hilos(
         (Err(error), None) => return Err(error),
         (Ok(veredicto), None) => veredicto,
     };
-    // Una línea base sin veredicto no mide nada: los defectos no tienen contra qué compararse.
-    let motivo_de_la_base = match puntaje_de(&base, dimension) {
-        Some(puntaje) => puntaje.sin_veredicto.clone(),
-        None => Some("la dimensión no figura en el veredicto de la base".into()),
-    };
-    if let Some(motivo) = motivo_de_la_base {
-        return Err(ErrorOraculo::Infra(format!(
-            "la línea base no tiene veredicto de {}: {motivo}",
-            dimension.clave()
-        )));
-    }
     // Base repetida (Tarea 83, punto 2): las dimensiones con ítems del juez juzgan la base dos veces más. Las
     // sondas no se repiten: `BaseRepetida` reusa las deterministas de la base. Sin juez (sin modelo), la base
     // no trae ítems del juez y no hay juicios que repetir.
     let pesos = inestables::pesos_de(&rubricas_de(dimension));
     let juez_corre = tiene_items_de_juez(dimension) && trae_juicio_del_juez(&base, dimension);
     let mut juicios = vec![base];
-    if juez_corre {
+    // Un juicio sin veredicto de la dimensión no mide nada: sus números faltan. Corta y dice qué juicio falló.
+    let mut fallo = motivo_de_juicio_base(&juicios[0], dimension).map(|motivo| (1, motivo));
+    if fallo.is_none() && juez_corre {
         for _ in 0..inestables::JUICIOS_EXTRA {
             let repetida = en_limite(tope, || {
                 evaluador(repo_bueno, TipoCaso::BaseRepetida, Target::Ninguno)
             });
-            match (repetida, detencion_de_rechazo(tope)) {
+            let veredicto = match (repetida, detencion_de_rechazo(tope)) {
                 (_, Some(detencion)) => return Ok(medida_detenida(detencion)),
                 (Err(error), None) => return Err(error),
-                (Ok(veredicto), None) => juicios.push(veredicto),
+                (Ok(veredicto), None) => veredicto,
+            };
+            let motivo = motivo_de_juicio_base(&veredicto, dimension);
+            juicios.push(veredicto);
+            if let Some(motivo) = motivo {
+                fallo = Some((juicios.len(), motivo));
+                break;
             }
         }
     }
@@ -1577,6 +1582,22 @@ fn calibrar_medida_con_hilos(
         .iter()
         .map(|j| juicio_base_de(j, dimension))
         .collect();
+    if let Some((k, motivo)) = fallo {
+        let texto = format!("juicio {k} de la base sin veredicto: {motivo}");
+        let fila = Fila {
+            base_sin_veredicto: Some(texto.clone()),
+            no_aplica: None,
+            extractos_base,
+            juicios_base,
+            ..fila_no_aplica(tarea, &tarea_hash, dimension, semilla, &texto)
+        };
+        return Ok(Medida {
+            fila: Some(fila),
+            detencion: None,
+            casos: Vec::new(),
+            no_aplicables: Vec::new(),
+        });
+    }
     let refs: Vec<&Veredicto> = juicios.iter().collect();
     let inestables = inestables::inestables_de(&refs, dimension, &pesos.del_juez);
     // Una dimensión cuyos ítems estables pesan menos de la mitad no mide casos: ahorra el gasto del juez.
@@ -1859,6 +1880,7 @@ fn fila_de(
         }
     }
     Fila {
+        base_sin_veredicto: None,
         tarea_hash: None,
         tarea: tarea.nombre.clone(),
         dimension,
@@ -2223,6 +2245,7 @@ fn fila_no_aplica(
     motivo: &str,
 ) -> Fila {
     Fila {
+        base_sin_veredicto: None,
         tarea_hash: Some(tarea_hash.into()),
         tarea: tarea.nombre.clone(),
         dimension,
@@ -2919,6 +2942,14 @@ fn puntaje_de(veredicto: &Veredicto, dimension: Dimension) -> Option<&Puntaje> {
     veredicto.puntajes.iter().find(|p| p.dimension == dimension)
 }
 
+/// Motivo por el que `veredicto` no da veredicto de `dimension`. `None` si lo da.
+fn motivo_de_juicio_base(veredicto: &Veredicto, dimension: Dimension) -> Option<String> {
+    match puntaje_de(veredicto, dimension) {
+        Some(puntaje) => puntaje.sin_veredicto.clone(),
+        None => Some("la dimensión no figura en el veredicto de la base".into()),
+    }
+}
+
 /// Lo que dijo `veredicto` sobre `dimension`. Sin puntaje de la dimensión, sale vacío.
 fn juicio_base_de(veredicto: &Veredicto, dimension: Dimension) -> JuicioBase {
     puntaje_de(veredicto, dimension)
@@ -3008,6 +3039,7 @@ mod tests {
     /// Fila que cuenta para `aplicar_en` con `tarea_hash` "" y la huella actual: 16 defectos y 16 limpios, todos bien.
     fn fila(tarea: &str, dimension: Dimension, ts: f64, exactitud: Option<f32>) -> Fila {
         Fila {
+            base_sin_veredicto: None,
             tarea_hash: Some(String::new()),
             plazo_mutantes: None,
             duracion_contrato: None,
@@ -3536,12 +3568,13 @@ mod tests {
         assert_eq!((fila.defectos, fila.no_aplicable), (1, 4));
     }
 
+    /// Punto 2 de la Tarea 121: una base sin veredicto da fila sin casos. Antes era `ErrorOraculo::Infra`.
     #[test]
-    fn calibra_base_sin_veredicto_es_infraestructura() {
+    fn calibra_base_sin_veredicto_da_fila_sin_casos() {
         let base = sin(&veredicto_base());
         let (_t, tarea) = tarea_prueba();
         let ev = falso(Path::new(FIXTURE), &base, |_, _, base| base.clone());
-        let error = calibrar_con(
+        let fila = calibrar_con(
             &tarea,
             Dimension::Seguridad,
             20,
@@ -3549,12 +3582,18 @@ mod tests {
             Path::new(FIXTURE),
             &ev,
         )
-        .expect_err("sin base no hay medición");
-        assert!(matches!(error, ErrorOraculo::Infra(_)), "{error:?}");
-        assert_eq!(error.codigo_de_salida(), 3);
+        .expect("una base sin veredicto da fila");
+        assert!(
+            fila.base_sin_veredicto
+                .as_deref()
+                .is_some_and(|t| t.starts_with("juicio 1 de la base sin veredicto:")),
+            "{fila:?}"
+        );
+        assert_eq!((fila.n, fila.defectos, fila.limpios), (0, 0, 0), "{fila:?}");
+        assert_eq!(fila.no_aplica, None, "{fila:?}");
     }
 
-    /// Punto 3: el error de la base sin veredicto dice el motivo del puntaje. Sin puntaje, dice que no figura.
+    /// Punto 3: la fila de la base sin veredicto dice el motivo del puntaje. Sin puntaje, dice que no figura.
     #[test]
     fn calibra_base_sin_veredicto_dice_el_motivo() {
         let (_t, tarea) = tarea_prueba();
@@ -3562,7 +3601,7 @@ mod tests {
         let ev = falso(Path::new(FIXTURE), &con_motivo_base, |_, _, base| {
             base.clone()
         });
-        let error = calibrar_con(
+        let fila = calibrar_con(
             &tarea,
             Dimension::Seguridad,
             20,
@@ -3570,16 +3609,17 @@ mod tests {
             Path::new(FIXTURE),
             &ev,
         )
-        .expect_err("sin base no hay medición");
-        let texto = match error {
-            ErrorOraculo::Infra(texto) => texto,
-            otro => panic!("{otro:?}"),
-        };
+        .expect("una base sin veredicto da fila");
+        let texto = fila.base_sin_veredicto.clone().unwrap_or_default();
+        assert!(
+            texto.starts_with("juicio 1 de la base sin veredicto:"),
+            "{texto}"
+        );
         assert!(texto.contains(": falta la sonda de seguridad"), "{texto}");
 
         let sin_puntaje = Veredicto::default();
         let ev = falso(Path::new(FIXTURE), &sin_puntaje, |_, _, base| base.clone());
-        let error = calibrar_con(
+        let fila = calibrar_con(
             &tarea,
             Dimension::Seguridad,
             20,
@@ -3587,11 +3627,8 @@ mod tests {
             Path::new(FIXTURE),
             &ev,
         )
-        .expect_err("sin base no hay medición");
-        let texto = match error {
-            ErrorOraculo::Infra(texto) => texto,
-            otro => panic!("{otro:?}"),
-        };
+        .expect("una base sin puntaje da fila");
+        let texto = fila.base_sin_veredicto.unwrap_or_default();
         assert!(
             texto.contains(": la dimensión no figura en el veredicto de la base"),
             "{texto}"
@@ -5938,6 +5975,31 @@ mod tests {
         assert_eq!(
             huella_de(Dimension::Seguridad),
             huella_con_version(Dimension::Seguridad, &prompt, 2)
+        );
+    }
+
+    /// Una fila con `base_sin_veredicto` no mide: no pisa los inestables de la medición anterior.
+    #[test]
+    fn inestables_de_salta_la_fila_con_base_sin_veredicto() {
+        let vieja = Fila {
+            inestables: vec!["diseno.errores".into()],
+            huella: Some(huella_de(Dimension::Diseno)),
+            tarea_hash: Some("tarea-actual".into()),
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let nueva = Fila {
+            base_sin_veredicto: Some("juicio 2 de la base sin veredicto: x".into()),
+            huella: Some(huella_de(Dimension::Diseno)),
+            tarea_hash: Some("tarea-actual".into()),
+            ..fila("memora", Dimension::Diseno, 2.0, Some(1.0))
+        };
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![nueva, vieja],
+        };
+        assert_eq!(
+            c.inestables_de("memora", "tarea-actual", Dimension::Diseno),
+            ["diseno.errores".to_string()]
         );
     }
 
@@ -9644,6 +9706,182 @@ mod tests {
             "{:?}",
             leida.extractos_base
         );
+    }
+
+    /// Juicio de Diseño con `diseno.acoplamiento` del juez en `nivel`.
+    fn juicio_diseno(nivel: u8) -> Veredicto {
+        Veredicto {
+            puntajes: vec![Puntaje {
+                items: vec![NivelItem {
+                    item: "diseno.acoplamiento".into(),
+                    nivel,
+                    evidencia: vec![],
+                    fuente: Fuente::Juez {
+                        modelo: "deepseek-reasoner".into(),
+                    },
+                }],
+                ..puntaje(Dimension::Diseno, 1.0)
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Juicio de Diseño sin veredicto: sin ítems, con un faltante y el motivo `motivo`.
+    fn juicio_diseno_sin_veredicto(motivo: &str) -> Veredicto {
+        Veredicto {
+            puntajes: vec![Puntaje {
+                faltantes: vec![ItemFaltante {
+                    item: "diseno.acoplamiento".into(),
+                    motivo: "el juez no respondió".into(),
+                }],
+                sin_veredicto: Some(motivo.into()),
+                ..puntaje(Dimension::Diseno, 1.0)
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Un segundo juicio de la base sin veredicto no mide la dimensión: la fila dice qué juicio falló.
+    #[test]
+    fn diseno_con_segundo_juicio_sin_veredicto_no_mide_y_lo_dice() {
+        let juicios = [
+            juicio_diseno(2),
+            juicio_diseno_sin_veredicto("el juez no respondió"),
+            juicio_diseno(2),
+        ];
+        let turno = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| {
+            let veredicto = match tipo {
+                TipoCaso::Base | TipoCaso::BaseRepetida => {
+                    juicios[turno.fetch_add(1, Ordering::SeqCst)].clone()
+                }
+                _ => juicios[0].clone(),
+            };
+            Ok(veredicto)
+        };
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("calibra");
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(
+            fila.base_sin_veredicto.as_deref(),
+            Some("juicio 2 de la base sin veredicto: el juez no respondió"),
+            "{fila:?}"
+        );
+        assert!(fila.inestables.is_empty(), "{:?}", fila.inestables);
+        assert_eq!(fila.inestable, None, "{fila:?}");
+        assert!(medida.casos.is_empty(), "no mide casos");
+        assert_eq!(fila.juicios_base.len(), 2, "{:?}", fila.juicios_base);
+    }
+
+    /// Un juicio repetido sin veredicto corta: el evaluador no juzga la base repetida que seguía.
+    #[test]
+    fn juicio_repetido_sin_veredicto_corta_antes_de_juzgar_otro() {
+        let juicios = [
+            juicio_diseno(2),
+            juicio_diseno_sin_veredicto("el juez no respondió"),
+            juicio_diseno(2),
+        ];
+        let turno = AtomicUsize::new(0);
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| {
+            let veredicto = match tipo {
+                TipoCaso::Base | TipoCaso::BaseRepetida => {
+                    juicios[turno.fetch_add(1, Ordering::SeqCst)].clone()
+                }
+                _ => juicios[0].clone(),
+            };
+            Ok(veredicto)
+        };
+        let (_t, tarea) = tarea_prueba();
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("calibra");
+        assert_eq!(
+            turno.load(Ordering::SeqCst),
+            2,
+            "la base y una repetida: la tercera no corre"
+        );
+    }
+
+    /// Una base sin veredicto da fila, no error de infraestructura. El motivo nombra el juicio 1.
+    #[test]
+    fn base_sin_veredicto_devuelve_fila_con_el_motivo_del_juicio_1() {
+        let base = juicio_diseno_sin_veredicto("el juez no respondió");
+        let llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Path, _: TipoCaso, _: Target| {
+            llamadas.fetch_add(1, Ordering::SeqCst);
+            Ok(base.clone())
+        };
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("una base sin veredicto da fila, no error");
+        let fila = medida.fila.expect("hay fila");
+        assert_eq!(
+            fila.base_sin_veredicto.as_deref(),
+            Some("juicio 1 de la base sin veredicto: el juez no respondió"),
+            "{fila:?}"
+        );
+        assert!(medida.casos.is_empty(), "no mide casos");
+        assert!(medida.detencion.is_none(), "sin detención");
+        assert_eq!(
+            llamadas.load(Ordering::SeqCst),
+            1,
+            "sin base no hay repetidas"
+        );
+    }
+
+    /// `cuenta` deja fuera la fila con `base_sin_veredicto`. La misma fila sin el campo sí cuenta.
+    #[test]
+    fn cuenta_no_suma_la_fila_con_base_sin_veredicto() {
+        let limpia = Fila {
+            tarea_hash: Some("h".into()),
+            inyecciones_distintas: Some(16),
+            ..fila("memora", Dimension::Diseno, 1.0, Some(1.0))
+        };
+        let sin = Fila {
+            base_sin_veredicto: Some("juicio 1 de la base sin veredicto: x".into()),
+            ..limpia.clone()
+        };
+        assert!(cuenta(&limpia, "h"), "{limpia:?}");
+        assert!(!cuenta(&sin, "h"), "{sin:?}");
     }
 
     // Punto 3: calibración de punta a punta con el evaluador real (`evaluar_con`), sin podman ni contenedores.

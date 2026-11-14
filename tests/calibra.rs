@@ -953,6 +953,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
     .expect("calibra");
     // Seguridad calibrada en la misma tarea: `global` la cuenta y Eficiencia no.
     let seguridad = Fila {
+        base_sin_veredicto: None,
         tarea_hash: Some(String::new()),
         plazo_mutantes: None,
         defectos_en_piso: 0,
@@ -1086,11 +1087,12 @@ fn eficiencia_no_aplicable_cli_json_imprime_la_fila_con_no_aplica() {
 #[test]
 fn eficiencia_con_bloque_mantiene_la_medicion_previa() {
     // Con `[eficiencia]` la dimensión aplica: la base corre. El evaluador de prueba no da veredicto de
-    // Eficiencia, así que la calibración falla como antes, sin fila.
+    // Eficiencia: la calibración escribe una fila sin casos que dice que la base no tiene veredicto (Tarea 121,
+    // punto 2). Antes era un error de infraestructura sin fila.
     let home = home_con_tarea(EFICIENCIA);
     let llamadas = Mutex::new(0u32);
     let evaluador = evaluador_contador(&llamadas);
-    let error = calibrar_tarea_con_lector(
+    let calibrada = calibrar_tarea_con_lector(
         home.path(),
         "calibra-fixture",
         "eficiencia",
@@ -1101,21 +1103,29 @@ fn eficiencia_con_bloque_mantiene_la_medicion_previa() {
         &evaluador,
         &digest_falso,
     )
-    .expect_err("sin veredicto de la base no hay fila");
+    .expect("una base sin veredicto da fila");
     assert!(*llamadas.lock().expect("lock") >= 1, "la base sí corre");
-    let ErrorOraculo::Infra(mensaje) = &error else {
-        panic!("error de infraestructura esperado: {error:?}");
-    };
+    assert_eq!(calibrada.fila.n, 0, "{:?}", calibrada.fila);
     assert!(
-        mensaje.contains("la línea base no tiene veredicto de eficiencia"),
-        "{mensaje}"
+        calibrada.casos.is_none(),
+        "sin casos no hay archivo de casos"
     );
-    assert!(!home.path().join(ARCHIVO).exists(), "no escribe fila");
+    let motivo = calibrada
+        .fila
+        .base_sin_veredicto
+        .as_deref()
+        .unwrap_or_default();
+    assert!(
+        motivo.starts_with("juicio 1 de la base sin veredicto:"),
+        "{motivo}"
+    );
+    assert!(home.path().join(ARCHIVO).exists(), "escribe la fila");
 }
 
 #[test]
 fn fila_vieja_sin_no_aplica_se_lee() {
     let fila = Fila {
+        base_sin_veredicto: None,
         tarea_hash: None,
         plazo_mutantes: None,
         defectos_en_piso: 0,
@@ -1161,6 +1171,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
     // Una fila `no_aplica` nueva se agrega al final: las filas anteriores quedan como estaban.
     let home = home_con_tarea("");
     let antes = Fila {
+        base_sin_veredicto: None,
         tarea_hash: None,
         plazo_mutantes: None,
         defectos_en_piso: 0,
