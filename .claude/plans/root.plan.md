@@ -11256,3 +11256,125 @@ El brief es `docs/builds/brief-local-142.md`. **Su punto 3 espera la Prueba 1.**
 | 13 | La validez sobre el final sellado | Los pasos 1 a 12 | Colab, notebook si usa el juez | Según el final |
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (57): la sonda que no llegó, la memoria que no se movió, y una máquina cargada
+
+**Estado.**
+- `laptop/cadena-110-138` (1f17041) suma la 137 y la 138. Su suite con podman dio verde: 3663, 0 y 5.
+- **La calibración de Eficiencia corrió en el `ROOT_HOME` real** con el binario de 1f17041, n=4 y semilla 42. Respaldo en `efi-real-4/`.
+- t1 (2963 s): ExB 0,5. Un limpio quedó detectado por `tiempo_tests`, con razón 1,96.
+- t2 (2368 s): ExB 1,0. Los dos defectos se detectaron, pero `memoria_pico` no cambió.
+- t3 (2565 s): ExB 0,5, sensibilidad 0.
+- **Los seis lastres cayeron en los mismos lugares que en la serie 136.**
+- Los builders 139, 140 y 141 compilan ahora en la laptop. La Prueba 1 espera al usuario.
+
+## 1. Por qué el inyector no usó la lista de la sonda
+
+**Lo que dicen los datos.**
+- **La sonda corrió bien.** En el journal de `serie-138`, cada base muestra la sonda: 34 tests pasan, y después `ROOT_SONDA_INICIO`, la lista y `ROOT_SONDA_FIN`. En t1, la lista trae 101 funciones.
+- **El inyector eligió con la regla de la 136 en las tres tareas.** Con la misma semilla, dio los mismos seis lugares que en la serie 136. En t2 y t3, esos archivos no están en la lista de la sonda.
+- **Con la lista llena, eso no puede pasar.** `lastre_de_memoria` (`src/oracle/calibra/inyectar.rs:1298`) solo usa la regla de la 136 si `corridas` viene vacía. Con la lista llena, elige solo entre funciones de la lista, o no elige ninguna.
+- **Entonces `corridas` llegó vacía.** Eso pasa si `tomar_sonda_lastre()` (`src/oracle/calibra.rs:1790`) devuelve `None`, un error, o una lista vacía. Una lista vacía sale si los ids que lista el contenedor no coinciden con los del mapa de `armar_copia_marcada`.
+
+**Lo que no encontré.** Leí el camino entero: `con_sonda_lastre` en la base, `correr_sonda_de_lastre` en `evaluar_con`, `dejar_sonda_lastre`, `tomar_sonda_lastre`, `corridas_de_la_sonda` y el contexto del inyector. Todo corre en un solo hilo, y no encontré dónde se pierde el valor.
+
+**Por qué los tests no lo vieron.** El test de la 137 que prueba el paso, `sonda_lastre_resultado_de_la_base_llega_al_inyector` (`src/oracle/calibra.rs:4065`), usa un evaluador falso. Ese evaluador llama a `dejar_sonda_lastre` él mismo. No pasa por `evaluar_con`. El camino real nunca se probó de punta a punta.
+
+**Por qué no hubo aviso, en dos partes:**
+- **Si `tomar_sonda_lastre()` dio un error,** `correr_sonda_de_lastre` dejó un aviso en el veredicto de la base. Los avisos de la base no se guardan en la fila ni en los casos.
+- **Si dio `None` o una lista vacía,** no hay aviso por diseño. `corridas_de_la_sonda` convierte los dos casos en una lista vacía, y el inyector usa la regla de la 136 en silencio.
+
+**La decisión: la sonda pedida no tiene un respaldo silencioso.**
+- Si la calibración pidió la sonda, y la sonda no dio funciones, el lastre queda no aplicable, con el motivo de la sonda. No usa la regla de la 136.
+- La fila guarda el estado de la sonda: si corrió, cuántas funciones dio, y su motivo si falló.
+- Cada renglón de caso guarda qué regla eligió el lugar: la sonda o el nombre.
+
+## 2. Por qué un lastre en una función que la sonda vio correr no movió la memoria en t1
+
+**Qué mide `memoria_pico`.** La medición corre los tests comunes en un contenedor, y al final lee `/sys/fs/cgroup/memory.peak` (`src/oracle/eficiencia.rs`). Es el pico de todo el contenedor: cargo, nextest y cada proceso de test. Un lastre de 64 MB en una función que un test corre sube ese pico. En la vuelta (49), en t2, lo subió 2,4 veces.
+
+**El error de diseño es mío, de la vuelta (51).** Dije que los tests viejos de `bootstrap/` eran casi todos los tests comunes. No es así:
+- **La sonda corre los tests de `bootstrap/` sobre el código de `bootstrap/`.** En t1 son 34 tests.
+- **La medición corre los tests comunes sobre el código del repo.** Son los que pasan en los dos lados.
+- **Un test viejo puede no ser común.** El cambio puede romperlo o borrarlo.
+- **Una función que corre en `bootstrap/` puede no correr en el repo.** El cambio puede dejar de llamarla. En t1, el cambio reescribe `composite_pattern.rs`.
+
+**El arreglo: la sonda corre en el repo, con los tests comunes.**
+- Marca las funciones de producción del repo bueno, no las de `bootstrap/`.
+- Corre solo los tests comunes, con el mismo filtro que usa la medición de Eficiencia de la base.
+- Así, la sonda ve justo lo que la medición va a correr.
+
+## 3. El ruido de `tiempo_tests` con la 138, y el limpio de t1
+
+**Fue la máquina. Las corridas lo muestran.**
+- En los casos 2 y 3 de t1, `tiempo_tests` del repo corre entre 0,71 y 0,99 s. La base corría cerca de 0,4 s.
+- En el limpio 1 de t1, la compilación dio razón 2,01. En los otros casos de t1, el ruido de la compilación quedó entre 1,22 y 1,54.
+- En t2, la compilación de los defectos dio razones de 1,27 y 1,05. Un lastre de memoria no cambia el tiempo de compilación.
+- t1 corrió de 12:59 a 13:49, y t2 hasta las 14:30. En esas horas, la laptop estaba ocupada por otro trabajo. El orquestador puede confirmar con las horas de arranque de los builders 139 a 141.
+
+**Pero el método también falló.** La máquina cargada es un caso que el método debe ver, y no lo vio.
+- **La referencia sale de la base,** que corrió sin carga. Cada caso agrega una sola corrida ancla.
+- **Una ancla sola casi no mueve la mediana** de once corridas. En el limpio 3 de t1, el ancla dio 0,75 s, igual que el repo. La máquina se había vuelto el doble de lenta, y el ancla lo mostró. Pero la referencia siguió en la mediana de la base, cerca de 0,39 s. La razón dio 1,96.
+
+**El arreglo del método, en la Tarea 144:**
+1. **`tiempo_tests` no reusa la referencia en los casos.** Cada caso corre los dos lados, alternados, 10 veces cada uno. Cuesta unos 4 s más por caso.
+2. **La compilación se compara con su ancla,** que corrió en el mismo momento. La serie de la base solo da el ruido.
+3. **Un control de carga:** cada caso lee `/proc/loadavg` antes y después de sus corridas medidas. Si la carga de un minuto pasa la mitad de los núcleos, el caso queda sin veredicto, con el motivo "la máquina estaba cargada".
+
+**Y una regla de trabajo para el orquestador:** ninguna compilación, suite ni builder corre en la laptop durante una calibración de Eficiencia.
+
+## 4. Qué bajó el valor en t2
+
+**Fue la compilación, no la memoria.**
+
+| Caso | Medida con regresión | Razón | Ruido |
+|---|---|---|---|
+| 0, defecto en `hex/byte.rs:19` | `tiempo_compilacion` | 1,272 | 0,061 |
+| 2, defecto en `mount_space_display.rs:33` | `tiempo_compilacion` | 1,045 | 0,020 |
+
+`memoria_pico` dio 0,999 y 1,001. **El ExB de 1,0 de t2 es falso:** los defectos se detectaron por la carga de la máquina en la compilación.
+
+**Todas las sensibilidades de esta calibración de Eficiencia no valen.** Las filas quedan en el `ROOT_HOME` real como una medición honesta de una máquina cargada. La próxima calibración las reemplaza.
+
+## 5. Las Tareas 143 y 144
+
+| Tarea | Qué | Archivos | Base |
+|---|---|---|---|
+| 143 | La sonda en el repo con los tests comunes, sin respaldo silencioso, con su estado guardado, y un test de punta a punta | `src/oracle/calibra/sonda_lastre.rs`, `src/oracle/mod.rs`, `src/oracle/calibra.rs`, `src/oracle/calibra/inyectar.rs`, `src/oracle/eficiencia.rs` (solo para dar el filtro de los tests comunes), `docs/interfaces.md` | Punta de `laptop/cadena-110-138` |
+| 144 | `tiempo_tests` alternado en los casos, la compilación contra su ancla, y el control de carga | `src/oracle/eficiencia.rs` | Punta de la 143 |
+
+- **La 143 y la 144 van en serie.** Las dos tocan `eficiencia.rs`.
+- **No chocan con la 139, la 140, la 141 ni la 142.** Esas tocan `contenedor.rs`, `descarga.rs`, `calibra/target.rs`, `tools/colab/`, `tests/colab_preparar.rs`, `colab_calibra.rs`, `cli.rs`, `lib.rs`, `oracle/colab.rs`, `proveedores/mod.rs`, `main.rs` y `tests/claves_fd.rs`.
+- **Arrancan cuando los builders 139 a 141 terminen,** para no cargar la laptop otra vez.
+
+Los briefs son `docs/builds/brief-local-143.md` y `docs/builds/brief-local-144.md`.
+
+## 6. Dónde corre la próxima calibración de Eficiencia
+
+**En la laptop.** Eficiencia necesita el cgroup del contenedor para `memory.peak`, y en Colab no hay contenedor.
+
+**Con dos condiciones:**
+1. Después de la 143 y la 144.
+2. **En una ventana sin otro trabajo:** ningún builder, suite ni compilación. El control de carga de la 144 lo revisa en cada caso.
+
+## 7. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | Las Tareas 139, 140 y 141, que compilan ahora | Nada | Laptop | No |
+| 2 | La Prueba 1: la subida al notebook y el aislamiento de la clave | El usuario | Colab, notebook | No |
+| 3 | Las pruebas de Colab de la 140, la 139 y la 141 | El paso 1 | Colab, CPU | No |
+| 4 | La Tarea 142 | Los pasos 1 y 2 | Laptop | No |
+| 5 | Las Tareas 143 y 144, en serie | El paso 1, para no cargar la laptop | Laptop | No |
+| 6 | La calibración de Eficiencia de t1 a t3, en una ventana sin otro trabajo | El paso 5 | Laptop | No |
+| 7 | Las cinco etapas de P107 a, en una sesión del notebook | Los pasos 3 y 4 | Colab, notebook | Hasta 18,45 USD |
+| 8 | La mezcla de la cadena 110 a 144 | La orden del usuario | — | No |
+| 9 | Congelar la versión | Los pasos 6 y 7 | — | No |
+| 10 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 3 y 9 | Colab, cuatro runtimes | No |
+| 11 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 12 | P98 c: el final con 15 defectos reales | El paso 11 | — | No |
+| 13 | La validez sobre el final sellado | Los pasos 1 a 12 | Colab, notebook si usa el juez | Según el final |
+
+**Preguntas al usuario:** ninguna nueva.
+
+**Nota del orquestador sobre la sección 3.** Los builders 139 a 141 arrancaron a las 15:11, después de la serie 138, así que no cargaron t1 ni t2. El journal de systemd del usuario no muestra otro builder, suite ni planner pesado entre las 12:59 y las 14:30. Solo muestra actividad del escritorio del usuario (GNOME) desde las 13:01. La causa de la carga queda sin confirmar. El control de carga de la 144 es justo lo que falta para verla.
