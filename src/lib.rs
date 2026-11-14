@@ -201,8 +201,13 @@ fn oraculo_calibrar(
     let fila = calibrada.fila;
     if json {
         println!("{}", serde_json::to_string_pretty(&fila)?);
-    } else if let Some(motivo) = fila.inestable.as_ref().or(fila.no_aplica.as_ref()) {
-        println!("{}/{}: {motivo}", fila.tarea, fila.dimension.clave());
+    } else if let Some(linea) = linea_sin_medir(&fila) {
+        println!("{linea}");
+        if fila.base_sin_veredicto.is_some()
+            && let Some(ruta) = &calibrada.casos
+        {
+            println!("casos: {}", ruta.display());
+        }
     } else {
         println!(
             "{}/{}: sensibilidad {}, {}, {}, {}, exactitud {}, casos {} (defectos {}, limpios {}, no aplicables {}, reemplazos {})",
@@ -233,6 +238,17 @@ fn oraculo_calibrar(
         }
     }
     Ok(0)
+}
+
+/// Línea humana de una fila que no mide la dimensión. `None` si la fila está medida.
+/// Precedencia: `base_sin_veredicto`, luego `inestable`, luego `no_aplica`.
+fn linea_sin_medir(fila: &oracle::calibra::Fila) -> Option<String> {
+    let (tarea, dimension) = (&fila.tarea, fila.dimension.clave());
+    if let Some(motivo) = &fila.base_sin_veredicto {
+        return Some(format!("{tarea}/{dimension}: base sin veredicto: {motivo}"));
+    }
+    let motivo = fila.inestable.as_ref().or(fila.no_aplica.as_ref())?;
+    Some(format!("{tarea}/{dimension}: {motivo}"))
 }
 
 /// Una línea `aviso: <texto>` por aviso, en el mismo orden.
@@ -1286,6 +1302,61 @@ mod tests {
             limpios_sin_veredicto: 0,
             tareas: vec!["t".into()],
         }
+    }
+
+    fn fila_sin_medir(tarea: &str, dimension: &str) -> oracle::calibra::Fila {
+        serde_json::from_value(serde_json::json!({
+            "tarea": tarea,
+            "dimension": dimension,
+            "n": 0,
+            "semilla": 1,
+            "ts": 1.0
+        }))
+        .expect("fila mínima")
+    }
+
+    #[test]
+    fn linea_sin_medir_base_sin_veredicto_dice_el_motivo() {
+        let motivo =
+            "juicio 1 de la base sin veredicto: cobertura 6 de 10 de peso, menor que dos tercios";
+        let fila = oracle::calibra::Fila {
+            base_sin_veredicto: Some(motivo.into()),
+            ..fila_sin_medir("s2-t1", "arquitectura")
+        };
+        assert_eq!(
+            linea_sin_medir(&fila),
+            Some(format!("s2-t1/arquitectura: base sin veredicto: {motivo}"))
+        );
+    }
+
+    #[test]
+    fn linea_sin_medir_inestable_usa_el_formato_de_siempre() {
+        let fila = oracle::calibra::Fila {
+            inestable: Some("ítems variaron".into()),
+            ..fila_sin_medir("s2-t1", "arquitectura")
+        };
+        assert_eq!(
+            linea_sin_medir(&fila),
+            Some("s2-t1/arquitectura: ítems variaron".to_string())
+        );
+    }
+
+    #[test]
+    fn linea_sin_medir_no_aplica_usa_el_formato_de_siempre() {
+        let fila = oracle::calibra::Fila {
+            no_aplica: Some("sin Dockerfile".into()),
+            ..fila_sin_medir("s2-t1", "arquitectura")
+        };
+        assert_eq!(
+            linea_sin_medir(&fila),
+            Some("s2-t1/arquitectura: sin Dockerfile".to_string())
+        );
+    }
+
+    #[test]
+    fn linea_sin_medir_fila_medida_da_none() {
+        let fila = fila_sin_medir("s2-t1", "arquitectura");
+        assert_eq!(linea_sin_medir(&fila), None);
     }
 
     #[test]
