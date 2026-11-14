@@ -993,6 +993,8 @@ struct Ronda<'a> {
     agotado: Vec<bool>,
     /// Equivalentes declarados en `tarea.toml`. Ningún caso los elige: se excluyen en cada elección.
     curadas: Excluidos,
+    /// Ítems inestables de la base. Cada caso los excluye, como una evaluación normal (Tarea 83, punto 2).
+    inestables: &'a [String],
 }
 
 impl Ronda<'_> {
@@ -1063,11 +1065,13 @@ fn evaluar_copia(
     // Un test más débil no mata más mutantes. Por eso los vivos de la base no aportan.
     // Solo corren los muertos y vencidos de la base.
     let resultado = con_caso(&id, || {
-        super::mutacion::con_carpeta_de_mutacion(r.carpeta_mutacion, || {
-            super::mutacion::con_muestra_de_base(r.mutantes_base, || {
-                super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
-                    con_plazos_suites(Some(r.plazos_suites), || {
-                        en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+        super::con_inestables_de_calibracion(r.inestables, || {
+            super::mutacion::con_carpeta_de_mutacion(r.carpeta_mutacion, || {
+                super::mutacion::con_muestra_de_base(r.mutantes_base, || {
+                    super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
+                        con_plazos_suites(Some(r.plazos_suites), || {
+                            en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+                        })
                     })
                 })
             })
@@ -1691,6 +1695,7 @@ fn calibrar_medida_con_hilos(
         .into_iter()
         .filter(|i| !inestables.contains(*i))
         .collect();
+    let inestables_casos: Vec<String> = inestables.iter().cloned().collect();
     let capas: &[Vec<String>] = tarea
         .arquitectura
         .as_ref()
@@ -1734,6 +1739,7 @@ fn calibrar_medida_con_hilos(
         candidatos: Vec::new(),
         agotado: Vec::new(),
         curadas: identidades_de_equivalentes(equivalentes_de(tarea)),
+        inestables: &inestables_casos,
     };
     // Las elecciones de los casos se hacen antes de lanzar los hilos: así cada caso ya tiene su lista fija.
     let pre = preelegir(&ronda, n)?;
@@ -1821,6 +1827,7 @@ fn calibrar_medida_con_hilos(
         }
     }
     // Los ítems inestables salen de los veredictos de los casos antes de detectar, puntuar y cubrir.
+    // Los casos ya no los traen (se excluyeron al evaluarse). Esta pasada los quita si quedara alguno.
     for caso in &mut casos {
         inestables::sin_inestables(&mut caso.veredicto, dimension, &inestables, &pesos.todos);
     }
@@ -11100,6 +11107,7 @@ mod tests {
     const ITEM_MODULARIDAD: &str = "diseno.modularidad";
     const ITEM_ROBUSTEZ: &str = "diseno.robustez";
     const ITEM_ERRORES: &str = "diseno.errores";
+    const ITEM_OPERABILIDAD: &str = "diseno.operabilidad";
 
     /// Veredicto de Diseño con `items` del juez y valor 1.
     fn diseno_con(items: &[(&str, u8)]) -> Veredicto {
@@ -11163,6 +11171,80 @@ mod tests {
                 "caso {}",
                 caso.indice
             );
+        }
+    }
+
+    #[test]
+    fn calibra_casos_ven_los_inestables_de_la_base_y_la_base_no() {
+        let (_t, tarea) = tarea_prueba();
+        let juicios = AtomicUsize::new(0);
+        let vistos: Mutex<Vec<(String, Vec<String>)>> = Mutex::new(Vec::new());
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let excluidos = crate::oracle::inestables_de_calibracion();
+            vistos
+                .lock()
+                .expect("lock")
+                .push((format!("{tipo:?}"), excluidos));
+            if matches!(tipo, TipoCaso::Base | TipoCaso::BaseRepetida) {
+                // Robustez y operabilidad varían 3 niveles entre los tres juicios: ambos quedan inestables.
+                let k = juicios.fetch_add(1, Ordering::SeqCst);
+                let nivel = alterno(k, 0, 3);
+                return Ok(diseno_con(&[
+                    (ITEM_MODULARIDAD, 3),
+                    (ITEM_ROBUSTEZ, nivel),
+                    (ITEM_OPERABILIDAD, nivel),
+                    (ITEM_ERRORES, 2),
+                ]));
+            }
+            Ok(diseno_con(&[
+                (ITEM_MODULARIDAD, 3),
+                (ITEM_ROBUSTEZ, 3),
+                (ITEM_OPERABILIDAD, 3),
+                (ITEM_ERRORES, 2),
+            ]))
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            6,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let fila = medida.fila.expect("hay fila");
+        let esperados = vec![ITEM_OPERABILIDAD.to_string(), ITEM_ROBUSTEZ.to_string()];
+        assert_eq!(
+            fila.inestables, esperados,
+            "la fila nombra los dos inestables"
+        );
+        let vistos = vistos.into_inner().expect("sin envenenar");
+        assert!(
+            vistos.iter().any(|(q, _)| q.starts_with("Limpio")),
+            "hay limpios"
+        );
+        assert!(
+            vistos.iter().any(|(q, _)| q.starts_with("Defecto")),
+            "hay defectos"
+        );
+        for (quien, excluidos) in &vistos {
+            if quien.starts_with("Base") {
+                assert!(
+                    excluidos.is_empty(),
+                    "{quien} se evalúa sin exclusiones: {excluidos:?}"
+                );
+            } else {
+                assert_eq!(
+                    excluidos, &esperados,
+                    "{quien} ve los inestables de la base"
+                );
+            }
         }
     }
 

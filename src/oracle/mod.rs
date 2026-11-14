@@ -1755,7 +1755,7 @@ fn aplicar_cobertura(
 }
 
 /// Ítems del juez que `evaluar` deja fuera de `dimension`: los inestables de su fila más reciente (Tarea 83,
-/// punto 2). Una medición de calibración no los quita: la calibración juzga la base con todos sus ítems.
+/// punto 2). En una calibración, los casos reciben los inestables de la base por un valor de hilo. La base no.
 fn excluidos_de(
     calibracion: &Calibraciones,
     tarea: &Tarea,
@@ -1764,17 +1764,19 @@ fn excluidos_de(
     rubricas: &[Rubrica],
     dimension: Dimension,
 ) -> Vec<String> {
-    if partes.dimension.is_some() {
-        return Vec::new();
-    }
     let Some(del_juez) = rubrica_del_juez(rubricas, dimension) else {
         return Vec::new();
     };
-    calibracion
-        .inestables_de(&tarea.nombre, tarea_hash, dimension)
-        .iter()
-        .filter(|id| del_juez.item.iter().any(|i| i.id == **id))
-        .cloned()
+    let inestables: Vec<String> = if partes.dimension.is_some() {
+        inestables_de_calibracion()
+    } else {
+        calibracion
+            .inestables_de(&tarea.nombre, tarea_hash, dimension)
+            .to_vec()
+    };
+    inestables
+        .into_iter()
+        .filter(|id| del_juez.item.iter().any(|i| i.id == *id))
         .collect()
 }
 
@@ -2413,6 +2415,9 @@ thread_local! {
     /// Plazos de las suites de las corridas de este hilo. `None`: vale `OpcionesOraculo::timeout`.
     static PLAZOS_SUITES: std::cell::RefCell<Option<PlazosSuites>> =
         const { std::cell::RefCell::new(None) };
+    /// Ítems inestables de la base de la calibración en curso. Solo la leen los casos de este hilo.
+    static INESTABLES_DE_CALIBRACION: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Anota una corrida de la suite `dir` que duró `segundos`. Gana la corrida más lenta de la suite.
@@ -2446,6 +2451,27 @@ pub(crate) fn con_plazos_suites<T>(plazos: Option<PlazosSuites>, f: impl FnOnce(
     let anterior = PLAZOS_SUITES.with(|p| p.replace(plazos));
     let _restaura = Restaura(anterior);
     f()
+}
+
+/// Corre `f` con `inestables` como los ítems inestables de la base en este hilo. Al salir, también ante pánico,
+/// vuelve el valor anterior. Lo usan los casos de una calibración: la base y sus repeticiones no lo reciben.
+pub(crate) fn con_inestables_de_calibracion<T>(inestables: &[String], f: impl FnOnce() -> T) -> T {
+    /// Devuelve la lista anterior al salir del ámbito.
+    struct Restaura(Vec<String>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = std::mem::take(&mut self.0);
+            INESTABLES_DE_CALIBRACION.with(|i| *i.borrow_mut() = anterior);
+        }
+    }
+    let anterior = INESTABLES_DE_CALIBRACION.with(|i| i.replace(inestables.to_vec()));
+    let _restaura = Restaura(anterior);
+    f()
+}
+
+/// Ítems inestables de la base en este hilo. Vacía fuera de `con_inestables_de_calibracion`.
+pub(crate) fn inestables_de_calibracion() -> Vec<String> {
+    INESTABLES_DE_CALIBRACION.with(|i| i.borrow().clone())
 }
 
 /// Plazo de la suite `dir` en este hilo. `None` si la corrida no es de una calibración.
@@ -8777,6 +8803,102 @@ mod tests {
         assert!(!cubre_dos_tercios(8, 13));
         assert!(cubre_dos_tercios(9, 13));
         assert!(cubre_dos_tercios(0, 0));
+    }
+
+    #[test]
+    fn oraculo_calibracion_cubre_6_de_8_de_peso_estable_con_los_inestables_fuera() {
+        // Diseño: robustez (3) y operabilidad (2) son inestables. El peso estable es 8. Un limpio que mide 6 cubre.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let hash = calibra::hash_de_tarea(&tarea).expect("hash");
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let partes = Partes {
+            dimension: Some(Dimension::Diseno),
+            ..Partes::default()
+        };
+        let juez = JuezDiseno {
+            modelo: None,
+            nombre: MODELO_JUEZ,
+            rubricas: &rubricas,
+        };
+        let r = resultado_con_niveles(&[
+            ("diseno.modularidad", 2),
+            ("diseno.errores", 2),
+            ("diseno.documentacion", 2),
+        ]);
+        let inestables = vec![
+            "diseno.robustez".to_string(),
+            "diseno.operabilidad".to_string(),
+        ];
+        let excluidos = con_inestables_de_calibracion(&inestables, || {
+            excluidos_de(
+                &Calibraciones::default(),
+                &tarea,
+                &hash,
+                &partes,
+                &rubricas,
+                Dimension::Diseno,
+            )
+        });
+        assert_eq!(peso_total(Dimension::Diseno, &rubricas, &excluidos), 8);
+        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new(), &excluidos);
+        assert_eq!(p.sin_veredicto, None, "{p:?}");
+    }
+
+    #[test]
+    fn excluidos_fuera_de_calibracion_dan_los_de_la_fila() {
+        // Guarda: sin calibración (`dimension` None), `excluidos_de` lee la fila de `calibracion.inestables_de`.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let hash = calibra::hash_de_tarea(&tarea).expect("hash");
+        let calibracion: Calibraciones = serde_json::from_value(json!({"v": 1, "filas": [
+            {"tarea": tarea.nombre, "dimension": "diseno", "n": 32, "defectos": 16, "limpios": 16,
+             "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+             "sensibilidad": 1.0, "especificidad": 1.0, "exactitud_balanceada": 1.0,
+             "tarea_hash": hash, "huella": calibra::huella_de(Dimension::Diseno),
+             "inestables": ["diseno.robustez", "diseno.operabilidad"]},
+        ]}))
+        .expect("calibración");
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let excluidos = excluidos_de(
+            &calibracion,
+            &tarea,
+            &hash,
+            &Partes::default(),
+            &rubricas,
+            Dimension::Diseno,
+        );
+        assert_eq!(excluidos, vec!["diseno.robustez", "diseno.operabilidad"]);
+    }
+
+    #[test]
+    fn excluidos_en_calibracion_sin_valor_de_hilo_dan_vacio() {
+        // Guarda: con `dimension` fijada y sin valor de hilo, no hay exclusiones. La base se juzga entera.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let hash = calibra::hash_de_tarea(&tarea).expect("hash");
+        let calibracion: Calibraciones = serde_json::from_value(json!({"v": 1, "filas": [
+            {"tarea": tarea.nombre, "dimension": "diseno", "n": 32, "defectos": 16, "limpios": 16,
+             "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+             "sensibilidad": 1.0, "especificidad": 1.0, "exactitud_balanceada": 1.0,
+             "tarea_hash": hash, "huella": calibra::huella_de(Dimension::Diseno),
+             "inestables": ["diseno.robustez", "diseno.operabilidad"]},
+        ]}))
+        .expect("calibración");
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let partes = Partes {
+            dimension: Some(Dimension::Diseno),
+            ..Partes::default()
+        };
+        let excluidos = excluidos_de(
+            &calibracion,
+            &tarea,
+            &hash,
+            &partes,
+            &rubricas,
+            Dimension::Diseno,
+        );
+        assert!(excluidos.is_empty(), "{excluidos:?}");
     }
 
     #[test]
