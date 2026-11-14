@@ -1,8 +1,6 @@
 # Brief de la Tarea 139 para el builder local
 
-> **EN PAUSA desde la vuelta (54). No arranques.** La Prueba 0b mostró que ningún contenedor anidado corre en Colab. Este brief corre `r00t` con el modo de la Tarea 140, que no sirve. El planner lo reescribe según la respuesta del usuario a P110.
-
-Este brief vale solo. No necesita otra conversación. La fuente de verdad es `.claude/plans/root.plan.md`. Reemplaza la versión de la vuelta (52).
+Este brief vale solo. No necesita otra conversación. La fuente de verdad es `.claude/plans/root.plan.md`. Reemplaza la versión de la vuelta (53).
 
 ## Qué es Root
 
@@ -13,8 +11,9 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 ## Base, rama y roles
 
 - Arrancá desde la punta de `laptop/cadena-110-136`. Trae las Tareas 84 a 136 y la 127b.
-- Arrancá después de la serie 138, cuando el orquestador lo diga.
-- La 137 toca `src/oracle/mod.rs`, `src/oracle/calibra.rs`, `src/oracle/calibra/inyectar.rs`, `src/oracle/calibra/sonda_lastre.rs` y los tests de `defectos.rs`. La 138 toca `src/oracle/eficiencia.rs`. La 140 toca `src/oracle/contenedor.rs`. No toques esos archivos. Podés llamar a sus funciones públicas, como `calibra::huella_de` y `calibra::agregar`.
+- **Arrancá cuando la serie 138 termine de medir.** El orquestador lo dice.
+- La 140 y la 141 se construyen a la vez. La 140 toca `tools/colab/` y `tests/colab_preparar.rs`. La 141 toca `src/colab_calibra.rs`, `src/cli.rs`, `src/lib.rs` y `src/oracle/colab.rs`. No toques esos archivos.
+- La 137 y la 138 tocan `src/oracle/mod.rs`, `src/oracle/calibra.rs`, `src/oracle/calibra/inyectar.rs`, `src/oracle/calibra/sonda_lastre.rs`, los tests de `src/oracle/calibra/defectos.rs` y `src/oracle/eficiencia.rs`. No toques esos archivos.
 - No uses `isolation: "worktree"` para tus subagentes.
 - Trabajá en tu propio worktree, en una rama nueva: `laptop/tarea-139`. Después de `git worktree add`, fijá `git config --worktree core.hooksPath .githooks`.
 - La mezcla espera la orden del usuario.
@@ -26,120 +25,104 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 | Punto | Podés tocar |
 |---|---|
-| 1, el paquete de ida | `src/colab_calibra.rs` (nuevo), `src/lib.rs` (la línea `mod` y el despacho del comando), `src/cli.rs` |
-| 2, la importación de vuelta | `src/colab_calibra.rs`, `src/cli.rs`, `src/lib.rs` |
-| 3, el ciclo de varios runtimes | `src/colab_calibra.rs`, `src/oracle/colab.rs`, `src/cli.rs`, `src/lib.rs` |
+| 1, el armado de los argumentos de `bwrap` | `src/oracle/contenedor.rs` |
+| 2, `ejecutar` con `bwrap` | `src/oracle/contenedor.rs` |
+| 3, los otros lugares que llaman a podman | `src/oracle/descarga.rs` (solo `correr_podman_acotado` y quien elige ese camino), `src/oracle/calibra/target.rs` (solo `digest_de_imagen`), `src/oracle/contenedor.rs` |
 
 - Los puntos van en serie, en este orden.
 - **Tests de otros archivos.** Podés editar un test de cualquier archivo si lee un literal o una firma que esta tarea cambia. Solo el test, no código de producción. Anotá cada uno en el informe.
-- **`src/oracle/colab.rs`:** podés abrir funciones de la CLI a `pub(crate)`, y cambiar `activo.json` para que guarde una lista de sesiones (punto 3). Nada más.
-- **No toques:** los archivos de la 137, la 138 y la 140, `src/tipos.rs`, el resto de `src/`, `imagenes/`, `rubricas/` y `$ROOT_HOME/`.
-- **Sin cambio de esquema** de `Fila` ni de `Veredicto`. El manifiesto es un tipo nuevo, en tu módulo.
-- **Sin dependencias nuevas** en `Cargo.toml`. Para el paquete, usá `tar` del sistema por un vector de argumentos, como `colab.rs`.
+- **No toques:** los archivos de la 137, la 138, la 140 y la 141, `src/limpieza.rs`, `src/oracle/entrega.rs`, `src/tipos.rs`, el resto de `src/`, `imagenes/`, `rubricas/` y `$ROOT_HOME/`.
+- **Sin cambio de esquema.**
+- **Sin dependencias nuevas** en `Cargo.toml`.
 - Si un arreglo necesita un archivo fuera de tu lista, detenete y escribilo en el informe.
 
 ## Entorno
 
 - Exportá `ROOT_SIN_PODMAN=1` en todo tu trabajo, también en tus commits. La suite con podman corre al mezclar, y la corre el orquestador.
 - La tarea no necesita podman, claves de API reales, Colab ni el `ROOT_HOME` real.
-- **No llames a la CLI `colab` real.** Los tests usan el falso de `ROOT_COLAB_BIN`, como los de `colab.rs`.
 - Corré la suite con `tools/test-seguro.sh`.
 - No exportes `DEEPSEEK_API_KEY` ni `ANTHROPIC_API_KEY`.
 - **Codegraph.** En esta laptop el comando es `codegraph`. Corré `codegraph init .` y `codegraph sync` en tu worktree antes de buscar llamadores. Uní siempre sus llamadores con los de `grep -w <nombre>`.
 
 ## Por qué
 
-**La decisión del usuario, literal, del 2026-11-13:** "C. Colab a) Mover las mediciones a Colab, dentro de 50 unidades". **El 2026-11-14 la recordó:** "acordate de usar colab para temas de root". **Y preguntó:** "No se puede multiples en colab?"
+**La decisión del usuario, literal:** P110 "b) Bubblewrap". Las cuatro dimensiones de oráculo (Seguridad, Funciona, Completitud y Pruebas) se calibran en Colab, con bubblewrap.
 
-**Lo que dijo la Prueba 0 del orquestador:**
-- Un runtime de CPU de Colab es Ubuntu 24.04, con 2 núcleos y 12 GB. Corre como root, con `CAP_SYS_ADMIN` y sin `CAP_NET_ADMIN`.
-- **Varios runtimes a la vez andan.** Con dos sesiones, `colab usage` dio "Active assignments: 2". Cada runtime de CPU cuesta 0,08 unidades por hora.
-- podman se instala con apt, pero no puede aislar la red ni usar cgroups. La Tarea 140 suma un modo de podman para Colab, sin red aislada y sin cgroups.
-- **Un proceso de `colab exec` no lee Colab Secrets.** Por eso, ninguna calibración con juez corre en Colab.
-- **Sin cgroup no hay `memory.peak`.** Por eso, Eficiencia no se calibra en Colab.
+**En Colab no corre ningún contenedor anidado.** El runtime es un contenedor de Docker sin privilegios. El kernel no deja montar un `/proc` nuevo (`mount_too_revealing`), porque Docker tapa entradas de `/proc`. podman y `unshare --mount-proc` fallan.
 
-**Lo que ya existe.** `src/oracle/colab.rs` corre los tests pendientes en una T4 (decisión 22). Usa la CLI `colab` con los verbos `new`, `upload`, `exec`, `download` y `stop`, siempre por vectores de argumentos. Anota una sesión en `$ROOT_HOME/colab/activo.json`, la sondea, y libera el runtime al terminar, con una señal o con un tope. `oraculo pendientes --vigilar` es la red de seguridad.
+**bubblewrap sí anda, si no monta un `/proc` nuevo.** La Prueba 0d del orquestador corrió bubblewrap 0.9.0 en Colab:
+```bash
+COMUN="--ro-bind / / --dev-bind /dev /dev --ro-bind /proc /proc --tmpfs /tmp --ro-bind /content/p/ro /repo --bind /content/p/sal /salida"
+bwrap --unshare-user --uid 0 --gid 0 --unshare-net --unshare-pid $COMUN -- sh -c '...'
+```
+- El repo quedó de solo lectura, y la salida escribible.
+- La red quedó cerrada: `Network is unreachable`.
+- El usuario y los procesos fueron propios: `pid=2`.
 
-**Por qué el binario se compila en la laptop, dentro de `docker.io/library/rust:1`.** El binario de la laptop se compila en Fedora 44, con una glibc más nueva que la de Ubuntu 24.04. La imagen `rust:1` es Debian bookworm, con glibc 2.36, y Ubuntu 24.04 trae 2.39. Un binario de esa imagen corre en Colab, y el runtime no gasta tiempo compilando Root.
+**Lo que hoy hace `contenedor::ejecutar`** (`src/oracle/contenedor.rs:222`): arma los argumentos de `podman run` con `argumentos` y `opciones`, lanza `podman`, y al vencer el plazo borra el contenedor por nombre. Las tareas de S2 corren comandos como `cd /repo && ... cargo nextest run ... --tool-config-file root:/etc/root-oraculo/nextest.toml`. Esperan `/repo`, `/oraculo`, `/cache`, `/rustsec` y `/salida` en esas rutas.
 
-**Por qué la imagen del oráculo se construye en cada runtime.** `root-oraculo-rust:4` pesa varios GB. La red de Google baja sus partes rápido. Construirla desde `imagenes/oraculo-rust/Containerfile` es más barato que subirla.
+**Lo que se pierde con `bwrap`:** los límites de memoria y de procesos (`--memory`, `--pids-limit`) y `memory.peak`. Por eso este modo sirve solo para las dimensiones de oráculo, en un runtime de un solo uso. Eficiencia no se calibra así.
 
 ## Tarea
 
-La regla que manda: **una calibración de oráculo corre en Colab, en varios runtimes a la vez, sale de la laptop en un paquete verificable, y vuelve al `ROOT_HOME` solo si coincide con la versión de la laptop.** Hacé un commit por punto. Cada punto empieza con su test en rojo.
+La regla que manda: **con `ROOT_CONTENEDOR_MODO=bwrap`, cada ejecución corre en bubblewrap con los mismos montajes, la red cerrada y el entorno de la imagen. Sin la variable, todo sigue con podman.** Hacé un commit por punto. Cada punto empieza con su test en rojo.
 
-### 1. El paquete de ida
+### 1. El armado de los argumentos de `bwrap`
 
-1. **Un comando nuevo:** `r00t colab empaquetar --binario <ruta> --trabajos <tarea>:<dimensión>,... --repo <tarea>=<ruta> --salida <archivo>`. Podés ajustar los nombres de los flags. Anotalos en el informe.
-2. **Solo dimensiones de oráculo:** Seguridad, Funciona, Completitud y Pruebas. Eficiencia y toda dimensión con ítems del juez se rechazan, con el motivo: "Eficiencia necesita el cgroup del contenedor" o "el juez necesita Colab Secrets, que `exec` no lee". Usá `calibra::tiene_items_de_juez` si es público.
-3. **El paquete lleva:**
-   - el binario `r00t` que se le pasa. El orquestador lo compila dentro de `docker.io/library/rust:1`. El comando revisa que sea un ELF de x86-64;
-   - `imagenes/oraculo-rust/` del repo de Root, para construir la imagen en el runtime;
-   - de `ROOT_HOME`: `oraculos/<tarea>/` de cada tarea del paquete, la caché de dependencias de cada tarea, `calibracion.json`, `configs/` y `root.toml`;
-   - el repo bueno de cada tarea;
-   - un manifiesto en JSON.
-4. **El paquete nunca lleva:** `eventos.jsonl`, `runs.jsonl`, `transcripts/`, `evidencia/`, `colab/`, ni ningún archivo que se llame como una clave o un token. La lista de exclusiones vive en una constante, con su motivo.
-5. **El manifiesto lleva:** el commit de Root, el SHA-256 del binario, la huella de cada dimensión (`calibra::huella_de`), el `tarea_hash` de cada tarea, el SHA-256 de cada archivo del paquete, y la lista de trabajos con el comando de cada uno.
-6. **El comando de cada trabajo** corre `r00t oraculo calibrar` con el modo de contenedor de Colab de la Tarea 140. Tomá el nombre del modo de una constante, y anotalo en el informe.
-7. **`root.toml`** se revisa antes de entrar. Si trae un campo con nombre de clave o token con valor, el comando falla y lo nombra, sin imprimir el valor.
-8. **Las funciones que arman la lista de archivos y el manifiesto son puras.** El empaquetado con `tar` es aparte.
-
-**Tests en rojo primero, con un `ROOT_HOME` falso en una carpeta temporal:**
-- Unitario: el paquete trae `oraculos/<tarea>/`, la caché de la tarea, `calibracion.json` y el binario.
-- Unitario: el paquete no trae `eventos.jsonl`, `runs.jsonl` ni `transcripts/`.
-- Unitario: un trabajo de Eficiencia y uno de Diseño se rechazan, cada uno con su motivo.
-- Unitario: un `root.toml` con `api_key = "x"` hace fallar el comando, y el mensaje no contiene `x`.
-- Unitario: el manifiesto trae el SHA-256 correcto de un archivo conocido.
-
-### 2. La importación de vuelta
-
-1. **Un comando nuevo:** `r00t colab importar <archivo>`.
-2. **Revisa el manifiesto de vuelta** antes de escribir nada:
-   - el SHA-256 de cada archivo coincide;
-   - el commit de Root coincide con el de la laptop;
-   - la huella y el `tarea_hash` de cada fila nueva coinciden con los que calcula la laptop.
-3. **Un archivo que no coincide frena todo.** Una fila que no coincide no entra, y el comando la nombra con su motivo. Las demás filas entran.
-4. **Antes de escribir,** guarda un respaldo de `calibracion.json` y de `calibracion/` en `ROOT_HOME/colab/respaldos/<fecha>/`. Usá `cp --reflink=auto` por un vector de argumentos.
-5. **Agrega las filas** con `calibra::agregar`. No dupliques una fila que ya está: misma tarea, dimensión y `ts`.
-6. **Copia los `.casos.jsonl` nuevos** a `ROOT_HOME/calibracion/`. Un nombre que ya existe no se pisa.
-7. **El manifiesto de vuelta dice dónde se midió** cada fila: `colab`, con el tipo de runtime. La fila no cambia.
-8. **Al final, imprime** cuántas filas entraron, cuántas no y por qué, y cuántos casos se copiaron.
+1. **Una variable nueva, `ROOT_CONTENEDOR_MODO`.** Con el valor exacto `bwrap`, el backend es bubblewrap. Con cualquier otro valor, o sin la variable, es podman.
+2. **El nombre y el valor** van en constantes públicas, para que la Tarea 141 las use.
+3. **La lectura de la variable es inyectable** para los tests, como en la Tarea 118 (`src/limpieza.rs`). Un test no cambia el entorno del proceso.
+4. **Una función pura, `argumentos_bwrap(e: &Ejecucion, entorno: &[(String, String)])`,** da los argumentos, en este orden:
+   - `--die-with-parent`, `--unshare-user`, `--uid 0`, `--gid 0`, `--unshare-pid`;
+   - `--unshare-net`, salvo que `e.red` sea verdadero;
+   - `--ro-bind / /`, `--dev-bind /dev /dev`, `--ro-bind /proc /proc`, `--tmpfs /tmp`;
+   - los montajes de `e`, en las mismas rutas que podman: `--ro-bind` para `/repo`, `/trabajo`, `/oraculo` (o `e.oraculo_destino`), `/cache` y `/rustsec`, y `--bind` para `/salida`. `/cache` va con `--bind` si `e.cache_rw` es verdadero;
+   - `--clearenv`, y después un `--setenv` por cada variable de `entorno` y de `e.env`, en ese orden;
+   - `--chdir /`, y al final `sh -c <e.cmd>`.
+5. **`entorno` es el entorno de la imagen.** Una variable, `ROOT_BWRAP_ENTORNO`, apunta a un archivo con una línea `CLAVE=valor` por variable. La Tarea 141 lo escribe en el runtime. Sin el archivo, `entorno` va vacío y el modo da un aviso.
+6. **Los secretos de `e.secretos`** se pasan con `--setenv` desde el proceso, nunca por un archivo. Si alguno viene en este modo, el modo da un error: en Colab no hay claves.
+7. **El modo `bwrap` no pone** `--memory`, `--pids-limit` ni `--name`.
 
 **Tests en rojo primero:**
-- Unitario: un paquete de vuelta con una fila válida la agrega a `calibracion.json`, y deja el respaldo.
-- Unitario: una fila con otra huella no entra, y el comando la nombra.
-- Unitario: un archivo con un SHA-256 distinto frena la importación sin escribir nada.
-- Unitario: importar dos veces el mismo paquete no duplica filas.
-- Unitario: dos paquetes con filas de tareas distintas se importan uno después del otro, y quedan todas.
+- Unitario: una `Ejecucion` con repo, oráculo, caché y salida da los `--ro-bind` y el `--bind` en las rutas de podman.
+- Unitario: con `e.red` en falso, los argumentos traen `--unshare-net`. Con `e.red` en verdadero, no.
+- Unitario: los argumentos traen `--clearenv` antes de los `--setenv`, y el comando al final.
+- Unitario: con `e.cache_rw` en verdadero, `/cache` va con `--bind`.
+- Unitario: un secreto en modo `bwrap` da error.
+- Guarda: sin la variable, `argumentos` da lo de hoy.
 
-### 3. El ciclo de varios runtimes
+### 2. `ejecutar` con `bwrap`
 
-1. **Un comando nuevo:** `r00t colab calibrar --paquete <archivo> [--paquete <archivo> ...]`. Cada paquete va a un runtime de CPU propio, y todos corren a la vez.
-2. **Un trabajo no se parte entre runtimes.** Cada paquete trae sus trabajos, y su runtime los corre en serie.
-3. **El ciclo de cada runtime:** pide el runtime de CPU con `new`; sube el paquete; instala podman con apt; construye la imagen; corre los trabajos del manifiesto; arma el paquete de vuelta; lo baja; y libera el runtime con `stop`.
-4. **Si la CLI necesita un valor explícito para la CPU,** usá ese valor y anotalo en el informe. Sin `--gpu`, ningún runtime pide una GPU.
-5. **`activo.json` guarda una lista de sesiones.** Lee también el formato viejo, de una sola sesión. `oraculo pendientes --vigilar` y `--liberar` recorren la lista.
-6. **Cada runtime se libera siempre:** al terminar, con un error, con `SIGINT` o `SIGTERM`, y al pasar un tope. El tope por defecto es de 4 horas por runtime, en una constante con su motivo.
-7. **Un runtime que falla no frena a los otros.** Su paquete de vuelta no llega, el comando lo dice, y los demás siguen.
-8. **Al bajar cada paquete de vuelta,** el comando llama a la importación del punto 2, de a uno.
-9. **El comando nunca escribe en el `ROOT_HOME` real** si una importación falla.
+1. **En modo `bwrap`, `ejecutar` lanza `bwrap`** con `argumentos_bwrap`, en un grupo de procesos propio (`process_group(0)`).
+2. **El plazo** mata el grupo entero con `SIGKILL` y devuelve `ErrorOraculo::PlazoVencido`, como hoy. No hay contenedor que borrar por nombre.
+3. **La lectura de stdout y stderr, los topes y `Resultado`** no cambian.
+4. **El barrido de contenedores** no corre en modo `bwrap`. No hay contenedores.
+5. **El turno de contenedor** sigue, para no lanzar dos a la vez si hoy no se lanzan.
 
-**Tests en rojo primero, con el falso de `ROOT_COLAB_BIN`:**
-- Unitario: dos paquetes dan dos sesiones, cada una con `new`, `upload`, `exec`, `download` y `stop`, con vectores de argumentos.
-- Unitario: sin `--gpu`, `new` no lleva `--gpu`, o lleva el valor de CPU.
-- Unitario: un `exec` que falla en una sesión libera esa sesión con `stop`, y la otra termina igual.
-- Unitario: `activo.json` lista las dos sesiones durante el ciclo, y no existe al terminar.
-- Unitario: un `activo.json` viejo, de una sola sesión, se lee.
-- Unitario: ningún argumento pasado a la CLI contiene el valor de una variable de entorno con nombre de clave.
+**Tests en rojo primero:**
+- Unitario: con un programa falso en vez de `bwrap`, `ejecutar` le pasa los argumentos de `argumentos_bwrap`.
+- Unitario: un programa falso que duerme más que el plazo da `PlazoVencido`, y su grupo de procesos no queda vivo.
+- **Un test con el `bwrap` real,** si está instalado en la laptop: corre `cat /repo/a` sobre una carpeta de solo lectura, prueba que `touch /repo/b` falla, y prueba que la red está cerrada. Se saltea si no hay `bwrap`, con un aviso como el de `saltar_sin_podman`.
 
-No corras la validez, `corre`, `calibrar` ni la pasada reales. No llames a la CLI `colab` real. Los corre el orquestador.
+### 3. Los otros lugares que llaman a podman
+
+1. **La descarga.** En modo `bwrap`, `correr_podman_acotado` (`src/oracle/descarga.rs`) no lanza podman. Da `ErrorOraculo::Infra` con el motivo: "en modo bwrap, la caché de dependencias viene en el paquete".
+2. **`digest_de_imagen`** (`src/oracle/calibra/target.rs:51`). En modo `bwrap`, devuelve el valor de la variable `ROOT_BWRAP_IMAGEN_ID`, que escribe la Tarea 141. Sin la variable, devuelve `None`.
+3. **`argumentos_separado`,** el contenedor vivo de Entrega, da un error claro en modo `bwrap`.
+4. **El informe lista** todo lugar con el literal `"podman"` en `src/`, y qué hace en modo `bwrap`. Usá la auditoría de la Tarea 118 como punto de partida.
+
+**Tests en rojo primero:**
+- Unitario: en modo `bwrap`, la descarga sin caché da el error con su motivo, sin lanzar podman.
+- Unitario: en modo `bwrap`, `digest_de_imagen` devuelve el id de la variable.
+- Unitario: en modo `bwrap`, `argumentos_separado` da error.
+
+No corras la validez, `corre`, `calibrar` ni la pasada reales. Las corre el orquestador.
 
 ## Lo que queda sin probar
 
 El builder no usa Colab ni podman. Quedan para el orquestador:
-- **La Prueba 0b** de la vuelta (53), sección 3. Sin ella, la 140 no arranca, y esta tarea no se puede probar en Colab.
-- **Una calibración real en Colab** con cuatro paquetes y cuatro runtimes, sin API: el reparto de la vuelta (53), sección 5. Después, la importación al `ROOT_HOME` de la laptop.
-- Cuántas asignaciones da `colab usage` con cuatro runtimes, y las unidades que gastó todo.
+- **En Colab, después de la prueba de la 140:** una calibración de Seguridad de s2-t1 con `ROOT_CONTENEDOR_MODO=bwrap`, en el runtime preparado. En la laptop tarda 8 s.
+- **En la laptop, sin la variable:** la suite con podman sigue verde.
 
 ## Reglas
 
@@ -147,10 +130,9 @@ El builder no usa Colab ni podman. Quedan para el orquestador:
 - **Commits.** Usá `git commit -- <rutas>`. Un archivo nuevo necesita `git add <ruta>` antes. No uses `git add -A` ni `--no-verify`.
 - **Archivos prohibidos siempre.** No toques `GOAL.md`, `GOAL.hash`, `rubricas/`, `docs/borradores/` ni `.claude/plans/root.plan.md`. No toques nada de `~/.local/share/root/`.
 - **Sin dinero.** No llames a ninguna API real ni a Colab.
-- **Claves.** Ninguna clave va en el paquete, en un argumento ni en un log.
 - **Borrados.** Todo borrado de Root pasa por `src/borrado.rs`.
 - **Temporales.** Ningún test crea carpetas en `/tmp` del host.
-- **Interfaces.** Si `r00t esquema` o `docs/interfaces.md` listan los comandos, regeneralos.
+- **Interfaces.** Esta tarea no cambia el esquema.
 - **Idioma.** Los documentos van en Español Técnico Simplificado: oraciones de 20 palabras o menos, una idea por oración, voz activa.
 
 ## Informe
@@ -160,7 +142,7 @@ Al terminar, escribí `docs/builds/informe-local-139.md` con estas secciones:
 1. **Resultado de la suite**: la base y el final, con verdes, fallas e ignorados, con `ROOT_SIN_PODMAN=1`.
 2. **Commits**: una tabla con punto, defecto, tests vistos en rojo y commit.
 3. **Qué falló o quedó incompleto**: cada punto sin hacer o sin probar, con su motivo.
-4. **Los comandos nuevos**: el texto de `--help` de cada uno, y un ejemplo de manifiesto en JSON.
-5. **Tests que cambiaron de valor**, con su motivo, y cada test de otro archivo que editaste.
-6. **Llamadores revisados**: por cada función de `colab.rs` que abriste o cambiaste, los llamadores de codegraph y de grep.
+4. **Los argumentos de los dos modos**: los argumentos completos de una misma `Ejecucion` con podman y con `bwrap`.
+5. **Los lugares con podman**: cada uno, y qué hace en modo `bwrap`.
+6. **Tests que cambiaron de valor**, con su motivo.
 7. **Preguntas para el planner**: numeradas, con la decisión que tomó el organizador.

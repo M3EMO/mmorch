@@ -11023,3 +11023,102 @@ echo "rc_d3=$?"
 - Gasto: menos de 0,01 unidades. Saldo: 769,72.
 
 Bubblewrap cumple lo que pide la sección 5 para seguir. P110 sigue siendo del usuario.
+
+## Vuelta del 2026-11-14 (55): las cuatro dimensiones de oráculo a Colab, con bubblewrap
+
+**Respuesta del usuario, textual:** P110 "b) Bubblewrap".
+
+**Estado.**
+- **La Prueba 0d dio bien.** bubblewrap 0.9.0 en Colab, con `--ro-bind /proc /proc`: el repo quedó de solo lectura, la salida escribible, la red cerrada (`Network is unreachable`), y el usuario y los procesos propios (`pid=2`). Las tres variantes dieron `rc=0`.
+- La serie 138 sigue calibrando Eficiencia en la laptop. Ningún builder compila mientras mide.
+- P109 espera al usuario. Saldo de Colab: 769,72 unidades.
+
+**Las tareas se renumeran.** La 139 de la vuelta (53) estaba en pausa, y la 140 sin uso. Las dos se reemplazan. Los briefs nuevos usan los mismos archivos.
+
+## 1. Las tres piezas
+
+| Tarea | Qué | Archivos |
+|---|---|---|
+| 139 | El backend de `bwrap`: `contenedor::ejecutar` corre el comando con bubblewrap en vez de podman, si se pide en forma explícita | `src/oracle/contenedor.rs`, `src/oracle/descarga.rs` (solo el camino que llama a podman directo), `src/oracle/calibra/target.rs` (solo `digest_de_imagen`) |
+| 140 | El script que prepara el runtime con las mismas herramientas que la imagen, y revisa sus versiones | `tools/colab/preparar-runtime.sh` (nuevo), `tools/colab/verificar-versiones.sh` (nuevo), `tests/colab_preparar.rs` (nuevo) |
+| 141 | El paquete de ida, la importación de vuelta y los runtimes a la vez, con el control de la base | `src/colab_calibra.rs` (nuevo), `src/cli.rs`, `src/lib.rs`, `src/oracle/colab.rs` |
+
+**Las tres corren en paralelo.** No comparten archivos. Ninguna toca los de la 137 ni la 138: `mod.rs`, `calibra.rs`, `inyectar.rs`, `sonda_lastre.rs`, los tests de `defectos.rs` y `eficiencia.rs`. Ninguna necesita la 137 ni la 138. **La base de las tres es la punta de `laptop/cadena-110-136`.**
+
+**Los builders arrancan cuando la serie 138 termine de medir,** para no cargar la laptop durante una medición.
+
+## 2. Cómo trabaja cada pieza
+
+**La 139, el backend de `bwrap`.**
+- Una variable, `ROOT_CONTENEDOR_MODO=bwrap`, lo activa. Sin ella, todo sigue con podman.
+- Los mismos montajes que podman, en las mismas rutas: `/repo`, `/oraculo`, `/cache` y `/rustsec` de solo lectura, y `/salida` escribible.
+- El resto, como en la Prueba 0d: `--ro-bind / /` y `--ro-bind /proc /proc`, `/tmp` en `tmpfs`, `--unshare-user` y `--unshare-net` para la red cerrada, `--unshare-pid`, y `--die-with-parent`.
+- **El entorno es el de la imagen:** la lista de variables viaja en el manifiesto, y `bwrap` empieza con `--clearenv`.
+- **El plazo** mata el grupo de procesos del `bwrap`, en vez de borrar un contenedor por nombre.
+- **Lo que no tiene:** los límites de memoria y de procesos de `--memory` y `--pids-limit`. Un caso que se desborde mata el runtime, que es de un solo uso.
+- **Los otros lugares que llaman a podman:**
+  - la descarga sin caché (`descarga.rs`, `correr_podman_acotado`) da un error claro: en este modo, la caché viene en el paquete;
+  - `digest_de_imagen` devuelve el id de la imagen que trae el manifiesto;
+  - `argumentos_separado`, el contenedor vivo de Entrega, da un error claro.
+
+**La 140, el script del runtime.**
+- **Las herramientas no se compilan en el runtime. Se copian de la imagen.** `cargo-mutants`, `cargo-nextest`, `cargo-audit`, `gitleaks` y `hadolint` son binarios de la imagen. Se compilaron en Debian bookworm, con glibc 2.36, y corren en Ubuntu 24.04, con glibc 2.39. Son los mismos binarios.
+- **La cadena de Rust se instala con `rustup`** en la versión exacta de la imagen, con `clippy`. Las rutas son las de la imagen: `/usr/local/rustup` y `/usr/local/cargo`.
+- **`/etc/root-oraculo/nextest.toml`** se escribe igual que en la imagen.
+- **bubblewrap** se instala con apt.
+- **Al final, el script de verificación** compara cada versión con las del manifiesto. Una diferencia frena todo, antes de calibrar.
+
+**La 141, el paquete, la importación y los runtimes.**
+- **El paquete se arma en la laptop.** Lleva el binario de Root, compilado dentro de `docker.io/library/rust:1`. Lleva también los binarios de herramientas y las versiones, sacados de `root-oraculo-rust:4` con podman. Y lleva el `ROOT_HOME` necesario, con `cache/rustsec/`, los repos y el manifiesto.
+- **Solo dimensiones de oráculo.** Rechaza Eficiencia y las dimensiones con juez.
+- **Varios runtimes a la vez,** con el reparto de la vuelta (53), sección 5. `activo.json` guarda una lista.
+- **El control de la base al importar** (sección 4).
+
+## 3. Cómo se prueba cada pieza
+
+| Tarea | En la laptop, sin podman | La prueba barata en Colab que la cierra |
+|---|---|---|
+| 139 | Unitarios del armado de los argumentos de `bwrap`. Un test con el `bwrap` real de la laptop, si está instalado: corre `cat` en un repo de solo lectura y prueba que la red está cerrada. Se saltea si no hay `bwrap` | Una calibración de Seguridad de s2-t1 en un runtime, con `ROOT_CONTENEDOR_MODO=bwrap`. En la laptop tarda 8 s |
+| 140 | `bash -n` de los dos scripts. Un test corre la verificación con binarios falsos en el `PATH`: da bien con las versiones del manifiesto y mal con una distinta | Correr el script en un runtime de CPU: tiempo, unidades, y la verificación en verde |
+| 141 | Tests con el falso de `ROOT_COLAB_BIN` y un `ROOT_HOME` falso: el paquete, la importación, el control de la base, dos sesiones a la vez | Un paquete de Seguridad de s2-t1 en un runtime, y su importación a una copia del `ROOT_HOME` de la laptop. Después, las doce calibraciones en cuatro runtimes |
+
+**El orden de las pruebas en Colab:** la de la 140 primero, porque prepara el runtime. Después, la de la 139, en ese runtime. Al final, la de la 141, que usa las dos.
+
+## 4. Las diferencias entre la imagen y el runtime que pueden cambiar un veredicto
+
+| Diferencia | Qué puede cambiar | Cómo se evita o se detecta |
+|---|---|---|
+| La versión de Rust y de clippy | Un aviso nuevo de clippy, un error de compilación | La misma versión exacta, con `rustup`. La verificación la compara |
+| Las versiones de cargo-mutants, nextest, cargo-audit, gitleaks y hadolint | Otros mutantes, otros hallazgos | Los mismos binarios, copiados de la imagen. La verificación compara su SHA-256 |
+| La base de RustSec | Otros avisos de cargo-audit | `cache/rustsec/` viaja en el paquete |
+| El compilador de C y la glibc del sistema | Un crate con código de C compila distinto, o falla | Se detecta en el control de la base |
+| 2 núcleos contra 8 | Un test o un mutante vence su plazo. Un mutante vencido cuenta como muerto | Se detecta en el control de la base. El plazo de los casos sale de la base del mismo runtime |
+| Las variables de entorno, como el idioma | Un test que depende del idioma | `bwrap` empieza con `--clearenv`, y pone las variables de la imagen |
+| Python y pytest de Ubuntu | Un contrato con pytest | Las tareas de S2 usan nextest. Si una tarea usa pytest, la 141 la rechaza en Colab |
+
+**El control de la base, en la importación.** La base de una calibración se mide en el runtime. Si el runtime es distinto, la base lo muestra.
+- La 141 compara la base de cada fila de Colab con la última fila de la laptop de la misma tarea, dimensión y huella.
+- Compara el valor de la base y, en Pruebas, el estado de cada mutante de la muestra de la base.
+- **Si difieren,** la fila no entra, con el motivo "la base de Colab difiere de la base de la laptop", y los dos valores.
+- **Sin fila de la laptop para comparar,** la fila no entra. El control necesita una referencia.
+- **Cuándo pasa eso:** si cambia la huella de una dimensión, las filas viejas de la laptop dejan de servir de referencia. Entonces el orquestador corre primero, en la laptop, una calibración de control por dimensión, en una sola tarea. En la laptop tardan de 8 s (Seguridad) a unos 5 minutos (Pruebas, con la 130). Colab corre el resto.
+- **Lo que se compara depende de lo que la fila guarda.** El valor de la base está en cada renglón de casos (`valor_base`). Si la muestra de mutantes de la base no está guardada, la 141 compara solo el valor, y lo anota.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | La serie 138: la 137, la 138, su suite y Eficiencia | Nada; ya corre | Laptop | No |
+| 2 | Las Tareas 139, 140 y 141, en paralelo | El paso 1, solo para no cargar la laptop | Laptop, sin podman | No |
+| 3 | Las pruebas de Colab de la 140, la 139 y la 141, en ese orden | El paso 2 | Colab, CPU | No |
+| 4 | La etapa 1 de P107 a: dos casos de Diseño | **P109** | Laptop | 0,35 USD |
+| 5 | Las etapas 2 a 5 de P107 a | El paso 4 y **P109** | Laptop | Hasta 18,45 USD |
+| 6 | La mezcla de la cadena 110 a 141 | La orden del usuario | — | No |
+| 7 | Si Eficiencia no cumple con la serie 138, su calibración otra vez | El paso 1 | Laptop | No |
+| 8 | Congelar la versión | El paso 5 | — | No |
+| 9 | Las doce calibraciones de oráculo con la versión congelada, en cuatro runtimes | Los pasos 3 y 8 | Colab | No |
+| 10 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 11 | P98 c: el final con 15 defectos reales | El paso 10 | — | No |
+| 12 | La validez sobre el final sellado | Los pasos 1 a 11 | Laptop si usa el juez | Según el final |
+
+**Preguntas al usuario:** P109.
