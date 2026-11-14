@@ -742,6 +742,7 @@ pub fn juzgar(
         leidos: &guardados,
     };
     let mut lectura = leer_items(respuesta.items, &cx);
+    lectura.descartes.extend(respuesta.descartes);
     let mut hallazgos = Vec::new();
     let mut hallazgos_descartados = Vec::new();
     for valor in respuesta.hallazgos {
@@ -843,7 +844,9 @@ fn reintentar(
         modelo: cx.modelo,
         leidos: cx.leidos,
     };
-    leer_items(respuesta.items, &cx_reintento)
+    let mut lectura = leer_items(respuesta.items, &cx_reintento);
+    lectura.descartes.extend(respuesta.descartes);
+    lectura
 }
 
 /// Texto de la sección `REINTENTO:`: una línea por cita que no pasó el gate, y una por id roto.
@@ -1088,22 +1091,78 @@ fn descarte(que: impl Into<String>, motivo: impl Into<String>) -> Descarte {
     }
 }
 
-/// Respuesta del juez: dos arreglos, `items` y `hallazgos`.
+/// Respuesta del juez: dos arreglos, `items` y `hallazgos`, y los descartes de su lectura.
 struct Respuesta {
     items: Vec<Value>,
     hallazgos: Vec<Value>,
+    descartes: Vec<Descarte>,
 }
 
-/// Parseo estricto: un objeto JSON con las claves `items` y `hallazgos`, con o sin un bloque ```json.
+const MOTIVO_JSON_REPARADO: &str = "JSON reparado: coma final";
+
+/// Quita comas finales (antes de `}` o `]`) fuera de los textos entre comillas. Nada más.
+fn quitar_comas_finales(texto: &str) -> String {
+    let chars: Vec<char> = texto.chars().collect();
+    let mut salida = String::with_capacity(texto.len());
+    let mut en_texto = false;
+    let mut escapado = false;
+    for (i, &c) in chars.iter().enumerate() {
+        if en_texto {
+            if escapado {
+                escapado = false;
+            } else if c == '\\' {
+                escapado = true;
+            } else if c == '"' {
+                en_texto = false;
+            }
+        } else if c == '"' {
+            en_texto = true;
+        } else if c == ',' && cierra_tras(&chars[i + 1..]) {
+            continue;
+        }
+        salida.push(c);
+    }
+    salida
+}
+
+/// Sí si el primer carácter que no es blanco JSON es `}` o `]`.
+fn cierra_tras(resto: &[char]) -> bool {
+    resto
+        .iter()
+        .copied()
+        .find(|c| !matches!(c, ' ' | '\t' | '\n' | '\r'))
+        .is_some_and(|c| matches!(c, '}' | ']'))
+}
+
+/// Parsea el JSON tal cual. Si falla, prueba sin comas finales y avisa del descarte.
+/// Si el reparado tampoco parsea, el error es el del parseo estricto.
+fn leer_json(texto: &str) -> Result<(Value, Vec<Descarte>), String> {
+    let limpio = desenvuelto(texto);
+    match serde_json::from_str::<Value>(limpio) {
+        Ok(valor) => Ok((valor, Vec::new())),
+        Err(estricto) => match serde_json::from_str::<Value>(&quitar_comas_finales(limpio)) {
+            Ok(valor) => Ok((
+                valor,
+                vec![descarte("respuesta del juez", MOTIVO_JSON_REPARADO)],
+            )),
+            Err(_) => Err(format!("JSON inválido: {estricto}")),
+        },
+    }
+}
+
+/// Parseo: un objeto JSON con las claves `items` y `hallazgos`, con o sin un bloque ```json.
 fn parsear(texto: &str) -> Result<Respuesta, String> {
-    let valor: Value =
-        serde_json::from_str(desenvuelto(texto)).map_err(|e| format!("JSON inválido: {e}"))?;
+    let (valor, descartes) = leer_json(texto)?;
     let Value::Object(mut campos) = valor else {
         return Err("se esperaba un objeto JSON".into());
     };
     let items = arreglo(campos.remove("items"), "items")?;
     let hallazgos = arreglo(campos.remove("hallazgos"), "hallazgos")?;
-    Ok(Respuesta { items, hallazgos })
+    Ok(Respuesta {
+        items,
+        hallazgos,
+        descartes,
+    })
 }
 
 fn arreglo(valor: Option<Value>, clave: &str) -> Result<Vec<Value>, String> {
@@ -1693,6 +1752,98 @@ mod tests {
     fn juez_json_roto_da_sin_veredicto() {
         let r = juzgar_con(&caso(), "{\"items\": [".into());
         assert_sin_veredicto(&r);
+    }
+
+    // Coma final: se repara solo si el texto estricto no parsea.
+
+    #[test]
+    fn parsear_repara_coma_final_en_objeto_y_arreglo() {
+        let texto = "{\"items\":[{\"item\":\"a\",\"nivel\":1,}],\"hallazgos\":[],}";
+        let r = parsear(texto).expect("parsea con la coma final reparada");
+        assert_eq!(r.items.len(), 1);
+        assert!(r.hallazgos.is_empty());
+        assert_eq!(
+            r.descartes,
+            vec![descarte("respuesta del juez", MOTIVO_JSON_REPARADO)]
+        );
+    }
+
+    #[test]
+    fn parsear_repara_coma_final_dentro_de_bloque_json() {
+        let texto = "```json\n{\"items\":[],\"hallazgos\":[],}\n```";
+        let r = parsear(texto).expect("parsea el bloque reparado");
+        assert!(r.items.is_empty());
+        assert_eq!(r.descartes.len(), 1);
+    }
+
+    #[test]
+    fn parsear_sin_coma_final_no_agrega_descarte() {
+        let r = parsear("{\"items\":[],\"hallazgos\":[]}").expect("parsea");
+        assert!(r.descartes.is_empty());
+    }
+
+    #[test]
+    fn parsear_con_reparo_fallido_da_el_error_estricto() {
+        // Sin la coma final sigue roto: `1 2` no es un arreglo válido.
+        let texto = "{\"items\":[1 2],\"hallazgos\":[],}";
+        let estricto = serde_json::from_str::<Value>(texto).unwrap_err();
+        let err = parsear(texto).err().expect("debe fallar");
+        assert_eq!(err, format!("JSON inválido: {estricto}"));
+    }
+
+    #[test]
+    fn parsear_json_cortado_sigue_con_json_invalido() {
+        let err = parsear("{\"items\": [").err().expect("debe fallar");
+        assert!(err.starts_with("JSON inválido"), "{err}");
+    }
+
+    #[test]
+    fn quitar_comas_finales_quita_coma_con_espacios_y_saltos() {
+        let texto = "{\"a\":[1, 2 ,\n\t]\n , }";
+        assert_eq!(quitar_comas_finales(texto), "{\"a\":[1, 2 \n\t]\n  }");
+    }
+
+    #[test]
+    fn quitar_comas_finales_no_toca_coma_dentro_de_texto() {
+        let texto = "{\"items\":[{\"item\":\"a\",\"cita\":\"x,}\"}],\"hallazgos\":[]}";
+        assert_eq!(quitar_comas_finales(texto), texto);
+    }
+
+    #[test]
+    fn quitar_comas_finales_respeta_comilla_escapada() {
+        // JSON: {"cita":"a\",}"}  La coma va dentro del texto.
+        let texto = "{\"cita\":\"a\\\",}\"}";
+        assert_eq!(quitar_comas_finales(texto), texto);
+    }
+
+    #[test]
+    fn quitar_comas_finales_quita_coma_tras_comilla_escapada() {
+        // JSON: {"a":"x\"","b":1,}  La coma final sí se quita.
+        let texto = "{\"a\":\"x\\\"\",\"b\":1,}";
+        assert_eq!(quitar_comas_finales(texto), "{\"a\":\"x\\\"\",\"b\":1}");
+    }
+
+    #[test]
+    fn quitar_comas_finales_respeta_barra_escapada() {
+        // JSON: {"a":"x\\",}  La barra escapada cierra el texto; la coma sí se quita.
+        let texto = "{\"a\":\"x\\\\\",}";
+        assert_eq!(quitar_comas_finales(texto), "{\"a\":\"x\\\\\"}");
+    }
+
+    #[test]
+    fn juzgar_con_coma_final_trae_el_descarte_de_reparacion() {
+        let c = caso();
+        let items = json!([item_nivel(MODULARIDAD, 1, json!([real()]))]).to_string();
+        let texto = format!("{{\"items\":{items},\"hallazgos\":[],}}");
+        let r = juzgar_con(&c, texto);
+        assert_eq!(r.estado, EstadoJuez::Ok);
+        assert!(r.niveles.contains_key(MODULARIDAD), "{r:?}");
+        assert!(
+            r.descartes
+                .contains(&descarte("respuesta del juez", MOTIVO_JSON_REPARADO)),
+            "{:?}",
+            r.descartes
+        );
     }
 
     #[test]
