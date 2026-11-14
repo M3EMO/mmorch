@@ -544,12 +544,9 @@ fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Dispar
         if !m.regresion || razon <= UMBRAL_NO_LISTO {
             continue;
         }
-        let Some(frase) = frase_de_regresion(m) else {
-            continue;
-        };
         salida.push(Disparo {
             regla: format!("eficiencia_regresion: {}", m.medida),
-            frase,
+            frase: frase_de_regresion_o_generica(m, razon),
             hallazgo: None,
         });
     }
@@ -1353,6 +1350,11 @@ fn nombre_dimension(d: Dimension) -> &'static str {
 /// Bytes en un MiB. Las medidas de memoria y tamaño llegan en bytes.
 const BYTES_POR_MIB: f64 = 1_048_576.0;
 
+/// Razón con un decimal y coma, como se lee en español.
+fn razon_a_texto(razon: f64) -> String {
+    format!("{razon:.1}").replace('.', ",")
+}
+
 /// Frase de una regresión de eficiencia: la razón con un decimal y los dos valores. Los tiempos van en
 /// segundos. La memoria y el tamaño van en bytes y se muestran en MiB. `None` si faltan números o la medida
 /// es desconocida.
@@ -1360,7 +1362,7 @@ fn frase_de_regresion(m: &MedidaEficiencia) -> Option<String> {
     let (Some(referencia), Some(repo), Some(razon)) = (m.referencia, m.repo, m.razon) else {
         return None;
     };
-    let razon_txt = format!("{razon:.1}").replace('.', ",");
+    let razon_txt = razon_a_texto(razon);
     let segundos = |v: f64| numero(v as f32);
     let mib = |v: f64| numero((v / BYTES_POR_MIB) as f32);
     let frase = match m.medida.as_str() {
@@ -1389,6 +1391,24 @@ fn frase_de_regresion(m: &MedidaEficiencia) -> Option<String> {
     Some(frase)
 }
 
+/// Frase de una regresión con razón presente. Una medida sin frase propia, por id desconocido o por faltar
+/// números, usa la genérica: el id y la razón, y los valores si están.
+fn frase_de_regresion_o_generica(m: &MedidaEficiencia, razon: f64) -> String {
+    if let Some(frase) = frase_de_regresion(m) {
+        return frase;
+    }
+    let razon_txt = razon_a_texto(razon);
+    match (m.repo, m.referencia) {
+        (Some(repo), Some(referencia)) => format!(
+            "La medida {} empeora {razon_txt} veces: {} contra {}.",
+            m.medida,
+            numero(repo as f32),
+            numero(referencia as f32)
+        ),
+        _ => format!("La medida {} empeora {razon_txt} veces.", m.medida),
+    }
+}
+
 /// Línea de eficiencia del resumen. Con regresión, nombra la de mayor razón. Sin regresión y con medidas con
 /// valor, dice que no hay regresiones. Sin medidas con valor, no hay línea.
 fn linea_de_eficiencia(v: &Veredicto) -> Option<String> {
@@ -1399,7 +1419,8 @@ fn linea_de_eficiencia(v: &Veredicto) -> Option<String> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     if let Some(m) = mayor {
-        return frase_de_regresion(m);
+        let razon = m.razon?;
+        return Some(frase_de_regresion_o_generica(m, razon));
     }
     con_valor()
         .next()
@@ -2352,6 +2373,34 @@ modulos = ["config"]
             "{}",
             i.motivo
         );
+    }
+
+    #[test]
+    fn informe_eficiencia_id_desconocido_con_regresion_dispara() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("otra", 1.25, 2.0, 1.6, 0.02, true)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("eficiencia_regresion: otra"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.resumen
+                .contains("La medida otra empeora 1,6 veces: 2,00 contra 1,25."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_id_desconocido_dentro_del_ruido_no_dispara() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("otra", 1.25, 2.0, 1.6, 0.7, false)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+        assert!(!i.motivo.contains("eficiencia_regresion"), "{}", i.motivo);
     }
 
     #[test]
