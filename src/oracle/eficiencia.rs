@@ -156,6 +156,23 @@ fn valor_del_ancla(ancla: &Serie) -> Option<f64> {
     ancla.as_ref().ok()?.first().copied()
 }
 
+/// Un aviso por cada serie de ancla con error. La referencia sigue con la serie de la base.
+fn avisar_ancla(ancla: &Ancla, avisos: &mut Vec<String>) {
+    let series = [
+        (Medida::TiempoTests, &ancla.tiempo),
+        (Medida::MemoriaPico, &ancla.memoria),
+        (Medida::TiempoCompilacion, &ancla.compilacion),
+    ];
+    for (medida, serie) in series {
+        if let Err(motivo) = serie {
+            avisos.push(format!(
+                "eficiencia: el ancla de {} falló y la referencia sigue con la base: {motivo}",
+                medida.id()
+            ));
+        }
+    }
+}
+
 /// Compara las dos series de una medida. El ancla suma a la referencia. Si un lado falla, la medida no tiene valor.
 fn combinar(medida: Medida, referencia: &Serie, ancla: &Serie, repo: &Serie) -> ResultadoMedida {
     match (referencia, repo) {
@@ -728,6 +745,7 @@ fn referencia_fijada_actual() -> Option<Referencia> {
 /// también con error. Cada lado tiene su subcarpeta: todas sus llamadas usan la misma `/salida`.
 /// Con carpeta fija (`con_carpeta_de_eficiencia`), usa esa carpeta y no crea ni borra la suya.
 /// Si el borrado de esa carpeta falla, `avisos` recibe un aviso con la ruta y el error. Las medidas no cambian.
+/// Con referencia fijada, un ancla con error suma un aviso por medida. La medida sigue con la base.
 pub fn medir(
     inicial: &dyn EjecutorHerramienta,
     repo: &dyn EjecutorHerramienta,
@@ -773,7 +791,7 @@ fn medir_con(
         ej: repo,
         salida: raiz.join("repo"),
     };
-    let resultados = medir_lados(&lado_i, &lado_r);
+    let resultados = medir_lados(&lado_i, &lado_r, avisos);
     // La carpeta fija es de quien la fijó: no se borra aquí. Un fallo de borrado no cambia las medidas: la
     // carpeta queda y el siguiente `medir` la ignora.
     if fija.is_none()
@@ -802,10 +820,10 @@ fn aviso_de_borrado(raiz: &Path, e: &std::io::Error) -> String {
 
 /// Las cuatro medidas de dos lados. Con referencia fijada, solo mide el repo. Si no, mide los dos lados y
 /// guarda lo que midió el inicial para `tomar_referencia`.
-fn medir_lados(inicial: &Lado, repo: &Lado) -> Vec<ResultadoMedida> {
+fn medir_lados(inicial: &Lado, repo: &Lado, avisos: &mut Vec<String>) -> Vec<ResultadoMedida> {
     let fijada = REFERENCIA_FIJA.with(|r| r.borrow().clone());
     match fijada {
-        Some(referencia) => medir_contra_referencia(&referencia, inicial, repo),
+        Some(referencia) => medir_contra_referencia(&referencia, inicial, repo, avisos),
         None => {
             let (resultados, referencia) = medir_los_dos_lados(inicial, repo);
             ULTIMA_REFERENCIA.with(|u| *u.borrow_mut() = Some(referencia));
@@ -858,6 +876,7 @@ fn medir_contra_referencia(
     referencia: &Referencia,
     inicial: &Lado,
     repo: &Lado,
+    avisos: &mut Vec<String>,
 ) -> Vec<ResultadoMedida> {
     let meta_r = leer_metadata(repo).map_err(|m| format!("repo: {m}"));
     let lista_r = leer_listas(repo).map_err(|m| format!("repo: {m}"));
@@ -895,6 +914,7 @@ fn medir_contra_referencia(
         &mut tamano,
         &mut ancla,
     );
+    avisar_ancla(&ancla, avisos);
     combinar_medidas(&tiempo, &memoria, &compilacion, &tamano, &ancla)
 }
 
@@ -1097,9 +1117,9 @@ mod tests {
     #[test]
     fn ancla_sube_el_ruido_y_quita_la_falsa_regresion() {
         let base = [1.00, 1.01, 1.00];
-        let repo = [1.05, 1.06, 1.05];
+        let repo = [1.04, 1.05, 1.04];
         let sin = comparar(&base, &repo).expect("comparable");
-        assert!(cerca(sin.razon, 1.05), "razon {}", sin.razon);
+        assert!(cerca(sin.razon, 1.04), "razon {}", sin.razon);
         assert!(cerca(sin.ruido, 0.02), "ruido {}", sin.ruido);
         assert!(sin.regresion);
         let con = comparar_con_ancla(&base, Some(1.05), &repo).expect("comparable");
@@ -1791,6 +1811,70 @@ mod tests {
             let razon = r.comparacion.as_ref().map(|c| c.razon);
             assert!(razon.is_some_and(|x| cerca(x, 2.0)), "{medida:?}: {r:?}");
         }
+    }
+
+    /// Un ancla con error deja un aviso por medida, con el id de la medida y el motivo.
+    #[test]
+    fn con_referencia_el_ancla_con_error_deja_aviso_por_medida() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        let inicial = Falso {
+            tests: "sin marcas\n".into(),
+            build: "ROOT_BUILD 1\n".into(),
+            ..sano("inicial", &log, &["a"])
+        };
+        let repo = sano("repo", &log, &["a"]);
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mut avisos = Vec::new();
+        con_referencia(Some(referencia), || {
+            medir_con(
+                &inicial,
+                &repo,
+                tmp.path(),
+                &borrado::borrar_dir_dentro,
+                &mut avisos,
+            )
+        });
+        assert!(
+            avisos.iter().any(|a| a.contains("tiempo_tests")),
+            "{avisos:?}"
+        );
+        assert!(
+            avisos.iter().any(|a| a.contains("tiempo_compilacion")),
+            "{avisos:?}"
+        );
+    }
+
+    /// Un ancla sana no deja aviso de ancla.
+    #[test]
+    fn con_referencia_un_ancla_sana_no_deja_aviso_de_ancla() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mut avisos = Vec::new();
+        con_referencia(Some(referencia), || {
+            medir_con(
+                &inicial,
+                &repo,
+                tmp.path(),
+                &borrado::borrar_dir_dentro,
+                &mut avisos,
+            )
+        });
+        assert!(
+            !avisos.iter().any(|a| a.contains("el ancla de")),
+            "{avisos:?}"
+        );
     }
 
     #[test]
