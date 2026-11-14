@@ -386,9 +386,9 @@ mod tests {
         }
     }
 
-    /// `podman` falso: anota cada llamada en su log. Responde `ps` con una línea por contenedor:
-    /// nombre y epoch. Sin hora, solo el nombre.
-    fn podman_falso(base: &Path, contenedores: &[Contenedor]) -> (PathBuf, PathBuf) {
+    /// Escribe el `podman` falso sin probarlo. Úsese `podman_falso`, que además lo prueba.
+    /// Con `--sonda` sale con 0 sin dejar marca: ni llamada en el log.
+    fn escribir_podman_falso(base: &Path, contenedores: &[Contenedor]) -> (PathBuf, PathBuf) {
         let log = base.join("podman.log");
         let lista: String = contenedores
             .iter()
@@ -398,13 +398,35 @@ mod tests {
             })
             .collect();
         let cuerpo = format!(
-            "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\n{lista}fi\n",
+            "#!/bin/sh\nif [ \"$1\" = --sonda ]; then exit 0; fi\necho \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\n{lista}fi\n",
             log.display()
         );
         let ruta = base.join("podman-falso");
         fs::write(&ruta, cuerpo).expect("script");
         fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
         (ruta, log)
+    }
+
+    /// `podman` falso listo para usar: lo escribe y lo prueba con `--sonda`.
+    /// Linux da ETXTBSY (errno 26) si un archivo ejecutable tiene un descriptor de escritura
+    /// abierto. Un fork concurrente hereda ese descriptor hasta su `exec`. La sonda espera a
+    /// que el descriptor se cierre. Tras una sonda exitosa, ningún hijo nuevo lo hereda.
+    fn podman_falso(base: &Path, contenedores: &[Contenedor]) -> (PathBuf, PathBuf) {
+        const ETXTBSY: i32 = 26;
+        let (ruta, log) = escribir_podman_falso(base, contenedores);
+        for _ in 0..50 {
+            match Command::new(&ruta).arg("--sonda").status() {
+                Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                resultado => {
+                    let estado = resultado.expect("sonda del podman falso");
+                    assert!(estado.success(), "la sonda sale con 0");
+                    return (ruta, log);
+                }
+            }
+        }
+        panic!("el podman falso sigue con ETXTBSY tras 50 intentos");
     }
 
     /// Un `/proc` falso con un proceso `pid` cuyo cmdline es `cmdline`.
@@ -811,5 +833,47 @@ mod tests {
             barrer_al_arrancar_con(podman.to_str().expect("ruta"), Some(valor));
             assert!(log.exists(), "con {valor:?} el barrido llama a podman");
         }
+    }
+
+    #[test]
+    fn sonda_de_podman_falso_no_deja_marca() {
+        let tmp = TempDir::new().expect("tmp");
+        let (podman, log) = podman_falso(tmp.path(), &[]);
+        let estado = Command::new(&podman)
+            .arg("--sonda")
+            .status()
+            .expect("lanza el podman falso");
+        assert!(estado.success(), "la sonda sale con 0");
+        assert!(!log.exists(), "la sonda no anota ninguna llamada");
+    }
+
+    #[test]
+    fn podman_falso_no_da_etxtbsy_con_fork_concurrente() {
+        let _serie = serie();
+        let parar = std::sync::atomic::AtomicBool::new(false);
+        let errores = Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            // Hilos que hacen fork en bucle: su hijo hereda el descriptor de escritura del script.
+            for _ in 0..4 {
+                s.spawn(|| {
+                    while !parar.load(Ordering::Relaxed) {
+                        let _ = Command::new("true").status();
+                    }
+                });
+            }
+            for _ in 0..200 {
+                let tmp = TempDir::new().expect("tmp");
+                let (podman, _log) = podman_falso(tmp.path(), &[]);
+                if let Err(e) = Command::new(&podman).arg("ps").status() {
+                    errores.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+                }
+            }
+            parar.store(true, Ordering::Relaxed);
+        });
+        let errores = errores.into_inner().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            errores.is_empty(),
+            "lanzar el podman falso falló: {errores:?}"
+        );
     }
 }
