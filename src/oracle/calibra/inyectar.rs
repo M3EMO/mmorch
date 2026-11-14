@@ -227,6 +227,8 @@ pub struct Contexto<'a> {
     pub inicial: Option<&'a Path>,
     /// Identidades que la elección no puede tomar: las ya usadas y las inválidas. Vacío: no excluye nada.
     pub excluidos: &'a Excluidos,
+    /// Funciones viejas que la sonda de lastre vio correr (Tarea 137). Vacía: `LastreDeMemoria` usa la regla de la Tarea 136.
+    pub corridas: &'a [(String, String)],
 }
 
 /// Aplica `defecto` a la copia de repo Rust en `dir`. `capas` son las de `[arquitectura]` de la tarea.
@@ -247,6 +249,7 @@ pub fn inyectar(
         cambios: None,
         inicial: None,
         excluidos: &BTreeSet::new(),
+        corridas: &[],
     };
     inyectar_con(defecto, dir, &contexto, semilla)
 }
@@ -296,9 +299,14 @@ pub fn inyectar_con(
         }
         Defecto::EstadoGlobal => estado_global(dir, &mut rng, contexto.cambios, ex)?,
         Defecto::EfectoEnNucleo => efecto_en_nucleo(dir, &mut rng, contexto.cambios, ex)?,
-        Defecto::LastreDeMemoria => {
-            lastre_de_memoria(dir, &mut rng, contexto.cambios, contexto.inicial, ex)?
-        }
+        Defecto::LastreDeMemoria => lastre_de_memoria(
+            dir,
+            &mut rng,
+            contexto.cambios,
+            contexto.inicial,
+            contexto.corridas,
+            ex,
+        )?,
     };
     // Con `cambios`, un defecto de línea o de módulo solo cae dentro del cambio: toda elección lo está.
     // Un cuerpo vaciado sin estado inicial puede caer fuera: su marca sale de `cuerpo_vaciado`.
@@ -1282,29 +1290,45 @@ const _: () = assert!(LASTRE_BYTES == 64 << 20);
 
 /// Agrega una reserva de memoria que el compilador no puede quitar, al inicio de una función de producción del
 /// cambio: lastre de memoria. La línea reportada es la de la reserva, `abre + 2` (1-based), justo debajo de la `{`.
-/// Con `inicial`, solo elige funciones viejas que un test viejo llama por su nombre (`llamados_de_tests_viejos`).
-/// Primero una del cambio (`cambios`); si no queda ninguna libre, una de cualquier archivo de producción.
+/// Con `corridas` (Tarea 137), elige solo funciones viejas que la sonda de lastre vio correr, por archivo y nombre.
+/// Si ninguna existe en el repo, no hay lugar (`Ok(None)`).
+/// Sin `corridas`, con `inicial`, solo elige funciones viejas que un test viejo llama por su nombre (`llamados_de_tests_viejos`).
+/// En los dos casos, primero una del cambio (`cambios`); si no queda ninguna libre, una de cualquier archivo de producción.
 /// Sin `inicial`, elige como antes entre todas las del cambio.
 fn lastre_de_memoria(
     dir: &Path,
     rng: &mut Prng,
     cambios: Option<&Rangos>,
     inicial: Option<&Path>,
+    corridas: &[(String, String)],
     excluidos: &Excluidos,
 ) -> io::Result<Lugar> {
     let identidad = |(a, c): &(String, Cuerpo)| {
         identidad_de_lugar(Defecto::LastreDeMemoria, a, c.abre as u32 + 2, "")
     };
-    let llamados = inicial
-        .map(|inicial| llamados_de_tests_viejos(dir, inicial))
-        .transpose()?;
-    let llamados = llamados.as_ref();
-    let mut candidatos = funciones_de_efecto(dir, cambios, inicial, llamados)?;
-    let mut libre = rng.elegir_libre(&candidatos, excluidos, identidad);
-    if libre.is_none() && inicial.is_some() && cambios.is_some() {
-        candidatos = funciones_de_efecto(dir, None, inicial, llamados)?;
-        libre = rng.elegir_libre(&candidatos, excluidos, identidad);
-    }
+    let libre = if corridas.is_empty() {
+        let llamados = inicial
+            .map(|inicial| llamados_de_tests_viejos(dir, inicial))
+            .transpose()?;
+        let llamados = llamados.as_ref();
+        let mut candidatos = funciones_de_efecto(dir, cambios, inicial, llamados)?;
+        let mut libre = rng.elegir_libre(&candidatos, excluidos, identidad);
+        if libre.is_none() && inicial.is_some() && cambios.is_some() {
+            candidatos = funciones_de_efecto(dir, None, inicial, llamados)?;
+            libre = rng.elegir_libre(&candidatos, excluidos, identidad);
+        }
+        libre
+    } else {
+        let candidatos = funciones_de_efecto(dir, cambios, inicial, None)?;
+        let mut candidatos = en_corridas(dir, candidatos, corridas)?;
+        let mut libre = rng.elegir_libre(&candidatos, excluidos, identidad);
+        if libre.is_none() && cambios.is_some() {
+            let todas = funciones_de_efecto(dir, None, inicial, None)?;
+            candidatos = en_corridas(dir, todas, corridas)?;
+            libre = rng.elegir_libre(&candidatos, excluidos, identidad);
+        }
+        libre
+    };
     let Some((archivo, cuerpo)) = libre else {
         return Ok(None);
     };
@@ -1319,6 +1343,25 @@ fn lastre_de_memoria(
     );
     escribir(dir, &archivo, &unir(&lineas))?;
     Ok(Some((archivo, cuerpo.abre as u32 + 2)))
+}
+
+/// Candidatas cuyo archivo y nombre están en `corridas`. El nombre sale de la línea de la firma de cada una.
+fn en_corridas(
+    dir: &Path,
+    candidatas: Vec<(String, Cuerpo)>,
+    corridas: &[(String, String)],
+) -> io::Result<Vec<(String, Cuerpo)>> {
+    let mut salida = Vec::new();
+    for (archivo, cuerpo) in candidatas {
+        let lineas = partir(&leer(dir, &archivo)?);
+        let Some(nombre) = nombre_de_funcion(&lineas[cuerpo.firma]) else {
+            continue;
+        };
+        if corridas.iter().any(|(a, n)| *a == archivo && n == nombre) {
+            salida.push((archivo, cuerpo));
+        }
+    }
+    Ok(salida)
 }
 
 /// Lo que `AssertBorrado` apagó: el lugar del primer `#[ignore]` y el mutante elegido.
@@ -2290,6 +2333,7 @@ mod tests {
                 muertos: &[],
                 inicial: None,
                 excluidos: &BTreeSet::new(),
+                corridas: &[],
                 cambios: None,
             };
             let inyeccion = inyectar_con(Defecto::ArchivoDios, dir.path(), &contexto, 42)
@@ -2451,6 +2495,7 @@ mod tests {
             limites: &limites,
             inicial: None,
             excluidos: &BTreeSet::new(),
+            corridas: &[],
             muertos,
             cambios: None,
         };
@@ -2515,6 +2560,7 @@ mod tests {
             camino_caliente: &[],
             inicial: None,
             excluidos: &BTreeSet::new(),
+            corridas: &[],
             limites: &limites,
             muertos: &[muerto_de_leer_numero()],
             cambios: None,
@@ -2825,6 +2871,7 @@ mod tests {
             cambios: None,
             inicial,
             excluidos,
+            corridas: &[],
         }
     }
 
@@ -3083,6 +3130,7 @@ mod tests {
             capas: &capas,
             inicial: None,
             excluidos: &BTreeSet::new(),
+            corridas: &[],
             camino_caliente: camino,
             limites: &limites,
             muertos: &[],
@@ -3437,6 +3485,7 @@ pub fn dos(x: u32) -> bool {
         let contexto = Contexto {
             inicial: None,
             excluidos: &BTreeSet::new(),
+            corridas: &[],
             capas: &capas,
             camino_caliente: &[],
             limites: &limites,
@@ -3582,6 +3631,7 @@ pub fn dos(x: u32) -> bool {
             cambios: Some(cambios),
             inicial: Some(inicial),
             excluidos: &BTreeSet::new(),
+            corridas: &[],
         };
         inyectar_con(Defecto::ComportamientoRoto, dir, &contexto, semilla)
     }
@@ -3746,6 +3796,7 @@ pub fn dos(x: u32) -> bool {
             cambios: Some(cambios),
             inicial: Some(inicial),
             excluidos,
+            corridas: &[],
         };
         inyectar_con(Defecto::ComportamientoRoto, dir, &contexto, semilla)
     }
@@ -3948,6 +3999,7 @@ pub fn dos(x: u32) -> bool {
             cambios: Some(cambios),
             inicial: Some(inicial),
             excluidos: &BTreeSet::new(),
+            corridas: &[],
         };
         inyectar_con(defecto, dir, &contexto, semilla)
     }
@@ -4702,6 +4754,147 @@ pub fn dos(x: u32) -> bool {
             if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
                 panic!("semilla {semilla}: la copia con {inyeccion:?} no compila:\n{stderr}");
             }
+        }
+    }
+
+    /// `inyectar_con` de `LastreDeMemoria` en `dir`, con `cambios`, el estado inicial `inicial` y `corridas`.
+    fn con_corridas_de(
+        dir: &Path,
+        cambios: &BTreeMap<String, Vec<(u32, u32)>>,
+        inicial: &Path,
+        corridas: &[(String, String)],
+        semilla: u64,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos: &[],
+            cambios: Some(cambios),
+            inicial: Some(inicial),
+            excluidos: &BTreeSet::new(),
+            corridas,
+        };
+        inyectar_con(Defecto::LastreDeMemoria, dir, &contexto, semilla)
+    }
+
+    /// Par (archivo, nombre) de una función que corrió en la sonda de lastre.
+    fn corrida(archivo: &str, nombre: &str) -> (String, String) {
+        (archivo.to_string(), nombre.to_string())
+    }
+
+    /// `src/a.rs` con `vieja` (su test viejo la llama) y `corrio` (ningún test la llama).
+    const DOS_VIEJAS_UNA_LLAMADA: &str = "pub fn vieja(x: u32) -> u32 {\n    x + 1\n}\n\npub fn corrio(x: u32) -> u32 {\n    x * 3\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn llama_a_vieja() {\n        assert_eq!(vieja(1), 2);\n    }\n}\n";
+
+    #[test]
+    fn lastre_sonda_con_corridas_va_a_la_funcion_que_corrio() {
+        let inicial = repo_de(&[("src/a.rs", DOS_VIEJAS_UNA_LLAMADA)]);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let corridas = [corrida("src/a.rs", "corrio")];
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/a.rs", DOS_VIEJAS_UNA_LLAMADA)]);
+            let inyeccion =
+                con_corridas_de(dir.path(), &cambios, inicial.path(), &corridas, semilla)
+                    .expect("E/S")
+                    .expect("aplica");
+            assert_eq!(inyeccion.archivo, "src/a.rs", "semilla {semilla}");
+            let a = leer(dir.path(), "src/a.rs").expect("lee a");
+            let lineas: Vec<&str> = a.lines().collect();
+            let i = inyeccion.linea as usize - 1;
+            assert_eq!(lineas[i], LINEA_LASTRE, "semilla {semilla}: {a}");
+            assert_eq!(
+                lineas[i - 1],
+                "pub fn corrio(x: u32) -> u32 {",
+                "semilla {semilla}: el lastre no va en la que corrió: {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn lastre_sonda_sin_corridas_usa_la_regla_de_la_136() {
+        let inicial = repo_de(&[("src/a.rs", A_CON_DOS_VIEJAS)]);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/a.rs", A_CON_DOS_VIEJAS)]);
+            let inyeccion = con_corridas_de(dir.path(), &cambios, inicial.path(), &[], semilla)
+                .expect("E/S")
+                .expect("aplica");
+            let a = leer(dir.path(), "src/a.rs").expect("lee a");
+            let lineas: Vec<&str> = a.lines().collect();
+            let i = inyeccion.linea as usize - 1;
+            assert_eq!(
+                lineas[i - 1],
+                "pub fn vieja(x: u32) -> u32 {",
+                "semilla {semilla}: sin corridas no va a la que llama el test viejo: {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn lastre_sonda_corridas_sin_funcion_en_el_repo_no_aplica() {
+        let inicial = repo_de(&[("src/a.rs", A_CON_DOS_VIEJAS)]);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let corridas = [corrida("src/a.rs", "fantasma")];
+        for semilla in 1..=5u64 {
+            let dir = repo_de(&[("src/a.rs", A_CON_DOS_VIEJAS)]);
+            let antes = arbol(dir.path());
+            let r = con_corridas_de(dir.path(), &cambios, inicial.path(), &corridas, semilla)
+                .expect("E/S");
+            assert!(r.is_none(), "semilla {semilla}: {r:?}");
+            assert_eq!(arbol(dir.path()), antes, "semilla {semilla}");
+        }
+    }
+
+    #[test]
+    fn lastre_sonda_gana_la_funcion_del_cambio_sobre_la_de_fuera() {
+        let estado = [
+            ("src/a.rs", DOS_VIEJAS_UNA_LLAMADA),
+            ("src/b.rs", B_CON_TEST),
+        ];
+        let inicial = repo_de(&estado);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let corridas = [corrida("src/a.rs", "corrio"), corrida("src/b.rs", "tres")];
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&estado);
+            let inyeccion =
+                con_corridas_de(dir.path(), &cambios, inicial.path(), &corridas, semilla)
+                    .expect("E/S")
+                    .expect("aplica");
+            assert_eq!(inyeccion.archivo, "src/a.rs", "semilla {semilla}");
+            let a = leer(dir.path(), "src/a.rs").expect("lee a");
+            let lineas: Vec<&str> = a.lines().collect();
+            let i = inyeccion.linea as usize - 1;
+            assert_eq!(
+                lineas[i - 1],
+                "pub fn corrio(x: u32) -> u32 {",
+                "semilla {semilla}: {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn lastre_sonda_si_solo_corrio_fuera_del_cambio_va_a_esa() {
+        let estado = [
+            ("src/a.rs", DOS_VIEJAS_UNA_LLAMADA),
+            ("src/b.rs", B_CON_TEST),
+        ];
+        let inicial = repo_de(&estado);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let corridas = [corrida("src/b.rs", "tres")];
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&estado);
+            let inyeccion =
+                con_corridas_de(dir.path(), &cambios, inicial.path(), &corridas, semilla)
+                    .expect("E/S")
+                    .expect("aplica");
+            assert_eq!(inyeccion.archivo, "src/b.rs", "semilla {semilla}");
+            let b = leer(dir.path(), "src/b.rs").expect("lee b");
+            assert!(
+                b.contains(&format!("pub fn tres(x: u32) -> u32 {{\n{LINEA_LASTRE}")),
+                "semilla {semilla}: {b}"
+            );
         }
     }
 

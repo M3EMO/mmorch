@@ -197,6 +197,7 @@ fn ensayar_con_home(
         cambios: None,
         inicial: None,
         excluidos: &BTreeSet::new(),
+        corridas: &[],
     };
     let inyeccion = inyectar_con(defecto, copia.path(), &contexto, SEMILLA)
         .expect("inyecta el defecto")
