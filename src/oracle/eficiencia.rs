@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -41,10 +42,14 @@ pub const FACTOR_RUIDO_CUARTILES: f64 = 2.0;
 /// Corridas mínimas por lado para usar cuartiles. Con menos corridas, el lado usa (max-min)/min, como antes.
 /// Base: 12 casos de t1 a t3 (Tarea 135), el exceso de la razón con medianas sobre 1 fue como máximo 1,04 veces la mayor dispersión por cuartiles (t3 caso 0: 0,024 contra 0,023). Con más datos, se revisa.
 pub const MIN_CORRIDAS_CUARTILES: usize = 4;
-/// Fracción de los núcleos a partir de la cual la máquina está cargada: con una carga de un minuto mayor que
-/// esta mitad, los tiempos no valen. Motivo: la carga de otro trabajo dobló los tiempos de t1 en la calibración
-/// de la cadena 110 a 138 (casos 2 y 3 de t1: tiempo_tests 0,71 a 0,99 s contra 0,4 s de la base).
+/// Fracción de los núcleos a partir de la cual la carga ajena de una corrida medida invalida los tiempos. La
+/// carga ajena es la CPU de la máquina que no es de la corrida, en núcleos. Motivo histórico: con la carga de un
+/// minuto del kernel (el promedio de carga), otro trabajo dobló los tiempos de t1 en la calibración de la cadena 110 a 138
+/// (casos 2 y 3 de t1: tiempo_tests 0,71 a 0,99 s contra 0,4 s de la base). Esa carga contaba también los
+/// procesos de Root; por eso ahora se mide solo la CPU ajena.
 pub const FRACCION_DE_NUCLEOS_CARGADA: f64 = 0.5;
+/// `/proc/stat` cuenta en USER_HZ de Linux, que vale 100 por segundo.
+const TICKS_POR_SEGUNDO: f64 = 100.0;
 
 /// Las cuatro medidas. El orden del enum es el orden de salida de `medir`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -643,10 +648,10 @@ fn compilar_tests(lado: &Lado) -> Result<(), String> {
     }
 }
 
-/// Una corrida medida de tests. Anota su tiempo. Una corrida que recompila no vale.
-fn correr_tests(lado: &Lado, filtro: &str, tiempo: &mut Serie) {
+/// Una corrida medida de tests. Anota su tiempo. Una corrida que recompila no vale. Corre bajo `vigilancia`.
+fn correr_tests(lado: &Lado, filtro: &str, tiempo: &mut Serie, vigilancia: &mut Vigilancia) {
     let nombre = lado.nombre;
-    match lado.ejecutar(&cmd_tests(filtro)) {
+    match vigilancia.correr(lado, &cmd_tests(filtro)) {
         Err(e) => anotar(tiempo, Err(format!("{nombre}: {e}"))),
         Ok(salida) if recompilo(&salida.stdout) => {
             anotar(tiempo, Err(MOTIVO_RECOMPILO.into()));
@@ -683,6 +688,7 @@ fn medir_tests(
     filtro: &Result<String, String>,
     tiempo: &mut [Serie; 2],
     memoria: &mut [Serie; 2],
+    vigilancia: &mut Vigilancia,
 ) {
     let filtro = match filtro {
         Ok(filtro) => filtro,
@@ -703,7 +709,7 @@ fn medir_tests(
             if tiempo[k].is_err() {
                 continue;
             }
-            correr_tests(lados[k], filtro, &mut tiempo[k]);
+            correr_tests(lados[k], filtro, &mut tiempo[k], vigilancia);
         }
     }
     for _ in 0..CORRIDAS_MEMORIA {
@@ -717,16 +723,17 @@ fn medir_tests(
 }
 
 /// Una compilación medida. Anota su reloj en `compilacion`. Si `con_tamano`, anota también el tamaño de
-/// sus binarios en `tamano`. Un fallo de la compilación llega a las dos series.
+/// sus binarios en `tamano`. Un fallo de la compilación llega a las dos series. Corre bajo `vigilancia`.
 fn correr_build(
     lado: &Lado,
     comando: &str,
     compilacion: &mut Serie,
     tamano: &mut Serie,
     con_tamano: bool,
+    vigilancia: &mut Vigilancia,
 ) {
     let nombre = lado.nombre;
-    match lado.ejecutar(comando) {
+    match vigilancia.correr(lado, comando) {
         Err(e) => {
             let motivo = format!("{nombre}: {e}");
             anotar(compilacion, Err(motivo.clone()));
@@ -761,7 +768,8 @@ fn correr_build(
 /// `lados[k]` `None` como en `medir_tests`: ese lado no corre y su serie ya viene en `compilacion[k]`.
 /// Corre `corridas` compilaciones por lado. El tamaño se mide solo en la corrida 0 de cada lado.
 /// Si `ancla_lado` es `Some`, corre una compilación tras la primera corrida de `lados`. Su reloj va a
-/// `ancla.compilacion`. Su tamaño no se mide: el tamaño sale solo de `lados`.
+/// `ancla.compilacion`. Su tamaño no se mide: el tamaño sale solo de `lados`. Todas bajo `vigilancia`.
+#[allow(clippy::too_many_arguments)]
 fn medir_compilacion(
     lados: [Option<&Lado>; 2],
     ancla_lado: Option<&Lado>,
@@ -770,6 +778,7 @@ fn medir_compilacion(
     compilacion: &mut [Serie; 2],
     tamano: &mut [Serie; 2],
     ancla: &mut Ancla,
+    vigilancia: &mut Vigilancia,
 ) {
     let (Ok(_), Ok(meta)) = (meta_i, meta_r) else {
         let motivo = unir_motivos(
@@ -807,6 +816,7 @@ fn medir_compilacion(
                     &mut compilacion[k],
                     &mut tamano[k],
                     corrida == 0,
+                    vigilancia,
                 );
             }
             if corrida == 0
@@ -820,6 +830,7 @@ fn medir_compilacion(
                     &mut ancla.compilacion,
                     &mut sin_tamano,
                     false,
+                    vigilancia,
                 );
             }
         }
@@ -889,7 +900,8 @@ pub(crate) struct Referencia {
     carga: Option<String>,
 }
 
-/// De dónde sale la carga de la máquina y cuántos núcleos tiene. Un error de núcleos llega como `Err`.
+/// De dónde sale la CPU ocupada de la máquina (`/proc/stat`) y cuántos núcleos tiene. Un error de núcleos llega
+/// como `Err`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FuenteDeCarga {
     ruta: PathBuf,
@@ -1070,11 +1082,14 @@ fn aviso_de_borrado(raiz: &Path, e: &std::io::Error) -> String {
     )
 }
 
-/// Carga de un minuto y núcleos de una lectura. Ambos salen de la misma fuente.
-#[derive(Debug, Clone, PartialEq)]
-struct Carga {
-    uno_minuto: f64,
-    nucleos: usize,
+/// Comando que corre `cmd` con el guion en modo `cpu`. El guion imprime la CPU propia de la corrida al final.
+fn bajo_cpu(cmd: &str) -> String {
+    format!("python3 /salida/{NOMBRE_GUION} cpu {}", comillas(cmd))
+}
+
+/// Envuelve `texto` en comillas simples para un shell. Cada `'` del texto sale como `'\''`.
+fn comillas(texto: &str) -> String {
+    format!("'{}'", texto.replace('\'', "'\\''"))
 }
 
 /// Fuente de carga que ve este hilo. En tests, sin fuente fijada, es `None`: el control está apagado y no lee
@@ -1084,16 +1099,16 @@ fn fuente_vigente() -> Option<FuenteDeCarga> {
     FUENTE_DE_CARGA.with(|c| c.borrow().clone())
 }
 
-/// Ruta del archivo de carga. Sin `ROOT_LOADAVG` (o vacía), es `/proc/loadavg`.
+/// Ruta del archivo de CPU de la máquina. Sin `ROOT_PROC_STAT` (o vacía), es `/proc/stat`.
 /// Existe para los tests de `tests/`, que no ven el `cfg(test)` del crate.
 fn ruta_de_carga() -> PathBuf {
-    match std::env::var_os("ROOT_LOADAVG") {
+    match std::env::var_os("ROOT_PROC_STAT") {
         Some(ruta) if !ruta.is_empty() => PathBuf::from(ruta),
-        _ => PathBuf::from("/proc/loadavg"),
+        _ => PathBuf::from("/proc/stat"),
     }
 }
 
-/// Fuente de carga que ve este hilo. En producción siempre es `/proc/loadavg` del host, salvo `ROOT_LOADAVG`,
+/// Fuente de carga que ve este hilo. En producción siempre es `/proc/stat` del host, salvo `ROOT_PROC_STAT`,
 /// y los núcleos de `available_parallelism`.
 #[cfg(not(test))]
 fn fuente_vigente() -> Option<FuenteDeCarga> {
@@ -1110,59 +1125,135 @@ fn no_se_leyo(detalle: impl std::fmt::Display) -> String {
     format!("no se pudo leer la carga: {detalle}")
 }
 
-/// Lee la carga de un minuto de la fuente y sus núcleos. Un archivo sin número o sin núcleos da error.
-fn leer_carga(fuente: &FuenteDeCarga) -> Result<Carga, String> {
+/// CPU ocupada de la máquina, en segundos. Suma user, nice, system, irq, softirq y steal de la línea `cpu `
+/// de la fuente. Deja fuera idle e iowait. Sin esa línea, con menos de 8 campos o con un campo no numérico, da error.
+fn leer_cpu_ocupada(fuente: &FuenteDeCarga) -> Result<f64, String> {
     let ruta = fuente.ruta.display();
     let texto = fs::read_to_string(&fuente.ruta).map_err(|e| no_se_leyo(format!("{ruta}: {e}")))?;
-    let uno_minuto = texto
-        .split_whitespace()
-        .next()
-        .and_then(|campo| campo.parse::<f64>().ok())
-        .filter(|carga| carga.is_finite())
-        .ok_or_else(|| no_se_leyo(format!("{ruta}: sin carga de un minuto")))?;
-    let nucleos = fuente.nucleos.clone().map_err(no_se_leyo)?;
-    Ok(Carga {
-        uno_minuto,
-        nucleos,
-    })
+    let linea = texto
+        .lines()
+        .find(|l| l.starts_with("cpu "))
+        .ok_or_else(|| no_se_leyo(format!("{ruta}: sin línea cpu")))?;
+    let partes: Vec<&str> = linea.split_whitespace().skip(1).take(8).collect();
+    if partes.len() < 8 {
+        return Err(no_se_leyo(format!(
+            "{ruta}: la línea cpu tiene menos de 8 campos"
+        )));
+    }
+    let mut campos = [0u64; 8];
+    for (destino, parte) in campos.iter_mut().zip(&partes) {
+        *destino = parte
+            .parse()
+            .map_err(|_| no_se_leyo(format!("{ruta}: campo de cpu no numérico: {parte}")))?;
+    }
+    // Índices: 0 user, 1 nice, 2 system, 3 idle, 4 iowait, 5 irq, 6 softirq, 7 steal.
+    let ocupados = campos[0] + campos[1] + campos[2] + campos[5] + campos[6] + campos[7];
+    Ok(ocupados as f64 / TICKS_POR_SEGUNDO)
 }
 
-/// Motivo de carga de una medición, según sus dos lecturas: antes y después de sus corridas. Un error de lectura
-/// da ese error. Si la carga de un minuto supera `FRACCION_DE_NUCLEOS_CARGADA` por los núcleos en alguna de las dos,
-/// da el motivo de carga con la mayor de las dos. `None` si la medición vale.
-fn motivo_de_carga(
-    antes: &Result<Carga, String>,
-    despues: &Result<Carga, String>,
-) -> Option<String> {
-    let (Ok(a), Ok(d)) = (antes, despues) else {
-        return Some(unir_motivos(
-            [antes.as_ref().err(), despues.as_ref().err()]
-                .into_iter()
-                .flatten()
-                .cloned(),
-        ));
-    };
-    let mayor = a.uno_minuto.max(d.uno_minuto);
-    let limite = FRACCION_DE_NUCLEOS_CARGADA * a.nucleos as f64;
-    (mayor > limite).then(|| {
-        format!(
-            "la máquina estaba cargada: carga {mayor:.2} con {} núcleos",
-            a.nucleos
-        )
-    })
+/// Carga ajena de una corrida, en núcleos: la CPU ocupada de la máquina que no es de la corrida, sobre su reloj.
+/// Un reloj no positivo da cero.
+fn carga_ajena(antes: f64, despues: f64, cpu_propia_s: f64, reloj_s: f64) -> f64 {
+    if reloj_s <= 0.0 {
+        return 0.0;
+    }
+    (despues - antes - cpu_propia_s).max(0.0) / reloj_s
 }
 
-/// Corre `f` entre dos lecturas de la fuente de carga vigente y devuelve el motivo de carga de esa medición.
-/// Sin fuente vigente, no lee nada: `f` corre y no hay motivo.
-fn con_control_de_carga(f: impl FnOnce()) -> Option<String> {
-    let Some(fuente) = fuente_vigente() else {
-        f();
-        return None;
-    };
-    let antes = leer_carga(&fuente);
-    f();
-    let despues = leer_carga(&fuente);
-    motivo_de_carga(&antes, &despues)
+/// Carga ajena de las corridas medidas de una medición.
+/// Con fuente, cada corrida corre bajo `bajo_cpu`. Su CPU propia se resta de la CPU ocupada de la máquina.
+/// Sin fuente, no envuelve nada y no lee nada.
+struct Vigilancia {
+    fuente: Option<FuenteDeCarga>,
+    /// Mayor carga ajena vista, en núcleos.
+    mayor: Option<f64>,
+    /// El primer motivo que apareció.
+    motivo: Option<String>,
+}
+
+impl Vigilancia {
+    /// Vigilancia con la fuente vigente de este hilo.
+    fn nueva() -> Self {
+        Vigilancia {
+            fuente: fuente_vigente(),
+            mayor: None,
+            motivo: None,
+        }
+    }
+
+    /// Corre `cmd` en `lado`. Con fuente, lo corre bajo `bajo_cpu` y mide la carga ajena de la corrida.
+    /// Un error del ejecutor sale tal cual, sin medir carga.
+    fn correr(&mut self, lado: &Lado, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+        let Some(fuente) = self.fuente.clone() else {
+            return lado.ejecutar(cmd);
+        };
+        let antes = leer_cpu_ocupada(&fuente);
+        let inicio = Instant::now();
+        let salida = lado.ejecutar(&bajo_cpu(cmd))?;
+        let reloj = inicio.elapsed().as_secs_f64();
+        let despues = leer_cpu_ocupada(&fuente);
+        let cpu_us = leer_marca(&salida.stdout, "ROOT_CPU_US");
+        self.evaluar(&fuente, antes, despues, cpu_us, reloj);
+        Ok(salida)
+    }
+
+    /// Guarda la carga ajena de una corrida. Sin CPU propia no hay medida: nunca se supone carga cero.
+    fn evaluar(
+        &mut self,
+        fuente: &FuenteDeCarga,
+        antes: Result<f64, String>,
+        despues: Result<f64, String>,
+        cpu_us: Option<f64>,
+        reloj: f64,
+    ) {
+        // Primero las lecturas de la máquina: un error de ellas es más básico que la falta de CPU propia.
+        let (a, d) = match (antes, despues) {
+            (Ok(a), Ok(d)) => (a, d),
+            (Err(e), _) | (_, Err(e)) => {
+                self.guardar_motivo(e);
+                return;
+            }
+        };
+        let Some(cpu_us) = cpu_us else {
+            self.guardar_motivo("sin medida de CPU propia".into());
+            return;
+        };
+        let ajena = carga_ajena(a, d, cpu_us / 1e6, reloj);
+        self.mayor = Some(self.mayor.map_or(ajena, |m| m.max(ajena)));
+        let motivo = match &fuente.nucleos {
+            Err(e) => Some(no_se_leyo(e)),
+            Ok(nucleos) => {
+                let limite = FRACCION_DE_NUCLEOS_CARGADA * (*nucleos as f64);
+                (ajena > limite).then(|| {
+                    format!("la máquina tenía carga ajena: {ajena:.2} núcleos de {nucleos}")
+                })
+            }
+        };
+        if let Some(motivo) = motivo {
+            self.guardar_motivo(motivo);
+        }
+    }
+
+    /// Guarda `motivo` solo si es el primero.
+    fn guardar_motivo(&mut self, motivo: String) {
+        if self.motivo.is_none() {
+            self.motivo = Some(motivo);
+        }
+    }
+
+    /// El primer motivo de carga de la medición. `None` si sus corridas valen.
+    fn motivo(&self) -> Option<String> {
+        self.motivo.clone()
+    }
+
+    /// Aviso con la mayor carga ajena vista. `None` sin corrida medida, sin fuente o sin núcleos leídos.
+    fn aviso(&self) -> Option<String> {
+        let mayor = self.mayor?;
+        let nucleos = self.fuente.as_ref()?.nucleos.as_ref().ok()?;
+        Some(format!(
+            "eficiencia: mayor carga ajena de una corrida: {mayor:.2} núcleos de {nucleos}"
+        ))
+    }
 }
 
 /// Deja sin valor el tiempo de tests y el de compilación, con `motivo`. Memoria y tamaño no cambian. Sin
@@ -1187,7 +1278,7 @@ fn medir_lados(inicial: &Lado, repo: &Lado, avisos: &mut Vec<String>) -> Vec<Res
     match fijada {
         Some(referencia) => medir_contra_referencia(&referencia, inicial, repo, avisos),
         None => {
-            let (resultados, referencia) = medir_los_dos_lados(inicial, repo);
+            let (resultados, referencia) = medir_los_dos_lados(inicial, repo, avisos);
             ULTIMA_REFERENCIA.with(|u| *u.borrow_mut() = Some(referencia));
             resultados
         }
@@ -1195,8 +1286,13 @@ fn medir_lados(inicial: &Lado, repo: &Lado, avisos: &mut Vec<String>) -> Vec<Res
 }
 
 /// Mide la metadata, las listas y las corridas de los dos lados. Devuelve las cuatro medidas y lo que
-/// midió el lado inicial. Primero la metadata y las listas de cada lado. Luego las corridas.
-fn medir_los_dos_lados(inicial: &Lado, repo: &Lado) -> (Vec<ResultadoMedida>, Referencia) {
+/// midió el lado inicial. Primero la metadata y las listas de cada lado. Luego las corridas. Suma a `avisos`
+/// la mayor carga ajena vista.
+fn medir_los_dos_lados(
+    inicial: &Lado,
+    repo: &Lado,
+    avisos: &mut Vec<String>,
+) -> (Vec<ResultadoMedida>, Referencia) {
     let meta_i = leer_metadata(inicial).map_err(|m| format!("inicial: {m}"));
     let meta_r = leer_metadata(repo).map_err(|m| format!("repo: {m}"));
     let lista_i = leer_listas(inicial).map_err(|m| format!("inicial: {m}"));
@@ -1208,18 +1304,29 @@ fn medir_los_dos_lados(inicial: &Lado, repo: &Lado) -> (Vec<ResultadoMedida>, Re
     let mut compilacion: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut tamano: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut ancla = Ancla::vacia();
-    let carga = con_control_de_carga(|| {
-        medir_tests([inicial, repo], [0, 1], &filtro, &mut tiempo, &mut memoria);
-        medir_compilacion(
-            lados,
-            None,
-            CORRIDAS,
-            [&meta_i, &meta_r],
-            &mut compilacion,
-            &mut tamano,
-            &mut ancla,
-        );
-    });
+    let mut vigilancia = Vigilancia::nueva();
+    medir_tests(
+        [inicial, repo],
+        [0, 1],
+        &filtro,
+        &mut tiempo,
+        &mut memoria,
+        &mut vigilancia,
+    );
+    medir_compilacion(
+        lados,
+        None,
+        CORRIDAS,
+        [&meta_i, &meta_r],
+        &mut compilacion,
+        &mut tamano,
+        &mut ancla,
+        &mut vigilancia,
+    );
+    let carga = vigilancia.motivo();
+    if let Some(aviso) = vigilancia.aviso() {
+        avisos.push(aviso);
+    }
     let referencia = Referencia {
         meta: meta_i,
         lista: lista_i,
@@ -1260,22 +1367,32 @@ fn medir_contra_referencia(
     let mut compilacion: [Serie; 2] = [referencia.compilacion.clone(), Ok(vec![])];
     let mut tamano: [Serie; 2] = [referencia.tamano.clone(), Ok(vec![])];
     let mut ancla = Ancla::vacia();
-    let carga = con_control_de_carga(|| {
-        // El orden [1, 0] hace que el repo corra primero en cada par de tests.
-        medir_tests([inicial, repo], [1, 0], &filtro, &mut tiempo, &mut memoria);
-        medir_compilacion(
-            [None, Some(repo)],
-            Some(inicial),
-            CORRIDAS_COMPILACION_DE_CASO,
-            [&referencia.meta, &meta_r],
-            &mut compilacion,
-            &mut tamano,
-            &mut ancla,
-        );
-    });
+    let mut vigilancia = Vigilancia::nueva();
+    // El orden [1, 0] hace que el repo corra primero en cada par de tests.
+    medir_tests(
+        [inicial, repo],
+        [1, 0],
+        &filtro,
+        &mut tiempo,
+        &mut memoria,
+        &mut vigilancia,
+    );
+    medir_compilacion(
+        [None, Some(repo)],
+        Some(inicial),
+        CORRIDAS_COMPILACION_DE_CASO,
+        [&referencia.meta, &meta_r],
+        &mut compilacion,
+        &mut tamano,
+        &mut ancla,
+        &mut vigilancia,
+    );
     avisar_ancla(&ancla, avisos);
+    if let Some(aviso) = vigilancia.aviso() {
+        avisos.push(aviso);
+    }
     // Una base cargada pasa su motivo al caso. La carga propia del caso va primero.
-    let motivo = carga.or_else(|| referencia.carga.clone());
+    let motivo = vigilancia.motivo().or_else(|| referencia.carga.clone());
     aplicar_carga(
         combinar_medidas(&tiempo, &memoria, &compilacion, &tamano, &ancla),
         motivo,
@@ -1316,7 +1433,8 @@ mod tests {
     use crate::oracle::ErrorOraculo;
     use crate::oracle::perfiles::herramientas::SalidaHerramienta;
     use serde_json::json;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+    use std::time::Duration;
 
     const TESTS_OK: &str = "ROOT_NS 1500000000\nROOT_MEM 1000\n";
     const BUILD_OK: &str = "ROOT_NS 2000000000\nROOT_BUILD 0\nROOT_SIZE 500\n";
@@ -1488,36 +1606,40 @@ mod tests {
         assert_eq!(comparar_contra_ancla(&[1.0], 1.0, &[]), None);
     }
 
-    /// Restaura `ROOT_LOADAVG` al salir del ámbito, también ante pánico.
-    struct RestauraLoadavg(Option<std::ffi::OsString>);
-    impl Drop for RestauraLoadavg {
+    /// Restaura `ROOT_PROC_STAT` al salir del ámbito, también ante pánico.
+    struct RestauraProcStat(Option<std::ffi::OsString>);
+    impl Drop for RestauraProcStat {
         fn drop(&mut self) {
-            // SAFETY: el test sostiene `CERROJO_LOADAVG` mientras vive esta guarda.
+            // SAFETY: el test sostiene `CERROJO_PROC_STAT` mientras vive esta guarda.
             unsafe {
                 match self.0.take() {
-                    Some(valor) => std::env::set_var("ROOT_LOADAVG", valor),
-                    None => std::env::remove_var("ROOT_LOADAVG"),
+                    Some(valor) => std::env::set_var("ROOT_PROC_STAT", valor),
+                    None => std::env::remove_var("ROOT_PROC_STAT"),
                 }
             }
         }
     }
 
     #[test]
-    fn ruta_de_carga_obedece_root_loadavg() {
-        static CERROJO_LOADAVG: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _cerrojo = CERROJO_LOADAVG.lock().unwrap_or_else(|e| e.into_inner());
+    fn ruta_de_carga_obedece_root_proc_stat() {
+        static CERROJO_PROC_STAT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _cerrojo = CERROJO_PROC_STAT.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("temp dir");
-        let ruta = dir.path().join("loadavg");
-        fs::write(&ruta, "9.00 9.00 9.00 1/100 1\n").expect("escribe la carga");
-        let _restaura = RestauraLoadavg(std::env::var_os("ROOT_LOADAVG"));
-        // SAFETY: el cerrojo de arriba serializa a los tests que tocan `ROOT_LOADAVG`.
-        unsafe { std::env::set_var("ROOT_LOADAVG", &ruta) };
+        let ruta = dir.path().join("stat");
+        fs::write(&ruta, stat_con(800)).expect("escribe el stat falso");
+        let _restaura = RestauraProcStat(std::env::var_os("ROOT_PROC_STAT"));
+        // SAFETY: el cerrojo de arriba serializa a los tests que tocan `ROOT_PROC_STAT`.
+        unsafe { std::env::set_var("ROOT_PROC_STAT", &ruta) };
+        assert_eq!(ruta_de_carga(), ruta);
         let fuente = FuenteDeCarga {
             ruta: ruta_de_carga(),
-            nucleos: Ok(2),
+            nucleos: Ok(8),
         };
-        let carga = leer_carga(&fuente).expect("lee la carga");
-        assert_eq!(carga.uno_minuto, 9.0);
+        assert_eq!(leer_cpu_ocupada(&fuente), Ok(8.0));
+        // El cerrojo fija la variable en vacía: la ruta cae en la de Linux, sin depender del host.
+        // SAFETY: mismo cerrojo que arriba.
+        unsafe { std::env::set_var("ROOT_PROC_STAT", "") };
+        assert_eq!(ruta_de_carga(), PathBuf::from("/proc/stat"));
     }
 
     #[test]
@@ -1744,8 +1866,18 @@ mod tests {
         inicial: &dyn EjecutorHerramienta,
         repo: &dyn EjecutorHerramienta,
     ) -> Vec<ResultadoMedida> {
+        medir_de_prueba_con_avisos(inicial, repo).0
+    }
+
+    /// `medir_de_prueba` que además devuelve los avisos de la medición.
+    fn medir_de_prueba_con_avisos(
+        inicial: &dyn EjecutorHerramienta,
+        repo: &dyn EjecutorHerramienta,
+    ) -> (Vec<ResultadoMedida>, Vec<String>) {
         let tmp = tempfile::tempdir().expect("temp dir");
-        medir(inicial, repo, tmp.path(), &mut Vec::new())
+        let mut avisos = Vec::new();
+        let resultados = medir(inicial, repo, tmp.path(), &mut avisos);
+        (resultados, avisos)
     }
 
     /// Ejecutor que anota la carpeta de `/salida` de cada llamada en `ejecutar_en` y responde con `Falso`.
@@ -2711,42 +2843,113 @@ mod tests {
         assert_eq!(referencia_fijada_actual(), None);
     }
 
-    /// Un `loadavg` falso con carga de un minuto alta, sobre la mitad de 8 núcleos.
-    const CARGA_ALTA: &str = "6.00 5.00 4.00 1/100 123\n";
-    /// Un `loadavg` falso con carga baja.
-    const CARGA_BAJA: &str = "1.00 0.90 0.80 1/100 123\n";
-    /// Motivo de una medición con `CARGA_ALTA` y 8 núcleos.
-    const MOTIVO_CARGA_ALTA: &str = "la máquina estaba cargada: carga 6.00 con 8 núcleos";
+    /// `/proc/stat` falso con `ticks` de CPU ocupada en `user`. Los demás campos dan cero.
+    fn stat_con(ticks: u64) -> String {
+        format!("cpu  {ticks} 0 0 0 0 0 0 0\n")
+    }
 
-    /// Escribe un `loadavg` falso en `dir` y devuelve su fuente, con `nucleos` núcleos.
+    /// Escribe un `stat` falso con `contenido` en `dir` y devuelve su fuente, con `nucleos` núcleos.
     fn fuente_falsa(dir: &Path, contenido: &str, nucleos: usize) -> FuenteDeCarga {
-        let ruta = dir.join("loadavg");
-        fs::write(&ruta, contenido).expect("escribe loadavg falso");
+        let ruta = dir.join("stat");
+        fs::write(&ruta, contenido).expect("escribe el stat falso");
         FuenteDeCarga {
             ruta,
             nucleos: Ok(nucleos),
         }
     }
 
-    /// Ejecutor que reescribe el `loadavg` falso en cada corrida medida (los comandos con `ROOT_NS`).
-    /// Así la carga cambia durante las corridas y no antes.
-    struct ReescribeCarga<'a> {
-        falso: Falso<'a>,
-        ruta: PathBuf,
-        nuevo: &'static str,
+    /// Máquina simulada. Cada corrida medida espera 20 ms.
+    /// Una corrida medida suma `ticks(n)` a la CPU ocupada del `stat`. Anota `cpu_us(n)` como `ROOT_CPU_US`.
+    /// `n` cuenta las corridas medidas desde cero, de los dos lados juntos.
+    /// Con `n` ticks, una corrida suma `n / 100` s de CPU. N núcleos ajenos son `2 N` ticks.
+    struct Maquina {
+        stat: PathBuf,
+        acumulado: Cell<u64>,
+        corridas: Cell<usize>,
+        ticks: Box<dyn Fn(usize) -> u64>,
+        cpu_us: Box<dyn Fn(usize) -> Option<u64>>,
     }
 
-    impl EjecutorHerramienta for ReescribeCarga<'_> {
+    /// Una máquina de `dir` con `nucleos` núcleos y la fuente de carga que lee su `stat`.
+    fn maquina_de(
+        dir: &Path,
+        nucleos: usize,
+        ticks: impl Fn(usize) -> u64 + 'static,
+        cpu_us: impl Fn(usize) -> Option<u64> + 'static,
+    ) -> (FuenteDeCarga, Maquina) {
+        let fuente = fuente_falsa(dir, &stat_con(0), nucleos);
+        let maquina = Maquina {
+            stat: fuente.ruta.clone(),
+            acumulado: Cell::new(0),
+            corridas: Cell::new(0),
+            ticks: Box::new(ticks),
+            cpu_us: Box::new(cpu_us),
+        };
+        (fuente, maquina)
+    }
+
+    /// Ejecutor de un lado en `maquina`. Responde como `Falso` y suma la carga de cada corrida medida.
+    struct ConMaquina<'a> {
+        falso: Falso<'a>,
+        maquina: &'a Maquina,
+    }
+
+    impl EjecutorHerramienta for ConMaquina<'_> {
         fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
-            if cmd.contains("ROOT_NS") {
-                fs::write(&self.ruta, self.nuevo).expect("reescribe loadavg falso");
+            if !cmd.contains("ROOT_NS") {
+                return self.falso.ejecutar(cmd);
             }
-            self.falso.ejecutar(cmd)
+            let m = self.maquina;
+            let n = m.corridas.get();
+            m.corridas.set(n + 1);
+            std::thread::sleep(Duration::from_millis(20));
+            let total = m.acumulado.get() + (m.ticks)(n);
+            m.acumulado.set(total);
+            fs::write(&m.stat, stat_con(total)).expect("reescribe el stat falso");
+            let mut salida = self.falso.ejecutar(cmd)?;
+            if let Some(us) = (m.cpu_us)(n) {
+                salida.stdout.push_str(&format!("ROOT_CPU_US {us}\n"));
+            }
+            Ok(salida)
         }
     }
 
-    /// Mide un caso con una referencia sana fijada. `fuente` es la carga de la medición del caso.
-    fn medir_caso_bajo_carga(fuente: FuenteDeCarga) -> Vec<ResultadoMedida> {
+    /// Un lado sano con un test `a`, en la máquina `maquina`.
+    fn en_maquina<'a>(
+        lado: &'static str,
+        log: &'a RefCell<Vec<String>>,
+        maquina: &'a Maquina,
+    ) -> ConMaquina<'a> {
+        ConMaquina {
+            falso: sano(lado, log, &["a"]),
+            maquina,
+        }
+    }
+
+    /// Dice si `motivo` es el de carga ajena de una máquina de `nucleos` núcleos.
+    fn es_motivo_de_carga_ajena(motivo: Option<&str>, nucleos: usize) -> bool {
+        motivo.is_some_and(|m| {
+            m.starts_with("la máquina tenía carga ajena: ")
+                && m.ends_with(&format!(" núcleos de {nucleos}"))
+        })
+    }
+
+    /// Mide los dos lados en `maquina`, con la fuente `fuente`. Devuelve también los avisos.
+    fn medir_bajo_carga(
+        fuente: FuenteDeCarga,
+        maquina: &Maquina,
+    ) -> (Vec<ResultadoMedida>, Vec<String>) {
+        let log = RefCell::new(Vec::new());
+        con_fuente_de_carga(Some(fuente), || {
+            medir_de_prueba_con_avisos(
+                &en_maquina("inicial", &log, maquina),
+                &en_maquina("repo", &log, maquina),
+            )
+        })
+    }
+
+    /// Mide un caso con una referencia sana fijada. Los dos lados corren en `maquina`, con la fuente `fuente`.
+    fn medir_caso_bajo_carga(fuente: FuenteDeCarga, maquina: &Maquina) -> Vec<ResultadoMedida> {
         let log_base = RefCell::new(Vec::new());
         let referencia = referencia_de(
             &sano("inicial", &log_base, &["a"]),
@@ -2755,18 +2958,85 @@ mod tests {
         let log = RefCell::new(Vec::new());
         con_fuente_de_carga(Some(fuente), || {
             con_referencia(Some(referencia), || {
-                medir_de_prueba(&sano("inicial", &log, &["a"]), &sano("repo", &log, &["a"]))
+                medir_de_prueba(
+                    &en_maquina("inicial", &log, maquina),
+                    &en_maquina("repo", &log, maquina),
+                )
             })
         })
     }
 
     #[test]
-    fn caso_con_carga_alta_deja_tiempos_sin_valor_con_su_motivo() {
+    fn corrida_con_la_cpu_de_la_maquina_igual_a_la_propia_no_queda_cargada() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let resultados = medir_caso_bajo_carga(fuente_falsa(dir.path(), CARGA_ALTA, 8));
+        // La máquina gasta 8 s de CPU por corrida, y la corrida propia también: no hay carga ajena.
+        let (fuente, maquina) = maquina_de(dir.path(), 8, |_| 800, |_| Some(8_000_000));
+        let (resultados, _) = medir_bajo_carga(fuente, &maquina);
+        for r in &resultados {
+            assert_eq!(r.motivo, None, "{:?}", r.medida);
+            assert!(r.comparacion.is_some(), "{:?}", r.medida);
+        }
+    }
+
+    #[test]
+    fn seis_nucleos_ajenos_de_ocho_dejan_los_tiempos_sin_valor() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // 12 ticks por corrida son 6 núcleos ajenos en 20 ms, con 8 núcleos.
+        let (fuente, maquina) = maquina_de(dir.path(), 8, |_| 12, |_| Some(0));
+        let (resultados, _) = medir_bajo_carga(fuente, &maquina);
         for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
             let r = por_medida(&resultados, medida);
-            assert_eq!(r.motivo.as_deref(), Some(MOTIVO_CARGA_ALTA), "{medida:?}");
+            assert!(
+                es_motivo_de_carga_ajena(r.motivo.as_deref(), 8),
+                "{medida:?}: {:?}",
+                r.motivo
+            );
+            assert_eq!(r.comparacion, None, "{medida:?}");
+        }
+    }
+
+    #[test]
+    fn con_dos_nucleos_1_5_ajenos_queda_cargada() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // 3 ticks por corrida son 1,5 núcleos ajenos en 20 ms: más de la mitad de 2 núcleos.
+        let (fuente, maquina) = maquina_de(dir.path(), 2, |_| 3, |_| Some(0));
+        let (resultados, _) = medir_bajo_carga(fuente, &maquina);
+        for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
+            let r = por_medida(&resultados, medida);
+            assert!(
+                es_motivo_de_carga_ajena(r.motivo.as_deref(), 2),
+                "{medida:?}: {:?}",
+                r.motivo
+            );
+        }
+    }
+
+    #[test]
+    fn corrida_sin_root_cpu_us_deja_los_tiempos_sin_valor() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (fuente, maquina) = maquina_de(dir.path(), 8, |_| 0, |_| None);
+        let (resultados, _) = medir_bajo_carga(fuente, &maquina);
+        for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
+            assert_eq!(
+                por_medida(&resultados, medida).motivo.as_deref(),
+                Some("sin medida de CPU propia"),
+                "{medida:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn caso_con_carga_alta_deja_tiempos_sin_valor_con_su_motivo() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (fuente, maquina) = maquina_de(dir.path(), 8, |_| 12, |_| Some(0));
+        let resultados = medir_caso_bajo_carga(fuente, &maquina);
+        for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
+            let r = por_medida(&resultados, medida);
+            assert!(
+                es_motivo_de_carga_ajena(r.motivo.as_deref(), 8),
+                "{medida:?}: {:?}",
+                r.motivo
+            );
             assert_eq!(r.comparacion, None, "{medida:?}");
         }
     }
@@ -2774,7 +3044,8 @@ mod tests {
     #[test]
     fn carga_baja_no_cambia_ninguna_medida() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let resultados = medir_caso_bajo_carga(fuente_falsa(dir.path(), CARGA_BAJA, 8));
+        let (fuente, maquina) = maquina_de(dir.path(), 8, |_| 0, |_| Some(0));
+        let resultados = medir_caso_bajo_carga(fuente, &maquina);
         for r in &resultados {
             assert_eq!(r.motivo, None, "{:?}", r.medida);
             assert!(r.comparacion.is_some(), "{:?}", r.medida);
@@ -2784,7 +3055,8 @@ mod tests {
     #[test]
     fn carga_alta_no_quita_memoria_ni_tamano() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let resultados = medir_caso_bajo_carga(fuente_falsa(dir.path(), CARGA_ALTA, 8));
+        let (fuente, maquina) = maquina_de(dir.path(), 8, |_| 12, |_| Some(0));
+        let resultados = medir_caso_bajo_carga(fuente, &maquina);
         for medida in [Medida::MemoriaPico, Medida::TamanoBinario] {
             let r = por_medida(&resultados, medida);
             assert_eq!(r.motivo, None, "{medida:?}");
@@ -2793,22 +3065,19 @@ mod tests {
     }
 
     #[test]
-    fn la_lectura_despues_de_las_corridas_tambien_cuenta() {
+    fn una_sola_corrida_cargada_basta() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let fuente = fuente_falsa(dir.path(), CARGA_BAJA, 8);
-        let ruta = fuente.ruta.clone();
-        let log = RefCell::new(Vec::new());
-        let inicial = ReescribeCarga {
-            falso: sano("inicial", &log, &["a"]),
-            ruta,
-            nuevo: CARGA_ALTA,
-        };
-        let resultados = con_fuente_de_carga(Some(fuente), || {
-            medir_de_prueba(&inicial, &sano("repo", &log, &["a"]))
-        });
+        // Solo la quinta corrida medida tiene 6 núcleos ajenos. Aun así, los tiempos pierden valor.
+        let (fuente, maquina) =
+            maquina_de(dir.path(), 8, |n| if n == 4 { 12 } else { 0 }, |_| Some(0));
+        let (resultados, _) = medir_bajo_carga(fuente, &maquina);
         for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
             let r = por_medida(&resultados, medida);
-            assert_eq!(r.motivo.as_deref(), Some(MOTIVO_CARGA_ALTA), "{medida:?}");
+            assert!(
+                es_motivo_de_carga_ajena(r.motivo.as_deref(), 8),
+                "{medida:?}: {:?}",
+                r.motivo
+            );
         }
     }
 
@@ -2816,32 +3085,45 @@ mod tests {
     fn base_cargada_deja_la_calibracion_sin_valor_y_el_caso_hereda_el_motivo() {
         let dir_alta = tempfile::tempdir().expect("temp dir");
         let dir_baja = tempfile::tempdir().expect("temp dir");
+        let (fuente_alta, maquina_alta) = maquina_de(dir_alta.path(), 8, |_| 12, |_| Some(0));
+        let (fuente_baja, maquina_baja) = maquina_de(dir_baja.path(), 8, |_| 0, |_| Some(0));
         let log = RefCell::new(Vec::new());
-        let referencia =
-            con_fuente_de_carga(Some(fuente_falsa(dir_alta.path(), CARGA_ALTA, 8)), || {
-                let base =
-                    medir_de_prueba(&sano("inicial", &log, &["a"]), &sano("repo", &log, &["a"]));
-                for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
-                    let r = por_medida(&base, medida);
-                    assert_eq!(
-                        r.motivo.as_deref(),
-                        Some(MOTIVO_CARGA_ALTA),
-                        "base {medida:?}"
-                    );
-                }
-                tomar_referencia().expect("la base dejó una referencia")
-            });
-        assert_eq!(referencia.carga.as_deref(), Some(MOTIVO_CARGA_ALTA));
-        let caso = con_fuente_de_carga(Some(fuente_falsa(dir_baja.path(), CARGA_BAJA, 8)), || {
+        let (motivo_base, referencia) = con_fuente_de_carga(Some(fuente_alta), || {
+            let base = medir_de_prueba(
+                &en_maquina("inicial", &log, &maquina_alta),
+                &en_maquina("repo", &log, &maquina_alta),
+            );
+            for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
+                let r = por_medida(&base, medida);
+                assert!(
+                    es_motivo_de_carga_ajena(r.motivo.as_deref(), 8),
+                    "base {medida:?}: {:?}",
+                    r.motivo
+                );
+            }
+            let motivo = por_medida(&base, Medida::TiempoTests)
+                .motivo
+                .clone()
+                .expect("la base tiene motivo");
+            (
+                motivo,
+                tomar_referencia().expect("la base dejó una referencia"),
+            )
+        });
+        assert_eq!(referencia.carga.as_deref(), Some(motivo_base.as_str()));
+        let caso = con_fuente_de_carga(Some(fuente_baja), || {
             con_referencia(Some(referencia), || {
-                medir_de_prueba(&sano("inicial", &log, &["a"]), &sano("repo", &log, &["a"]))
+                medir_de_prueba(
+                    &en_maquina("inicial", &log, &maquina_baja),
+                    &en_maquina("repo", &log, &maquina_baja),
+                )
             })
         });
         for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
             let r = por_medida(&caso, medida);
             assert_eq!(
                 r.motivo.as_deref(),
-                Some(MOTIVO_CARGA_ALTA),
+                Some(motivo_base.as_str()),
                 "caso {medida:?}"
             );
             assert_eq!(r.comparacion, None, "caso {medida:?}");
@@ -2850,19 +3132,30 @@ mod tests {
     }
 
     #[test]
-    fn carga_de_exactamente_la_mitad_de_los_nucleos_no_es_carga() {
+    fn el_aviso_lleva_la_mayor_carga_ajena_aunque_no_este_cargado() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let resultados =
-            medir_caso_bajo_carga(fuente_falsa(dir.path(), "4.00 3.00 2.00 1/100 1\n", 8));
+        // 2 ticks por corrida son 1 núcleo ajeno: bajo la mitad de 8. No hay motivo, pero sí aviso.
+        let (fuente, maquina) = maquina_de(dir.path(), 8, |_| 2, |_| Some(0));
+        let (resultados, avisos) = medir_bajo_carga(fuente, &maquina);
         for r in &resultados {
             assert_eq!(r.motivo, None, "{:?}", r.medida);
         }
+        assert!(
+            avisos
+                .iter()
+                .any(|a| a.starts_with("eficiencia: mayor carga ajena de una corrida: ")),
+            "{avisos:?}"
+        );
     }
 
     #[test]
     fn lectura_ilegible_deja_tiempos_sin_valor_con_motivo_de_lectura() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let resultados = medir_caso_bajo_carga(fuente_falsa(dir.path(), "no es carga\n", 8));
+        let log = RefCell::new(Vec::new());
+        let ilegible = fuente_falsa(dir.path(), "no es carga\n", 8);
+        let resultados = con_fuente_de_carga(Some(ilegible), || {
+            medir_de_prueba(&sano("inicial", &log, &["a"]), &sano("repo", &log, &["a"]))
+        });
         for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
             let r = por_medida(&resultados, medida);
             assert!(
@@ -2873,16 +3166,94 @@ mod tests {
                 r.motivo
             );
         }
+        // La máquina informa su CPU propia: así el único fallo es el de núcleos.
+        let (fuente, maquina) = maquina_de(dir.path(), 8, |_| 0, |_| Some(0));
         let sin_nucleos = FuenteDeCarga {
             nucleos: Err("sin núcleos".into()),
-            ..fuente_falsa(dir.path(), CARGA_BAJA, 8)
+            ..fuente
         };
-        let resultados = medir_caso_bajo_carga(sin_nucleos);
+        let resultados = con_fuente_de_carga(Some(sin_nucleos), || {
+            medir_de_prueba(
+                &en_maquina("inicial", &log, &maquina),
+                &en_maquina("repo", &log, &maquina),
+            )
+        });
         let r = por_medida(&resultados, Medida::TiempoTests);
         assert_eq!(
             r.motivo.as_deref(),
             Some("no se pudo leer la carga: sin núcleos")
         );
+    }
+
+    #[test]
+    fn leer_cpu_ocupada_suma_solo_los_campos_ocupados() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // user 100, nice 20, system 30, idle 9999, iowait 8888, irq 4, softirq 5, steal 6. Sin idle ni iowait:
+        // 165 ticks, 1,65 s. La línea cpu0 no cuenta.
+        let ok = fuente_falsa(
+            dir.path(),
+            "cpu0 1 1 1 1 1 1 1 1\ncpu  100 20 30 9999 8888 4 5 6\n",
+            8,
+        );
+        let uso = leer_cpu_ocupada(&ok).expect("lee la línea cpu");
+        assert!(cerca(uso, 1.65), "uso {uso}");
+        let casos = [
+            ("sin línea cpu", "cpu0 1 1 1 1 1 1 1 1\n"),
+            ("siete campos", "cpu  1 2 3 4 5 6 7\n"),
+            ("campo no numérico", "cpu  1 2 3 4 5 6 x 8\n"),
+        ];
+        for (nombre, contenido) in casos {
+            let fuente = fuente_falsa(dir.path(), contenido, 8);
+            let r = leer_cpu_ocupada(&fuente);
+            assert!(r.is_err(), "{nombre}: {r:?}");
+        }
+        let ausente = FuenteDeCarga {
+            ruta: dir.path().join("no existe"),
+            nucleos: Ok(8),
+        };
+        assert!(leer_cpu_ocupada(&ausente).is_err());
+    }
+
+    #[test]
+    fn comillas_conserva_las_comillas_simples() {
+        let texto = "a'b \"c\" $x";
+        let salida = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf %s {}", comillas(texto)))
+            .output()
+            .expect("corre sh");
+        assert_eq!(String::from_utf8_lossy(&salida.stdout), texto);
+    }
+
+    /// Dice si cada llamada de `entradas` va bajo el modo cpu. Solo tests y build van ahí, y solo con control.
+    fn revisar_modo_cpu(entradas: &[String], con_control: bool) {
+        let prefijo = "python3 /salida/root-medir.py cpu '";
+        for entrada in entradas {
+            let tipo = entrada.split(' ').nth(1).unwrap_or_default();
+            let cmd = entrada.splitn(3, ' ').nth(2).unwrap_or_default();
+            let debe = con_control && matches!(tipo, "tests" | "build");
+            assert_eq!(cmd.starts_with(prefijo), debe, "{entrada}");
+        }
+    }
+
+    #[test]
+    fn las_corridas_medidas_van_bajo_el_modo_cpu() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let log = RefCell::new(Vec::new());
+        let fuente = fuente_falsa(dir.path(), &stat_con(0), 8);
+        con_fuente_de_carga(Some(fuente), || {
+            medir_de_prueba(&sano("inicial", &log, &["a"]), &sano("repo", &log, &["a"]))
+        });
+        let con_control = log.borrow().clone();
+        assert!(!lados_de(&con_control, "tests").is_empty());
+        revisar_modo_cpu(&con_control, true);
+        // Sin fuente fijada, el control está apagado: ningún comando va bajo el modo cpu.
+        let sin_control = RefCell::new(Vec::new());
+        medir_de_prueba(
+            &sano("inicial", &sin_control, &["a"]),
+            &sano("repo", &sin_control, &["a"]),
+        );
+        revisar_modo_cpu(&sin_control.borrow(), false);
     }
 
     /// Base de t1: diez corridas de tests. Mediana 0,2945; cuartiles 0,29175 y 0,2965.
