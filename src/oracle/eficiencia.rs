@@ -112,6 +112,8 @@ fn sin_valor(medida: Medida, motivo: String) -> ResultadoMedida {
         repo: None,
         comparacion: None,
         motivo: Some(motivo),
+        corridas_referencia: vec![],
+        corridas_repo: vec![],
     }
 }
 
@@ -150,6 +152,8 @@ fn combinar(medida: Medida, referencia: &Serie, ancla: &Serie, repo: &Serie) -> 
                     repo: p.iter().copied().reduce(f64::min),
                     comparacion: Some(comparacion),
                     motivo: None,
+                    corridas_referencia: r.iter().copied().chain(ancla).collect(),
+                    corridas_repo: p.clone(),
                 },
                 None => sin_valor(medida, "no se puede comparar".into()),
             }
@@ -625,6 +629,10 @@ pub struct ResultadoMedida {
     pub repo: Option<f64>,
     pub comparacion: Option<Comparacion>,
     pub motivo: Option<String>,
+    /// Cada corrida del lado inicial, en orden. El ancla va al final. Vacía si no hay valor.
+    pub corridas_referencia: Vec<f64>,
+    /// Cada corrida del repo, en orden. Vacía si no hay valor.
+    pub corridas_repo: Vec<f64>,
 }
 
 /// Lo que midió el lado inicial de una medición. Una calibración la mide una vez y sus casos la reusan.
@@ -1785,6 +1793,49 @@ mod tests {
                 .referencia
                 .is_some()
         );
+    }
+
+    #[test]
+    fn medir_deja_las_corridas_de_cada_lado_en_su_orden() {
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = Falso {
+            tests: "ROOT_NS 3000000000\nROOT_MEM 2000\n".into(),
+            ..sano("repo", &log, &["a"])
+        };
+        let resultados = medir_de_prueba(&inicial, &repo);
+        let tiempo = por_medida(&resultados, Medida::TiempoTests);
+        assert_eq!(
+            tiempo.corridas_referencia,
+            vec![1.5; CORRIDAS],
+            "{tiempo:?}"
+        );
+        assert_eq!(tiempo.corridas_repo, vec![3.0; CORRIDAS], "{tiempo:?}");
+    }
+
+    #[test]
+    fn con_referencia_corridas_referencia_son_la_serie_mas_el_ancla() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        // El ancla mide 9 segundos: va al final de las corridas de referencia.
+        let inicial = Falso {
+            tests: "ROOT_NS 9000000000\nROOT_MEM 9000\n".into(),
+            ..sano("inicial", &log, &["a"])
+        };
+        let repo = Falso {
+            tests: "ROOT_NS 3000000000\nROOT_MEM 2000\n".into(),
+            ..sano("repo", &log, &["a"])
+        };
+        let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        let tiempo = por_medida(&resultados, Medida::TiempoTests);
+        let mut esperado = vec![1.5; CORRIDAS];
+        esperado.push(9.0);
+        assert_eq!(tiempo.corridas_referencia, esperado, "{tiempo:?}");
+        assert_eq!(tiempo.corridas_repo, vec![3.0; CORRIDAS], "{tiempo:?}");
     }
 
     #[test]

@@ -2276,6 +2276,8 @@ modulos = ["config"]
             ruido: Some(ruido),
             regresion,
             motivo: None,
+            corridas_referencia: vec![],
+            corridas_repo: vec![],
         }
     }
 

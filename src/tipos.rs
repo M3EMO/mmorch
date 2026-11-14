@@ -376,6 +376,12 @@ pub struct MedidaEficiencia {
     pub regresion: bool,
     /// Por qué la medida no tiene valor.
     pub motivo: Option<String>,
+    /// Cada corrida del estado inicial, en el orden en que corrió. El ancla va al final. Vacía si no hay valor.
+    #[serde(default)]
+    pub corridas_referencia: Vec<f64>,
+    /// Cada corrida del repo, en el orden en que corrió. Vacía si no hay valor.
+    #[serde(default)]
+    pub corridas_repo: Vec<f64>,
 }
 
 /// La vuelta de eficiencia de una corrida (Tarea 116): la primera regresión y si la vuelta corrió.
@@ -1236,6 +1242,8 @@ mod tests {
                 ruido: Some(0.02),
                 regresion: true,
                 motivo: None,
+                corridas_referencia: vec![],
+                corridas_repo: vec![],
             }],
             ..Veredicto::default()
         };
@@ -1249,6 +1257,23 @@ mod tests {
             "{:?}",
             viejo.eficiencia_auto
         );
+    }
+
+    #[test]
+    fn medida_eficiencia_vieja_sin_corridas_lee_listas_vacias() {
+        // Una medida anterior a `corridas_referencia` y `corridas_repo` las lee con listas vacías.
+        let json = json!({
+            "medida": "tiempo_tests",
+            "referencia": 1.0,
+            "repo": 1.2,
+            "razon": 1.2,
+            "ruido": 0.02,
+            "regresion": true,
+            "motivo": null
+        });
+        let vieja: MedidaEficiencia = serde_json::from_value(json).expect("lee");
+        assert!(vieja.corridas_referencia.is_empty(), "{vieja:?}");
+        assert!(vieja.corridas_repo.is_empty(), "{vieja:?}");
     }
 
     #[test]
@@ -1300,6 +1325,8 @@ mod tests {
                 ruido: Some(0.05),
                 regresion: true,
                 motivo: None,
+                corridas_referencia: vec![],
+                corridas_repo: vec![],
             }],
             corrio: true,
             motivo: Some("sin cupo".into()),

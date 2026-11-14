@@ -11184,6 +11184,8 @@ mod tests {
             ruido: Some(0.02),
             regresion: true,
             motivo: None,
+            corridas_referencia: vec![],
+            corridas_repo: vec![],
         }]
     }
 

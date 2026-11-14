@@ -992,6 +992,24 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
       "type": "object",
       "properties": {
+        "corridas_referencia": {
+          "description": "Cada corrida del estado inicial, en el orden en que corrió. El ancla va al final. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "corridas_repo": {
+          "description": "Cada corrida del repo, en el orden en que corrió. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
         "medida": {
           "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
           "type": "string"
@@ -1364,6 +1382,24 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
       "type": "object",
       "properties": {
+        "corridas_referencia": {
+          "description": "Cada corrida del estado inicial, en el orden en que corrió. El ancla va al final. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "corridas_repo": {
+          "description": "Cada corrida del repo, en el orden en que corrió. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
         "medida": {
           "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
           "type": "string"
@@ -2996,6 +3032,24 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
       "type": "object",
       "properties": {
+        "corridas_referencia": {
+          "description": "Cada corrida del estado inicial, en el orden en que corrió. El ancla va al final. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "corridas_repo": {
+          "description": "Cada corrida del repo, en el orden en que corrió. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
         "medida": {
           "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
           "type": "string"
@@ -6742,6 +6796,24 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
       "type": "object",
       "properties": {
+        "corridas_referencia": {
+          "description": "Cada corrida del estado inicial, en el orden en que corrió. El ancla va al final. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "corridas_repo": {
+          "description": "Cada corrida del repo, en el orden en que corrió. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
         "medida": {
           "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
           "type": "string"

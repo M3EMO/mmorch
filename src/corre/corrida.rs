@@ -2511,6 +2511,8 @@ mod tests {
             ruido: Some(0.05),
             regresion,
             motivo: None,
+            corridas_referencia: vec![],
+            corridas_repo: vec![],
         }
     }
 
@@ -2616,6 +2618,8 @@ mod tests {
             ruido: None,
             regresion: true,
             motivo: Some("sin medida".into()),
+            corridas_referencia: vec![],
+            corridas_repo: vec![],
         };
         let veredicto =
             veredicto_con_eficiencia(vec![medida_eficiencia("tiempo_tests", true), sin_valor]);
@@ -4183,6 +4187,8 @@ mod tests {
             ruido: Some(0.05),
             regresion: true,
             motivo: None,
+            corridas_referencia: vec![],
+            corridas_repo: vec![],
         };
         let texto = prompt_de_eficiencia(std::slice::from_ref(&medida), "haz hecho");
         assert!(texto.starts_with(PROMPT_EFICIENCIA), "{texto}");

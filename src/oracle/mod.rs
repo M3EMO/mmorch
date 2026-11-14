@@ -1911,6 +1911,8 @@ fn medida_de_eficiencia(r: &ResultadoMedida) -> MedidaEficiencia {
         ruido: r.comparacion.as_ref().map(|c| c.ruido),
         regresion: r.comparacion.as_ref().is_some_and(|c| c.regresion),
         motivo: r.motivo.clone(),
+        corridas_referencia: r.corridas_referencia.clone(),
+        corridas_repo: r.corridas_repo.clone(),
     }
 }
 
