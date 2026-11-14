@@ -4058,10 +4058,11 @@ mod tests {
             rep_casos.load(Ordering::SeqCst) > 0,
             "los casos miden el repo"
         );
-        assert_eq!(
-            ini_casos.load(Ordering::SeqCst),
-            0,
-            "los casos no llaman al lado inicial"
+        // Tarea 133: cada caso corre solo el ancla del lado inicial: compilar tests, tests y compilación.
+        let llamadas_inicial = ini_casos.load(Ordering::SeqCst);
+        assert!(
+            llamadas_inicial > 0 && llamadas_inicial.is_multiple_of(3),
+            "cada caso llama al lado inicial solo por el ancla: {llamadas_inicial}"
         );
     }
 

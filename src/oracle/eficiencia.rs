@@ -72,6 +72,12 @@ pub fn comparar(referencia: &[f64], repo: &[f64]) -> Option<Comparacion> {
     })
 }
 
+/// Como `comparar`, pero la referencia suma el `ancla`: una corrida del lado inicial, si hay.
+pub fn comparar_con_ancla(base: &[f64], ancla: Option<f64>, repo: &[f64]) -> Option<Comparacion> {
+    let referencia: Vec<f64> = base.iter().copied().chain(ancla).collect();
+    comparar(&referencia, repo)
+}
+
 /// Una serie de valores de un lado. Un error deja la serie sin valores y con su motivo.
 type Serie = Result<Vec<f64>, String>;
 
@@ -109,19 +115,45 @@ fn sin_valor(medida: Medida, motivo: String) -> ResultadoMedida {
     }
 }
 
-/// Compara las dos series de una medida. Si un lado falla, la medida no tiene valor.
-fn combinar(medida: Medida, referencia: &Serie, repo: &Serie) -> ResultadoMedida {
+/// Series de la corrida del lado inicial que ancla la referencia. Sin ancla quedan vacías y sin error.
+/// Un ancla con error no hace fallar la medida: `combinar` usa solo la base.
+struct Ancla {
+    tiempo: Serie,
+    memoria: Serie,
+    compilacion: Serie,
+}
+
+impl Ancla {
+    fn vacia() -> Self {
+        Ancla {
+            tiempo: Ok(vec![]),
+            memoria: Ok(vec![]),
+            compilacion: Ok(vec![]),
+        }
+    }
+}
+
+/// Valor de una serie de ancla. Una serie con error o sin valor no da ninguno.
+fn valor_del_ancla(ancla: &Serie) -> Option<f64> {
+    ancla.as_ref().ok()?.first().copied()
+}
+
+/// Compara las dos series de una medida. El ancla suma a la referencia. Si un lado falla, la medida no tiene valor.
+fn combinar(medida: Medida, referencia: &Serie, ancla: &Serie, repo: &Serie) -> ResultadoMedida {
     match (referencia, repo) {
-        (Ok(r), Ok(p)) => match comparar(r, p) {
-            Some(comparacion) => ResultadoMedida {
-                medida,
-                referencia: r.iter().copied().reduce(f64::min),
-                repo: p.iter().copied().reduce(f64::min),
-                comparacion: Some(comparacion),
-                motivo: None,
-            },
-            None => sin_valor(medida, "no se puede comparar".into()),
-        },
+        (Ok(r), Ok(p)) => {
+            let ancla = valor_del_ancla(ancla);
+            match comparar_con_ancla(r, ancla, p) {
+                Some(comparacion) => ResultadoMedida {
+                    medida,
+                    referencia: r.iter().copied().chain(ancla).reduce(f64::min),
+                    repo: p.iter().copied().reduce(f64::min),
+                    comparacion: Some(comparacion),
+                    motivo: None,
+                },
+                None => sin_valor(medida, "no se puede comparar".into()),
+            }
+        }
         _ => {
             let motivos = [referencia, repo]
                 .into_iter()
@@ -376,14 +408,39 @@ fn compilar_tests(lado: &Lado) -> Result<(), String> {
     }
 }
 
+/// Una corrida medida de tests. Anota su tiempo y su memoria. Una corrida que recompila no vale.
+fn correr_tests(lado: &Lado, filtro: &str, tiempo: &mut Serie, memoria: &mut Serie) {
+    let nombre = lado.nombre;
+    match lado.ejecutar(&cmd_tests(filtro)) {
+        Err(e) => {
+            let motivo = format!("{nombre}: {e}");
+            anotar(tiempo, Err(motivo.clone()));
+            anotar(memoria, Err(motivo));
+        }
+        Ok(salida) if recompilo(&salida.stdout) => {
+            anotar(tiempo, Err(MOTIVO_RECOMPILO.into()));
+            anotar(memoria, Err(MOTIVO_RECOMPILO.into()));
+        }
+        Ok(salida) => {
+            let ns = leer_marca(&salida.stdout, "ROOT_NS").map(|ns| ns / 1e9);
+            anotar(tiempo, ns.ok_or_else(|| format!("{nombre}: sin ROOT_NS")));
+            let mem = leer_marca(&salida.stdout, "ROOT_MEM");
+            anotar(memoria, mem.ok_or_else(|| "sin memory.peak".to_string()));
+        }
+    }
+}
+
 /// Mide tiempo y memoria de los tests. Compila los tests de cada lado que corre, y luego corre esos lados
 /// alternados, `CORRIDAS` veces. Un lado que no compila no corre. Si `lados[k]` es `None`, ese lado no corre:
 /// su serie ya viene en `tiempo[k]` y `memoria[k]`. Con `filtro` con error, los dos lados quedan con ese error.
+/// Si `ancla_lado` es `Some`, corre una vez tras la primera corrida de `lados`. Su serie va a `ancla`.
 fn medir_tests(
     lados: [Option<&Lado>; 2],
+    ancla_lado: Option<&Lado>,
     filtro: &Result<String, String>,
     tiempo: &mut [Serie; 2],
     memoria: &mut [Serie; 2],
+    ancla: &mut Ancla,
 ) {
     let filtro = match filtro {
         Ok(filtro) => filtro,
@@ -393,6 +450,12 @@ fn medir_tests(
             return;
         }
     };
+    if let Some(lado) = ancla_lado
+        && let Err(motivo) = compilar_tests(lado)
+    {
+        anotar(&mut ancla.tiempo, Err(motivo.clone()));
+        anotar(&mut ancla.memoria, Err(motivo));
+    }
     for (k, lado) in lados.into_iter().enumerate() {
         let Some(lado) = lado else { continue };
         if let Err(motivo) = compilar_tests(lado) {
@@ -400,49 +463,76 @@ fn medir_tests(
             anotar(&mut memoria[k], Err(motivo));
         }
     }
-    for _ in 0..CORRIDAS {
+    for corrida in 0..CORRIDAS {
         for (k, lado) in lados.into_iter().enumerate() {
             let Some(lado) = lado else { continue };
-            let nombre = lado.nombre;
             if tiempo[k].is_err() && memoria[k].is_err() {
                 continue;
             }
-            match lado.ejecutar(&cmd_tests(filtro)) {
-                Err(e) => {
-                    let motivo = format!("{nombre}: {e}");
-                    anotar(&mut tiempo[k], Err(motivo.clone()));
-                    anotar(&mut memoria[k], Err(motivo));
-                }
-                Ok(salida) if recompilo(&salida.stdout) => {
-                    anotar(&mut tiempo[k], Err(MOTIVO_RECOMPILO.into()));
-                    anotar(&mut memoria[k], Err(MOTIVO_RECOMPILO.into()));
-                }
-                Ok(salida) => {
-                    let ns = leer_marca(&salida.stdout, "ROOT_NS").map(|ns| ns / 1e9);
-                    anotar(
-                        &mut tiempo[k],
-                        ns.ok_or_else(|| format!("{nombre}: sin ROOT_NS")),
-                    );
-                    let mem = leer_marca(&salida.stdout, "ROOT_MEM");
-                    anotar(
-                        &mut memoria[k],
-                        mem.ok_or_else(|| "sin memory.peak".to_string()),
-                    );
+            correr_tests(lado, filtro, &mut tiempo[k], &mut memoria[k]);
+        }
+        if corrida == 0
+            && let Some(lado) = ancla_lado
+            && (ancla.tiempo.is_ok() || ancla.memoria.is_ok())
+        {
+            correr_tests(lado, filtro, &mut ancla.tiempo, &mut ancla.memoria);
+        }
+    }
+}
+
+/// Una compilación medida. Anota su reloj en `compilacion`. Si `con_tamano`, anota también el tamaño de
+/// sus binarios en `tamano`. Un fallo de la compilación llega a las dos series.
+fn correr_build(
+    lado: &Lado,
+    comando: &str,
+    compilacion: &mut Serie,
+    tamano: &mut Serie,
+    con_tamano: bool,
+) {
+    let nombre = lado.nombre;
+    match lado.ejecutar(comando) {
+        Err(e) => {
+            let motivo = format!("{nombre}: {e}");
+            anotar(compilacion, Err(motivo.clone()));
+            anotar(tamano, Err(motivo));
+        }
+        Ok(salida) => match leer_marca(&salida.stdout, "ROOT_BUILD") {
+            Some(0.0) => {
+                let ns = leer_marca(&salida.stdout, "ROOT_NS").map(|ns| ns / 1e9);
+                anotar(
+                    compilacion,
+                    ns.ok_or_else(|| format!("{nombre}: sin ROOT_NS")),
+                );
+                if con_tamano {
+                    let size = leer_marca(&salida.stdout, "ROOT_SIZE");
+                    anotar(tamano, size.ok_or_else(|| "sin tamaño".to_string()));
                 }
             }
-        }
+            Some(_) => {
+                anotar(compilacion, Err("la compilación falló".into()));
+                anotar(tamano, Err("la compilación falló".into()));
+            }
+            None => {
+                anotar(compilacion, Err("salida ilegible del build".into()));
+                anotar(tamano, Err("salida ilegible del build".into()));
+            }
+        },
     }
 }
 
 /// Mide la compilación y el tamaño de los binarios. Usa los paquetes y binarios del lado `repo`.
 /// Los dos lados tienen los mismos nombres de paquete, así que el comando sirve para ambos.
 /// `lados[k]` `None` como en `medir_tests`: ese lado no corre y su serie ya viene en `compilacion[k]`.
+/// Si `ancla_lado` es `Some`, corre una compilación tras la primera corrida de `lados`. Su reloj va a
+/// `ancla.compilacion`. Su tamaño no se mide: el tamaño sale solo de `lados`.
 fn medir_compilacion(
     lados: [Option<&Lado>; 2],
+    ancla_lado: Option<&Lado>,
     meta_i: &Result<Metadatos, String>,
     meta_r: &Result<Metadatos, String>,
     compilacion: &mut [Serie; 2],
     tamano: &mut [Serie; 2],
+    ancla: &mut Ancla,
 ) {
     let (Ok(_), Ok(meta)) = (meta_i, meta_r) else {
         let motivo = unir_motivos(
@@ -471,58 +561,59 @@ fn medir_compilacion(
         for corrida in 0..CORRIDAS {
             for (k, lado) in lados.into_iter().enumerate() {
                 let Some(lado) = lado else { continue };
-                let nombre = lado.nombre;
                 if compilacion[k].is_err() {
                     continue;
                 }
-                match lado.ejecutar(&comando) {
-                    Err(e) => {
-                        let motivo = format!("{nombre}: {e}");
-                        anotar(&mut compilacion[k], Err(motivo.clone()));
-                        anotar(&mut tamano[k], Err(motivo));
-                    }
-                    Ok(salida) => match leer_marca(&salida.stdout, "ROOT_BUILD") {
-                        Some(0.0) => {
-                            let ns = leer_marca(&salida.stdout, "ROOT_NS").map(|ns| ns / 1e9);
-                            anotar(
-                                &mut compilacion[k],
-                                ns.ok_or_else(|| format!("{nombre}: sin ROOT_NS")),
-                            );
-                            if corrida == 0 {
-                                let size = leer_marca(&salida.stdout, "ROOT_SIZE");
-                                anotar(
-                                    &mut tamano[k],
-                                    size.ok_or_else(|| "sin tamaño".to_string()),
-                                );
-                            }
-                        }
-                        Some(_) => {
-                            anotar(&mut compilacion[k], Err("la compilación falló".into()));
-                            anotar(&mut tamano[k], Err("la compilación falló".into()));
-                        }
-                        None => {
-                            anotar(&mut compilacion[k], Err("salida ilegible del build".into()));
-                            anotar(&mut tamano[k], Err("salida ilegible del build".into()));
-                        }
-                    },
-                }
+                correr_build(
+                    lado,
+                    &comando,
+                    &mut compilacion[k],
+                    &mut tamano[k],
+                    corrida == 0,
+                );
+            }
+            if corrida == 0
+                && let Some(lado) = ancla_lado
+            {
+                // El ancla no mide tamaño: su serie de tamaño se descarta.
+                let mut sin_tamano = Ok(vec![]);
+                correr_build(
+                    lado,
+                    &comando,
+                    &mut ancla.compilacion,
+                    &mut sin_tamano,
+                    false,
+                );
             }
         }
     }
 }
 
-/// Une las series de los dos lados en las cuatro medidas, en orden de `Medida`.
+/// Une las series de los dos lados en las cuatro medidas, en orden de `Medida`. El ancla suma a la
+/// referencia de tiempo, memoria y compilación. El tamaño no tiene ancla.
 fn combinar_medidas(
     tiempo: &[Serie; 2],
     memoria: &[Serie; 2],
     compilacion: &[Serie; 2],
     tamano: &[Serie; 2],
+    ancla: &Ancla,
 ) -> Vec<ResultadoMedida> {
+    let sin_ancla: Serie = Ok(vec![]);
     vec![
-        combinar(Medida::TiempoTests, &tiempo[0], &tiempo[1]),
-        combinar(Medida::MemoriaPico, &memoria[0], &memoria[1]),
-        combinar(Medida::TiempoCompilacion, &compilacion[0], &compilacion[1]),
-        combinar(Medida::TamanoBinario, &tamano[0], &tamano[1]),
+        combinar(Medida::TiempoTests, &tiempo[0], &ancla.tiempo, &tiempo[1]),
+        combinar(
+            Medida::MemoriaPico,
+            &memoria[0],
+            &ancla.memoria,
+            &memoria[1],
+        ),
+        combinar(
+            Medida::TiempoCompilacion,
+            &compilacion[0],
+            &ancla.compilacion,
+            &compilacion[1],
+        ),
+        combinar(Medida::TamanoBinario, &tamano[0], &sin_ancla, &tamano[1]),
     ]
 }
 
@@ -648,7 +739,7 @@ fn aviso_de_borrado(raiz: &Path, e: &std::io::Error) -> String {
 fn medir_lados(inicial: &Lado, repo: &Lado) -> Vec<ResultadoMedida> {
     let fijada = REFERENCIA_FIJA.with(|r| r.borrow().clone());
     match fijada {
-        Some(referencia) => medir_contra_referencia(&referencia, repo),
+        Some(referencia) => medir_contra_referencia(&referencia, inicial, repo),
         None => {
             let (resultados, referencia) = medir_los_dos_lados(inicial, repo);
             ULTIMA_REFERENCIA.with(|u| *u.borrow_mut() = Some(referencia));
@@ -670,8 +761,17 @@ fn medir_los_dos_lados(inicial: &Lado, repo: &Lado) -> (Vec<ResultadoMedida>, Re
     let mut memoria: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut compilacion: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut tamano: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
-    medir_tests(lados, &filtro, &mut tiempo, &mut memoria);
-    medir_compilacion(lados, &meta_i, &meta_r, &mut compilacion, &mut tamano);
+    let mut ancla = Ancla::vacia();
+    medir_tests(lados, None, &filtro, &mut tiempo, &mut memoria, &mut ancla);
+    medir_compilacion(
+        lados,
+        None,
+        &meta_i,
+        &meta_r,
+        &mut compilacion,
+        &mut tamano,
+        &mut ancla,
+    );
     let referencia = Referencia {
         meta: meta_i,
         lista: lista_i,
@@ -681,13 +781,17 @@ fn medir_los_dos_lados(inicial: &Lado, repo: &Lado) -> (Vec<ResultadoMedida>, Re
         compilacion: compilacion[0].clone(),
         tamano: tamano[0].clone(),
     };
-    let resultados = combinar_medidas(&tiempo, &memoria, &compilacion, &tamano);
+    let resultados = combinar_medidas(&tiempo, &memoria, &compilacion, &tamano, &ancla);
     (resultados, referencia)
 }
 
-/// Mide solo el repo y lo compara con la referencia. El lado inicial no corre: sus series son las de la
-/// referencia. Si el filtro del repo no es el de la referencia, los tests no tienen valor.
-fn medir_contra_referencia(referencia: &Referencia, repo: &Lado) -> Vec<ResultadoMedida> {
+/// Mide el repo y lo compara con la referencia. Además corre el lado inicial una vez por medida: su
+/// corrida ancla la referencia. Si el filtro del repo no es el de la referencia, los tests no tienen valor.
+fn medir_contra_referencia(
+    referencia: &Referencia,
+    inicial: &Lado,
+    repo: &Lado,
+) -> Vec<ResultadoMedida> {
     let meta_r = leer_metadata(repo).map_err(|m| format!("repo: {m}"));
     let lista_r = leer_listas(repo).map_err(|m| format!("repo: {m}"));
     let filtro = preparar_filtro(&referencia.lista, &lista_r).and_then(|f| {
@@ -706,15 +810,25 @@ fn medir_contra_referencia(referencia: &Referencia, repo: &Lado) -> Vec<Resultad
     let mut memoria: [Serie; 2] = [referencia.memoria.clone(), Ok(vec![])];
     let mut compilacion: [Serie; 2] = [referencia.compilacion.clone(), Ok(vec![])];
     let mut tamano: [Serie; 2] = [referencia.tamano.clone(), Ok(vec![])];
-    medir_tests(lados, &filtro, &mut tiempo, &mut memoria);
+    let mut ancla = Ancla::vacia();
+    medir_tests(
+        lados,
+        Some(inicial),
+        &filtro,
+        &mut tiempo,
+        &mut memoria,
+        &mut ancla,
+    );
     medir_compilacion(
         lados,
+        Some(inicial),
         &referencia.meta,
         &meta_r,
         &mut compilacion,
         &mut tamano,
+        &mut ancla,
     );
-    combinar_medidas(&tiempo, &memoria, &compilacion, &tamano)
+    combinar_medidas(&tiempo, &memoria, &compilacion, &tamano, &ancla)
 }
 
 /// Crea la carpeta de trabajo dentro de `tmp` y una subcarpeta por lado. Si falla a medias, borra lo creado.
@@ -856,6 +970,14 @@ mod tests {
             .collect()
     }
 
+    /// Devuelve los tipos de las llamadas de un lado, en orden.
+    fn tipos_de(log: &[String], lado: &str) -> Vec<String> {
+        log.iter()
+            .filter(|e| e.split(' ').next() == Some(lado))
+            .map(|e| e.split(' ').nth(1).unwrap_or_default().to_string())
+            .collect()
+    }
+
     #[test]
     fn comparar_razon_y_ruido_sin_regresion() {
         let c = comparar(&[1.0, 1.1, 1.0], &[1.05, 1.06, 1.08]).expect("comparable");
@@ -877,6 +999,27 @@ mod tests {
         assert_eq!(comparar(&[], &[1.0]), None);
         assert_eq!(comparar(&[1.0], &[]), None);
         assert_eq!(comparar(&[0.0, 1.0], &[1.0]), None);
+    }
+
+    #[test]
+    fn ancla_sube_el_ruido_y_quita_la_falsa_regresion() {
+        let base = [1.00, 1.01, 1.00];
+        let repo = [1.05, 1.06, 1.05];
+        let sin = comparar(&base, &repo).expect("comparable");
+        assert!(cerca(sin.razon, 1.05), "razon {}", sin.razon);
+        assert!(cerca(sin.ruido, 0.02), "ruido {}", sin.ruido);
+        assert!(sin.regresion);
+        let con = comparar_con_ancla(&base, Some(1.05), &repo).expect("comparable");
+        assert!(cerca(con.ruido, 0.05), "ruido {}", con.ruido);
+        assert!(!con.regresion, "{con:?}");
+    }
+
+    #[test]
+    fn ancla_no_tapa_una_regresion_real() {
+        let con = comparar_con_ancla(&[1.00, 1.01, 1.00], Some(1.00), &[2.40, 2.41, 2.42])
+            .expect("comparable");
+        assert!(con.regresion, "{con:?}");
+        assert!(cerca(con.razon, 2.4), "razon {}", con.razon);
     }
 
     #[test]
@@ -1271,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn con_referencia_el_lado_inicial_no_recibe_llamadas() {
+    fn con_referencia_el_inicial_solo_recibe_su_ancla() {
         let log_base = RefCell::new(Vec::new());
         let referencia = referencia_de(
             &sano("inicial", &log_base, &["a"]),
@@ -1283,14 +1426,97 @@ mod tests {
         let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
         assert_eq!(resultados.len(), 4);
         let entradas = log.borrow();
-        assert!(
-            entradas.iter().all(|e| !e.starts_with("inicial ")),
-            "{entradas:?}"
+        // Sin metadata ni lista: esas vienen de la referencia.
+        assert_eq!(
+            tipos_de(&entradas, "inicial"),
+            ["compilar_tests", "tests", "build"]
         );
         assert!(
             entradas.iter().any(|e| e.starts_with("repo ")),
             "{entradas:?}"
         );
+    }
+
+    #[test]
+    fn con_referencia_el_inicial_recibe_una_llamada_por_medida_de_tiempo() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        let entradas = log.borrow();
+        let tipos = tipos_de(&entradas, "inicial");
+        let cuenta = |tipo: &str| tipos.iter().filter(|t| *t == tipo).count();
+        assert_eq!(cuenta("tests"), 1, "{tipos:?}");
+        assert_eq!(cuenta("build"), 1, "{tipos:?}");
+        assert_eq!(cuenta("compilar_tests"), 1, "{tipos:?}");
+    }
+
+    #[test]
+    fn con_referencia_el_orden_de_las_corridas_es_repo_inicial_repo_repo() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        let entradas = log.borrow();
+        let esperado: Vec<String> = ["repo", "inicial", "repo", "repo"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(lados_de(&entradas, "tests"), esperado, "{entradas:?}");
+        assert_eq!(lados_de(&entradas, "build"), esperado, "{entradas:?}");
+    }
+
+    #[test]
+    fn sin_referencia_el_orden_alterna_como_hoy() {
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        medir_de_prueba(&inicial, &repo);
+        let entradas = log.borrow();
+        let esperado: Vec<String> = (0..CORRIDAS)
+            .flat_map(|_| ["inicial", "repo"])
+            .map(String::from)
+            .collect();
+        assert_eq!(lados_de(&entradas, "tests"), esperado, "{entradas:?}");
+        assert_eq!(lados_de(&entradas, "build"), esperado, "{entradas:?}");
+    }
+
+    /// Un ancla que falla no hace fallar la medida: la referencia queda en la serie de la base.
+    #[test]
+    fn con_referencia_un_ancla_con_error_se_ignora() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        let inicial = Falso {
+            tests: "sin marcas\n".into(),
+            build: "ROOT_BUILD 1\n".into(),
+            ..sano("inicial", &log, &["a"])
+        };
+        let repo = Falso {
+            tests: "ROOT_NS 3000000000\nROOT_MEM 2000\n".into(),
+            build: "ROOT_NS 4000000000\nROOT_BUILD 0\nROOT_SIZE 1000\n".into(),
+            ..sano("repo", &log, &["a"])
+        };
+        let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        for medida in [Medida::TiempoTests, Medida::TiempoCompilacion] {
+            let r = por_medida(&resultados, medida);
+            assert!(r.motivo.is_none(), "{medida:?}: {r:?}");
+            let razon = r.comparacion.as_ref().map(|c| c.razon);
+            assert!(razon.is_some_and(|x| cerca(x, 2.0)), "{medida:?}: {r:?}");
+        }
     }
 
     #[test]
@@ -1300,7 +1526,8 @@ mod tests {
             &sano("inicial", &log_base, &["a"]),
             &sano("repo", &log_base, &["a"]),
         );
-        // El lado inicial de esta prueba tiene otros números. Si se midiera, la razón cambiaría.
+        // El ancla del lado inicial mide más que la base. El mínimo sigue siendo el de la base.
+        // La razón no cambia: el ruido sí, pero esta prueba no lo mira.
         let log = RefCell::new(Vec::new());
         let inicial = Falso {
             tests: "ROOT_NS 9000000000\nROOT_MEM 9000\n".into(),
@@ -1326,7 +1553,11 @@ mod tests {
             let razon = r.comparacion.as_ref().map(|c| c.razon);
             assert!(razon.is_some_and(|x| cerca(x, 2.0)), "{medida:?}: {r:?}");
         }
-        assert!(log.borrow().iter().all(|e| !e.starts_with("inicial ")));
+        // Solo el ancla del lado inicial: compilación de tests, una corrida de tests y una de build.
+        assert_eq!(
+            tipos_de(&log.borrow(), "inicial"),
+            ["compilar_tests", "tests", "build"]
+        );
     }
 
     #[test]
