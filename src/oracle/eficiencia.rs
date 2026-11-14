@@ -376,6 +376,78 @@ pub(crate) fn cmd_tests(filtro: &str) -> String {
     )
 }
 
+/// Nombre con el que se escribe el guion de medición en la carpeta de trabajo.
+// lo usan los puntos 2 y 3
+#[allow(dead_code)]
+pub(crate) const NOMBRE_GUION: &str = "root-medir.py";
+
+/// Guion Python que mide CPU (`cpu`) o memoria pico de un binario (`rss`). Solo usa la librería estándar.
+// lo usan los puntos 2 y 3
+#[allow(dead_code)]
+pub(crate) const GUION_MEDIR: &str = r#"# Guion de medición de root. Solo usa la librería estándar de Python 3.
+#
+# Modo cpu: root-medir.py cpu <comando>
+#   Corre `sh -c <comando>`, imprime ROOT_CPU_US en microsegundos y sale con su código.
+# Modo rss: root-medir.py rss <binario> <args...>
+#   Corre el binario y agrega su pico de memoria en bytes a root-rss.lista.
+import os
+import resource
+import subprocess
+import sys
+
+NOMBRE_LISTA = "root-rss.lista"
+
+
+def codigo_de_salida(returncode):
+    # Un hijo muerto por señal da un código negativo. Se sale con 128 más la señal.
+    if returncode < 0:
+        return 128 - returncode
+    return returncode
+
+
+def cpu_us():
+    # Suma CPU de usuario y sistema del hijo y de este proceso, en microsegundos.
+    total = 0.0
+    for quien in (resource.RUSAGE_CHILDREN, resource.RUSAGE_SELF):
+        uso = resource.getrusage(quien)
+        total += uso.ru_utime + uso.ru_stime
+    return round(total * 1000000)
+
+
+def modo_cpu(comando):
+    # Espera al comando. Después imprime su CPU y sale con su código.
+    hijo = subprocess.run(["sh", "-c", comando])
+    print(f"ROOT_CPU_US {cpu_us()}", flush=True)
+    return codigo_de_salida(hijo.returncode)
+
+
+def modo_rss(binario, args):
+    # Espera al binario y anota su pico de memoria. No escribe nada en stdout.
+    hijo = subprocess.run([binario] + args)
+    kib = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    carpeta = os.path.dirname(os.path.abspath(__file__))
+    fd = os.open(os.path.join(carpeta, NOMBRE_LISTA), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        # Una sola escritura: varios procesos agregan líneas a la vez.
+        os.write(fd, f"{kib * 1024}\n".encode())
+    finally:
+        os.close(fd)
+    return codigo_de_salida(hijo.returncode)
+
+
+def main(argv):
+    if len(argv) == 3 and argv[1] == "cpu":
+        return modo_cpu(argv[2])
+    if len(argv) >= 3 and argv[1] == "rss":
+        return modo_rss(argv[2], argv[3:])
+    sys.stderr.write("uso: root-medir.py cpu <comando> | rss <binario> <args...>\n")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+"#;
+
 /// Compila los tests antes de las corridas medidas. Lee `ROOT_COMPILAR` (código de salida de nextest).
 pub(crate) fn cmd_compilar_tests() -> String {
     format!(
@@ -2825,5 +2897,113 @@ mod tests {
             assert_eq!(m.corridas_referencia, base, "{medida:?}");
             assert_eq!(m.corridas_repo, repo, "{medida:?}");
         }
+    }
+
+    /// Dice si `python3` corre. Si no corre, el test que lo llama sale sin fallar.
+    fn hay_python3() -> bool {
+        match std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        {
+            Ok(salida) if salida.status.success() => true,
+            Ok(_) => {
+                eprintln!("python3 no responde a --version; se saltea el test del guion");
+                false
+            }
+            Err(e) => {
+                eprintln!("python3 no se puede correr ({e}); se saltea el test del guion");
+                false
+            }
+        }
+    }
+
+    /// Escribe `GUION_MEDIR` en `dir` y corre `python3 root-medir.py <args>` desde `dir`.
+    fn correr_guion(dir: &Path, args: &[&str]) -> std::process::Output {
+        fs::write(dir.join(NOMBRE_GUION), GUION_MEDIR).expect("escribir el guion");
+        std::process::Command::new("python3")
+            .arg(NOMBRE_GUION)
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("correr python3")
+    }
+
+    fn texto(salida: &[u8]) -> String {
+        String::from_utf8_lossy(salida).into_owned()
+    }
+
+    #[test]
+    fn guion_cpu_imprime_cpu_us_mayor_que_cero() {
+        if !hay_python3() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let salida = correr_guion(
+            dir.path(),
+            &["cpu", "i=0; while [ $i -lt 100000 ]; do i=$((i+1)); done"],
+        );
+        let stdout = texto(&salida.stdout);
+        assert_eq!(
+            salida.status.code(),
+            Some(0),
+            "stderr: {}",
+            texto(&salida.stderr)
+        );
+        let cpu = leer_marca(&stdout, "ROOT_CPU_US");
+        assert!(
+            cpu.is_some_and(|n| n > 0.0),
+            "sin ROOT_CPU_US mayor que cero: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn guion_rss_deja_una_linea_de_100_mib_o_mas() {
+        if !hay_python3() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let salida = correr_guion(
+            dir.path(),
+            &["rss", "python3", "-c", "b=bytearray(100*2**20)"],
+        );
+        assert_eq!(
+            salida.status.code(),
+            Some(0),
+            "stderr: {}",
+            texto(&salida.stderr)
+        );
+        assert!(
+            salida.stdout.is_empty(),
+            "stdout: {:?}",
+            texto(&salida.stdout)
+        );
+        let lista =
+            fs::read_to_string(dir.path().join("root-rss.lista")).expect("leer root-rss.lista");
+        let lineas: Vec<&str> = lista.lines().collect();
+        assert_eq!(lineas.len(), 1, "lista: {lista:?}");
+        let bytes: u64 = lineas[0].trim().parse().expect("línea numérica");
+        assert!(bytes >= 100 * 1024 * 1024, "rss menor que 100 MiB: {bytes}");
+    }
+
+    #[test]
+    fn guion_sale_con_el_codigo_del_comando() {
+        if !hay_python3() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cpu = correr_guion(dir.path(), &["cpu", "exit 7"]);
+        let stdout = texto(&cpu.stdout);
+        assert_eq!(cpu.status.code(), Some(7), "stdout: {stdout:?}");
+        assert!(
+            leer_marca(&stdout, "ROOT_CPU_US").is_some(),
+            "sin ROOT_CPU_US: {stdout:?}"
+        );
+
+        let rss = correr_guion(
+            dir.path(),
+            &["rss", "python3", "-c", "import sys; sys.exit(3)"],
+        );
+        assert_eq!(rss.status.code(), Some(3), "stderr: {}", texto(&rss.stderr));
+        assert!(rss.stdout.is_empty(), "stdout: {:?}", texto(&rss.stdout));
     }
 }
