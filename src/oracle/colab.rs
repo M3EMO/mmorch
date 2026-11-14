@@ -1909,8 +1909,8 @@ fn ruta(p: &Path) -> String {
 mod tests {
     use super::*;
     use crate::oracle::tarea::{Comando, Exclusion};
+    use crate::prueba_ejecutable::escribir_ejecutable;
     use std::cell::{Cell, RefCell};
-    use std::os::unix::fs::PermissionsExt;
     use std::rc::Rc;
 
     use sha2::{Digest, Sha256};
@@ -2447,10 +2447,7 @@ mod tests {
             "#!/bin/sh\necho \"$*\" >> '{d}/llamadas.log'\ncase \"$1\" in\nnew) echo $$ > '{d}/pid.txt'; sleep 300 ;;\n*) exit 0 ;;\nesac\n",
             d = dir.display()
         );
-        let ruta = dir.join("colab-mudo");
-        fs::write(&ruta, guion).expect("escribe el falso");
-        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
-        ruta
+        escribir_ejecutable(&dir.join("colab-mudo"), &guion)
     }
 
     /// Vivo si `kill -0` lo acepta. Llama a la CLI `kill` con argumentos, sin shell.
@@ -2528,8 +2525,7 @@ mod tests {
             "#!/bin/sh\ncat > '{}/stdin.txt'\nexit 0\n",
             base.path().display()
         );
-        fs::write(&binario, guion).expect("escribe");
-        fs::set_permissions(&binario, fs::Permissions::from_mode(0o755)).expect("permisos");
+        escribir_ejecutable(&binario, &guion);
         let cli = ColabProceso {
             binario,
             plazo_primer_paso: Duration::from_secs(2),
@@ -2556,10 +2552,7 @@ mod tests {
             "#!/bin/sh\necho \"$*\" >> '{d}/llamadas.log'\ncase \"$1\" in\nexec)\n  case \"$*\" in\n    *gpu.py*) echo 'ROOT_GPU=Tesla T4' ;;\n    *prepara.py*) echo ROOT_PREPARADO=1 ;;\n    *prepara-rust.py*) echo ROOT_RUST=rustup ;;\n    *corre.py*) echo ROOT_LANZADO=1 ;;\n    *estado.py*) echo $$ > '{d}/pid.txt'; echo 'ROOT_ESTADO=corriendo' ;;\n  esac ;;\nstop) {stop_cuerpo} ;;\n*) exit 0 ;;\nesac\nexit 0\n",
             d = dir.display()
         );
-        let ruta = dir.join("colab-lenta");
-        fs::write(&ruta, guion).expect("escribe el falso");
-        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
-        ruta
+        escribir_ejecutable(&dir.join("colab-lenta"), &guion)
     }
 
     /// Como `falso_corre_lenta_stop`, con `stop` que sale 0.
@@ -3238,12 +3231,10 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let marca = base.path().join("lanzado");
         let binario = base.path().join("colab-marca");
-        fs::write(
+        escribir_ejecutable(
             &binario,
-            format!("#!/bin/sh\necho x > '{}'\nexit 0\n", marca.display()),
-        )
-        .expect("escribe");
-        fs::set_permissions(&binario, fs::Permissions::from_mode(0o755)).expect("permisos");
+            &format!("#!/bin/sh\necho x > '{}'\nexit 0\n", marca.display()),
+        );
         let cli = ColabProceso {
             binario,
             plazo_primer_paso: Duration::from_secs(1),

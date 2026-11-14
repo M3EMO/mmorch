@@ -1246,6 +1246,7 @@ mod tests {
     use crate::corre::{EsperaVigencia, Lanzamiento, SalidaClaude, dir_corridas};
     use crate::goal::{ErrorGoal, calcular_hash};
     use crate::oracle::ErrorOraculo;
+    use crate::prueba_ejecutable::escribir_ejecutable;
     use crate::tipos::{Confianza, Decision, Estado, Evento, Forma, Informe, Rol, TipoEvento, Via};
     use crate::track::{self, Filtro};
 
@@ -3806,94 +3807,18 @@ mod tests {
         corrida.dir.join("claude-estado").join(".credentials.json")
     }
 
-    /// Escribe el programa falso de podman sin probarlo. Úsese `podman_falso`, que además lo prueba.
-    /// Con `--sonda` sale con 0 sin anotar nada en el log.
-    fn escribir_podman_falso(base: &Path, nombres: &[String]) -> (PathBuf, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
+    /// Programa falso de podman: `ps` imprime `nombres`, y cada llamada se anota en el log de `base`.
+    /// Lo escribe y lo prueba con la sonda de `prueba_ejecutable`.
+    fn podman_falso(base: &Path, nombres: &[String]) -> (PathBuf, PathBuf) {
         let log = base.join("podman.log");
         // El `:` evita un `then` vacío cuando `nombres` está vacío.
         let ps: String = nombres.iter().map(|n| format!("echo {n}\n")).collect();
         let cuerpo = format!(
-            "#!/bin/sh\nif [ \"$1\" = --sonda ]; then exit 0; fi\necho \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\n:\n{ps}fi\n",
+            "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\n:\n{ps}fi\n",
             log.display()
         );
-        let ruta = base.join("podman-falso");
-        fs::write(&ruta, cuerpo).expect("script");
-        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+        let ruta = escribir_ejecutable(&base.join("podman-falso"), &cuerpo);
         (ruta, log)
-    }
-
-    /// Programa falso de podman: `ps` imprime `nombres`, y cada llamada se anota en el log de `base`.
-    /// Lo escribe y lo prueba con `--sonda`. Linux da ETXTBSY (errno 26) si un archivo ejecutable
-    /// tiene un descriptor de escritura abierto. Un fork concurrente hereda ese descriptor hasta
-    /// su `exec`. La sonda espera a que el descriptor se cierre. Tras una sonda exitosa, ningún
-    /// hijo nuevo lo hereda.
-    fn podman_falso(base: &Path, nombres: &[String]) -> (PathBuf, PathBuf) {
-        const ETXTBSY: i32 = 26;
-        let (ruta, log) = escribir_podman_falso(base, nombres);
-        for _ in 0..50 {
-            match Command::new(&ruta).arg("--sonda").status() {
-                Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                resultado => {
-                    let estado = resultado.expect("sonda del podman falso");
-                    assert!(estado.success(), "la sonda sale con 0");
-                    return (ruta, log);
-                }
-            }
-        }
-        panic!("el podman falso sigue con ETXTBSY tras 50 intentos");
-    }
-
-    #[test]
-    fn sonda_de_podman_falso_no_deja_marca() {
-        let _serie = ejecutor::serie_de_pruebas();
-        let tmp = TempDir::new().expect("tmp");
-        let (podman, log) = podman_falso(tmp.path(), &[]);
-        let estado = Command::new(&podman)
-            .arg("--sonda")
-            .status()
-            .expect("lanza el podman falso");
-        assert!(estado.success(), "la sonda sale con 0");
-        assert!(!log.exists(), "la sonda no anota ninguna llamada");
-    }
-
-    #[test]
-    fn podman_falso_no_da_etxtbsy_con_fork_concurrente() {
-        let _serie = ejecutor::serie_de_pruebas();
-        // Al salir, con pánico incluido, pone la bandera. Así los hilos del scope siempre terminan.
-        struct Parar<'a>(&'a std::sync::atomic::AtomicBool);
-        impl Drop for Parar<'_> {
-            fn drop(&mut self) {
-                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        let parar = std::sync::atomic::AtomicBool::new(false);
-        let errores = std::sync::Mutex::new(Vec::new());
-        std::thread::scope(|s| {
-            // Hilos que hacen fork en bucle: su hijo hereda el descriptor de escritura del script.
-            for _ in 0..4 {
-                s.spawn(|| {
-                    while !parar.load(std::sync::atomic::Ordering::Relaxed) {
-                        let _ = Command::new("true").status();
-                    }
-                });
-            }
-            let _al_salir = Parar(&parar);
-            for _ in 0..200 {
-                let tmp = TempDir::new().expect("tmp");
-                let (podman, _log) = podman_falso(tmp.path(), &[]);
-                if let Err(e) = Command::new(&podman).arg("ps").status() {
-                    errores.lock().unwrap_or_else(|e| e.into_inner()).push(e);
-                }
-            }
-        });
-        let errores = errores.into_inner().unwrap_or_else(|e| e.into_inner());
-        assert!(
-            errores.is_empty(),
-            "lanzar el podman falso falló: {errores:?}"
-        );
     }
 
     #[test]
@@ -4024,7 +3949,6 @@ mod tests {
         copia: &Path,
         nombre: &str,
     ) -> (PathBuf, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let log = base.join("podman.log");
         let cuerpo = format!(
             "#!/bin/sh\n\
@@ -4041,19 +3965,16 @@ mod tests {
             log = log.display(),
             copia = copia.display(),
         );
-        let ruta = base.join("podman-del-orden");
-        fs::write(&ruta, cuerpo).expect("script");
-        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+        let ruta = escribir_ejecutable(&base.join("podman-del-orden"), &cuerpo);
         (ruta, log)
     }
 
     /// `podman` falso con `cuerpo` como script, después de `#!/bin/sh`. Devuelve su ruta.
     fn podman_con_cuerpo(base: &Path, cuerpo: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let ruta = base.join("podman-con-cuerpo");
-        fs::write(&ruta, format!("#!/bin/sh\n{cuerpo}\n")).expect("script");
-        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
-        ruta
+        escribir_ejecutable(
+            &base.join("podman-con-cuerpo"),
+            &format!("#!/bin/sh\n{cuerpo}\n"),
+        )
     }
 
     #[test]

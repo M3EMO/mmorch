@@ -360,8 +360,8 @@ fn panico_de_prueba() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prueba_ejecutable::escribir_ejecutable;
     use std::cell::{Cell, RefCell};
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::Ordering;
@@ -386,9 +386,8 @@ mod tests {
         }
     }
 
-    /// Escribe el `podman` falso sin probarlo. Úsese `podman_falso`, que además lo prueba.
-    /// Con `--sonda` sale con 0 sin dejar marca: ni llamada en el log.
-    fn escribir_podman_falso(base: &Path, contenedores: &[Contenedor]) -> (PathBuf, PathBuf) {
+    /// `podman` falso listo para usar. Lo escribe y lo prueba con la sonda de `prueba_ejecutable`.
+    fn podman_falso(base: &Path, contenedores: &[Contenedor]) -> (PathBuf, PathBuf) {
         let log = base.join("podman.log");
         let lista: String = contenedores
             .iter()
@@ -398,35 +397,11 @@ mod tests {
             })
             .collect();
         let cuerpo = format!(
-            "#!/bin/sh\nif [ \"$1\" = --sonda ]; then exit 0; fi\necho \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\n:\n{lista}fi\n",
+            "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = ps ]; then\n:\n{lista}fi\n",
             log.display()
         );
-        let ruta = base.join("podman-falso");
-        fs::write(&ruta, cuerpo).expect("script");
-        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+        let ruta = escribir_ejecutable(&base.join("podman-falso"), &cuerpo);
         (ruta, log)
-    }
-
-    /// `podman` falso listo para usar: lo escribe y lo prueba con `--sonda`.
-    /// Linux da ETXTBSY (errno 26) si un archivo ejecutable tiene un descriptor de escritura
-    /// abierto. Un fork concurrente hereda ese descriptor hasta su `exec`. La sonda espera a
-    /// que el descriptor se cierre. Tras una sonda exitosa, ningún hijo nuevo lo hereda.
-    fn podman_falso(base: &Path, contenedores: &[Contenedor]) -> (PathBuf, PathBuf) {
-        const ETXTBSY: i32 = 26;
-        let (ruta, log) = escribir_podman_falso(base, contenedores);
-        for _ in 0..50 {
-            match Command::new(&ruta).arg("--sonda").status() {
-                Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                resultado => {
-                    let estado = resultado.expect("sonda del podman falso");
-                    assert!(estado.success(), "la sonda sale con 0");
-                    return (ruta, log);
-                }
-            }
-        }
-        panic!("el podman falso sigue con ETXTBSY tras 50 intentos");
     }
 
     /// Un `/proc` falso con un proceso `pid` cuyo cmdline es `cmdline`.
@@ -833,18 +808,6 @@ mod tests {
             barrer_al_arrancar_con(podman.to_str().expect("ruta"), Some(valor));
             assert!(log.exists(), "con {valor:?} el barrido llama a podman");
         }
-    }
-
-    #[test]
-    fn sonda_de_podman_falso_no_deja_marca() {
-        let tmp = TempDir::new().expect("tmp");
-        let (podman, log) = podman_falso(tmp.path(), &[]);
-        let estado = Command::new(&podman)
-            .arg("--sonda")
-            .status()
-            .expect("lanza el podman falso");
-        assert!(estado.success(), "la sonda sale con 0");
-        assert!(!log.exists(), "la sonda no anota ninguna llamada");
     }
 
     #[test]

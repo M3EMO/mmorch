@@ -788,6 +788,7 @@ fn regla_sin_pruebas(bloque: &BloqueFicha, r: &mut Revisor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prueba_ejecutable::escribir_ejecutable;
 
     const LIMPIA: &str = include_str!("../tests/fixtures/fichas/spec-completa.md");
     const VAGA: &str = include_str!("../tests/fixtures/fichas/spec-vaga.md");
@@ -840,9 +841,7 @@ mod tests {
         let bin = dir.path().join("bin");
         fs::create_dir(&bin).expect("carpeta bin");
         let cargo = bin.join("cargo");
-        fs::write(&cargo, cargo_falso).expect("cargo falso");
-        fs::set_permissions(&cargo, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .expect("permisos del cargo falso");
+        escribir_ejecutable(&cargo, cargo_falso);
         let salida = dir.path().join("salida");
         fs::create_dir(&salida).expect("carpeta salida");
         let comando = cmd_nextest("contrato").replace("/salida", &salida.display().to_string());

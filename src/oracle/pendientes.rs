@@ -721,6 +721,7 @@ mod tests {
     use super::*;
     use crate::oracle::tarea::{Comando, Exclusion};
     use crate::oracle::{comando_git, identidad_de};
+    use crate::prueba_ejecutable::escribir_ejecutable;
     use std::process::Command;
 
     /// Repo git con un commit de todo lo que hay en `dir`.
@@ -1524,7 +1525,7 @@ mod tests {
             guion_correr(&["tests/test_a.py::t1".into()], 1, ""),
         )
         .expect("sh");
-        fs::write(bin.join("unshare"), unshare).expect("unshare");
+        escribir_ejecutable(&bin.join("unshare"), unshare);
         let fake_python = format!(
             "#!/bin/sh\n\
              case \"$*\" in\n\
@@ -1536,10 +1537,7 @@ mod tests {
              exec {} \"$@\"\n",
             python3_real().display()
         );
-        fs::write(bin.join("python3"), fake_python).expect("python3");
-        for f in ["unshare", "python3"] {
-            fs::set_permissions(bin.join(f), fs::Permissions::from_mode(0o755)).expect("perm");
-        }
+        escribir_ejecutable(&bin.join("python3"), &fake_python);
         dir
     }
 

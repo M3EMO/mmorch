@@ -938,6 +938,7 @@ mod tests {
     use super::pruebas::EjecutorFalso;
     use super::*;
     use crate::observe::transcript::leer_transcript;
+    use crate::prueba_ejecutable::escribir_ejecutable;
     use std::fs;
     use tempfile::TempDir;
 
@@ -1366,11 +1367,7 @@ mod tests {
 
     /// Script de prueba ejecutable con `cuerpo`, en `dir`. Devuelve su ruta.
     fn programa_falso(dir: &Path, cuerpo: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let ruta = dir.join("podman-falso");
-        fs::write(&ruta, format!("#!/bin/sh\n{cuerpo}\n")).expect("script");
-        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
-        ruta
+        escribir_ejecutable(&dir.join("podman-falso"), &format!("#!/bin/sh\n{cuerpo}\n"))
     }
 
     #[test]
