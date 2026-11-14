@@ -23,6 +23,9 @@ pub const CORRIDAS: usize = 3;
 /// Corridas de tests por lado. Los tests duran menos de medio segundo: con 3 corridas no se estima bien la
 /// dispersión (en t1-t3 duraron de 0,25 a 0,42 s; un 2 % son 5 a 8 ms).
 pub const CORRIDAS_TESTS: usize = 10;
+/// Compilaciones del repo en un caso con referencia fijada. Una sola: en 12 casos de t1-t3 la compilación
+/// varió como máximo 0,52 %, contra un piso de 2 %. Cada compilación medida tarda de 66 a 83 s.
+pub const CORRIDAS_COMPILACION_DE_CASO: usize = 1;
 /// Piso de ruido: 2 % de cambio. Perfherder usa este piso.
 pub const PISO_RUIDO: f64 = 0.02;
 /// Más de 1,5 veces da "no listo". Decisión P105 a del usuario.
@@ -540,13 +543,14 @@ fn correr_build(
 /// Mide la compilación y el tamaño de los binarios. Usa los paquetes y binarios del lado `repo`.
 /// Los dos lados tienen los mismos nombres de paquete, así que el comando sirve para ambos.
 /// `lados[k]` `None` como en `medir_tests`: ese lado no corre y su serie ya viene en `compilacion[k]`.
+/// Corre `corridas` compilaciones por lado. El tamaño se mide solo en la corrida 0 de cada lado.
 /// Si `ancla_lado` es `Some`, corre una compilación tras la primera corrida de `lados`. Su reloj va a
 /// `ancla.compilacion`. Su tamaño no se mide: el tamaño sale solo de `lados`.
 fn medir_compilacion(
     lados: [Option<&Lado>; 2],
     ancla_lado: Option<&Lado>,
-    meta_i: &Result<Metadatos, String>,
-    meta_r: &Result<Metadatos, String>,
+    corridas: usize,
+    [meta_i, meta_r]: [&Result<Metadatos, String>; 2],
     compilacion: &mut [Serie; 2],
     tamano: &mut [Serie; 2],
     ancla: &mut Ancla,
@@ -575,7 +579,7 @@ fn medir_compilacion(
             *tamano = sin("sin binarios");
         }
         let comando = cmd_compilacion(&meta.paquetes, &meta.binarios);
-        for corrida in 0..CORRIDAS {
+        for corrida in 0..corridas {
             for (k, lado) in lados.into_iter().enumerate() {
                 let Some(lado) = lado else { continue };
                 if compilacion[k].is_err() {
@@ -828,8 +832,8 @@ fn medir_los_dos_lados(inicial: &Lado, repo: &Lado) -> (Vec<ResultadoMedida>, Re
     medir_compilacion(
         lados,
         None,
-        &meta_i,
-        &meta_r,
+        CORRIDAS,
+        [&meta_i, &meta_r],
         &mut compilacion,
         &mut tamano,
         &mut ancla,
@@ -848,7 +852,8 @@ fn medir_los_dos_lados(inicial: &Lado, repo: &Lado) -> (Vec<ResultadoMedida>, Re
 }
 
 /// Mide el repo y lo compara con la referencia. Además corre el lado inicial una vez por medida: su
-/// corrida ancla la referencia. Si el filtro del repo no es el de la referencia, los tests no tienen valor.
+/// corrida ancla la referencia. El repo compila `CORRIDAS_COMPILACION_DE_CASO` veces: su ruido sale de la
+/// serie de la base y del ancla, con el piso. Si el filtro del repo no es el de la referencia, los tests no tienen valor.
 fn medir_contra_referencia(
     referencia: &Referencia,
     inicial: &Lado,
@@ -884,8 +889,8 @@ fn medir_contra_referencia(
     medir_compilacion(
         lados,
         Some(inicial),
-        &referencia.meta,
-        &meta_r,
+        CORRIDAS_COMPILACION_DE_CASO,
+        [&referencia.meta, &meta_r],
         &mut compilacion,
         &mut tamano,
         &mut ancla,
@@ -1685,6 +1690,40 @@ mod tests {
     }
 
     #[test]
+    fn con_referencia_el_repo_compila_una_vez_y_el_inicial_una_su_ancla() {
+        let log_base = RefCell::new(Vec::new());
+        let referencia = referencia_de(
+            &sano("inicial", &log_base, &["a"]),
+            &sano("repo", &log_base, &["a"]),
+        );
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
+        let entradas = log.borrow();
+        let tipos_repo = tipos_de(&entradas, "repo");
+        let cuenta_repo = tipos_repo.iter().filter(|t| *t == "build").count();
+        assert_eq!(cuenta_repo, 1, "{tipos_repo:?}");
+        let tipos_inicial = tipos_de(&entradas, "inicial");
+        let cuenta_inicial = tipos_inicial.iter().filter(|t| *t == "build").count();
+        assert_eq!(cuenta_inicial, 1, "{tipos_inicial:?}");
+    }
+
+    #[test]
+    fn sin_referencia_cada_lado_compila_tres_veces() {
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        medir_de_prueba(&inicial, &repo);
+        let entradas = log.borrow();
+        for lado in ["inicial", "repo"] {
+            let tipos = tipos_de(&entradas, lado);
+            let cuenta = tipos.iter().filter(|t| *t == "build").count();
+            assert_eq!(cuenta, CORRIDAS, "{lado}: {tipos:?}");
+        }
+    }
+
+    #[test]
     fn con_referencia_el_orden_de_las_corridas_es_repo_inicial_repo_repo() {
         let log_base = RefCell::new(Vec::new());
         let referencia = referencia_de(
@@ -1701,11 +1740,9 @@ mod tests {
         esperado_tests.extend(vec!["repo"; CORRIDAS_TESTS - 1]);
         let esperado_tests: Vec<String> = esperado_tests.into_iter().map(String::from).collect();
         assert_eq!(lados_de(&entradas, "tests"), esperado_tests, "{entradas:?}");
-        // Build: sin cambios, sigue con CORRIDAS.
-        let esperado_build: Vec<String> = ["repo", "inicial", "repo", "repo"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        // Build: el repo compila CORRIDAS_COMPILACION_DE_CASO vez y el ancla del inicial corre tras ella.
+        let esperado_build: Vec<String> =
+            ["repo", "inicial"].into_iter().map(String::from).collect();
         assert_eq!(lados_de(&entradas, "build"), esperado_build, "{entradas:?}");
     }
 
