@@ -78,8 +78,6 @@ thread_local! {
 
 /// Corre `f` con `muestra` como la muestra de la base. Al salir, también ante pánico, vuelve el valor
 /// anterior. Una muestra vacía no fija nada: `medir_mutantes` mide como hoy.
-// Sin llamador fuera de los tests hasta que `calibra` lo use. Quitar este allow al conectarlo.
-#[allow(dead_code)]
 pub(crate) fn con_muestra_de_base<T>(muestra: &[MutanteEstado], f: impl FnOnce() -> T) -> T {
     /// Devuelve la muestra anterior al salir del ámbito.
     struct Restaura(Option<Vec<MutanteEstado>>);

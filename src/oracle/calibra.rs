@@ -1021,10 +1021,14 @@ fn evaluar_copia(
     let _ = super::mutacion::tomar_muestra();
     let _ = super::mutacion::tomar_filtro();
     // Los casos corren con el plazo de la base: un plazo automático cambiaría con los tests que se apagan.
+    // Un test más débil no mata más mutantes. Por eso los vivos de la base no aportan.
+    // Solo corren los muertos y vencidos de la base.
     let resultado = con_caso(&id, || {
-        super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
-            con_plazos_suites(Some(r.plazos_suites), || {
-                en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+        super::mutacion::con_muestra_de_base(r.mutantes_base, || {
+            super::mutacion::con_plazo_fijo(r.plazo_mutantes, || {
+                con_plazos_suites(Some(r.plazos_suites), || {
+                    en_limite(r.tope, || (r.evaluador)(copia, tipo, target))
+                })
             })
         })
     });
@@ -11376,6 +11380,100 @@ mod tests {
         assert!(!casos.is_empty(), "los casos corrieron su sonda");
         for cmd in casos {
             assert!(cmd.contains(" --timeout 50 "), "caso con plazo 50: {cmd}");
+        }
+    }
+
+    /// Mutante que la base de `BASE_CON_DURACION` mata (`CaughtMutant`).
+    const MUERTO_DE_LA_BASE: &str = "src/a.rs:1:1: replace x -> u8 with 0";
+    /// Mutante que la base de `BASE_CON_DURACION` deja vivo (`MissedMutant`).
+    const VIVO_DE_LA_BASE: &str = "src/a.rs:2:1: replace y -> u8 with 1";
+
+    /// Corre la calibración con la base de `BASE_CON_DURACION` y anota cada corrida de mutación con su etiqueta.
+    fn corridas_con_base_parcial() -> Vec<(String, String)> {
+        let (_t, tarea) = tarea_prueba();
+        let cmds: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+        let evaluador = |_: &Path, tipo: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
+            let outcomes = match tipo {
+                TipoCaso::Base | TipoCaso::BaseRepetida => BASE_CON_DURACION,
+                _ => MUTANTES_DEFECTO,
+            };
+            let ej = MutacionAnotada {
+                outcomes,
+                etiqueta: format!("{tipo:?}"),
+                cmds: &cmds,
+            };
+            let _ = crate::oracle::mutacion::sonda_mutacion(&ej, &tarea);
+            Ok(diseno_con(&[(ITEM_MODULARIDAD, 3), (ITEM_ROBUSTEZ, 3)]))
+        };
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Diseno,
+            4,
+            42,
+            Path::new(FIXTURE),
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        cmds.into_inner().expect("sin envenenar")
+    }
+
+    #[test]
+    fn calibra_caso_con_defecto_corre_solo_los_muertos_de_la_base() {
+        let cmds = corridas_con_base_parcial();
+        let defectos: Vec<&(String, String)> = cmds
+            .iter()
+            .filter(|(e, _)| e.starts_with("Defecto"))
+            .collect();
+        assert!(!defectos.is_empty(), "los casos con defecto corrieron");
+        for (etiqueta, cmd) in defectos {
+            assert_eq!(
+                crate::oracle::mutacion::pedidos_del_comando(cmd),
+                Some(vec![MUERTO_DE_LA_BASE.to_string()]),
+                "{etiqueta}: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn calibra_caso_limpio_corre_solo_los_muertos_de_la_base() {
+        let cmds = corridas_con_base_parcial();
+        let limpios: Vec<&(String, String)> = cmds
+            .iter()
+            .filter(|(e, _)| e.starts_with("Limpio"))
+            .collect();
+        assert!(!limpios.is_empty(), "los casos limpios corrieron");
+        for (etiqueta, cmd) in limpios {
+            assert_eq!(
+                crate::oracle::mutacion::pedidos_del_comando(cmd),
+                Some(vec![MUERTO_DE_LA_BASE.to_string()]),
+                "{etiqueta}: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn calibra_base_corre_la_muestra_entera() {
+        let cmds = corridas_con_base_parcial();
+        let base: Vec<&(String, String)> = cmds
+            .iter()
+            .filter(|(e, _)| e == "Base" || e == "BaseRepetida")
+            .collect();
+        assert!(!base.is_empty(), "la base corrió su sonda");
+        for (etiqueta, cmd) in base {
+            assert_eq!(
+                crate::oracle::mutacion::pedidos_del_comando(cmd),
+                Some(vec![
+                    MUERTO_DE_LA_BASE.to_string(),
+                    VIVO_DE_LA_BASE.to_string()
+                ]),
+                "{etiqueta}: {cmd}"
+            );
         }
     }
 
