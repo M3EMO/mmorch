@@ -1,6 +1,7 @@
 //! Eficiencia del repo evaluado contra su estado inicial (`bootstrap/`). Mide cuatro cosas:
 //! tiempo de tests, pico de memoria, tiempo de compilación y tamaño de los binarios.
-//! Cada lado corre en su propio ejecutor. `comparar` hace toda la aritmética.
+//! Cada lado corre en su propio ejecutor. `comparar_por_mediana` y `comparar` hacen la aritmética:
+//! tiempo de tests y memoria usan la mediana; compilación y tamaño usan el mínimo.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -30,6 +31,12 @@ pub const CORRIDAS_COMPILACION_DE_CASO: usize = 1;
 pub const PISO_RUIDO: f64 = 0.02;
 /// Más de 1,5 veces da "no listo". Decisión P105 a del usuario.
 pub const UMBRAL_NO_LISTO: f64 = 1.5;
+/// Factor sobre la dispersión por cuartiles de tiempo de tests y memoria. Ver `MIN_CORRIDAS_CUARTILES`.
+/// Base: 12 casos de t1 a t3 (Tarea 135), el exceso de la razón con medianas sobre 1 fue como máximo 1,04 veces la mayor dispersión por cuartiles (t3 caso 0: 0,024 contra 0,023). Con más datos, se revisa.
+pub const FACTOR_RUIDO_CUARTILES: f64 = 2.0;
+/// Corridas mínimas por lado para usar cuartiles. Con menos corridas, el lado usa (max-min)/min, como antes.
+/// Base: 12 casos de t1 a t3 (Tarea 135), el exceso de la razón con medianas sobre 1 fue como máximo 1,04 veces la mayor dispersión por cuartiles (t3 caso 0: 0,024 contra 0,023). Con más datos, se revisa.
+pub const MIN_CORRIDAS_CUARTILES: usize = 4;
 
 /// Las cuatro medidas. El orden del enum es el orden de salida de `medir`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -92,6 +99,86 @@ pub fn comparar(referencia: &[f64], repo: &[f64]) -> Option<Comparacion> {
 pub fn comparar_con_ancla(base: &[f64], ancla: Option<f64>, repo: &[f64]) -> Option<Comparacion> {
     let referencia: Vec<f64> = base.iter().copied().chain(ancla).collect();
     comparar(&referencia, repo)
+}
+
+/// Mediana de los valores. Con n par, el promedio de los dos centrales. `None` si está vacío.
+fn mediana(valores: &[f64]) -> Option<f64> {
+    let mut orden = valores.to_vec();
+    orden.sort_by(f64::total_cmp);
+    let n = orden.len();
+    match n {
+        0 => None,
+        _ if n % 2 == 1 => Some(orden[n / 2]),
+        _ => Some((orden[n / 2 - 1] + orden[n / 2]) / 2.0),
+    }
+}
+
+/// Valor en la posición `p * (n - 1)` de una serie ordenada, con interpolación lineal. `None` si está vacía.
+fn en_posicion(orden: &[f64], p: f64) -> Option<f64> {
+    let n = orden.len();
+    if n == 0 {
+        return None;
+    }
+    let pos = p * (n - 1) as f64;
+    let bajo = pos.floor() as usize;
+    let alto = pos.ceil() as usize;
+    let frac = pos - bajo as f64;
+    Some(orden[bajo] + (orden[alto] - orden[bajo]) * frac)
+}
+
+/// Q1 y Q3 de los valores, con interpolación lineal en la posición p * (n - 1). Ordena una copia.
+/// `None` si está vacío.
+fn cuartiles(valores: &[f64]) -> Option<(f64, f64)> {
+    let mut orden = valores.to_vec();
+    orden.sort_by(f64::total_cmp);
+    Some((en_posicion(&orden, 0.25)?, en_posicion(&orden, 0.75)?))
+}
+
+/// Dispersión de un lado para el ruido. Con `MIN_CORRIDAS_CUARTILES` corridas o más, es
+/// `FACTOR_RUIDO_CUARTILES` por (q3 - q1) / mediana. Con menos, es (max - min) / min, como antes.
+/// Un valor no positivo cuenta dispersión cero: no se divide por cero.
+fn dispersion_de_lado(valores: &[f64]) -> f64 {
+    let Some(med) = mediana(valores) else {
+        return 0.0;
+    };
+    if valores.len() < MIN_CORRIDAS_CUARTILES {
+        let min = valores.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = valores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        return if min > 0.0 { (max - min) / min } else { 0.0 };
+    }
+    match cuartiles(valores) {
+        Some((q1, q3)) if med > 0.0 => FACTOR_RUIDO_CUARTILES * (q3 - q1) / med,
+        _ => 0.0,
+    }
+}
+
+/// Compara las medianas de cada lado. El ruido sale de `dispersion_de_lado`, con el piso `PISO_RUIDO`.
+/// `None` si algún lado está vacío o la mediana de la referencia no es positiva.
+pub fn comparar_por_mediana(referencia: &[f64], repo: &[f64]) -> Option<Comparacion> {
+    let med_ref = mediana(referencia)?;
+    let med_repo = mediana(repo)?;
+    if med_ref <= 0.0 {
+        return None;
+    }
+    let razon = med_repo / med_ref;
+    let ruido = dispersion_de_lado(referencia)
+        .max(dispersion_de_lado(repo))
+        .max(PISO_RUIDO);
+    Some(Comparacion {
+        razon,
+        ruido,
+        regresion: razon > 1.0 + ruido,
+    })
+}
+
+/// Como `comparar_por_mediana`, pero la referencia suma el `ancla`: una corrida del lado inicial, si hay.
+pub fn comparar_con_ancla_por_mediana(
+    base: &[f64],
+    ancla: Option<f64>,
+    repo: &[f64],
+) -> Option<Comparacion> {
+    let referencia: Vec<f64> = base.iter().copied().chain(ancla).collect();
+    comparar_por_mediana(&referencia, repo)
 }
 
 /// Una serie de valores de un lado. Un error deja la serie sin valores y con su motivo.
@@ -173,19 +260,43 @@ fn avisar_ancla(ancla: &Ancla, avisos: &mut Vec<String>) {
     }
 }
 
+/// Tiempo de tests y memoria se comparan por mediana. Compilación y tamaño, por mínimo.
+fn por_mediana(medida: Medida) -> bool {
+    matches!(medida, Medida::TiempoTests | Medida::MemoriaPico)
+}
+
+/// Mínimo de los valores. `None` si está vacío.
+fn minimo(valores: &[f64]) -> Option<f64> {
+    valores.iter().copied().reduce(f64::min)
+}
+
 /// Compara las dos series de una medida. El ancla suma a la referencia. Si un lado falla, la medida no tiene valor.
 fn combinar(medida: Medida, referencia: &Serie, ancla: &Serie, repo: &Serie) -> ResultadoMedida {
     match (referencia, repo) {
         (Ok(r), Ok(p)) => {
             let ancla = valor_del_ancla(ancla);
-            match comparar_con_ancla(r, ancla, p) {
+            let completa: Vec<f64> = r.iter().copied().chain(ancla).collect();
+            let (comparacion, valor_referencia, valor_repo) = if por_mediana(medida) {
+                (
+                    comparar_con_ancla_por_mediana(r, ancla, p),
+                    mediana(&completa),
+                    mediana(p),
+                )
+            } else {
+                (
+                    comparar_con_ancla(r, ancla, p),
+                    minimo(&completa),
+                    minimo(p),
+                )
+            };
+            match comparacion {
                 Some(comparacion) => ResultadoMedida {
                     medida,
-                    referencia: r.iter().copied().chain(ancla).reduce(f64::min),
-                    repo: p.iter().copied().reduce(f64::min),
+                    referencia: valor_referencia,
+                    repo: valor_repo,
                     comparacion: Some(comparacion),
                     motivo: None,
-                    corridas_referencia: r.iter().copied().chain(ancla).collect(),
+                    corridas_referencia: completa,
                     corridas_repo: p.clone(),
                 },
                 None => sin_valor(medida, "no se puede comparar".into()),
@@ -628,7 +739,7 @@ fn medir_compilacion(
 }
 
 /// Une las series de los dos lados en las cuatro medidas, en orden de `Medida`. El ancla suma a la
-/// referencia de tiempo, memoria y compilación. El tamaño no tiene ancla.
+/// referencia de tiempo, memoria y compilación. El tamaño no tiene ancla. Ver `combinar` para la estadística.
 fn combinar_medidas(
     tiempo: &[Serie; 2],
     memoria: &[Serie; 2],
@@ -659,7 +770,9 @@ fn combinar_medidas(
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResultadoMedida {
     pub medida: Medida,
+    /// Valor comparado del lado inicial: la mediana en tiempo de tests y memoria, el mínimo en las otras dos.
     pub referencia: Option<f64>,
+    /// Valor comparado del repo: la mediana en tiempo de tests y memoria, el mínimo en las otras dos.
     pub repo: Option<f64>,
     pub comparacion: Option<Comparacion>,
     pub motivo: Option<String>,
@@ -2054,5 +2167,142 @@ mod tests {
             assert_eq!(referencia_fijada_actual(), Some(a.clone()));
         });
         assert_eq!(referencia_fijada_actual(), None);
+    }
+
+    /// Base de t1: diez corridas de tests. Mediana 0,2945; cuartiles 0,29175 y 0,2965.
+    const T1_BASE: [f64; 10] = [
+        0.263, 0.287, 0.291, 0.294, 0.294, 0.295, 0.295, 0.297, 0.304, 0.306,
+    ];
+    /// Repo de t1: diez corridas. Mínimo 0,289; mediana 0,296; cuartiles chicos.
+    const T1_REPO: [f64; 10] = [
+        0.289, 0.294, 0.295, 0.295, 0.296, 0.296, 0.297, 0.297, 0.298, 0.300,
+    ];
+
+    #[test]
+    fn t1_compara_por_mediana_y_ruido_por_cuartiles() {
+        let c = comparar_por_mediana(&T1_BASE, &T1_REPO).expect("comparable");
+        assert!(cerca(c.razon, 0.296 / 0.2945), "razon {}", c.razon);
+        // La base manda: 2 x (0,2965 - 0,29175) / 0,2945.
+        assert!(
+            cerca(c.ruido, 2.0 * (0.2965 - 0.29175) / 0.2945),
+            "ruido {}",
+            c.ruido
+        );
+        assert!(!c.regresion, "{c:?}");
+        // Guarda: la función vieja, con mínimos, da otra razón y otro ruido.
+        let viejo = comparar(&T1_BASE, &T1_REPO).expect("comparable");
+        assert!(cerca(viejo.razon, 0.289 / 0.263), "razon {}", viejo.razon);
+        assert!(cerca(viejo.ruido, 0.043 / 0.263), "ruido {}", viejo.ruido);
+    }
+
+    #[test]
+    fn base_estable_y_mediana_50_por_ciento_mas_alta_es_regresion() {
+        let base = [
+            1.000, 1.005, 1.002, 1.001, 1.004, 1.000, 1.003, 1.002, 1.001, 1.004,
+        ];
+        let repo: Vec<f64> = base.iter().map(|x| x * 1.5).collect();
+        let c = comparar_por_mediana(&base, &repo).expect("comparable");
+        assert!(cerca(c.razon, 1.5), "razon {}", c.razon);
+        assert!(c.regresion, "{c:?}");
+    }
+
+    #[test]
+    fn tres_corridas_por_lado_usan_el_ruido_de_hoy() {
+        let referencia = [1.0, 1.1, 1.0];
+        let repo = [1.05, 1.06, 1.08];
+        let nuevo = comparar_por_mediana(&referencia, &repo).expect("comparable");
+        let viejo = comparar(&referencia, &repo).expect("comparable");
+        // Sin cuartiles ni factor 2: el ruido es (max-min)/min, como en `comparar`.
+        assert!(cerca(nuevo.ruido, viejo.ruido), "{nuevo:?} {viejo:?}");
+        assert!(cerca(nuevo.ruido, 0.10), "ruido {}", nuevo.ruido);
+    }
+
+    #[test]
+    fn lado_con_tres_corridas_no_recibe_el_factor_del_otro() {
+        // La base usa cuartiles (0,0322 con factor). El repo, con 3 corridas, usa (max-min)/min: 0,0381.
+        let repo = [0.289, 0.296, 0.300];
+        let c = comparar_por_mediana(&T1_BASE, &repo).expect("comparable");
+        assert!(cerca(c.ruido, 0.011 / 0.289), "ruido {}", c.ruido);
+    }
+
+    #[test]
+    fn cuartiles_de_1_a_5_corridas_con_interpolacion() {
+        let series: [(&[f64], (f64, f64)); 5] = [
+            (&[1.0], (1.0, 1.0)),
+            (&[1.0, 2.0], (1.25, 1.75)),
+            (&[1.0, 2.0, 3.0], (1.5, 2.5)),
+            (&[1.0, 2.0, 3.0, 4.0], (1.75, 3.25)),
+            (&[1.0, 2.0, 3.0, 4.0, 5.0], (2.0, 4.0)),
+        ];
+        for (serie, (q1, q3)) in series {
+            let (a, b) = cuartiles(serie).expect("no vacía");
+            assert!(cerca(a, q1) && cerca(b, q3), "{serie:?}: ({a}, {b})");
+        }
+    }
+
+    #[test]
+    fn cuartiles_de_t1_base_son_los_del_informe() {
+        let (q1, q3) = cuartiles(&T1_BASE).expect("no vacía");
+        assert!(cerca(q1, 0.29175), "q1 {q1}");
+        assert!(cerca(q3, 0.2965), "q3 {q3}");
+    }
+
+    #[test]
+    fn cuartiles_ordenan_la_entrada_y_vacio_da_none() {
+        assert_eq!(cuartiles(&[]), None);
+        assert_eq!(cuartiles(&[5.0, 1.0, 3.0, 2.0, 4.0]), Some((2.0, 4.0)));
+    }
+
+    #[test]
+    fn mediana_impar_par_y_vacia() {
+        assert_eq!(mediana(&[3.0, 1.0, 2.0]), Some(2.0));
+        assert_eq!(mediana(&[4.0, 1.0, 3.0, 2.0]), Some(2.5));
+        assert_eq!(mediana(&[]), None);
+    }
+
+    #[test]
+    fn comparar_por_mediana_vacios_o_mediana_no_positiva_dan_none() {
+        assert_eq!(comparar_por_mediana(&[], &[1.0]), None);
+        assert_eq!(comparar_por_mediana(&[1.0], &[]), None);
+        assert_eq!(comparar_por_mediana(&[0.0, 0.0, 1.0], &[1.0]), None);
+    }
+
+    #[test]
+    fn ancla_entra_a_la_mediana_de_la_referencia() {
+        let base = [1.0; 10];
+        let repo = [1.5; 10];
+        // El ancla es menor que la base. El mínimo de la referencia sería 0,5. La mediana sigue en 1,0.
+        let c = comparar_con_ancla_por_mediana(&base, Some(0.5), &repo).expect("comparable");
+        assert!(cerca(c.razon, 1.5), "razon {}", c.razon);
+        assert!(c.regresion, "{c:?}");
+        let viejo = comparar_con_ancla(&base, Some(0.5), &repo).expect("comparable");
+        assert!(cerca(viejo.razon, 3.0), "razon {}", viejo.razon);
+    }
+
+    #[test]
+    fn combinar_compilacion_y_tamano_con_minimos_y_tiempo_y_memoria_con_mediana() {
+        let base = T1_BASE.to_vec();
+        let repo = T1_REPO.to_vec();
+        let serie: [Serie; 2] = [Ok(base.clone()), Ok(repo.clone())];
+        let resultados = combinar_medidas(&serie, &serie, &serie, &serie, &Ancla::vacia());
+        let esperado_minimo = comparar(&base, &repo).expect("comparable");
+        let esperado_mediana = comparar_por_mediana(&base, &repo).expect("comparable");
+        for medida in [Medida::TiempoCompilacion, Medida::TamanoBinario] {
+            let m = por_medida(&resultados, medida);
+            assert_eq!(m.comparacion, Some(esperado_minimo.clone()), "{medida:?}");
+            assert_eq!(m.referencia, Some(0.263), "{medida:?}");
+            assert_eq!(m.repo, Some(0.289), "{medida:?}");
+        }
+        for medida in [Medida::TiempoTests, Medida::MemoriaPico] {
+            let m = por_medida(&resultados, medida);
+            assert_eq!(m.comparacion, Some(esperado_mediana.clone()), "{medida:?}");
+            assert!(
+                m.referencia.is_some_and(|x| cerca(x, 0.2945)),
+                "{medida:?}: {m:?}"
+            );
+            assert!(m.repo.is_some_and(|x| cerca(x, 0.296)), "{medida:?}: {m:?}");
+            assert_eq!(m.corridas_referencia, base, "{medida:?}");
+            assert_eq!(m.corridas_repo, repo, "{medida:?}");
+        }
     }
 }
