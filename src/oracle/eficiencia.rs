@@ -1,5 +1,5 @@
 //! Eficiencia del repo evaluado contra su estado inicial (`bootstrap/`). Mide cuatro cosas:
-//! tiempo de tests, pico de memoria, tiempo de compilación y tamaño de los binarios.
+//! tiempo de tests, pico de memoria por proceso de test, tiempo de compilación y tamaño de los binarios.
 //! Cada lado corre en su propio ejecutor. `comparar_por_mediana` y `comparar` hacen la aritmética:
 //! tiempo de tests y memoria usan la mediana; compilación y tamaño usan el mínimo. Con referencia fijada,
 //! la compilación se compara contra su ancla (`comparar_contra_ancla`).
@@ -25,6 +25,9 @@ pub const CORRIDAS: usize = 3;
 /// Corridas de tests por lado. Los tests duran menos de medio segundo: con 3 corridas no se estima bien la
 /// dispersión (en t1-t3 duraron de 0,25 a 0,42 s; un 2 % son 5 a 8 ms).
 pub const CORRIDAS_TESTS: usize = 10;
+/// Corridas de memoria por lado: cada una mide el mayor pico de un proceso de test. Igual a
+/// `MIN_CORRIDAS_CUARTILES`, así la comparación usa cuartiles.
+pub const CORRIDAS_MEMORIA: usize = 4;
 /// Compilaciones del repo en un caso con referencia fijada. Una sola: en 12 casos de t1-t3 la compilación
 /// varió como máximo 0,52 %, contra un piso de 2 %. Cada compilación medida tarda de 66 a 83 s.
 pub const CORRIDAS_COMPILACION_DE_CASO: usize = 1;
@@ -47,6 +50,8 @@ pub const FRACCION_DE_NUCLEOS_CARGADA: f64 = 0.5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Medida {
     TiempoTests,
+    /// Mayor pico de memoria residente de un solo proceso de test, medido con `getrusage`. No incluye a `cargo`
+    /// ni a `nextest`, y no suma procesos.
     MemoriaPico,
     TiempoCompilacion,
     TamanoBinario,
@@ -367,23 +372,31 @@ pub(crate) fn cmd_lista() -> String {
     )
 }
 
-/// Ejecuta una corrida de tests medida con el filtro `filtro` (vacío o ` -E '...'`). No compila: los tests
-/// ya están compilados por `cmd_compilar_tests`. Lee `ROOT_NS` (nanosegundos) y `ROOT_MEM` (bytes, vacío si no
-/// hay `memory.peak`). Las líneas `Compiling` de cargo salen en stdout: si hay una, la corrida recompiló.
+/// Ejecuta una corrida de tiempo de tests con el filtro `filtro` (vacío o ` -E '...'`). No compila: los tests
+/// ya están compilados por `cmd_compilar_tests`. Lee `ROOT_NS` (nanosegundos). No fija el runner: el arranque
+/// de Python cambiaría el tiempo. Las líneas `Compiling` de cargo salen en stdout: si hay una, la corrida recompiló.
 pub(crate) fn cmd_tests(filtro: &str) -> String {
     format!(
-        "{PRELUDIO}cd /repo && export CARGO_TARGET_DIR=/salida/target && a=$(date +%s%N); cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml{filtro} 2>&1 | grep -E '^ *Compiling'; b=$(date +%s%N); echo \"ROOT_NS $((b-a))\"; echo \"ROOT_MEM $(cat /sys/fs/cgroup/memory.peak 2>/dev/null)\""
+        "{PRELUDIO}cd /repo && export CARGO_TARGET_DIR=/salida/target && a=$(date +%s%N); cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml{filtro} 2>&1 | grep -E '^ *Compiling'; b=$(date +%s%N); echo \"ROOT_NS $((b-a))\""
     )
 }
 
+/// Corrida de memoria con el filtro `filtro`. El runner de nextest es el guion `root-medir.py rss`: cada test
+/// anota en `root-rss.lista` su pico de memoria. Imprime `ROOT_MEM` con el mayor valor de la lista, vacío si
+/// la lista falta o está vacía. No mide tiempo.
+pub(crate) fn cmd_memoria(filtro: &str) -> String {
+    format!(
+        "{PRELUDIO}cd /repo && export CARGO_TARGET_DIR=/salida/target && rm -f /salida/root-rss.lista && export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=\"python3 /salida/{NOMBRE_GUION} rss\" && cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml{filtro} 2>&1 | grep -E '^ *Compiling'; echo \"ROOT_MEM $(sort -n /salida/root-rss.lista 2>/dev/null | tail -1)\""
+    )
+}
+
+/// Motivo de la medida de memoria cuando la corrida no trae `ROOT_MEM`.
+const MOTIVO_SIN_MEMORIA: &str = "sin medida de memoria por proceso";
+
 /// Nombre con el que se escribe el guion de medición en la carpeta de trabajo.
-// lo usan los puntos 2 y 3
-#[allow(dead_code)]
 pub(crate) const NOMBRE_GUION: &str = "root-medir.py";
 
 /// Guion Python que mide CPU (`cpu`) o memoria pico de un binario (`rss`). Solo usa la librería estándar.
-// lo usan los puntos 2 y 3
-#[allow(dead_code)]
 pub(crate) const GUION_MEDIR: &str = r#"# Guion de medición de root. Solo usa la librería estándar de Python 3.
 #
 # Modo cpu: root-medir.py cpu <comando>
@@ -605,7 +618,7 @@ fn preparar_filtro(
     Ok(format!(" -E 'not ({expr})'"))
 }
 
-/// Motivo de una corrida medida que compiló algo: su reloj y su pico de memoria incluyen rustc.
+/// Motivo de una corrida medida que compiló algo: su reloj o su pico de memoria incluyen rustc.
 const MOTIVO_RECOMPILO: &str = "la corrida medida recompiló";
 
 /// Dice si la salida de una corrida trae una línea `Compiling` de cargo.
@@ -630,31 +643,40 @@ fn compilar_tests(lado: &Lado) -> Result<(), String> {
     }
 }
 
-/// Una corrida medida de tests. Anota su tiempo y su memoria. Una corrida que recompila no vale.
-fn correr_tests(lado: &Lado, filtro: &str, tiempo: &mut Serie, memoria: &mut Serie) {
+/// Una corrida medida de tests. Anota su tiempo. Una corrida que recompila no vale.
+fn correr_tests(lado: &Lado, filtro: &str, tiempo: &mut Serie) {
     let nombre = lado.nombre;
     match lado.ejecutar(&cmd_tests(filtro)) {
-        Err(e) => {
-            let motivo = format!("{nombre}: {e}");
-            anotar(tiempo, Err(motivo.clone()));
-            anotar(memoria, Err(motivo));
-        }
+        Err(e) => anotar(tiempo, Err(format!("{nombre}: {e}"))),
         Ok(salida) if recompilo(&salida.stdout) => {
             anotar(tiempo, Err(MOTIVO_RECOMPILO.into()));
-            anotar(memoria, Err(MOTIVO_RECOMPILO.into()));
         }
         Ok(salida) => {
             let ns = leer_marca(&salida.stdout, "ROOT_NS").map(|ns| ns / 1e9);
             anotar(tiempo, ns.ok_or_else(|| format!("{nombre}: sin ROOT_NS")));
-            let mem = leer_marca(&salida.stdout, "ROOT_MEM");
-            anotar(memoria, mem.ok_or_else(|| "sin memory.peak".to_string()));
         }
     }
 }
 
-/// Mide tiempo y memoria de los tests. Compila los tests de cada lado y luego corre los dos lados,
-/// alternados, `CORRIDAS_TESTS` veces. En cada par corre primero el lado `orden[0]`. Un lado que no compila
-/// no corre. Con `filtro` con error, los dos lados quedan con ese error.
+/// Una corrida medida de memoria. Anota el mayor pico de un proceso de test. Una corrida que recompila no vale.
+fn correr_memoria(lado: &Lado, filtro: &str, memoria: &mut Serie) {
+    let nombre = lado.nombre;
+    match lado.ejecutar(&cmd_memoria(filtro)) {
+        Err(e) => anotar(memoria, Err(format!("{nombre}: {e}"))),
+        Ok(salida) if recompilo(&salida.stdout) => {
+            anotar(memoria, Err(MOTIVO_RECOMPILO.into()));
+        }
+        Ok(salida) => {
+            let mem = leer_marca(&salida.stdout, "ROOT_MEM");
+            anotar(memoria, mem.ok_or_else(|| MOTIVO_SIN_MEMORIA.to_string()));
+        }
+    }
+}
+
+/// Mide tiempo y memoria de los tests. Compila los tests de cada lado. Luego corre los dos lados, alternados,
+/// `CORRIDAS_TESTS` veces de tiempo y `CORRIDAS_MEMORIA` veces de memoria. En cada par corre primero el lado
+/// `orden[0]`. Un lado que no compila no corre. Un lado con error en su serie se salta. Con `filtro` con
+/// error, los dos lados quedan con ese error.
 fn medir_tests(
     lados: [&Lado; 2],
     orden: [usize; 2],
@@ -678,10 +700,18 @@ fn medir_tests(
     }
     for _ in 0..CORRIDAS_TESTS {
         for k in orden {
-            if tiempo[k].is_err() && memoria[k].is_err() {
+            if tiempo[k].is_err() {
                 continue;
             }
-            correr_tests(lados[k], filtro, &mut tiempo[k], &mut memoria[k]);
+            correr_tests(lados[k], filtro, &mut tiempo[k]);
+        }
+    }
+    for _ in 0..CORRIDAS_MEMORIA {
+        for k in orden {
+            if memoria[k].is_err() {
+                continue;
+            }
+            correr_memoria(lados[k], filtro, &mut memoria[k]);
         }
     }
 }
@@ -980,17 +1010,11 @@ fn medir_con(
     };
     let raiz = match creada {
         Ok(raiz) => raiz,
-        Err(e) => {
-            let motivo = format!("carpeta de trabajo: {e}");
-            let medidas = [
-                Medida::TiempoTests,
-                Medida::MemoriaPico,
-                Medida::TiempoCompilacion,
-                Medida::TamanoBinario,
-            ];
-            return Vec::from(medidas.map(|m| sin_valor(m, motivo.clone())));
-        }
+        Err(e) => return cuatro_sin_valor(format!("carpeta de trabajo: {e}")),
     };
+    if let Err(e) = escribir_guion(&raiz) {
+        return cuatro_sin_valor(format!("guion de medición: {e}"));
+    }
     let lado_i = Lado {
         nombre: "inicial",
         ej: inicial,
@@ -1010,6 +1034,24 @@ fn medir_con(
         avisos.push(aviso_de_borrado(&raiz, &e));
     }
     resultados
+}
+
+/// Las cuatro medidas sin valor, con el mismo motivo. Se usa cuando la medición no puede empezar.
+fn cuatro_sin_valor(motivo: String) -> Vec<ResultadoMedida> {
+    let medidas = [
+        Medida::TiempoTests,
+        Medida::MemoriaPico,
+        Medida::TiempoCompilacion,
+        Medida::TamanoBinario,
+    ];
+    Vec::from(medidas.map(|m| sin_valor(m, motivo.clone())))
+}
+
+/// Escribe el guion de medición en la carpeta de cada lado. El runner de memoria lo ejecuta desde ahí.
+fn escribir_guion(raiz: &Path) -> std::io::Result<()> {
+    ["inicial", "repo"]
+        .iter()
+        .try_for_each(|lado| fs::write(raiz.join(lado).join(NOMBRE_GUION), GUION_MEDIR))
 }
 
 /// Crea las subcarpetas `inicial` y `repo` dentro de la carpeta fija. Las que ya existen se reusan.
@@ -1309,6 +1351,9 @@ mod tests {
             } else if cmd.contains("--no-run") {
                 salida.stdout = self.compilar.clone();
                 "compilar_tests"
+            } else if cmd.contains("root-rss.lista") {
+                salida.stdout = self.tests.clone();
+                "memoria"
             } else if cmd.contains("ROOT_NS") {
                 salida.stdout = self.tests.clone();
                 "tests"
@@ -1561,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn sin_memory_peak_memoria_no_tiene_valor_y_tiempo_si() {
+    fn sin_medida_de_memoria_memoria_no_tiene_valor_y_tiempo_si() {
         let log = RefCell::new(Vec::new());
         let sin_pico = "ROOT_NS 1500000000\nROOT_MEM \n";
         let inicial = Falso {
@@ -1574,11 +1619,53 @@ mod tests {
         };
         let resultados = medir_de_prueba(&inicial, &repo);
         let memoria = por_medida(&resultados, Medida::MemoriaPico);
-        assert_eq!(memoria.motivo.as_deref(), Some("sin memory.peak"));
+        assert_eq!(
+            memoria.motivo.as_deref(),
+            Some("sin medida de memoria por proceso")
+        );
         assert_eq!(memoria.referencia, None);
         let tiempo = por_medida(&resultados, Medida::TiempoTests);
         assert!(tiempo.referencia.is_some());
         assert!(tiempo.motivo.is_none());
+    }
+
+    #[test]
+    fn medir_corre_la_memoria_de_cada_lado_despues_de_los_tests() {
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        medir_de_prueba(&inicial, &repo);
+        let entradas = log.borrow();
+        let esperado: Vec<String> = (0..CORRIDAS_MEMORIA)
+            .flat_map(|_| ["inicial", "repo"])
+            .map(String::from)
+            .collect();
+        assert_eq!(lados_de(&entradas, "memoria"), esperado, "{entradas:?}");
+        let ultima_test = entradas
+            .iter()
+            .rposition(|e| e.split(' ').nth(1) == Some("tests"))
+            .expect("hay corridas de tests");
+        let primera_memoria = entradas
+            .iter()
+            .position(|e| e.split(' ').nth(1) == Some("memoria"))
+            .expect("hay corridas de memoria");
+        assert!(ultima_test < primera_memoria, "{entradas:?}");
+    }
+
+    #[test]
+    fn medir_escribe_el_guion_en_cada_lado() {
+        let fija = tempfile::tempdir().expect("carpeta fija");
+        let log = RefCell::new(Vec::new());
+        let inicial = sano("inicial", &log, &["a"]);
+        let repo = sano("repo", &log, &["a"]);
+        con_carpeta_de_eficiencia(Some(fija.path()), || {
+            medir_de_prueba(&inicial, &repo);
+        });
+        for lado in ["inicial", "repo"] {
+            let ruta = fija.path().join(lado).join(NOMBRE_GUION);
+            let guion = fs::read_to_string(&ruta).expect("el guion existe en el lado");
+            assert_eq!(guion, GUION_MEDIR, "{}", ruta.display());
+        }
     }
 
     #[test]
@@ -1878,7 +1965,25 @@ mod tests {
         assert!(!cmd.contains("cargo build"), "{cmd}");
         assert!(cmd.contains("cargo nextest run"), "{cmd}");
         assert!(cmd.contains("date +%s%N"), "{cmd}");
-        assert!(cmd.contains("/sys/fs/cgroup/memory.peak"), "{cmd}");
+        assert!(!cmd.contains("memory.peak"), "{cmd}");
+        assert!(!cmd.contains("ROOT_MEM"), "{cmd}");
+        assert!(!cmd.contains("RUNNER"), "{cmd}");
+    }
+
+    #[test]
+    fn cmd_memoria_fija_el_runner_y_no_lee_memory_peak() {
+        let cmd = cmd_memoria(" -E 'not (test(=b))'");
+        assert!(
+            cmd.contains(
+                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=\"python3 /salida/root-medir.py rss\""
+            ),
+            "{cmd}"
+        );
+        assert!(cmd.contains("rm -f /salida/root-rss.lista"), "{cmd}");
+        assert!(cmd.contains("ROOT_MEM"), "{cmd}");
+        assert!(cmd.contains(" -E 'not (test(=b))'"), "{cmd}");
+        assert!(!cmd.contains("memory.peak"), "{cmd}");
+        assert!(!cmd.contains("ROOT_NS"), "{cmd}");
     }
 
     #[test]
@@ -2066,9 +2171,11 @@ mod tests {
         let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
         assert_eq!(resultados.len(), 4);
         let entradas = log.borrow();
-        // Sin metadata ni lista: esas vienen de la referencia. Tests: CORRIDAS_TESTS veces. Build: su ancla.
+        // Sin metadata ni lista: esas vienen de la referencia. Tests: CORRIDAS_TESTS veces. Memoria: CORRIDAS_MEMORIA
+        // veces. Build: su ancla.
         let mut esperado = vec!["compilar_tests"];
         esperado.extend(vec!["tests"; CORRIDAS_TESTS]);
+        esperado.extend(vec!["memoria"; CORRIDAS_MEMORIA]);
         esperado.push("build");
         assert_eq!(tipos_de(&entradas, "inicial"), esperado);
         assert!(
@@ -2455,9 +2562,10 @@ mod tests {
                 "{medida:?}: {r:?}"
             );
         }
-        // El lado inicial corre sus tests cada corrida y su compilación una vez: el ancla.
+        // El lado inicial corre sus tests y su memoria en cada corrida, y su compilación una vez: el ancla.
         let mut esperado = vec!["compilar_tests"];
         esperado.extend(vec!["tests"; CORRIDAS_TESTS]);
+        esperado.extend(vec!["memoria"; CORRIDAS_MEMORIA]);
         esperado.push("build");
         assert_eq!(tipos_de(&log.borrow(), "inicial"), esperado);
     }
@@ -2479,7 +2587,10 @@ mod tests {
         let repo = sano("repo", &log, &["a"]);
         let resultados = con_referencia(Some(referencia), || medir_de_prueba(&inicial, &repo));
         let memoria = por_medida(&resultados, Medida::MemoriaPico);
-        assert_eq!(memoria.motivo.as_deref(), Some("sin memory.peak"));
+        assert_eq!(
+            memoria.motivo.as_deref(),
+            Some("sin medida de memoria por proceso")
+        );
         assert_eq!(memoria.referencia, None);
         let tiempo = por_medida(&resultados, Medida::TiempoTests);
         assert!(tiempo.referencia.is_some());
