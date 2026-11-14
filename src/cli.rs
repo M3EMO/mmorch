@@ -194,6 +194,12 @@ pub enum ColabAccion {
         /// Repo de Root: de ahí sale `tools/colab/`. Por defecto, el directorio actual.
         #[arg(long)]
         raiz_root: Option<PathBuf>,
+        /// Repeticiones por defecto de cada trabajo.
+        #[arg(long, default_value_t = crate::colab_calibra::N_POR_DEFECTO)]
+        n: u32,
+        /// Semilla del sorteo.
+        #[arg(long, default_value_t = crate::colab_calibra::SEMILLA_POR_DEFECTO)]
+        semilla: u64,
     },
     /// Importa la vuelta de una calibración de Colab: revisa el paquete y agrega sus filas.
     Importar {
@@ -653,6 +659,57 @@ mod tests {
                 assert_eq!(tarea.as_deref(), Some("mi-tarea"));
             }
             otro => panic!("se esperaba oraculo capas, llegó {otro:?}"),
+        }
+    }
+
+    /// Argumentos base de `colab empaquetar`, sin `--n` ni `--semilla`.
+    fn empaquetar_base() -> Vec<&'static str> {
+        vec![
+            "r00t",
+            "colab",
+            "empaquetar",
+            "--binario",
+            "b",
+            "--trabajos",
+            "t:d",
+            "--repo",
+            "t=r",
+            "--rustup-sha256",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--salida",
+            "s.tar.gz",
+        ]
+    }
+
+    #[test]
+    fn colab_empaquetar_parsea_n_y_semilla() {
+        let mut args = empaquetar_base();
+        args.extend(["--n", "8", "--semilla", "7"]);
+        let cli = Cli::try_parse_from(args).expect("colab empaquetar con --n y --semilla parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { n, semilla, .. },
+            } => {
+                assert_eq!(n, 8);
+                assert_eq!(semilla, 7);
+            }
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_empaquetar_sin_banderas_usa_defectos() {
+        let cli = Cli::try_parse_from(empaquetar_base()).expect("colab empaquetar sin --n parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { n, semilla, .. },
+            } => {
+                assert_eq!(n, crate::colab_calibra::N_POR_DEFECTO);
+                assert_eq!(semilla, crate::colab_calibra::SEMILLA_POR_DEFECTO);
+                assert_eq!(n, 4);
+                assert_eq!(semilla, 42);
+            }
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
         }
     }
 }

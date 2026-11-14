@@ -623,8 +623,41 @@ fn oraculo_liberar(json: bool, home: &Path) -> Result<(), Error> {
 }
 
 /// `colab empaquetar`: arma el paquete para Colab e imprime dónde quedó.
-fn colab_empaquetar(json: bool, pedido: colab_calibra::PedidoEmpaquetar) -> Result<(), Error> {
-    let resumen = colab_calibra::empaquetar_cli(pedido)?;
+fn colab_empaquetar(
+    json: bool,
+    pedido: colab_calibra::PedidoEmpaquetar,
+    n: u32,
+    semilla: u64,
+) -> Result<(), Error> {
+    // Con los valores por defecto se usa `empaquetar_cli`, que sigue siendo el punto de entrada.
+    let armar = |pedido, n, semilla| {
+        if (n, semilla)
+            == (
+                colab_calibra::N_POR_DEFECTO,
+                colab_calibra::SEMILLA_POR_DEFECTO,
+            )
+        {
+            colab_calibra::empaquetar_cli(pedido)
+        } else {
+            colab_calibra::empaquetar_cli_con(pedido, n, semilla)
+        }
+    };
+    colab_empaquetar_con(json, pedido, n, semilla, &armar)
+}
+
+/// Igual que `colab_empaquetar`, pero la función que arma el paquete se inyecta para testear.
+fn colab_empaquetar_con(
+    json: bool,
+    pedido: colab_calibra::PedidoEmpaquetar,
+    n: u32,
+    semilla: u64,
+    armar: &dyn Fn(
+        colab_calibra::PedidoEmpaquetar,
+        u32,
+        u64,
+    ) -> Result<colab_calibra::Resumen, oracle::ErrorOraculo>,
+) -> Result<(), Error> {
+    let resumen = armar(pedido, n, semilla)?;
     let salida = resumen.salida.display().to_string();
     if json {
         println!(
@@ -990,6 +1023,8 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                     rustup_sha256,
                     salida,
                     raiz_root,
+                    n,
+                    semilla,
                 },
         } => colab_empaquetar(
             cli.json,
@@ -1001,6 +1036,8 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                 salida: salida.clone(),
                 raiz_root: raiz_root.clone(),
             },
+            *n,
+            *semilla,
         ),
         Comando::Colab {
             accion: ColabAccion::Importar { archivo, raiz_root },
@@ -1674,5 +1711,55 @@ mod tests {
         });
         let resumen = resumen_auditoria(&valor);
         assert!(!resumen.contains("encontrados"), "resumen: {resumen}");
+    }
+
+    /// Pedido mínimo de `colab empaquetar` para los tests de `colab_empaquetar_con`.
+    fn pedido_empaquetar() -> colab_calibra::PedidoEmpaquetar {
+        colab_calibra::PedidoEmpaquetar {
+            binario: PathBuf::from("b"),
+            trabajos: vec!["t:d".into()],
+            repos: vec!["t=r".into()],
+            rustup_sha256: "0".repeat(64),
+            salida: PathBuf::from("s.tar.gz"),
+            raiz_root: None,
+        }
+    }
+
+    #[test]
+    fn colab_empaquetar_pasa_n_y_semilla_a_la_funcion() {
+        let recibidos = std::cell::RefCell::new(Vec::new());
+        let registrar = |_pedido: colab_calibra::PedidoEmpaquetar, n: u32, semilla: u64| {
+            recibidos.borrow_mut().push((n, semilla));
+            Ok(colab_calibra::Resumen {
+                salida: PathBuf::from("s.tar.gz"),
+                archivos: 1,
+                trabajos: 1,
+            })
+        };
+        colab_empaquetar_con(false, pedido_empaquetar(), 8, 7, &registrar)
+            .expect("empaquetar con n y semilla explícitos");
+        assert_eq!(*recibidos.borrow(), vec![(8, 7)]);
+    }
+
+    #[test]
+    fn colab_empaquetar_con_defectos_pasa_4_y_42() {
+        let recibidos = std::cell::RefCell::new(Vec::new());
+        let registrar = |_pedido: colab_calibra::PedidoEmpaquetar, n: u32, semilla: u64| {
+            recibidos.borrow_mut().push((n, semilla));
+            Ok(colab_calibra::Resumen {
+                salida: PathBuf::from("s.tar.gz"),
+                archivos: 1,
+                trabajos: 1,
+            })
+        };
+        colab_empaquetar_con(
+            false,
+            pedido_empaquetar(),
+            colab_calibra::N_POR_DEFECTO,
+            colab_calibra::SEMILLA_POR_DEFECTO,
+            &registrar,
+        )
+        .expect("empaquetar con defectos");
+        assert_eq!(*recibidos.borrow(), vec![(4, 42)]);
     }
 }
