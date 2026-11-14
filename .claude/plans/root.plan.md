@@ -10342,3 +10342,132 @@ Los briefs son `docs/builds/brief-local-133.md` y `docs/builds/brief-local-134.m
 **Lista de ideas, nueva entrada:** un defecto de tiempo para `eficiencia.tiempo` que no dependa de cuántas veces se llama la función.
 
 **Preguntas al usuario:** P107 sigue abierta.
+
+## Vuelta del 2026-11-14 (50): las medidas de cada caso, y lo que dicen
+
+**Estado.**
+- Las Tareas 133 y 134 terminaron en verde sin podman. `laptop/cadena-110-134` (eed1225) las suma sobre 56fd3eb. Su suite con podman dio verde, sola: 3611, 0 y 5.
+- **La calibración de Eficiencia corrió otra vez en el `ROOT_HOME` real,** con n=4, semilla 42 y el binario de eed1225. Respaldo en `efi-real-2/`.
+- t1 (2133 s): especificidad 1,0, sensibilidad 0. Los lastres no movieron la memoria.
+- t2 (2696 s): los lastres subieron la memoria 2,4 veces. Un limpio quedó detectado por `tiempo_tests`. ExB 0,75.
+- t3 (2697 s): los lastres no movieron la memoria. Sensibilidad 0.
+- P107 espera la respuesta del usuario. El disco está al 98 %, con 10 GB libres.
+
+**Leí las medidas de los 12 casos** en los `.casos.jsonl` nuevos, y `eficiencia_base` de las tres filas.
+
+## 1. Las preguntas de la 133 y la 134
+
+**La 133:**
+1. **Las medidas de la base van en `Fila.eficiencia_base`:** acepto.
+2. **Un ancla que falla se ignora sin aviso: no se acepta.** Una falla escondida es lo que Root no hace. El veredicto suma un aviso con la medida y el error. La referencia sigue con la serie de la base. Va en la 135.
+3. **Los casos de Eficiencia corren en serie:** acepto. Dos casos a la vez compartirían un `target` y se pisarían el tiempo.
+4. **El ancla sube el costo:** acepto. La sección 5 recorta otra parte.
+5. **El test del ancla pasa por igualdad exacta de flotantes:** se cambia a un repo de 1,04, con margen. Va en la 135.
+6. **`mod.rs` no cambió:** acepto.
+
+**La 134:**
+1. **`en_cambio` queda en falso en el segundo criterio:** acepto.
+2. **El motivo propio de un lastre sin lugar:** va en la 135, que toca `calibra.rs`. El texto cubre también la regla nueva de la 136: "ninguna función vieja que corran los tests del estado inicial".
+3. **Una función es vieja por su nombre en el mismo archivo:** acepto. Sigue `declara_fn`, igual que `CuerpoVaciado`.
+
+## 2. Por qué el lastre en una función vieja sigue sin efecto
+
+**Una función vieja no es una función que los tests corren.** La 134 eligió `composite_pattern.rs:19` y `:170` en t1, y `content_match.rs:17` y `tree_build/bline.rs:42` en t3. Existían en `bootstrap/`, pero ningún test común las llama. La memoria pico no cambió: 42 MB en t1 y 65 MB en t3, con razones entre 0,991 y 1,002.
+
+**En t2 sí funcionó por suerte.** `content_search/mod.rs:32` y `:44` son funciones que los tests viejos de ese módulo llaman.
+
+**Cómo elegir un lugar que los tests comunes corren, sin API: por el nombre en un test viejo.**
+1. Un test viejo es una función `#[test]` que ya existe en `bootstrap/`.
+2. Un test viejo que pasa en `bootstrap/` corre en la medición, porque sigue pasando en el repo. Son los tests comunes, o casi todos.
+3. **El lugar del lastre es una función vieja de producción cuyo nombre aparece llamado en el cuerpo de un test viejo.** Por ejemplo, `foo(` o `.foo(`.
+4. Primero se busca en los archivos del cambio. Si no hay, en cualquier archivo de producción.
+5. Todo sale del texto de `bootstrap/` y del repo. No corre nada.
+
+**Lo que esta regla no garantiza.** Un nombre común puede coincidir con otra función. La llamada puede estar en una rama que el test no recorre. Las medidas de cada caso lo muestran: si la memoria no sube, el caso queda no detectado, y es honesto.
+
+Es la Tarea 136.
+
+## 3. El piso de 2 % y `tiempo_tests`
+
+**Los datos de los limpios y de las bases:**
+
+| Tarea | Caso | Razón de `tiempo_tests` | Ruido |
+|---|---|---|---|
+| t1 | Base | 1,004 | 0,02 |
+| t2 | Base | 1,004 | 0,02 |
+| t2 | Limpio 1 | 1,005 | 0,02 |
+| t2 | Limpio 3 | **1,024** | 0,0204 |
+| t3 | Base | 0,991 | 0,022 |
+| t3 | Limpio 1 | 0,995 | 0,028 |
+| t3 | Limpio 3 | 0,998 | 0,022 |
+
+- En t2, un limpio dio 1,024, y quedó como regresión por 0,4 puntos sobre el ruido.
+- Las corridas de `tiempo_tests` duran entre 0,25 y 0,42 s. Un 2 % es de 5 a 8 ms. El arranque de un proceso ya varía eso.
+- **El piso de 2 % sirve para la compilación, no para `tiempo_tests`.** En los 12 casos, la compilación varió como mucho 0,52 %.
+
+**Lo que falla no es el número del piso. Es que el ruido se mide con pocas corridas, y de un solo lado.**
+- Hoy el ruido sale de la referencia: tres corridas de la base, más el ancla. Las tres corridas del repo no entran.
+- Con tres corridas de 0,4 s, la dispersión se estima mal.
+
+**El arreglo medido:**
+1. **`tiempo_tests` corre 10 veces por lado, en vez de 3.** Cuesta unos 4 s por lado. La compilación sigue con su número de corridas.
+2. **El ruido de una medida** es la mayor dispersión entre la referencia (con el ancla) y el repo, con el piso de 2 %. Un cambio real corre todo el repo, pero no lo dispersa. El ruido del repo solo sube el umbral si el repo es inestable.
+3. **Cada medida guarda sus corridas,** no solo el mínimo. Así, la próxima calibración da la dispersión real de 10 corridas, y el piso se puede revisar con datos.
+
+## 4. Por qué t1 sale 15 % más lento en todos los casos
+
+**No es un costo del cambio. Es la máquina.**
+- En la base de t1, los dos lados se alternaron: referencia 0,254 s y repo 0,255 s. Razón 1,004.
+- En los cuatro casos, el repo da entre 0,291 y 0,293 s. La referencia guardada sigue en 0,254, porque es la de la base.
+- **El ancla también salió lenta.** El ruido de los casos es de 0,15 a 0,21. Ese ruido sale de la dispersión entre la serie de la base y el ancla. Para llegar a 0,15, el ancla tiene que haber dado cerca de 0,29 s.
+- Los dos lados se volvieron un 15 % más lentos entre la base y los casos. El ancla de la 133 lo vio, y ningún limpio quedó detectado.
+
+**Lo que no sé es por qué la máquina cambió.** Puede ser la frecuencia de la CPU, otro proceso, o algo de la carpeta fija. Con las corridas guardadas de la 135 se ve si la lentitud es pareja o si son corridas sueltas.
+
+**El costo del ancla.** Con un ruido de 0,15 a 0,21, una regresión de tiempo menor que 15 % no se detecta en esos casos. Es el precio honesto de una máquina que cambia. La memoria no sufre: su ruido quedó en el piso.
+
+## 5. Qué se puede recortar de los 36 a 45 minutos
+
+**El reparto, con el código y las medidas.** Cada compilación medida tarda entre 66 y 83 s.
+- La base compila 3 veces por lado: 6 compilaciones.
+- Cada caso compila 3 veces el repo, más 1 el ancla: 4 compilaciones.
+- En una tarea con n=4, son 6 + 16 = 22 compilaciones, de 25 a 30 minutos. Es la mayor parte del tiempo.
+
+**El recorte: una sola compilación del repo en cada caso de calibración.**
+- **El dato:** en los 12 casos, la razón de compilación quedó entre 0,995 y 1,003. La variación más grande fue 0,52 %, y el piso es 2 %.
+- **El ancla y la base no cambian.** La base sigue con 3 por lado, y fija el ruido. El ancla sigue en cada caso.
+- **Una evaluación normal no cambia:** sigue con 3 por lado, como pide P105 a.
+- **Lo que se gana:** cada caso compila 2 veces en vez de 4. Son unos 2,5 minutos menos por caso, y unos 10 minutos menos por tarea.
+- **Lo que se pierde:** nada medible con estos datos. Si la compilación de un caso varía más que el piso, el caso lo muestra en sus corridas guardadas.
+
+## 6. Las Tareas 135 y 136
+
+| Tarea | Qué | Archivos |
+|---|---|---|
+| 135 | `tiempo_tests` con 10 corridas; el ruido de los dos lados; las corridas guardadas; una compilación del repo por caso; el aviso del ancla; el margen del test del ancla; el motivo de un lastre sin lugar | `src/oracle/eficiencia.rs`, `src/oracle/calibra.rs`, `src/tipos.rs`, `docs/interfaces.md` |
+| 136 | El lastre va a una función vieja que un test viejo llama | `src/oracle/calibra/inyectar.rs`, el módulo de tests de `src/oracle/calibra/defectos.rs` |
+
+**Corren en paralelo.** No comparten archivos. La base de las dos es la punta de `laptop/cadena-110-134`.
+
+Los briefs son `docs/builds/brief-local-135.md` y `docs/builds/brief-local-136.md`.
+
+## 7. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | API |
+|---|---|---|---|
+| 1 | La mezcla de la cadena 110 a 134 | La orden del usuario | No |
+| 2 | Las Tareas 135 y 136, en paralelo | Nada | No |
+| 3 | La calibración de Eficiencia de t1 a t3, otra vez | La 135 y la 136 | No |
+| 4 | Una prueba de dos casos de Diseño con el juez real | **P107** | Sí, cerca de 0,35 USD |
+| 5 | La calibración de Diseño, Arquitectura y Estructura de t1 a t3 | **P107** | Sí, cerca de 17 USD |
+| 6 | Congelar la versión | El paso 5 | No |
+| 7 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | No |
+| 8 | P98 c: el final con 15 defectos reales | El paso 7 | No |
+| 9 | La validez sobre el final sellado | Los pasos 1 a 8 | Según el final |
+
+**Hoy cumplen P102 a:** Seguridad, Pruebas, Completitud y Funciona.
+**Eficiencia todavía no:** con las tareas juntas, hay 2 defectos detectados de 6, y un limpio mal en t2. El paso 3 lo vuelve a medir.
+**Diseño, Arquitectura y Estructura:** esperan P107.
+**Entrega:** no se puede calibrar con S2.
+
+**Preguntas al usuario:** P107 sigue abierta.
