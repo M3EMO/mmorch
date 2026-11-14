@@ -70,6 +70,10 @@ const VIGENCIA_MINIMA: Duration = Duration::from_secs(20 * 60);
 const MAX_VUELTAS: u32 = 4;
 /// Prefijo del prompt de cada vuelta que sigue a un corte por plazo.
 const PROMPT_CONTINUACION: &str = "La vuelta anterior se cortó por tiempo. Revisá `git status` y `git log`. Terminá o descartá lo que quedó sin commit. Seguí esta instrucción:";
+/// Instrucción de la vuelta de eficiencia. Va antes de las medidas que empeoraron, una por línea.
+const PROMPT_EFICIENCIA: &str = "La evaluación midió que tu cambio empeora la eficiencia. Bajá estas medidas sin cambiar el comportamiento y hacé commit:";
+/// Fase del `Gate` que anota por qué la vuelta de eficiencia no cambió la fila.
+const FASE_EFICIENCIA: &str = "eficiencia";
 
 /// Lo que `correr` necesita del mundo. Producción arma las de la CLI; los tests dan las suyas.
 pub struct DepsCorre<'a> {
@@ -87,6 +91,29 @@ pub struct DepsCorre<'a> {
     pub entorno: &'a [(String, String)],
 }
 
+/// Instrucción de la vuelta de eficiencia: la constante, una línea por medida y el prompt del rol.
+/// Un número que no tiene valor se escribe como "sin valor".
+fn prompt_de_eficiencia(regresiones: &[MedidaEficiencia], prompt_rol: &str) -> String {
+    let mut lineas = vec![PROMPT_EFICIENCIA.to_string()];
+    for medida in regresiones {
+        let razon = medida
+            .razon
+            .map_or("sin valor".to_string(), |r| format!("{r:.2}"));
+        let referencia = medida
+            .referencia
+            .map_or("sin valor".to_string(), |r| r.to_string());
+        let repo = medida
+            .repo
+            .map_or("sin valor".to_string(), |r| r.to_string());
+        lineas.push(format!(
+            "- {}: {razon} veces la referencia (referencia {referencia}, repo {repo})",
+            medida.medida
+        ));
+    }
+    lineas.push(prompt_rol.to_string());
+    lineas.join("\n")
+}
+
 /// Una vuelta que terminó bien: su número de lanzamiento, su código de salida y su línea `result`.
 struct Lanzado {
     n: u32,
@@ -101,6 +128,40 @@ enum Fin {
     Codigo(i32),
     VueltasAgotadas,
     SinCupo,
+}
+
+/// Lo que no cambia entre lanzamientos de una corrida. Lo leen `lanzar_rol` y la vuelta de eficiencia.
+struct Lanza<'a, 'b> {
+    deps: &'a DepsCorre<'b>,
+    tarea: &'a str,
+    tarea_cargada: &'a Tarea,
+    config_cargada: &'a ConfigCorrida,
+    ruta_eventos: &'a Path,
+    corrida: &'a Corrida,
+    id: &'a str,
+    huellas: &'a HuellasOraculo,
+}
+
+/// Lo que cambia entre lanzamientos: lo lanzado, los transcripts y los contadores de la corrida.
+struct Avance {
+    lanzados: Vec<Lanzado>,
+    /// Transcript de cada lanzamiento, buenos y cortados, también los de corridas anteriores.
+    transcripts: Vec<(Rol, PathBuf)>,
+    lanzamientos: u32,
+    /// Verdadero desde el primer lanzamiento de esta invocación. Antes de cada uno se espera la vigencia.
+    ya_lanzo: bool,
+    /// Modelo del último lanzamiento de cada rol. Lo toma la fila: el ruteo de cada vuelta puede cambiarlo.
+    modelos_lanzados: BTreeMap<Rol, String>,
+}
+
+/// Lo que deja la vuelta de eficiencia. `veredicto` va a la fila: la segunda evaluación, o la primera
+/// si la vuelta no salió bien. `corrio` vale si hubo algún lanzamiento. `motivo` dice por qué se
+/// quedó con la primera. La fila no los lee todavía: los lleva el punto 3 de la Tarea 116.
+#[allow(dead_code)]
+struct ResultadoVuelta {
+    veredicto: Veredicto,
+    corrio: bool,
+    motivo: Option<String>,
 }
 
 /// Corre la tarea con la configuración y devuelve la fila que se agregó a `runs.jsonl`.
@@ -127,6 +188,8 @@ enum Fin {
 /// y registra su sesión sin costo, con su duración y sus turnos (ver `registrar_corte`).
 /// Desde el segundo lanzamiento, la vigencia del login se espera antes de cada lanzamiento
 /// (ver `esperar_vigencia_del_rol`).
+/// Si la primera evaluación marca regresión de eficiencia, hay una vuelta de eficiencia más
+/// (ver `correr_vuelta_eficiencia`). Su evaluación es la que cuenta.
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
     correr_interno(deps, tarea, config, None)
 }
@@ -223,19 +286,26 @@ fn correr_interno(
     let (previos, mayor_previo) = previos_de(deps.home, &id)?;
 
     // e) Lanzamiento por rol, en orden. Cada salida se guarda como transcript. Un corte por plazo
-    // vuelve a lanzar el mismo rol, hasta `MAX_VUELTAS` veces.
-    let mut lanzados: Vec<Lanzado> = Vec::new();
-    // Transcript de cada lanzamiento, buenos y cortados, también los de corridas anteriores. Lo revisa
-    // el oráculo en el paso g.
-    let mut transcripts: Vec<(Rol, PathBuf)> =
-        previos.iter().map(|p| (p.rol, p.ruta.clone())).collect();
-    let mut lanzamientos: u32 = mayor_previo;
+    // vuelve a lanzar el mismo rol, hasta `MAX_VUELTAS` veces (ver `lanzar_rol`).
+    let c = Lanza {
+        deps,
+        tarea,
+        tarea_cargada: &tarea_cargada,
+        config_cargada: &config_cargada,
+        ruta_eventos: &ruta_eventos,
+        corrida: &corrida,
+        id: &id,
+        huellas: &huellas,
+    };
+    let mut av = Avance {
+        lanzados: Vec::new(),
+        transcripts: previos.iter().map(|p| (p.rol, p.ruta.clone())).collect(),
+        lanzamientos: mayor_previo,
+        ya_lanzo: false,
+        modelos_lanzados: BTreeMap::new(),
+    };
     // Al reanudar, cada rol se mira en orden hasta el primero sin `result` exitoso. Después, todo se lanza normal.
     let mut reanudando = reanuda.is_some();
-    // Desde el primer lanzamiento de esta invocación, la vigencia se espera antes de cada lanzamiento.
-    let mut ya_lanzo = false;
-    // Modelo del último lanzamiento de cada rol. Lo toma la fila: el ruteo de cada vuelta puede cambiarlo.
-    let mut modelos_lanzados: BTreeMap<Rol, String> = BTreeMap::new();
     for (rol, _) in &elecciones {
         let prompt_rol = config_cargada.prompt.get(rol).cloned().unwrap_or_default();
         let mut sesion: Option<String> = None;
@@ -245,7 +315,7 @@ fn correr_interno(
             match estado_previo(&previos, *rol) {
                 EstadoRol::Terminado(lanzado) => {
                     registrar_sesion(deps.home, &id, &lanzado, &lanzado.linea, &ruta_eventos)?;
-                    lanzados.push(lanzado);
+                    av.lanzados.push(lanzado);
                     continue;
                 }
                 EstadoRol::Parcial { sesion: previa } => {
@@ -256,110 +326,7 @@ fn correr_interno(
             }
             reanudando = false;
         }
-        let mut vuelta: u32 = 0;
-        let fin = loop {
-            // Desde el primer lanzamiento de esta invocación, cada uno vuelve a leer la credencial: se revisa su vigencia antes.
-            if ya_lanzo {
-                esperar_vigencia_del_rol(deps.ejecutor, &ruta_eventos, &id, *rol)?;
-            }
-            // Antes de cada lanzamiento el rol vuelve a rutear. Si ya no va por cupo, la corrida para acá.
-            let modelo = match rutear_por_cupo(deps.home, *rol, tarea) {
-                Ok(modelo) => modelo,
-                Err(causa) => {
-                    let motivo = format!(
-                        "cupo agotado antes del rol {}, vuelta {}: {causa}",
-                        nombre_rol(*rol),
-                        vuelta + 1
-                    );
-                    gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
-                    break Fin::SinCupo;
-                }
-            };
-            vuelta += 1;
-            lanzamientos += 1;
-            ya_lanzo = true;
-            let n = lanzamientos;
-            let prompt = if retoma || vuelta > 1 {
-                format!("{PROMPT_CONTINUACION} {prompt_rol}")
-            } else {
-                prompt_rol.clone()
-            };
-            let args = args_claude(&prompt, &modelo, deps.home, &config_cargada.claude, *rol);
-            let args = match &sesion {
-                Some(sesion) => con_resume(args, sesion),
-                None => args,
-            };
-            // El plazo sale de la vida del login en este momento, no de la del inicio de la corrida.
-            let plazo = plazo_de_lanzamiento(deps.ejecutor.vida_restante()?);
-            let lanzamiento = Lanzamiento {
-                rol: *rol,
-                args,
-                env: env_del_builder(&config_cargada.claude, *rol, deps.entorno),
-                repo: corrida.repo.clone(),
-                plugin: config_cargada.claude.plugin_de(*rol).map(Path::to_path_buf),
-                plazo,
-            };
-            modelos_lanzados.insert(*rol, modelo.clone());
-            let inicio = Instant::now();
-            let resultado = deps.ejecutor.lanzar(&lanzamiento);
-            let duracion = inicio.elapsed();
-            match resultado {
-                Ok(salida) => {
-                    // Lo que se guarda, y lo que se valida, es el stdout ya redactado.
-                    let guardado = stdout_redactado(&ruta_eventos, &corrida, &salida.stdout)?;
-                    let ruta = guardar_transcript(deps.home, &id, n, *rol, &guardado)?;
-                    transcripts.push((*rol, ruta.clone()));
-                    // Sin `result` exitoso el rol no evalúa: no hay resultado que evaluar.
-                    let linea = match resultado_exitoso(&guardado) {
-                        Ok(linea) => linea,
-                        Err(causa) => {
-                            let motivo =
-                                format!("rol {} sin resultado exitoso: {causa}", nombre_rol(*rol));
-                            gate(&ruta_eventos, &id, FASE_ROL, motivo.clone(), Some(*rol))?;
-                            return Err(ErrorCorre::Ejecutor(motivo));
-                        }
-                    };
-                    let codigo = salida.codigo;
-                    let lanzado = Lanzado {
-                        n,
-                        rol: *rol,
-                        codigo,
-                        linea,
-                    };
-                    // La sesión se registra al terminar el rol: si un rol siguiente aborta, su costo ya queda.
-                    registrar_sesion(deps.home, &id, &lanzado, &lanzado.linea, &ruta_eventos)?;
-                    lanzados.push(lanzado);
-                    break Fin::Codigo(codigo);
-                }
-                Err(ErrorCorre::Cortado { mensaje, stdout }) => {
-                    // Un corte no aborta: deja su transcript parcial, su costo y la sesión para la siguiente vuelta.
-                    let ruta = registrar_corte(
-                        deps.home,
-                        &ruta_eventos,
-                        &corrida,
-                        *rol,
-                        n,
-                        &modelo,
-                        &stdout,
-                        duracion,
-                    )?;
-                    transcripts.push((*rol, ruta));
-                    let motivo = format!("rol {} cortado por plazo: {mensaje}", nombre_rol(*rol));
-                    gate(&ruta_eventos, &id, FASE_LANZAMIENTO, motivo, Some(*rol))?;
-                    if let Some(id_sesion) = sesion_de_transcript(&stdout) {
-                        sesion = Some(id_sesion);
-                    }
-                    if vuelta == MAX_VUELTAS {
-                        break Fin::VueltasAgotadas;
-                    }
-                }
-                Err(error) => {
-                    let motivo = format!("rol {} no arrancó: {error}", nombre_rol(*rol));
-                    gate(&ruta_eventos, &id, FASE_LANZAMIENTO, motivo, Some(*rol))?;
-                    return Err(error);
-                }
-            }
-        };
+        let fin = lanzar_rol(&c, &mut av, *rol, &prompt_rol, sesion, retoma)?;
         match fin {
             Fin::VueltasAgotadas => {
                 let motivo = format!(
@@ -369,7 +336,7 @@ fn correr_interno(
                 gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
                 break;
             }
-            // El `Gate` de cupo ya quedó dentro del bucle. La corrida sigue como en un corte.
+            // El `Gate` de cupo ya quedó dentro de `lanzar_rol`. La corrida sigue como en un corte.
             Fin::SinCupo => break,
             Fin::Codigo(codigo) if codigo != 0 => {
                 let motivo = format!("rol {} salió con {codigo}", nombre_rol(*rol));
@@ -382,7 +349,8 @@ fn correr_interno(
 
     // f) Después de planifica, la aprobación automática del plan. Solo si planifica salió bien.
     // Reanudar no la vuelve a escribir si ya está en el log.
-    let plan_aprobado = lanzados
+    let plan_aprobado = av
+        .lanzados
         .iter()
         .any(|l| l.rol == Rol::Planifica && l.codigo == 0);
     if plan_aprobado && !plan_ya_aprobado(&ruta_eventos, &id)? {
@@ -393,18 +361,7 @@ fn correr_interno(
     }
 
     // g) Lecturas del oráculo en cada transcript, también los de vueltas cortadas.
-    // Las líneas que no son JSON también se anotan.
-    for (rol, ruta) in &transcripts {
-        let revision = registrar_lecturas(ruta, &id, &huellas, &ruta_eventos)
-            .map_err(|e| de_observe("revisar el transcript", e))?;
-        if !revision.avisos.is_empty() {
-            let motivo = format!(
-                "transcript con líneas que no son JSON: {}",
-                revision.avisos.join("; ")
-            );
-            gate(&ruta_eventos, &id, FASE_TRANSCRIPT, motivo, Some(*rol))?;
-        }
-    }
+    revisar_transcripts(&c, &av.transcripts)?;
 
     // h) Se quita la copia de la credencial. La guardia lo hace y su error llega acá.
     // Después se arma el estado final en un repo nuevo.
@@ -414,11 +371,7 @@ fn correr_interno(
     git_seguro::repo_limpio_desde(&corrida.repo, &repo_final, MENSAJE_ESTADO_FINAL)?;
 
     // i) Evaluación. Un error no pierde la corrida: la fila lleva el veredicto por defecto.
-    let opciones = OpcionesOraculo {
-        home: Some(deps.home.to_path_buf()),
-        ..OpcionesOraculo::default()
-    };
-    let veredicto = match (deps.evaluar)(&repo_final, &tarea_cargada, &opciones) {
+    let primera = match evaluar_repo(deps, &repo_final, &tarea_cargada) {
         Ok(veredicto) => veredicto,
         Err(error) => {
             let motivo = format!("la evaluación falló: {error}");
@@ -428,6 +381,13 @@ fn correr_interno(
                 ..Veredicto::default()
             }
         }
+    };
+    // Vuelta de eficiencia: si la evaluación marca regresión, un lanzamiento más y una evaluación más.
+    let regresiones = regresiones_de_vuelta(&primera, &config_cargada.roles, &av.lanzados);
+    let veredicto = if regresiones.is_empty() {
+        primera
+    } else {
+        correr_vuelta_eficiencia(&c, &mut av, primera, &regresiones)?.veredicto
     };
 
     // j) La fila. El resumen sale de los eventos de esta corrida.
@@ -439,7 +399,7 @@ fn correr_interno(
         .iter()
         .filter_map(|(rol, eleccion)| eleccion.modelo.clone().map(|m| (*rol, m)))
         .collect();
-    modelos.extend(modelos_lanzados);
+    modelos.extend(av.modelos_lanzados);
     let fila = Fila {
         id,
         ts: observe::ahora().0,
@@ -451,7 +411,7 @@ fn correr_interno(
         resumen,
         modelos,
         forma: config_cargada.forma(config),
-        vueltas: lanzamientos,
+        vueltas: av.lanzamientos,
         reanudada: reanuda.is_some(),
         ..Fila::default()
     };
@@ -460,6 +420,240 @@ fn correr_interno(
         fuente,
     })?;
     Ok(fila)
+}
+
+/// Lanza `rol` hasta que una vuelta termine, o hasta agotar `MAX_VUELTAS` cortes por plazo. Cada vuelta
+/// rutea el rol, espera la vigencia del login y guarda su transcript. Una vuelta que sigue a un corte
+/// lleva `PROMPT_CONTINUACION` antes de `prompt_rol`. `sesion` y `retoma` valen para la primera vuelta.
+fn lanzar_rol(
+    c: &Lanza,
+    av: &mut Avance,
+    rol: Rol,
+    prompt_rol: &str,
+    mut sesion: Option<String>,
+    retoma: bool,
+) -> Result<Fin, ErrorCorre> {
+    let mut vuelta: u32 = 0;
+    let fin = loop {
+        // Desde el primer lanzamiento de esta invocación, cada uno vuelve a leer la credencial: se revisa su vigencia antes.
+        if av.ya_lanzo {
+            esperar_vigencia_del_rol(c.deps.ejecutor, c.ruta_eventos, c.id, rol)?;
+        }
+        // Antes de cada lanzamiento el rol vuelve a rutear. Si ya no va por cupo, la corrida para acá.
+        let modelo = match rutear_por_cupo(c.deps.home, rol, c.tarea) {
+            Ok(modelo) => modelo,
+            Err(causa) => {
+                let motivo = format!(
+                    "cupo agotado antes del rol {}, vuelta {}: {causa}",
+                    nombre_rol(rol),
+                    vuelta + 1
+                );
+                gate(c.ruta_eventos, c.id, FASE_ROL, motivo, Some(rol))?;
+                break Fin::SinCupo;
+            }
+        };
+        vuelta += 1;
+        av.lanzamientos += 1;
+        av.ya_lanzo = true;
+        let n = av.lanzamientos;
+        let prompt = if retoma || vuelta > 1 {
+            format!("{PROMPT_CONTINUACION} {prompt_rol}")
+        } else {
+            prompt_rol.to_string()
+        };
+        let args = args_claude(&prompt, &modelo, c.deps.home, &c.config_cargada.claude, rol);
+        let args = match &sesion {
+            Some(sesion) => con_resume(args, sesion),
+            None => args,
+        };
+        // El plazo sale de la vida del login en este momento, no de la del inicio de la corrida.
+        let plazo = plazo_de_lanzamiento(c.deps.ejecutor.vida_restante()?);
+        let lanzamiento = Lanzamiento {
+            rol,
+            args,
+            env: env_del_builder(&c.config_cargada.claude, rol, c.deps.entorno),
+            repo: c.corrida.repo.clone(),
+            plugin: c
+                .config_cargada
+                .claude
+                .plugin_de(rol)
+                .map(Path::to_path_buf),
+            plazo,
+        };
+        av.modelos_lanzados.insert(rol, modelo.clone());
+        let inicio = Instant::now();
+        let resultado = c.deps.ejecutor.lanzar(&lanzamiento);
+        let duracion = inicio.elapsed();
+        match resultado {
+            Ok(salida) => {
+                // Lo que se guarda, y lo que se valida, es el stdout ya redactado.
+                let guardado = stdout_redactado(c.ruta_eventos, c.corrida, &salida.stdout)?;
+                let ruta = guardar_transcript(c.deps.home, c.id, n, rol, &guardado)?;
+                av.transcripts.push((rol, ruta.clone()));
+                // Sin `result` exitoso el rol no evalúa: no hay resultado que evaluar.
+                let linea = match resultado_exitoso(&guardado) {
+                    Ok(linea) => linea,
+                    Err(causa) => {
+                        let motivo =
+                            format!("rol {} sin resultado exitoso: {causa}", nombre_rol(rol));
+                        gate(c.ruta_eventos, c.id, FASE_ROL, motivo.clone(), Some(rol))?;
+                        return Err(ErrorCorre::Ejecutor(motivo));
+                    }
+                };
+                let codigo = salida.codigo;
+                let lanzado = Lanzado {
+                    n,
+                    rol,
+                    codigo,
+                    linea,
+                };
+                // La sesión se registra al terminar el rol: si un rol siguiente aborta, su costo ya queda.
+                registrar_sesion(c.deps.home, c.id, &lanzado, &lanzado.linea, c.ruta_eventos)?;
+                av.lanzados.push(lanzado);
+                break Fin::Codigo(codigo);
+            }
+            Err(ErrorCorre::Cortado { mensaje, stdout }) => {
+                // Un corte no aborta: deja su transcript parcial, su costo y la sesión para la siguiente vuelta.
+                let ruta = registrar_corte(
+                    c.deps.home,
+                    c.ruta_eventos,
+                    c.corrida,
+                    rol,
+                    n,
+                    &modelo,
+                    &stdout,
+                    duracion,
+                )?;
+                av.transcripts.push((rol, ruta));
+                let motivo = format!("rol {} cortado por plazo: {mensaje}", nombre_rol(rol));
+                gate(c.ruta_eventos, c.id, FASE_LANZAMIENTO, motivo, Some(rol))?;
+                if let Some(id_sesion) = sesion_de_transcript(&stdout) {
+                    sesion = Some(id_sesion);
+                }
+                if vuelta == MAX_VUELTAS {
+                    break Fin::VueltasAgotadas;
+                }
+            }
+            Err(error) => {
+                let motivo = format!("rol {} no arrancó: {error}", nombre_rol(rol));
+                gate(c.ruta_eventos, c.id, FASE_LANZAMIENTO, motivo, Some(rol))?;
+                return Err(error);
+            }
+        }
+    };
+    Ok(fin)
+}
+
+/// Revisa cada transcript con las huellas del oráculo. Anota sus lecturas y sus líneas que no son JSON.
+fn revisar_transcripts(c: &Lanza, transcripts: &[(Rol, PathBuf)]) -> Result<(), ErrorCorre> {
+    for (rol, ruta) in transcripts {
+        let revision = registrar_lecturas(ruta, c.id, c.huellas, c.ruta_eventos)
+            .map_err(|e| de_observe("revisar el transcript", e))?;
+        if !revision.avisos.is_empty() {
+            let motivo = format!(
+                "transcript con líneas que no son JSON: {}",
+                revision.avisos.join("; ")
+            );
+            gate(c.ruta_eventos, c.id, FASE_TRANSCRIPT, motivo, Some(*rol))?;
+        }
+    }
+    Ok(())
+}
+
+/// Evalúa el repo final con la tarea. Un error se devuelve tal cual: quien llama decide qué `Gate` anota.
+fn evaluar_repo(deps: &DepsCorre, repo: &Path, tarea: &Tarea) -> Result<Veredicto, ErrorOraculo> {
+    let opciones = OpcionesOraculo {
+        home: Some(deps.home.to_path_buf()),
+        ..OpcionesOraculo::default()
+    };
+    (deps.evaluar)(repo, tarea, &opciones)
+}
+
+/// Vuelta de eficiencia: relanza el último rol con su sesión y la instrucción de las medidas que empeoraron.
+/// Revisa solo sus transcripts nuevos, quita su copia de la credencial y evalúa otra vez: esa es la que
+/// cuenta. Si la vuelta falla, la fila se queda con la primera evaluación y el `Gate` dice por qué.
+/// Solo se hace una vuelta: la segunda evaluación no vuelve a pedir otra.
+fn correr_vuelta_eficiencia(
+    c: &Lanza,
+    av: &mut Avance,
+    primera: Veredicto,
+    regresiones: &[MedidaEficiencia],
+) -> Result<ResultadoVuelta, ErrorCorre> {
+    let Some((rol, sesion)) = av
+        .lanzados
+        .last()
+        .map(|ultimo| (ultimo.rol, sesion_de_transcript(ultimo.linea.as_bytes())))
+    else {
+        return quedarse_con_la_primera(c, primera, false, "sin rol que relanzar".into(), None);
+    };
+    let prompt_rol = c
+        .config_cargada
+        .prompt
+        .get(&rol)
+        .cloned()
+        .unwrap_or_default();
+    let instruccion = prompt_de_eficiencia(regresiones, &prompt_rol);
+    // La vuelta tiene su propia copia de la credencial. La guardia la quita en todo camino de salida.
+    let guardia = GuardiaCredencial {
+        corrida: c.corrida,
+        hecho: false,
+    };
+    let desde = av.transcripts.len();
+    let antes = av.lanzamientos;
+    let fin = lanzar_rol(c, av, rol, &instruccion, sesion, false);
+    let corrio = av.lanzamientos > antes;
+    // Solo los transcripts de la vuelta: los anteriores ya se revisaron en el paso g.
+    revisar_transcripts(c, &av.transcripts[desde..])?;
+    guardia.cerrar()?;
+    let motivo = match fin {
+        Ok(Fin::Codigo(0)) => None,
+        Ok(Fin::Codigo(codigo)) => Some(format!("rol {} salió con {codigo}", nombre_rol(rol))),
+        Ok(Fin::VueltasAgotadas) => Some(format!(
+            "rol {} agotó {MAX_VUELTAS} vueltas cortadas por plazo",
+            nombre_rol(rol)
+        )),
+        Ok(Fin::SinCupo) => Some(format!(
+            "sin cupo para la vuelta de eficiencia del rol {}",
+            nombre_rol(rol)
+        )),
+        Err(error) => Some(format!("la vuelta de eficiencia falló: {error}")),
+    };
+    if let Some(motivo) = motivo {
+        return quedarse_con_la_primera(c, primera, corrio, motivo, Some(rol));
+    }
+    // El estado final de la vuelta es un repo nuevo, como el de la primera evaluación.
+    let repo_final = c.corrida.dir.join("final-eficiencia");
+    let segunda = git_seguro::repo_limpio_desde(&c.corrida.repo, &repo_final, MENSAJE_ESTADO_FINAL)
+        .map_err(|error| format!("no se armó el estado final de la vuelta: {error}"))
+        .and_then(|()| {
+            evaluar_repo(c.deps, &repo_final, c.tarea_cargada)
+                .map_err(|error| format!("la segunda evaluación falló: {error}"))
+        });
+    match segunda {
+        Ok(veredicto) => Ok(ResultadoVuelta {
+            veredicto,
+            corrio,
+            motivo: None,
+        }),
+        Err(motivo) => quedarse_con_la_primera(c, primera, corrio, motivo, Some(rol)),
+    }
+}
+
+/// Deja la primera evaluación para la fila y anota el motivo en un `Gate` de fase `eficiencia`.
+/// Un error al escribir el `Gate` sí es error de la corrida.
+fn quedarse_con_la_primera(
+    c: &Lanza,
+    primera: Veredicto,
+    corrio: bool,
+    motivo: String,
+    rol: Option<Rol>,
+) -> Result<ResultadoVuelta, ErrorCorre> {
+    gate(c.ruta_eventos, c.id, FASE_EFICIENCIA, motivo.clone(), rol)?;
+    Ok(ResultadoVuelta {
+        veredicto: primera,
+        corrio,
+        motivo: Some(motivo),
+    })
 }
 
 /// Un transcript guardado de una corrida anterior: `<n>-<rol>.jsonl` en `transcripts/<id>/`.
@@ -733,7 +927,6 @@ fn resultado_exitoso(stdout: &[u8]) -> Result<String, String> {
 }
 
 /// Medidas de `eficiencia_auto` con regresión que justifican una vuelta. Vacío quiere decir: no hay vuelta.
-#[cfg_attr(not(test), allow(dead_code))]
 fn regresiones_de_vuelta(
     veredicto: &Veredicto,
     roles: &[Rol],
@@ -1188,6 +1381,10 @@ mod tests {
         fsmonitor_marca: Option<PathBuf>,
         /// Lanzamientos que hizo antes una corrida anterior. El `session_id` falso sigue desde aquí.
         sesion_desde: u32,
+        /// Desde este lanzamiento (base 1), el builder sale con código 1.
+        falla_desde: Option<usize>,
+        /// Desde este lanzamiento (base 1), el lanzamiento falla después de montar la credencial.
+        falla_tras_montar_desde: Option<usize>,
     }
 
     impl EjecutorBuilder for Builder {
@@ -1248,7 +1445,8 @@ mod tests {
             let mut con_extra = l.clone();
             con_extra.env.extend(self.extra.iter().cloned());
             let mut salida = EjecutorFalso.lanzar(&con_extra)?;
-            if self.falla == Some(l.rol) {
+            let lanzamiento_n = self.lanzados.borrow().len();
+            if self.falla == Some(l.rol) || self.falla_desde.is_some_and(|d| lanzamiento_n >= d) {
                 salida.codigo = 1;
             }
             if let Some(texto) = self.credencial {
@@ -1264,7 +1462,11 @@ mod tests {
                 let _ = fs::remove_file(&ruta);
                 std::os::unix::fs::symlink(destino, &ruta).expect("enlace de credencial");
             }
-            if self.falla_tras_montar {
+            if self.falla_tras_montar
+                || self
+                    .falla_tras_montar_desde
+                    .is_some_and(|d| lanzamiento_n >= d)
+            {
                 return Err(ErrorCorre::Ejecutor(
                     "prueba: falla después de montar".into(),
                 ));
@@ -3818,5 +4020,317 @@ mod tests {
         let corrida = corrida_de_prueba(tmp.path());
         let vigia = VigilaSenales::iniciar(&corrida).expect("registra");
         drop(vigia);
+    }
+
+    // ---- Vuelta de eficiencia ----
+
+    /// Veredicto de prueba con la marca dada en `commit`. Con `regresion`, trae una medida con regresión.
+    fn veredicto_marcado(marca: &str, regresion: bool) -> Veredicto {
+        Veredicto {
+            commit: marca.into(),
+            informe: Some(informe()),
+            eficiencia_auto: if regresion {
+                vec![medida_eficiencia("tiempo_tests", true)]
+            } else {
+                Vec::new()
+            },
+            ..Veredicto::default()
+        }
+    }
+
+    /// Evaluador de prueba: las primeras `hasta` llamadas traen regresión. Cuenta sus llamadas y marca cada
+    /// veredicto con su número, como `evaluacion-<n>`.
+    fn evaluador_con_regresion_hasta(
+        llamadas: &Cell<u32>,
+        hasta: u32,
+    ) -> impl Fn(&Path, &Tarea, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + '_ {
+        move |_r: &Path, _t: &Tarea, _o: &OpcionesOraculo| {
+            llamadas.set(llamadas.get() + 1);
+            let n = llamadas.get();
+            Ok(veredicto_marcado(&format!("evaluacion-{n}"), n <= hasta))
+        }
+    }
+
+    /// Ejecutor que llena el cupo del bloque de `home` tras el lanzamiento número `tras` (base 1).
+    struct AgotaCupoTrasLanzamiento<'a> {
+        interno: &'a dyn EjecutorBuilder,
+        home: &'a Path,
+        tras: usize,
+        lanzamientos: Cell<usize>,
+    }
+
+    impl EjecutorBuilder for AgotaCupoTrasLanzamiento<'_> {
+        fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+            let resultado = self.interno.lanzar(l);
+            let n = self.lanzamientos.get() + 1;
+            self.lanzamientos.set(n);
+            if n == self.tras {
+                llenar_cupo(self.home);
+            }
+            resultado
+        }
+
+        fn verificar_antes(&self, plazo: Duration) -> Result<(), ErrorCorre> {
+            self.interno.verificar_antes(plazo)
+        }
+
+        fn espera_vigencia(&self) -> EsperaVigencia {
+            self.interno.espera_vigencia()
+        }
+
+        fn vida_restante(&self) -> Result<Option<Duration>, ErrorCorre> {
+            self.interno.vida_restante()
+        }
+    }
+
+    #[test]
+    fn corre_eficiencia_evaluador_con_regresion_y_despues_ninguna_lanza_dos_veces_el_ultimo_rol_y_evalua_dos_veces()
+     {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_regresion_hasta(&llamadas, 1);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(llamadas.get(), 2, "evalúa dos veces");
+        assert_eq!(
+            fila.veredicto.commit, "evaluacion-2",
+            "la fila lleva la segunda"
+        );
+        assert_eq!(fila.vueltas, 3, "planifica, construye y la vuelta");
+        let lanzados = builder.lanzados.borrow();
+        let roles: Vec<Rol> = lanzados.iter().map(|l| l.rol).collect();
+        assert_eq!(roles, vec![Rol::Planifica, Rol::Construye, Rol::Construye]);
+        assert!(
+            !lanzados[1].args.contains(&"--resume".to_string()),
+            "{:?}",
+            lanzados[1].args
+        );
+        assert!(
+            tiene_par(&lanzados[2].args, "--resume", "s1-2"),
+            "la vuelta retoma la sesión de construye: {:?}",
+            lanzados[2].args
+        );
+    }
+
+    #[test]
+    fn corre_eficiencia_la_instruccion_de_la_vuelta_nombra_medida_razon_y_numeros() {
+        let medida = MedidaEficiencia {
+            medida: "tiempo_tests".into(),
+            referencia: Some(10.0),
+            repo: Some(13.0),
+            razon: Some(1.3),
+            ruido: Some(0.05),
+            regresion: true,
+            motivo: None,
+        };
+        let texto = prompt_de_eficiencia(std::slice::from_ref(&medida), "haz hecho");
+        assert!(texto.starts_with(PROMPT_EFICIENCIA), "{texto}");
+        assert!(
+            texto.contains("- tiempo_tests: 1.30 veces la referencia (referencia 10, repo 13)"),
+            "{texto}"
+        );
+        assert!(texto.ends_with("haz hecho"), "{texto}");
+
+        let sin_valor = MedidaEficiencia {
+            razon: None,
+            referencia: None,
+            repo: None,
+            ..medida
+        };
+        let texto = prompt_de_eficiencia(&[sin_valor], "haz hecho");
+        assert!(
+            texto.contains("- tiempo_tests: sin valor veces la referencia (referencia sin valor, repo sin valor)"),
+            "{texto}"
+        );
+
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_regresion_hasta(&llamadas, 1);
+        correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        let lanzados = builder.lanzados.borrow();
+        let ultimo = lanzados.last().expect("un lanzamiento");
+        assert!(
+            ultimo.args[1].contains("tiempo_tests"),
+            "el prompt de la vuelta nombra la medida: {:?}",
+            ultimo.args
+        );
+    }
+
+    #[test]
+    fn corre_eficiencia_evaluador_que_siempre_da_regresion_evalua_dos_veces_no_tres() {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_regresion_hasta(&llamadas, u32::MAX);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(
+            llamadas.get(),
+            2,
+            "una sola vuelta: no evalúa una tercera vez"
+        );
+        assert_eq!(builder.lanzados.borrow().len(), 3);
+        assert_eq!(fila.vueltas, 3);
+        assert_eq!(fila.veredicto.commit, "evaluacion-2");
+    }
+
+    #[test]
+    fn corre_eficiencia_sin_cupo_para_la_vuelta_la_fila_lleva_la_primera_evaluacion_y_el_gate_nombra_el_motivo()
+     {
+        let e = entorno();
+        let builder = Builder::default();
+        let agota = AgotaCupoTrasLanzamiento {
+            interno: &builder,
+            home: &e.home,
+            tras: 2,
+            lanzamientos: Cell::new(0),
+        };
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_regresion_hasta(&llamadas, 1);
+        let fila =
+            correr_con_eval(&e, &agota, &[], CONFIG, &evaluar).expect("la corrida llega a la fila");
+        assert_eq!(llamadas.get(), 1, "solo la primera evaluación");
+        assert_eq!(
+            fila.veredicto.commit, "evaluacion-1",
+            "la fila lleva la primera"
+        );
+        assert_eq!(builder.lanzados.borrow().len(), 2, "la vuelta no se lanza");
+        assert_eq!(fila.vueltas, 2);
+        let motivos = gates(&e, FASE_EFICIENCIA);
+        assert_eq!(motivos.len(), 1, "{motivos:?}");
+        assert!(
+            motivos[0].contains("sin cupo") && motivos[0].contains("construye"),
+            "{motivos:?}"
+        );
+    }
+
+    #[test]
+    fn corre_eficiencia_la_copia_de_la_credencial_no_existe_al_terminar_tambien_si_la_vuelta_falla()
+    {
+        const CREDENCIAL: &str = "{\"claudeAiOauth\":{\"accessToken\":\"tok\"}}";
+
+        // Caso 1: la vuelta sale bien.
+        {
+            let e = entorno();
+            let builder = Builder {
+                credencial: Some(CREDENCIAL),
+                ..Builder::default()
+            };
+            let llamadas = Cell::new(0);
+            let evaluar = evaluador_con_regresion_hasta(&llamadas, 1);
+            correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+            assert_eq!(builder.lanzados.borrow().len(), 3, "la vuelta se lanza");
+            let copia = estado_de(&unica_corrida(&e.usuario).join("repo"))
+                .expect("estado de la corrida")
+                .join(".credentials.json");
+            assert!(!copia.exists(), "caso sin falla: {}", copia.display());
+        }
+
+        // Caso 2: la vuelta falla después de montar la copia. La corrida igual llega a la fila.
+        {
+            let e = entorno();
+            let builder = Builder {
+                credencial: Some(CREDENCIAL),
+                falla_tras_montar_desde: Some(3),
+                ..Builder::default()
+            };
+            let llamadas = Cell::new(0);
+            let evaluar = evaluador_con_regresion_hasta(&llamadas, 1);
+            let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar)
+                .expect("la vuelta que falla no tira la corrida");
+            assert_eq!(
+                builder.lanzados.borrow().len(),
+                3,
+                "la vuelta se lanza y falla"
+            );
+            assert_eq!(
+                fila.veredicto.commit, "evaluacion-1",
+                "la fila lleva la primera"
+            );
+            let motivos = gates(&e, FASE_EFICIENCIA);
+            assert!(
+                motivos
+                    .iter()
+                    .any(|m| m.contains("falla después de montar")),
+                "{motivos:?}"
+            );
+            let copia = estado_de(&unica_corrida(&e.usuario).join("repo"))
+                .expect("estado de la corrida")
+                .join(".credentials.json");
+            assert!(
+                !copia.exists(),
+                "la vuelta fallida no deja la copia: {}",
+                copia.display()
+            );
+        }
+    }
+
+    #[test]
+    fn corre_eficiencia_sin_regresion_lanza_y_evalua_una_sola_vez() {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_regresion_hasta(&llamadas, 0);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(llamadas.get(), 1, "una sola evaluación");
+        assert_eq!(builder.lanzados.borrow().len(), 2, "sin vuelta");
+        assert_eq!(fila.vueltas, 2);
+        assert_eq!(fila.veredicto.commit, "evaluacion-1");
+        assert!(
+            gates(&e, FASE_EFICIENCIA).is_empty(),
+            "sin vuelta no hay gate"
+        );
+    }
+
+    #[test]
+    fn corre_eficiencia_la_vuelta_con_codigo_distinto_de_0_deja_la_primera_evaluacion() {
+        let e = entorno();
+        let builder = Builder {
+            falla_desde: Some(3),
+            ..Builder::default()
+        };
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_regresion_hasta(&llamadas, 1);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar)
+            .expect("la vuelta que sale con 1 no tira la corrida");
+        assert_eq!(builder.lanzados.borrow().len(), 3, "la vuelta se lanza");
+        assert_eq!(llamadas.get(), 1, "no hay segunda evaluación");
+        assert_eq!(
+            fila.veredicto.commit, "evaluacion-1",
+            "la fila lleva la primera"
+        );
+        let motivos = gates(&e, FASE_EFICIENCIA);
+        assert_eq!(motivos.len(), 1, "{motivos:?}");
+        assert!(motivos[0].contains("salió con 1"), "{motivos:?}");
+    }
+
+    #[test]
+    fn corre_eficiencia_segunda_evaluacion_con_error_deja_la_primera() {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar =
+            |_r: &Path, _t: &Tarea, _o: &OpcionesOraculo| -> Result<Veredicto, ErrorOraculo> {
+                llamadas.set(llamadas.get() + 1);
+                if llamadas.get() == 1 {
+                    Ok(veredicto_marcado("evaluacion-1", true))
+                } else {
+                    Err(ErrorOraculo::Infra("segunda evaluación rota".into()))
+                }
+            };
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar)
+            .expect("la segunda evaluación rota no tira la corrida");
+        assert_eq!(llamadas.get(), 2, "evalúa dos veces");
+        assert_eq!(
+            fila.veredicto.commit, "evaluacion-1",
+            "la fila lleva la primera"
+        );
+        assert_eq!(fila.vueltas, 3);
+        let motivos = gates(&e, FASE_EFICIENCIA);
+        assert_eq!(motivos.len(), 1, "{motivos:?}");
+        assert!(
+            motivos[0].contains("segunda evaluación rota"),
+            "{motivos:?}"
+        );
     }
 }
