@@ -20,6 +20,8 @@ pub mod tipos;
 pub mod track;
 
 mod limpieza;
+#[cfg(test)]
+mod prueba_ejecutable;
 
 pub use cli::Cli;
 pub use error::Error;
