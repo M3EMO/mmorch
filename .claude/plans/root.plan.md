@@ -9995,3 +9995,153 @@ El brief es `docs/builds/brief-local-129.md`.
 **Lo que sí corre en paralelo, sin código y sin API:** recalibrar las dimensiones de oráculo de t1 a t3 con el binario de la cadena 110 a 127. Son Seguridad, Funciona, Completitud y Pruebas. P102 a pide para ellas un defecto detectado y todos los limpios bien. No usan el juez. Con la 127, Pruebas cuesta menos tiempo.
 
 **Preguntas al usuario:** P107 sigue abierta.
+
+## Vuelta del 2026-11-14 (47): la carpeta fija que no llega, Eficiencia, y la recalibración de oráculo
+
+**Estado.**
+- Las dos suites con podman de `laptop/cadena-110-127` (f70e05d) dieron 3534, 0 y 5, solas. La carrera de la 126 no apareció.
+- **El reparto 3 falló:** cargo-mutants 27.1.0 rechaza `--in-place` con `--jobs 1`. El orquestador escribió y lanzó la Tarea 127b: sin `--jobs` con carpeta fija. Terminó en verde (f536143). `laptop/cadena-110-127b` (352fd99) la suma.
+- **El reparto 4, con la 127b:** Pruebas con n=4 tardó 392 s, con exactitud balanceada 1,0. La carpeta fija solo se usó en los dos últimos casos.
+- Las Tareas 128 (8e35101) y 129 (c9aaff2) terminaron en verde sin podman. `laptop/cadena-110-129` (5409dbe) las junta sobre 352fd99. Su suite con podman corre ahora.
+- P107 espera la respuesta del usuario.
+- El disco está al 98 %, con 11 GB libres.
+
+**Un error mío en el brief 127.** No revisé que cargo-mutants acepte `--in-place` con `--jobs 1`. El orquestador lo arregló con la 127b.
+
+## 1. Las preguntas de la 128
+
+1. **El tope de defectos sin veredicto es el 20 % de `defectos + defectos_sin_veredicto`:** confirmo.
+2. **Las filas viejas se suman con 0:** acepto. Contaban los defectos sin veredicto como no detectados, y eso las hace más estrictas. Las de oráculo se recalibran en esta vuelta, en la sección 5. Las de juez esperan P107.
+3. **Una identidad con copias toma el caso de menor índice:** acepto por ahora. Va a la lista de limpiezas: si una copia tiene veredicto, la identidad debe tomar esa.
+4. **No se invalidan las filas guardadas:** acepto. Una medición nueva gana, porque gana la fila más reciente.
+5. **Los limpios compartidos entre Estructura, Arquitectura y Diseño:** acepto por ahora. Un limpio que Diseño juzgó con los excluidos de Diseño puede servir a Arquitectura sin los excluidos de Arquitectura. El error solo puede dejar un limpio sin veredicto, nunca dar uno bien de más. En la próxima medición con juez, el orquestador cuenta cuántos limpios reusados quedan sin veredicto por cobertura. Si hay alguno, se arregla.
+6. **Un ítem en piso no recibe defectos mientras otro pueda bajar:** acepto. Es la regla de la 128.
+7. **Si ninguno puede bajar, se rota entre todos:** acepto.
+8. **Ningún caché guarda la rotación:** acepto. El reuso de limpios usa los casos impares, que no llevan defecto.
+
+## 2. Las preguntas de la 129
+
+1. **Un archivo con `mod x {` en línea se salta entero:** acepto. El `static` va en la raíz del archivo.
+2. **`en_cambio` queda en falso:** acepto. El lugar es un archivo del cambio, no una línea tocada.
+3. **Las calibraciones guardadas de Diseño y Arquitectura quedan viejas:** sí. La próxima medición con juez las reemplaza.
+4. **El cambio de la cuenta de llamadas en dos tests de `calibra.rs`:** acepto. Es un literal que la tarea mueve.
+
+## 3. Por qué la base y dos casos no usan la carpeta fija
+
+**Lo que muestra `reparto4/podman.jsonl`.** Las cinco corridas llevan `--in-place`, así que el valor de hilo de la 127 sí estaba fijado. Pero los montajes de `/salida` difieren:
+
+| Corrida | `/salida` | Tiempo |
+|---|---|---|
+| Base | `sondas-N94ort` | 108 s |
+| Caso 1 | `sondas-qDvakO` | 79 s |
+| Caso 2 | `sondas-AFf6l5` | 81 s |
+| Caso 3 | `evaluar-gX2pzV/mutacion` | 80 s, en frío |
+| Caso 4 | `evaluar-gX2pzV/mutacion` | 37,7 s, tibio |
+
+**La causa, en `src/oracle/memo.rs`.**
+- La calibración envuelve el ejecutor de sondas en dos capas de memo: `EjecutorGrabador` (línea 91) en la base, y `EjecutorReusador` (línea 147) en los casos con reuso.
+- **Ninguno implementa `ejecutar_en`.** Toman el valor por defecto del trait (`src/oracle/perfiles/herramientas.rs:39`), que llama a `ejecutar` e ignora la carpeta.
+- Su `ejecutar` llama al `ejecutar` del ejecutor real. `EjecutorContenedor::ejecutar` crea un `/salida` nuevo, `sondas-<azar>`.
+- Los casos 3 y 4 no pasaron por el memo. Llegaron directo a `EjecutorContenedor::ejecutar_en`, que sí usa la carpeta.
+
+**El caso 4 mide la ganancia:** 37,7 s con el `target` tibio, contra 80 s en frío.
+
+**El arreglo es la Tarea 130.**
+1. `EjecutorGrabador` y `EjecutorReusador` implementan `ejecutar_en`, y lo pasan al ejecutor real.
+2. El grabador anota la salida igual que en `ejecutar`.
+3. El reusador devuelve la salida grabada si la toma, igual que en `ejecutar`. Si no, llama a `ejecutar_en` del real.
+4. Un test por envoltorio prueba que la carpeta llega al ejecutor real.
+
+**La lección de diseño.** Un método del trait con valor por defecto se pierde en cada envoltorio. La 130 no quita el valor por defecto, porque más de veinte ejecutores falsos de tests lo usan. Suma los tests de los dos envoltorios de producción.
+
+**La ganancia esperada.** La base sigue en frío, unos 108 s. Cada caso baja a unos 38 s. Pruebas con n=4 bajaría de 392 s a unos 290 s.
+
+El brief es `docs/builds/brief-local-130.md`. Toca solo `src/oracle/memo.rs`.
+
+## 4. La Tarea 131: Eficiencia sin `[eficiencia]`
+
+**Dos partes, de la vuelta (43), sección 4.**
+
+**El defecto: `LastreDeMemoria`, para `eficiencia.capacidad`.**
+- Inyecta en una función del cambio una reserva grande que se escribe y se suelta al salir: `let _lastre = std::hint::black_box(vec![1u8; 64 << 20]);`.
+- **Por qué memoria y no tiempo.** El pico de memoria no depende de cuántas veces se llama la función, porque cada reserva se suelta antes de la siguiente. Un retardo de tiempo sí depende, y puede llevar un test a su plazo.
+- **Por qué `vec![1u8; ...]`.** Un vector de ceros puede pedir páginas sin escribirlas, y no sube la memoria residente. Con unos, las escribe.
+- En t1, la memoria de los tests es de 42 MB. 64 MB más da una razón cercana a 2,5. Pasa el 1,5 de P105 a.
+- Solo se detecta si los tests comunes llaman a la función. Si no la llaman, el caso queda no detectado, y eso es honesto.
+
+**La referencia reusada en la calibración.**
+- La base mide el lado `bootstrap/` y lo guarda. Los casos reusan esa serie, y solo miden el lado del repo.
+- El ruido de la referencia sigue saliendo de sus tres corridas.
+
+**¿Corre en paralelo con la 130? Sí.** La 130 toca solo `src/oracle/memo.rs`. La 131 toca `src/oracle/calibra/inyectar.rs`, `src/oracle/calibra/defectos.rs` (tests), `src/oracle/eficiencia.rs` y `src/oracle/calibra.rs`.
+
+El brief es `docs/builds/brief-local-131.md`.
+
+## 5. La recalibración de las dimensiones de oráculo
+
+**Qué dimensiones.** Seguridad, Funciona, Completitud y Pruebas, en s2-t1, s2-t2 y s2-t3. No usan el juez. Estructura tiene ítems del juez, y espera P107. Eficiencia espera la 131. Entrega no aplica: ninguna de las tres trae `[entrega]`.
+
+**¿Antes o después de la 130? Antes, apenas la suite de `laptop/cadena-110-129` dé verde.** La 130 solo cambia el tiempo. Los comandos, los mutantes y los resultados son los mismos. La huella no cambia. Esperarla demora la medición sin ganar nada en el resultado.
+
+**¿En el `ROOT_HOME` real o en una copia? En el real, con un respaldo antes.**
+- Las filas deben quedar en el real para que la evaluación las use.
+- Una copia pide pasar las filas a mano después. Eso es más propenso a errores que un respaldo.
+- La medición no gasta API, y el binario tiene la suite en verde.
+- El respaldo se hace con reflink, así que casi no ocupa disco.
+
+**n=4 por dimensión y tarea:** dos defectos y dos limpios. P102 a pide para una dimensión de oráculo un defecto detectado y todos los limpios bien, con las tareas juntas. Con tres tareas son seis defectos y seis limpios por dimensión.
+
+```bash
+set -euo pipefail
+RAIZ=/home/mpera/.claude/orchestration
+HOME_ROOT=$HOME/.local/share/root
+P=$HOME/.cache/root-wt/recal-oraculo
+mkdir -p "$P"
+
+# 1. El binario de la cadena 110 a 129.
+git -C "$RAIZ" worktree add --detach "$P/wt" laptop/cadena-110-129
+git -C "$P/wt" config --worktree core.hooksPath .githooks
+CARGO_TARGET_DIR="$P/target" cargo build --release --manifest-path "$P/wt/Cargo.toml"
+R="$P/target/release/r00t"
+
+# 2. El respaldo del ROOT_HOME real, con reflink.
+cp -a --reflink=always "$HOME_ROOT/calibracion.json" "$P/calibracion.json.antes"
+cp -a --reflink=always "$HOME_ROOT/calibracion" "$P/calibracion.antes"
+
+# 3. Las doce calibraciones, sin claves. Una a la vez.
+for t in 1 2 3; do
+  for d in seguridad funciona completitud pruebas; do
+    a=$(date +%s)
+    env -u DEEPSEEK_API_KEY -u ANTHROPIC_API_KEY ROOT_HOME="$HOME_ROOT" \
+      "$R" oraculo calibrar --tarea "s2-t$t" --dimension "$d" --n 4 --json \
+      --repo "$HOME/.cache/root-wt/mineria/s2/rep/t$t-ref" \
+      > "$P/t$t-$d.json" 2> "$P/t$t-$d.err" || echo "t$t $d rc $?" >> "$P/rc.txt"
+    b=$(date +%s)
+    echo "t$t $d $((b-a)) s" >> "$P/tiempos.txt"
+    df -B1 --output=avail "$HOME" | tail -1 >> "$P/disco.txt"
+  done
+done
+
+# 4. El resumen por fila.
+for f in "$P"/t*.json; do
+  jq -c --arg f "$(basename "$f")" '{f: $f, n, defectos, limpios, defectos_sin_veredicto, limpios_sin_veredicto, sensibilidad, especificidad, base_sin_veredicto, no_aplica, inestable}' "$f"
+done > "$P/resumen.jsonl"
+
+cat "$P/tiempos.txt" "$P/resumen.jsonl"
+cat "$P/rc.txt" 2>/dev/null || true
+```
+
+**La versión de cada dimensión,** con las tareas juntas, la calcula el planner con `resumen.jsonl`. No hace falta otra corrida.
+
+**Lo que se informa:** `resumen.jsonl`, `tiempos.txt`, `rc.txt` si existe, y el disco libre más bajo de `disco.txt`.
+
+**Si algo sale mal,** el orquestador vuelve el `ROOT_HOME` al respaldo:
+```bash
+cp -a --reflink=always "$P/calibracion.json.antes" "$HOME_ROOT/calibracion.json"
+```
+y le pregunta al usuario antes de tocar `calibracion/`.
+
+**Lista de limpiezas, nueva entrada:**
+- La identidad con copias de `defectos_distintos` (pregunta 3 de la 128).
+
+**Preguntas al usuario:** P107 sigue abierta.
