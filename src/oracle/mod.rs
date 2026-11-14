@@ -837,7 +837,7 @@ fn evaluar_con(
                 cache: cache.clone(),
                 rustsec: rustsec.clone(),
             });
-            eficiencia::medir(ej_inicial.as_ref(), ej_del_repo.as_ref())
+            eficiencia::medir(ej_inicial.as_ref(), ej_del_repo.as_ref(), &home.join("tmp"))
         } else {
             Vec::new()
         };

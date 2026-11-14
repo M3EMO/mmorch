@@ -3,13 +3,19 @@
 //! Cada lado corre en su propio ejecutor. `comparar` hace toda la aritmética.
 
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 use serde_json::Value;
 
+use crate::borrado;
+use crate::oracle::ErrorOraculo;
 use crate::oracle::descarga::PRELUDIO;
-use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
+use crate::oracle::perfiles::herramientas::{
+    EjecutorHerramienta, SalidaHerramienta, carpeta_de_salida,
+};
 
 /// Corridas por lado. rustc-perf: tres corridas y se compara el mínimo.
 pub const CORRIDAS: usize = 3;
@@ -124,6 +130,19 @@ fn combinar(medida: Medida, referencia: &Serie, repo: &Serie) -> ResultadoMedida
     }
 }
 
+/// Un lado de la medición: su ejecutor y su carpeta de `/salida`. Todas sus llamadas usan esa carpeta.
+struct Lado<'a> {
+    nombre: &'static str,
+    ej: &'a dyn EjecutorHerramienta,
+    salida: PathBuf,
+}
+
+impl Lado<'_> {
+    fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+        self.ej.ejecutar_en(cmd, &self.salida)
+    }
+}
+
 /// Guarda los paquetes y binarios de un lado. Sus nombres son aptos para un shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Metadatos {
@@ -220,8 +239,8 @@ fn parsear_metadata(json: &str) -> Result<Metadatos, String> {
     })
 }
 
-fn leer_metadata(ej: &dyn EjecutorHerramienta) -> Result<Metadatos, String> {
-    let salida = ej.ejecutar(&cmd_metadata()).map_err(|e| e.to_string())?;
+fn leer_metadata(lado: &Lado) -> Result<Metadatos, String> {
+    let salida = lado.ejecutar(&cmd_metadata()).map_err(|e| e.to_string())?;
     let json = salida
         .archivos
         .get("metadata.json")
@@ -276,8 +295,8 @@ fn parsear_lista(xml: &str) -> Result<Listas, String> {
     Ok(Listas { todos, pasan })
 }
 
-fn leer_listas(ej: &dyn EjecutorHerramienta) -> Result<Listas, String> {
-    let salida = ej.ejecutar(&cmd_lista()).map_err(|e| e.to_string())?;
+fn leer_listas(lado: &Lado) -> Result<Listas, String> {
+    let salida = lado.ejecutar(&cmd_lista()).map_err(|e| e.to_string())?;
     let xml = salida
         .archivos
         .get("lista.xml")
@@ -324,8 +343,8 @@ fn preparar_filtro(
 
 /// Mide tiempo y memoria de los tests. Corre los dos lados alternados, `CORRIDAS` veces.
 fn medir_tests(
-    inicial: &dyn EjecutorHerramienta,
-    repo: &dyn EjecutorHerramienta,
+    inicial: &Lado,
+    repo: &Lado,
     lista_i: &Result<Listas, String>,
     lista_r: &Result<Listas, String>,
 ) -> (ResultadoMedida, ResultadoMedida) {
@@ -338,15 +357,16 @@ fn medir_tests(
             );
         }
     };
-    let lados = [("inicial", inicial), ("repo", repo)];
+    let lados = [inicial, repo];
     let mut tiempo: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut memoria: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     for _ in 0..CORRIDAS {
-        for (k, (nombre, ej)) in lados.iter().enumerate() {
+        for (k, lado) in lados.iter().enumerate() {
+            let nombre = lado.nombre;
             if tiempo[k].is_err() && memoria[k].is_err() {
                 continue;
             }
-            match ej.ejecutar(&cmd_tests(&filtro)) {
+            match lado.ejecutar(&cmd_tests(&filtro)) {
                 Err(e) => {
                     let motivo = format!("{nombre}: {e}");
                     anotar(&mut tiempo[k], Err(motivo.clone()));
@@ -376,8 +396,8 @@ fn medir_tests(
 /// Mide la compilación y el tamaño de los binarios. Usa los paquetes y binarios del lado `repo`.
 /// Los dos lados tienen los mismos nombres de paquete, así que el comando sirve para ambos.
 fn medir_compilacion(
-    inicial: &dyn EjecutorHerramienta,
-    repo: &dyn EjecutorHerramienta,
+    inicial: &Lado,
+    repo: &Lado,
     meta_i: &Result<Metadatos, String>,
     meta_r: &Result<Metadatos, String>,
 ) -> (ResultadoMedida, ResultadoMedida) {
@@ -394,7 +414,7 @@ fn medir_compilacion(
         );
     };
     let sin = |motivo: &str| -> [Serie; 2] { [Err(motivo.into()), Err(motivo.into())] };
-    let lados = [("inicial", inicial), ("repo", repo)];
+    let lados = [inicial, repo];
     let mut compilacion: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     let mut tamano: [Serie; 2] = [Ok(vec![]), Ok(vec![])];
     if meta.paquetes.is_empty() {
@@ -410,11 +430,12 @@ fn medir_compilacion(
         }
         let comando = cmd_compilacion(&meta.paquetes, &meta.binarios);
         for corrida in 0..CORRIDAS {
-            for (k, (nombre, ej)) in lados.iter().enumerate() {
+            for (k, lado) in lados.iter().enumerate() {
+                let nombre = lado.nombre;
                 if compilacion[k].is_err() {
                     continue;
                 }
-                match ej.ejecutar(&comando) {
+                match lado.ejecutar(&comando) {
                     Err(e) => {
                         let motivo = format!("{nombre}: {e}");
                         anotar(&mut compilacion[k], Err(motivo.clone()));
@@ -465,11 +486,44 @@ pub struct ResultadoMedida {
 }
 
 /// Mide el repo contra el estado inicial. Siempre devuelve cuatro resultados, en orden de `Medida`.
+/// `tmp` es la carpeta padre (`home/tmp`): `medir` crea ahí su carpeta de trabajo y la borra al terminar,
+/// también con error. Cada lado tiene su subcarpeta: todas sus llamadas usan la misma `/salida`.
 pub fn medir(
     inicial: &dyn EjecutorHerramienta,
     repo: &dyn EjecutorHerramienta,
+    tmp: &Path,
 ) -> Vec<ResultadoMedida> {
-    // Primero la metadata y las listas de tests de cada lado. Luego las corridas.
+    let raiz = match crear_trabajo(tmp) {
+        Ok(raiz) => raiz,
+        Err(e) => {
+            let motivo = format!("carpeta de trabajo: {e}");
+            let medidas = [
+                Medida::TiempoTests,
+                Medida::MemoriaPico,
+                Medida::TiempoCompilacion,
+                Medida::TamanoBinario,
+            ];
+            return Vec::from(medidas.map(|m| sin_valor(m, motivo.clone())));
+        }
+    };
+    let lado_i = Lado {
+        nombre: "inicial",
+        ej: inicial,
+        salida: raiz.join("inicial"),
+    };
+    let lado_r = Lado {
+        nombre: "repo",
+        ej: repo,
+        salida: raiz.join("repo"),
+    };
+    let resultados = medir_lados(&lado_i, &lado_r);
+    // Un fallo de borrado no cambia las medidas: la carpeta queda y el siguiente `medir` la ignora.
+    let _ = borrado::borrar_dir_dentro(tmp, &raiz);
+    resultados
+}
+
+/// Las cuatro medidas de dos lados. Primero la metadata y las listas de tests de cada lado. Luego las corridas.
+fn medir_lados(inicial: &Lado, repo: &Lado) -> Vec<ResultadoMedida> {
     let meta_i = leer_metadata(inicial).map_err(|m| format!("inicial: {m}"));
     let meta_r = leer_metadata(repo).map_err(|m| format!("repo: {m}"));
     let lista_i = leer_listas(inicial).map_err(|m| format!("inicial: {m}"));
@@ -477,6 +531,19 @@ pub fn medir(
     let (tiempo, memoria) = medir_tests(inicial, repo, &lista_i, &lista_r);
     let (compilacion, tamano) = medir_compilacion(inicial, repo, &meta_i, &meta_r);
     vec![tiempo, memoria, compilacion, tamano]
+}
+
+/// Crea la carpeta de trabajo dentro de `tmp` y una subcarpeta por lado. Si falla a medias, borra lo creado.
+fn crear_trabajo(tmp: &Path) -> std::io::Result<PathBuf> {
+    let raiz = carpeta_de_salida(tmp)?.keep();
+    let subcarpetas = ["inicial", "repo"]
+        .iter()
+        .try_for_each(|lado| fs::create_dir(raiz.join(lado)));
+    if let Err(e) = subcarpetas {
+        let _ = borrado::borrar_dir_dentro(tmp, &raiz);
+        return Err(e);
+    }
+    Ok(raiz)
 }
 
 /// Lee la última línea que empieza con `marca` en la salida. `None` si falta o no es número.
@@ -622,7 +689,7 @@ mod tests {
         let log = RefCell::new(Vec::new());
         let inicial = sano("inicial", &log, &["a"]);
         let repo = sano("repo", &log, &["a"]);
-        let resultados = medir(&inicial, &repo);
+        let resultados = medir_de_prueba(&inicial, &repo);
         assert_eq!(resultados.len(), 4);
         let entradas = log.borrow();
         let esperado: Vec<String> = (0..CORRIDAS)
@@ -644,7 +711,7 @@ mod tests {
             lista: lista(&[("a", true), ("b", true)]),
             ..sano("repo", &log, &[])
         };
-        let resultados = medir(&inicial, &repo);
+        let resultados = medir_de_prueba(&inicial, &repo);
         let entradas = log.borrow();
         let corridas: Vec<&String> = entradas
             .iter()
@@ -674,7 +741,7 @@ mod tests {
             tests: sin_pico.into(),
             ..sano("repo", &log, &["a"])
         };
-        let resultados = medir(&inicial, &repo);
+        let resultados = medir_de_prueba(&inicial, &repo);
         let memoria = por_medida(&resultados, Medida::MemoriaPico);
         assert_eq!(memoria.motivo.as_deref(), Some("sin memory.peak"));
         assert_eq!(memoria.referencia, None);
@@ -694,7 +761,7 @@ mod tests {
             metadata: metadata("app", None),
             ..sano("repo", &log, &["a"])
         };
-        let resultados = medir(&inicial, &repo);
+        let resultados = medir_de_prueba(&inicial, &repo);
         let tamano = por_medida(&resultados, Medida::TamanoBinario);
         assert_eq!(tamano.motivo.as_deref(), Some("sin binarios"));
         assert_eq!(tamano.referencia, None);
@@ -711,7 +778,7 @@ mod tests {
             lista: lista(&[("b", true)]),
             ..sano("repo", &log, &[])
         };
-        let resultados = medir(&inicial, &repo);
+        let resultados = medir_de_prueba(&inicial, &repo);
         for medida in [Medida::TiempoTests, Medida::MemoriaPico] {
             let r = por_medida(&resultados, medida);
             assert_eq!(
@@ -735,7 +802,7 @@ mod tests {
             ..sano("repo", &log, &["a"])
         };
         let inicial = sano("inicial", &log, &["a"]);
-        let resultados = medir(&inicial, &roto);
+        let resultados = medir_de_prueba(&inicial, &roto);
         for medida in [Medida::TiempoCompilacion, Medida::TamanoBinario] {
             let r = por_medida(&resultados, medida);
             assert_eq!(
@@ -752,5 +819,103 @@ mod tests {
         assert_eq!(Medida::MemoriaPico.id(), "memoria_pico");
         assert_eq!(Medida::TiempoCompilacion.id(), "tiempo_compilacion");
         assert_eq!(Medida::TamanoBinario.id(), "tamano_binario");
+    }
+
+    /// `medir` con una carpeta temporal propia: los tests que no miran la carpeta no la nombran.
+    fn medir_de_prueba(
+        inicial: &dyn EjecutorHerramienta,
+        repo: &dyn EjecutorHerramienta,
+    ) -> Vec<ResultadoMedida> {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        medir(inicial, repo, tmp.path())
+    }
+
+    /// Ejecutor que anota la carpeta de `/salida` de cada llamada en `ejecutar_en` y responde con `Falso`.
+    /// Con `error_en = Some(n)`, la llamada número `n` (desde cero) falla con error de infraestructura.
+    /// `ejecutar` entra en pánico: toda llamada de la medición debe llevar carpeta.
+    struct ConCarpeta<'a> {
+        falso: Falso<'a>,
+        carpetas: RefCell<Vec<PathBuf>>,
+        error_en: Option<usize>,
+    }
+
+    impl EjecutorHerramienta for ConCarpeta<'_> {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            panic!("llamada sin carpeta de /salida: {cmd}");
+        }
+
+        fn ejecutar_en(&self, cmd: &str, salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+            let n = self.carpetas.borrow().len();
+            self.carpetas.borrow_mut().push(salida.to_path_buf());
+            if self.error_en == Some(n) {
+                return Err(ErrorOraculo::Infra("corte de prueba".into()));
+            }
+            self.falso.ejecutar(cmd)
+        }
+    }
+
+    /// Un lado con carpetas anotadas. Responde como un lado sano de un test.
+    fn con_carpeta<'a>(
+        lado: &'static str,
+        log: &'a RefCell<Vec<String>>,
+        error_en: Option<usize>,
+    ) -> ConCarpeta<'a> {
+        ConCarpeta {
+            falso: sano(lado, log, &["a"]),
+            carpetas: RefCell::new(Vec::new()),
+            error_en,
+        }
+    }
+
+    #[test]
+    fn medir_todas_las_llamadas_de_un_lado_usan_la_misma_carpeta() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let log = RefCell::new(Vec::new());
+        let inicial = con_carpeta("inicial", &log, None);
+        let repo = con_carpeta("repo", &log, None);
+        medir(&inicial, &repo, tmp.path());
+        let carpetas_i = inicial.carpetas.borrow();
+        assert!(carpetas_i.len() > CORRIDAS, "{carpetas_i:?}");
+        assert!(
+            carpetas_i.iter().all(|c| *c == carpetas_i[0]),
+            "{carpetas_i:?}"
+        );
+    }
+
+    #[test]
+    fn medir_los_dos_lados_usan_carpetas_distintas() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let log = RefCell::new(Vec::new());
+        let inicial = con_carpeta("inicial", &log, None);
+        let repo = con_carpeta("repo", &log, None);
+        medir(&inicial, &repo, tmp.path());
+        let carpetas_i = inicial.carpetas.borrow().clone();
+        let carpetas_r = repo.carpetas.borrow().clone();
+        assert_ne!(carpetas_i[0], carpetas_r[0]);
+        assert!(carpetas_r.iter().all(|c| !carpetas_i.contains(c)));
+    }
+
+    #[test]
+    fn medir_borra_su_carpeta_de_trabajo_tambien_con_error() {
+        for error_en in [None, Some(0), Some(2), Some(5)] {
+            let tmp = tempfile::tempdir().expect("temp dir");
+            let log = RefCell::new(Vec::new());
+            let inicial = con_carpeta("inicial", &log, error_en);
+            let repo = con_carpeta("repo", &log, None);
+            medir(&inicial, &repo, tmp.path());
+            let usadas: Vec<PathBuf> = inicial
+                .carpetas
+                .borrow()
+                .iter()
+                .chain(repo.carpetas.borrow().iter())
+                .cloned()
+                .collect();
+            assert!(!usadas.is_empty(), "error_en {error_en:?}");
+            for carpeta in &usadas {
+                assert!(!carpeta.exists(), "error_en {error_en:?}: {carpeta:?}");
+            }
+            let quedo: Vec<_> = fs::read_dir(tmp.path()).expect("lee tmp").collect();
+            assert!(quedo.is_empty(), "error_en {error_en:?}: {quedo:?}");
+        }
     }
 }
