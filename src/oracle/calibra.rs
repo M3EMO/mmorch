@@ -1838,7 +1838,8 @@ fn calibrar_medida_con_defectos(
             funciones: corridas_de_la_sonda(resultado_sonda.clone()).len() as u32,
             motivo: match &resultado_sonda {
                 Some(Err(motivo)) => Some(motivo.clone()),
-                _ => None,
+                None => Some(MOTIVO_SONDA_NO_CORRIO.to_string()),
+                Some(Ok(_)) => None,
             },
         }
     } else {
@@ -4442,6 +4443,16 @@ mod tests {
                 motivo: Some("motivo x".into()),
             }
         );
+        let sin_resultado = medir_eficiencia_con_sonda(&repo, &tarea, None);
+        assert_eq!(
+            sin_resultado.fila.expect("fila").sonda_lastre,
+            SondaLastre {
+                pedida: true,
+                corrio: false,
+                funciones: 0,
+                motivo: Some(MOTIVO_SONDA_NO_CORRIO.into()),
+            }
+        );
         let base = veredicto_de(Dimension::Funciona, 1.0, None);
         let evaluador = |_: &Path, _: TipoCaso, _: Target| -> Result<Veredicto, ErrorOraculo> {
             Ok(base.clone())
@@ -4526,6 +4537,31 @@ mod tests {
             calibrada.avisos,
             vec!["sonda de lastre: motivo".to_string()]
         );
+    }
+
+    /// Tarea 143, punto 5: sin resultado de la sonda, el aviso dice que no corrió.
+    #[test]
+    fn sonda_lastre_sin_resultado_llega_a_los_avisos() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        fs::create_dir_all(&carpeta).expect("carpeta de la tarea");
+        let _ = tarea_en(&carpeta, "\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n");
+        let repo = copia_fixture();
+        let base = eficiencia_base();
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| Ok(base.clone());
+        let calibrada = calibrar_tarea_con_lector(
+            home.path(),
+            "calibra-fixture",
+            "eficiencia",
+            2,
+            42,
+            Some(repo.path()),
+            None,
+            &evaluador,
+            &digest_falso,
+        )
+        .expect("calibra eficiencia");
+        assert_eq!(calibrada.avisos, vec![MOTIVO_SONDA_NO_CORRIO.to_string()]);
     }
 
     /// Tarea 143, punto 4: una fila y un renglón viejos, sin los campos nuevos, se leen con su valor por defecto.
