@@ -19,6 +19,7 @@ pub mod route;
 pub mod tipos;
 pub mod track;
 
+mod colab_calibra;
 mod limpieza;
 #[cfg(test)]
 mod prueba_ejecutable;
@@ -31,8 +32,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use cli::{
-    Comando, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion, ProveedorJuez, TrackAccion,
-    ViaRegistro,
+    ColabAccion, Comando, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion, ProveedorJuez,
+    TrackAccion, ViaRegistro,
 };
 use ficha::{ContextoRevision, ErrorFicha, JuezProveedor, Revision};
 use oracle::tarea::Tarea;
@@ -621,6 +622,25 @@ fn oraculo_liberar(json: bool, home: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// `colab empaquetar`: arma el paquete para Colab e imprime dónde quedó.
+fn colab_empaquetar(json: bool, pedido: colab_calibra::PedidoEmpaquetar) -> Result<(), Error> {
+    let resumen = colab_calibra::empaquetar_cli(pedido)?;
+    let salida = resumen.salida.display().to_string();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "salida": salida,
+                "archivos": resumen.archivos,
+                "trabajos": resumen.trabajos,
+            })
+        );
+    } else {
+        println!("{salida}: {} archivos", resumen.archivos);
+    }
+    Ok(())
+}
+
 /// `oraculo pendientes`: arma el paquete de los tests pendientes, o importa el junit de Colab.
 fn oraculo_pendientes(
     json: bool,
@@ -844,6 +864,27 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
             *colab,
             *liberar,
             *vigilar,
+        ),
+        Comando::Colab {
+            accion:
+                ColabAccion::Empaquetar {
+                    binario,
+                    trabajos,
+                    repo,
+                    rustup_sha256,
+                    salida,
+                    raiz_root,
+                },
+        } => colab_empaquetar(
+            cli.json,
+            colab_calibra::PedidoEmpaquetar {
+                binario: binario.clone(),
+                trabajos: trabajos.clone(),
+                repos: repo.clone(),
+                rustup_sha256: rustup_sha256.clone(),
+                salida: salida.clone(),
+                raiz_root: raiz_root.clone(),
+            },
         ),
         Comando::Observa { accion } => observa(cli.json, accion),
         Comando::Corre {

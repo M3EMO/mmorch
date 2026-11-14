@@ -46,6 +46,11 @@ pub enum Comando {
         #[command(subcommand)]
         accion: OraculoAccion,
     },
+    /// Prepara paquetes para correr el Oracle en Colab.
+    Colab {
+        #[command(subcommand)]
+        accion: ColabAccion,
+    },
     /// Registra y resume lo que pasa en una corrida.
     Observa {
         #[command(subcommand)]
@@ -165,6 +170,31 @@ impl From<ProveedorJuez> for crate::tipos::Proveedor {
             ProveedorJuez::Anthropic => crate::tipos::Proveedor::Anthropic,
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ColabAccion {
+    /// Arma el paquete de calibración para Colab: binario, herramientas, tareas y calibración.
+    Empaquetar {
+        /// Binario `r00t` para x86-64 que entra al paquete.
+        #[arg(long)]
+        binario: PathBuf,
+        /// Trabajos `tarea:dimension`, separados por coma.
+        #[arg(long, value_delimiter = ',', required = true)]
+        trabajos: Vec<String>,
+        /// Repo bueno de una tarea, como `tarea=ruta`. Se repite por cada tarea.
+        #[arg(long, num_args = 1, required = true)]
+        repo: Vec<String>,
+        /// SHA-256 en hexadecimal (64 caracteres) del instalador de rustup.
+        #[arg(long)]
+        rustup_sha256: String,
+        /// Archivo `.tar.gz` de salida.
+        #[arg(long)]
+        salida: PathBuf,
+        /// Repo de Root: de ahí sale `tools/colab/`. Por defecto, el directorio actual.
+        #[arg(long)]
+        raiz_root: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -396,6 +426,9 @@ impl Comando {
                 OraculoAccion::Validar { .. } => "oraculo validar",
                 OraculoAccion::Auditar { .. } => "oraculo auditar",
                 OraculoAccion::Capas { .. } => "oraculo capas",
+            },
+            Comando::Colab { accion } => match accion {
+                ColabAccion::Empaquetar { .. } => "colab empaquetar",
             },
             Comando::Observa { accion } => match accion {
                 ObservaAccion::Claude { .. } => "observa claude",
