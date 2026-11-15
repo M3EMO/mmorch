@@ -274,6 +274,24 @@ pub struct Manifiesto {
     /// Tope de gasto de API de S2 que queda, en USD. Solo lo lleva el paquete con `--juez`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tope_s2_usd: Option<f64>,
+    /// Gasto de API de S2 con sus partes. Solo lo lleva el paquete con `--juez`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gasto_s2: Option<GastoS2>,
+}
+
+/// Gasto de API de S2 con sus partes, en USD.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GastoS2 {
+    /// Gasto previo al corte.
+    pub previo_usd: f64,
+    /// Corte de S2, en RFC 3339.
+    pub corte: String,
+    /// Gasto de API desde el corte.
+    pub desde_corte_usd: f64,
+    /// Gasto previo más gasto desde el corte.
+    pub total_usd: f64,
+    /// Lo que queda del tope.
+    pub restante_usd: f64,
 }
 
 /// Un trabajo dentro del manifiesto.
@@ -312,6 +330,7 @@ pub struct DatosManifiesto {
     pub trabajos: Vec<DatoTrabajo>,
     pub imagenes: BTreeMap<String, String>,
     pub tope_s2_usd: Option<f64>,
+    pub gasto_s2: Option<GastoS2>,
 }
 
 /// Orden de un trabajo: el comando, sus argumentos y su entorno.
@@ -394,15 +413,21 @@ pub fn empaquetar(paquete: &Paquete, imagen: &dyn Imagen) -> Result<Resumen, Err
     }
     validar_trabajos(&trabajos, paquete.juez)?;
     // Con juez, sin tope de S2 no hay gasto para calibrar. Se revisa antes de armar nada.
-    if paquete.juez {
-        let gastado = gastado_s2_usd(&paquete.home)?;
-        if tope_s2_restante(gastado) <= 0.0 {
+    // Se calcula el gasto una sola vez: sirve al rechazo y al manifiesto.
+    let gasto = if paquete.juez {
+        let gasto = gasto_s2(&paquete.home)?;
+        eprintln!("{}", linea_gasto_s2(&gasto));
+        if gasto.restante_usd <= 0.0 {
             return Err(ErrorOraculo::Uso(format!(
                 "con --juez no se arma el paquete: no queda tope de S2. \
-                 Gastado: {gastado:.2} USD. TOPE_S2_USD: {TOPE_S2_USD:.0} USD."
+                 Gastado: {:.2} USD. TOPE_S2_USD: {TOPE_S2_USD:.0} USD.",
+                gasto.total_usd
             )));
         }
-    }
+        Some(gasto)
+    } else {
+        None
+    };
 
     for nombre in tareas.keys() {
         if !paquete.repos.contains_key(nombre) {
@@ -443,7 +468,15 @@ pub fn empaquetar(paquete: &Paquete, imagen: &dyn Imagen) -> Result<Resumen, Err
         .map_err(|e| ErrorOraculo::Infra(format!("limpiar {}: {e}", staging.display())))?;
     fs::create_dir_all(&staging)
         .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", staging.display())))?;
-    let resultado = armar_y_empaquetar(paquete, &staging, &bytes, &tareas, imagen, nombre_imagen);
+    let resultado = armar_y_empaquetar(
+        paquete,
+        &staging,
+        &bytes,
+        &tareas,
+        imagen,
+        nombre_imagen,
+        gasto.as_ref(),
+    );
     let limpieza = borrado::borrar_dir_dentro(&tmp, &staging);
     let resumen = resultado?;
     limpieza.map_err(|e| ErrorOraculo::Infra(format!("borrar la carpeta de trabajo: {e}")))?;
@@ -458,6 +491,7 @@ fn armar_y_empaquetar(
     tareas: &BTreeMap<String, Tarea>,
     imagen: &dyn Imagen,
     nombre_imagen: &str,
+    gasto: Option<&GastoS2>,
 ) -> Result<Resumen, ErrorOraculo> {
     let id = imagen.id(nombre_imagen)?;
 
@@ -550,17 +584,13 @@ fn armar_y_empaquetar(
     }
     let imagenes: BTreeMap<String, String> =
         tareas.keys().map(|n| (n.clone(), id.clone())).collect();
-    let tope_s2_usd = if paquete.juez {
-        Some(tope_s2_restante(gastado_s2_usd(&paquete.home)?))
-    } else {
-        None
-    };
     let datos = DatosManifiesto {
         commit_root: paquete.commit_root.clone(),
         binario_sha256,
         trabajos,
         imagenes,
-        tope_s2_usd,
+        tope_s2_usd: gasto.map(|g| g.restante_usd),
+        gasto_s2: gasto.cloned(),
     };
     let manifiesto = armar_manifiesto(&datos, archivos);
     let json = serde_json::to_string_pretty(&manifiesto)
@@ -608,13 +638,43 @@ pub fn tope_s2_restante(gastado: f64) -> f64 {
     (TOPE_S2_USD - gastado).max(0.0)
 }
 
-/// Gasto de API de S2 que ya lleva ROOT_HOME. Regla P112 a: el previo, más toda llamada a la API desde el corte.
+/// Gasto de API de S2 con sus partes. Regla P112 a: el previo, más toda llamada a la API desde el corte.
 /// Cuenta de cualquier tarea, porque los eventos no traen la tarea. Por eso sobreestima el gasto de S2.
-pub fn gastado_s2_usd(home: &Path) -> Result<f64, ErrorOraculo> {
+pub fn gasto_s2(home: &Path) -> Result<GastoS2, ErrorOraculo> {
     let eventos = crate::observe::uso::leer_eventos(&crate::observe::ruta_eventos_en(home))
         .map_err(|e| ErrorOraculo::Infra(format!("leer eventos.jsonl: {e}")))?;
     let desde_corte = crate::observe::uso::gasto_api_desde(&eventos, corte_s2_epoch(CORTE_S2)?);
-    Ok(GASTO_S2_PREVIO_USD + desde_corte)
+    let total_usd = GASTO_S2_PREVIO_USD + desde_corte;
+    Ok(GastoS2 {
+        previo_usd: GASTO_S2_PREVIO_USD,
+        corte: CORTE_S2.to_string(),
+        desde_corte_usd: desde_corte,
+        total_usd,
+        restante_usd: tope_s2_restante(total_usd),
+    })
+}
+
+/// Gasto total de API de S2 en USD. Ver `gasto_s2`. Solo lo usan los tests.
+#[cfg(test)]
+pub fn gastado_s2_usd(home: &Path) -> Result<f64, ErrorOraculo> {
+    Ok(gasto_s2(home)?.total_usd)
+}
+
+/// Línea de stderr con el gasto de S2: previo, desde el corte, total y lo que queda.
+pub fn linea_gasto_s2(g: &GastoS2) -> String {
+    format!(
+        "gasto de S2: {} USD previos + {} USD desde {} = {} USD; quedan {} USD de {TOPE_S2_USD:.0}",
+        cifra_usd(g.previo_usd),
+        cifra_usd(g.desde_corte_usd),
+        g.corte,
+        cifra_usd(g.total_usd),
+        cifra_usd(g.restante_usd),
+    )
+}
+
+/// USD con dos decimales y coma decimal, como pide la línea de S2.
+fn cifra_usd(usd: f64) -> String {
+    format!("{usd:.2}").replace('.', ",")
 }
 
 /// Revisa los trabajos: dimensión calibrable y comandos sin `pytest`.
@@ -745,6 +805,7 @@ pub fn armar_manifiesto(datos: &DatosManifiesto, archivos: BTreeMap<String, Stri
         trabajos,
         imagenes: datos.imagenes.clone(),
         tope_s2_usd: datos.tope_s2_usd,
+        gasto_s2: datos.gasto_s2.clone(),
     }
 }
 
@@ -3580,6 +3641,49 @@ mod tests {
     }
 
     #[test]
+    fn sin_juez_el_manifiesto_no_trae_gasto_s2() {
+        let e = Escenario::con_contrato("cargo test");
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let extraido = extraer(&resumen.salida);
+        let texto =
+            fs::read_to_string(extraido.path().join("manifiesto.json")).expect("manifiesto");
+        assert!(!texto.contains("gasto_s2"), "{texto}");
+    }
+
+    #[test]
+    fn linea_gasto_s2_trae_las_cinco_cifras() {
+        let home = tempfile::tempdir().expect("home");
+        eventos_con_api(home.path(), 1.0);
+        let linea = linea_gasto_s2(&gasto_s2(home.path()).expect("lee eventos"));
+        assert_eq!(
+            linea,
+            "gasto de S2: 6,55 USD previos + 1,00 USD desde 2026-11-14T00:00:00Z = 7,55 USD; quedan 17,45 USD de 25"
+        );
+    }
+
+    #[test]
+    fn con_juez_el_manifiesto_trae_las_cuatro_cifras() {
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 6.55);
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+        paquete.juez = true;
+        let resumen = empaquetar(&paquete, &Doble).expect("empaqueta con juez");
+        let extraido = extraer(&resumen.salida);
+        let texto =
+            fs::read_to_string(extraido.path().join("manifiesto.json")).expect("manifiesto");
+        let m: Manifiesto = serde_json::from_str(&texto).expect("JSON del manifiesto");
+        let g = m.gasto_s2.expect("gasto de S2");
+        assert!((g.previo_usd - 6.55).abs() < 1e-9, "{g:?}");
+        assert_eq!(g.corte, CORTE_S2);
+        assert!((g.desde_corte_usd - 6.55).abs() < 1e-9, "{g:?}");
+        assert!((g.total_usd - 13.10).abs() < 1e-9, "{g:?}");
+        let tope = m.tope_s2_usd.expect("tope de S2");
+        assert!((g.restante_usd - tope).abs() < 1e-9, "{g:?} vs {tope}");
+        assert!((g.restante_usd - 11.90).abs() < 1e-9, "{g:?}");
+    }
+
+    #[test]
     fn resumen_trae_el_sha256_del_tar() {
         let e = Escenario::con_contrato("cargo test");
         let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
@@ -4962,6 +5066,7 @@ mod tests_calibrar {
             }],
             imagenes: BTreeMap::from([("tarea-prueba".to_string(), "imagen".to_string())]),
             tope_s2_usd: None,
+            gasto_s2: None,
         };
         let manifiesto = armar_manifiesto(&datos, archivos);
         let json = serde_json::to_string_pretty(&manifiesto).expect("manifiesto");
@@ -5862,6 +5967,7 @@ mod tests_calibrar {
             trabajos: Vec::new(),
             imagenes: BTreeMap::new(),
             tope_s2_usd: None,
+            gasto_s2: None,
         };
         let mut codigos = Vec::new();
         correr_runtime(
