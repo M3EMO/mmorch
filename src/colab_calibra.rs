@@ -548,6 +548,7 @@ fn armar_y_empaquetar(
                 ErrorOraculo::Infra(format!("la caché {} no está en ROOT_HOME", cache.display()))
             })?;
             copiar_dir(&cache, &staging.join(relativa), Nombres::Libres)?;
+            verificar_checksums_de_cargo(&staging.join(relativa))?;
         }
     }
     let rustsec = paquete.home.join("cache/rustsec");
@@ -1116,6 +1117,59 @@ fn recorrer(raiz: &Path, dir: &Path, mapa: &mut BTreeMap<String, String>) -> io:
                 .collect::<Vec<_>>()
                 .join("/");
             mapa.insert(clave, sha256_hex(&fs::read(&ruta)?));
+        }
+    }
+    Ok(())
+}
+
+/// Revisa los `.cargo-checksum.json` bajo `copia/vendor`, en cualquier nivel.
+/// Solo mira que cada archivo listado en `files` exista. No compara SHA-256.
+fn verificar_checksums_de_cargo(copia: &Path) -> Result<(), ErrorOraculo> {
+    let vendor = copia.join("vendor");
+    if !vendor.is_dir() {
+        return Ok(());
+    }
+    buscar_checksums(&vendor)
+}
+
+/// Recorre `dir` y revisa cada `.cargo-checksum.json`. No sigue enlaces simbólicos.
+fn buscar_checksums(dir: &Path) -> Result<(), ErrorOraculo> {
+    let error = |e: io::Error| ErrorOraculo::Infra(format!("leer {}: {e}", dir.display()));
+    for entrada in fs::read_dir(dir).map_err(error)? {
+        let entrada = entrada.map_err(error)?;
+        let ruta = entrada.path();
+        let tipo = entrada.file_type().map_err(error)?;
+        if tipo.is_dir() {
+            buscar_checksums(&ruta)?;
+        } else if tipo.is_file() && entrada.file_name() == ".cargo-checksum.json" {
+            revisar_checksum(dir, &ruta)?;
+        }
+    }
+    Ok(())
+}
+
+/// Lee un `.cargo-checksum.json` de la carpeta `crate_dir`.
+/// Cada clave de `files` debe existir como archivo dentro de `crate_dir`.
+fn revisar_checksum(crate_dir: &Path, ruta: &Path) -> Result<(), ErrorOraculo> {
+    let texto = fs::read_to_string(ruta)
+        .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", ruta.display())))?;
+    let valor: serde_json::Value = serde_json::from_str(&texto)
+        .map_err(|e| ErrorOraculo::Infra(format!("{} no es JSON válido: {e}", ruta.display())))?;
+    let Some(files) = valor.get("files").and_then(|f| f.as_object()) else {
+        return Err(ErrorOraculo::Infra(format!(
+            "{} no tiene un objeto `files`",
+            ruta.display()
+        )));
+    };
+    let nombre = crate_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    for clave in files.keys() {
+        if !crate_dir.join(clave).is_file() {
+            return Err(ErrorOraculo::Infra(format!(
+                "el crate {nombre} lista {clave} en files, pero el archivo falta en la caché"
+            )));
         }
     }
     Ok(())
@@ -3479,6 +3533,80 @@ mod tests {
             .expect("empaqueta");
         let nombres = listar(&resumen.salida);
         let esperado = format!("cache/rust/{h}/vendor/syn-2.0.74/src/token.rs");
+        assert!(nombres.contains(&esperado), "{nombres:?}");
+    }
+
+    #[test]
+    fn checksum_de_cargo_con_archivo_ausente_falla_el_empaquetado() {
+        // `files` lista `src/a.rs`, pero la caché no lo trae: cargo no podría verificarlo.
+        let e = Escenario::con_contrato("cargo test");
+        let h = crate::oracle::descarga::hash_corto(b"lock\n");
+        let crate_dir = e
+            .home
+            .path()
+            .join("cache/rust")
+            .join(&h)
+            .join("vendor/falso-1.0.0");
+        fs::create_dir_all(&crate_dir).expect("dir");
+        fs::write(
+            crate_dir.join(".cargo-checksum.json"),
+            r#"{"files":{"src/a.rs":"00"},"package":"00"}"#,
+        )
+        .expect("escribe");
+        let Err(error) = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+        else {
+            panic!("un archivo listado y ausente debía frenar el empaquetado");
+        };
+        let mensaje = error.to_string();
+        assert!(matches!(error, ErrorOraculo::Infra(_)), "{mensaje}");
+        assert!(mensaje.contains("falso-1.0.0"), "{mensaje}");
+        assert!(mensaje.contains("src/a.rs"), "{mensaje}");
+    }
+
+    #[test]
+    fn checksum_de_cargo_mal_formado_falla_el_empaquetado() {
+        // Un `.cargo-checksum.json` que no es JSON: el error nombra su ruta.
+        let e = Escenario::con_contrato("cargo test");
+        let h = crate::oracle::descarga::hash_corto(b"lock\n");
+        let crate_dir = e
+            .home
+            .path()
+            .join("cache/rust")
+            .join(&h)
+            .join("vendor/falso-1.0.0");
+        fs::create_dir_all(&crate_dir).expect("dir");
+        fs::write(crate_dir.join(".cargo-checksum.json"), "no es json").expect("escribe");
+        let Err(error) = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+        else {
+            panic!("un checksum mal formado debía frenar el empaquetado");
+        };
+        let mensaje = error.to_string();
+        assert!(matches!(error, ErrorOraculo::Infra(_)), "{mensaje}");
+        assert!(mensaje.contains(".cargo-checksum.json"), "{mensaje}");
+    }
+
+    #[test]
+    fn checksum_de_cargo_con_archivo_presente_empaqueta() {
+        // Guarda: `src/a.rs` está listado y existe en la caché. Debe pasar.
+        let e = Escenario::con_contrato("cargo test");
+        let h = crate::oracle::descarga::hash_corto(b"lock\n");
+        let crate_dir = e
+            .home
+            .path()
+            .join("cache/rust")
+            .join(&h)
+            .join("vendor/falso-1.0.0");
+        fs::create_dir_all(crate_dir.join("src")).expect("dir");
+        fs::write(crate_dir.join("src/a.rs"), "pub fn a() {}\n").expect("escribe");
+        fs::write(
+            crate_dir.join(".cargo-checksum.json"),
+            r#"{"files":{"src/a.rs":"00"},"package":"00"}"#,
+        )
+        .expect("escribe");
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let nombres = listar(&resumen.salida);
+        let esperado = format!("cache/rust/{h}/vendor/falso-1.0.0/src/a.rs");
         assert!(nombres.contains(&esperado), "{nombres:?}");
     }
 
