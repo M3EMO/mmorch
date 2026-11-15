@@ -86,9 +86,31 @@ pub const EXCLUIDOS: &[(&str, &str)] = &[
     ("registros", "stderr de corridas viejas de la laptop"),
 ];
 
+// Cifras del tope de S2: decisiones del usuario, no medidas del código.
+
 /// Tope de gasto de API de S2, en USD. Con `--juez`, el manifiesto guarda lo que queda de este tope.
-/// decisión P107 a del usuario: el tope de S2 sube a 25 USD.
+/// Decisión P107 a del usuario: el tope de S2 sube a 25 USD.
 pub const TOPE_S2_USD: f64 = 25.0;
+
+/// Gasto de API de S2 antes del corte. Es la suma del orquestador, corrida por corrida.
+/// Fuente: P112 a del usuario.
+#[allow(dead_code)] // El punto 2 de la Tarea 154 lo usa.
+pub const GASTO_S2_PREVIO_USD: f64 = 6.55;
+
+/// Desde este instante, toda llamada a la API cuenta contra S2. Formato RFC 3339.
+/// Fuente: P112 a del usuario.
+#[allow(dead_code)] // El punto 2 de la Tarea 154 lo usa.
+pub const CORTE_S2: &str = "2026-11-14T00:00:00Z";
+
+/// Convierte el texto del corte de S2 a segundos desde la época Unix.
+/// Un texto que no sea RFC 3339 da error de infraestructura.
+#[allow(dead_code)] // El punto 2 de la Tarea 154 lo usa.
+pub fn corte_s2_epoch(texto: &str) -> Result<f64, ErrorOraculo> {
+    let momento =
+        time::OffsetDateTime::parse(texto, &time::format_description::well_known::Rfc3339)
+            .map_err(|e| ErrorOraculo::Infra(format!("corte de S2 inválido {texto:?}: {e}")))?;
+    Ok(momento.unix_timestamp() as f64)
+}
 
 /// Tiempo máximo de cada llamada a podman.
 const PLAZO_PODMAN: Duration = Duration::from_secs(300);
@@ -3330,6 +3352,20 @@ mod tests {
     fn tope_s2_restante_tiene_piso_cero() {
         assert!((tope_s2_restante(6.55) - 18.45).abs() < 1e-9);
         assert_eq!(tope_s2_restante(30.0), 0.0);
+    }
+
+    #[test]
+    fn corte_s2_convertido_da_1794614400() {
+        let epoch = corte_s2_epoch(CORTE_S2).expect("corte válido");
+        assert_eq!(epoch, 1794614400.0_f64);
+    }
+
+    #[test]
+    fn corte_s2_invalido_da_error_con_el_texto() {
+        match corte_s2_epoch("no-es-fecha") {
+            Err(ErrorOraculo::Infra(m)) => assert!(m.contains("no-es-fecha"), "{m}"),
+            otro => panic!("se esperaba Infra, llegó {otro:?}"),
+        }
     }
 
     #[test]
