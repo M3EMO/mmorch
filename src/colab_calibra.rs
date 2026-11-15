@@ -55,11 +55,12 @@ const HERRAMIENTAS: [&str; 5] = [
 ];
 
 /// Dimensiones que Colab calibra. Las demás se rechazan.
-const DIMENSIONES_COLAB: [Dimension; 4] = [
+const DIMENSIONES_COLAB: [Dimension; 5] = [
     Dimension::Seguridad,
     Dimension::Funciona,
     Dimension::Completitud,
     Dimension::Pruebas,
+    Dimension::Eficiencia,
 ];
 
 /// Segmentos que marcan un nombre como secreto, en minúsculas.
@@ -546,11 +547,6 @@ pub fn validar_trabajos(trabajos: &[Trabajo]) -> Result<(), ErrorOraculo> {
     for trabajo in trabajos {
         let dimension = trabajo.dimension;
         let quien = format!("tarea {}, dimensión {}", trabajo.tarea, dimension.clave());
-        if dimension == Dimension::Eficiencia {
-            return Err(ErrorOraculo::Uso(format!(
-                "{quien}: Eficiencia necesita el cgroup del contenedor"
-            )));
-        }
         if tiene_items_de_juez(dimension) {
             return Err(ErrorOraculo::Uso(format!(
                 "{quien}: el juez necesita Colab Secrets, que `exec` no lee"
@@ -2943,23 +2939,19 @@ mod tests {
     }
 
     #[test]
-    fn rechaza_eficiencia_y_diseno_con_su_motivo() {
-        let e = Escenario::con_contrato("cargo test");
-        let texto = empaquetar(
-            &e.paquete(&[("tarea-prueba", Dimension::Eficiencia)]),
-            &Doble,
-        )
-        .expect_err("rechaza eficiencia")
-        .to_string();
-        assert!(
-            texto.contains("Eficiencia necesita el cgroup del contenedor"),
-            "{texto}"
-        );
-        assert!(
-            texto.contains("tarea-prueba") && texto.contains("eficiencia"),
-            "{texto}"
-        );
+    fn acepta_eficiencia_sin_juez() {
+        // Eficiencia mide solo con sondas: no necesita el juez ni el cgroup del contenedor.
+        let trabajo = Trabajo {
+            tarea: "s2-t1".to_string(),
+            dimension: Dimension::Eficiencia,
+            comandos: vec!["cargo test".to_string()],
+        };
+        validar_trabajos(&[trabajo]).expect("acepta eficiencia");
+    }
 
+    #[test]
+    fn rechaza_diseno_con_su_motivo() {
+        let e = Escenario::con_contrato("cargo test");
         let texto = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Diseno)]), &Doble)
             .expect_err("rechaza diseño")
             .to_string();
