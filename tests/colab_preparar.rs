@@ -9,6 +9,8 @@ use std::process::{Command, Output};
 mod ejecutable;
 use ejecutable::escribir_ejecutable;
 
+use root::oracle::contenedor::CARPETAS_RUNTIME;
+
 const SCRIPT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tools/colab/verificar-versiones.sh"
@@ -33,14 +35,8 @@ const HERRAMIENTAS: [&str; 5] = [
     "hadolint",
 ];
 
-/// Carpetas que bwrap no puede crear. Son los destinos de `argumentos_bwrap` en `contenedor.rs`.
-/// Lista fija: si cambia, cambian también los dos scripts y `contenedor.rs`.
-const CARPETAS_RUNTIME: [&str; 6] = [
-    "/repo", "/salida", "/oraculo", "/cache", "/rustsec", "/trabajo",
-];
-
-/// Carpetas de un test: falsos para el PATH, binarios de `ROOT_BIN_DIR`, `ROOT_ETC_DIR`, el paquete
-/// y `runtime`, la raíz de `ROOT_RAIZ_DIR` con las seis carpetas de `CARPETAS_RUNTIME`.
+/// Carpetas de un test: falsos para el PATH, binarios, `ROOT_ETC_DIR`, el paquete y `runtime`.
+/// La raíz `runtime` tiene las seis carpetas de `root::oracle::contenedor::CARPETAS_RUNTIME`.
 struct Escenario {
     falsos: PathBuf,
     bin: PathBuf,
@@ -247,29 +243,37 @@ fn lista_de_carpetas(texto: &str) -> Vec<String> {
         .collect()
 }
 
+/// Compara la lista `CARPETAS_RUNTIME` de un script con la del crate. Si difiere, el error nombra el script.
+fn comparar_lista(nombre_script: &str, texto: &str) -> Result<(), String> {
+    let esperado: Vec<String> = CARPETAS_RUNTIME.iter().map(|r| r.to_string()).collect();
+    let lista = lista_de_carpetas(texto);
+    if lista == esperado {
+        return Ok(());
+    }
+    Err(format!(
+        "la lista de {nombre_script} no es la del crate: {lista:?}, se esperaba {esperado:?}"
+    ))
+}
+
+/// Los dos scripts deben tener la misma lista que la constante del crate.
 #[test]
 fn carpetas_del_runtime_son_los_montajes_de_bwrap() {
-    let contenedor = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/oracle/contenedor.rs"
-    ))
-    .expect("lee contenedor.rs");
-    for ruta in CARPETAS_RUNTIME.iter() {
-        let literal = format!("\"{ruta}\"");
-        assert!(
-            contenedor.contains(&literal),
-            "contenedor.rs no tiene el destino {literal}"
-        );
-    }
-    let esperado: Vec<String> = CARPETAS_RUNTIME.iter().map(|r| r.to_string()).collect();
     for script in [PREPARAR, SCRIPT] {
         let texto = fs::read_to_string(script).expect("lee el script");
-        assert_eq!(
-            lista_de_carpetas(&texto),
-            esperado,
-            "la lista de {script} no es la de argumentos_bwrap"
-        );
+        comparar_lista(script, &texto).expect("lista de carpetas");
     }
+}
+
+#[test]
+fn comparar_lista_nombra_el_script_si_la_lista_difiere() {
+    let falso = "CARPETAS_RUNTIME=(/repo /otra)\n";
+    let error = comparar_lista("tools/colab/falso.sh", falso).expect_err("debe dar error");
+    assert!(
+        error.contains("tools/colab/falso.sh"),
+        "el error no nombra el script: {error}"
+    );
+    let igual = "CARPETAS_RUNTIME=(/repo /salida /oraculo /cache /rustsec /trabajo)\n";
+    assert!(comparar_lista("tools/colab/falso.sh", igual).is_ok());
 }
 
 #[test]
