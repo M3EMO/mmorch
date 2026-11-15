@@ -230,23 +230,24 @@ fn sin_repo_nombra_repo_y_sale_mal() {
 }
 
 /// Lee la lista `CARPETAS_RUNTIME=(...)` de un script. Debe caber en una sola línea.
-fn lista_de_carpetas(texto: &str) -> Vec<String> {
+/// Si falta la línea, el error nombra el script.
+fn lista_de_carpetas(nombre_script: &str, texto: &str) -> Result<Vec<String>, String> {
     let linea = texto
         .lines()
         .find(|l| l.starts_with("CARPETAS_RUNTIME=("))
-        .expect("falta la línea CARPETAS_RUNTIME=(...)");
-    linea
+        .ok_or_else(|| format!("falta la línea CARPETAS_RUNTIME=(...) en {nombre_script}"))?;
+    Ok(linea
         .trim_start_matches("CARPETAS_RUNTIME=(")
         .trim_end_matches(')')
         .split_whitespace()
         .map(String::from)
-        .collect()
+        .collect())
 }
 
-/// Compara la lista `CARPETAS_RUNTIME` de un script con la del crate. Si difiere, el error nombra el script.
+/// Compara la lista `CARPETAS_RUNTIME` de un script con la del crate. Si difiere o falta, el error nombra el script.
 fn comparar_lista(nombre_script: &str, texto: &str) -> Result<(), String> {
     let esperado: Vec<String> = CARPETAS_RUNTIME.iter().map(|r| r.to_string()).collect();
-    let lista = lista_de_carpetas(texto);
+    let lista = lista_de_carpetas(nombre_script, texto)?;
     if lista == esperado {
         return Ok(());
     }
@@ -274,6 +275,20 @@ fn comparar_lista_nombra_el_script_si_la_lista_difiere() {
     );
     let igual = "CARPETAS_RUNTIME=(/repo /salida /oraculo /cache /rustsec /trabajo)\n";
     assert!(comparar_lista("tools/colab/falso.sh", igual).is_ok());
+}
+
+#[test]
+fn lista_ausente_nombra_el_guion() {
+    let raiz = tempfile::tempdir().expect("raíz temporal");
+    let ruta = raiz.path().join("falso.sh");
+    fs::write(&ruta, "#!/bin/bash\necho sin lista\n").expect("escribe falso.sh");
+    let texto = fs::read_to_string(&ruta).expect("lee falso.sh");
+    let nombre = ruta.display().to_string();
+    let error = comparar_lista(&nombre, &texto).expect_err("debe dar error");
+    assert!(
+        error.contains(&nombre),
+        "el error no nombra el guion: {error}"
+    );
 }
 
 #[test]
