@@ -12404,3 +12404,100 @@ Brief: `docs/builds/brief-local-154.md`.
 **Antes del paso 7, el orquestador compara** la línea de gasto de `empaquetar --juez` con su propia suma. Si difieren en más de 0,05 USD, informa las dos cifras y no arma el paquete.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (66): los `token.rs` que el paquete no llevó, y los dueños que bwrap no conoce
+
+**Estado.**
+- La 153 terminó en verde: 3896/0/5. La 154 compila ahora sobre `laptop/tarea-153`.
+- El usuario corrió `paso0-152.sh`. Los paquetes están en `colab-pruebas/v152/`.
+- La prueba de la 141 con la cadena 152 corrió en 151 s. La importación rechazó la fila otra vez: base 0,111 contra 1,0.
+- El repo bueno dio `no_compila: true` en Colab. El `tmpfs` de la 152 ya deja montar `/oraculo/contrato`.
+- El orquestador envolvió `bwrap` y guardó las 20 llamadas. Encontró dos defectos: la caché sin nueve `token.rs`, y el `tar` que no puede cambiar el dueño.
+- La v6 no corrió.
+
+## 1. El filtro de nombres secretos y la caché
+
+**Qué pasa.** `copiar_dir` salta todo archivo cuyo nombre marca `es_nombre_secreto`. "token" es uno de sus segmentos. La caché de cargo trae fuentes de dependencias como `syn-2.0.74/src/token.rs`. El paquete no las lleva. `cargo` verifica cada archivo contra `.cargo-checksum.json`, y falla.
+
+**`copiar_dir` copia cinco cosas distintas:** `tools/colab`, `oraculos/<tarea>`, la caché de cargo, la base de `rustsec` y `configs`. El filtro tiene sentido solo donde el usuario puede dejar una clave.
+
+**Decisión.**
+1. **La caché y `rustsec` se copian enteras, sin filtro de nombres ni de `.env`.** Su contenido viene de crates.io y de la base de avisos, no del usuario. El checksum de cargo ya lo verifica.
+2. **En `tools/colab`, `oraculos/<tarea>` y `configs`, un nombre secreto hace fallar el empaquetado.** El mensaje nombra el archivo. Hoy se salta en silencio. Un test oculto llamado `test_token.py` desaparecería del paquete sin aviso, igual que estos `token.rs`.
+3. **La regla de la 147 para los enlaces se mantiene:** nada se salta en silencio.
+
+**La guarda pedida.** Después de copiar la caché, el empaquetado lee cada `.cargo-checksum.json` de `vendor/`. Cada archivo de su lista `files` debe estar en la copia. Si falta uno, el empaquetado falla con el crate y el archivo.
+
+**Error mío.** El brief de la 141 pidió el filtro de nombres secretos para todo `ROOT_HOME`. No separé lo que escribe el usuario de lo que trae cargo.
+
+## 2. El dueño de los archivos dentro de bwrap
+
+**`--no-same-owner` en cada `tar` no alcanza. La causa está antes.**
+- El runtime de Colab corre como root. Ahí, `tar -xzf` conserva el dueño de cada archivo del paquete: el uid de la laptop, 1000.
+- bwrap con `--unshare-user --uid 0` mapea solo al usuario que lo llama: root mapea a root. Un archivo del uid 1000 aparece adentro como 65534, el uid de desborde.
+- Cualquier copia que conserva dueños falla: el `tar` de gitleaks y de cargo audit, y también un `cp -a`. Root usa `cp -a` en `COMANDO_LOCK` de `descarga.rs`, en Entrega, y en comandos de tareas como los de `calibra/defectos.rs`.
+
+**Decisión: el runtime extrae el paquete sin conservar dueños.**
+- `script_preparar`, en `src/colab_calibra.rs`, pasa `--no-same-owner` al `tar -xzf` del paquete. Así, todo archivo del paquete queda de root, y root mapea a 0 dentro de bwrap.
+- `src/oracle/colab.rs:165` hace lo mismo con su paquete, por la misma regla.
+- `tools/colab/notebook-juez.py` ya extrae con `tarfile` y `filter="data"`. Ese filtro no aplica los dueños del tar. La 155 lo confirma con un test.
+- Los comandos de las sondas no cambian. La versión de las sondas queda igual.
+
+**Por qué no tocar cada `tar` de las sondas.** Un arreglo en cada comando deja fuera los `cp -a` y los comandos que escriben las tareas. El arreglo en la extracción cubre a todos. Además, cambiar un comando de sonda cambia la versión que se congela.
+
+## 3. Los otros pasos que pueden fallar en bwrap y no en podman
+
+Revisé las 20 llamadas del estado y lo que corre después en las cinco dimensiones de Colab:
+
+| Paso | ¿Falla en bwrap? | Motivo |
+|---|---|---|
+| `cargo nextest run` | Sí, por la caché | Lo arregla el punto 1 |
+| `cargo metadata` | Sí, por la misma caché | Lee los `Cargo.toml` de `vendor/`. Lo arregla el punto 1 |
+| `command -v gitleaks` y `command -v cargo-audit` | No | El PATH viene del entorno de la imagen, y `preparar-runtime.sh` instala las herramientas |
+| La copia con `tar` para gitleaks y cargo audit | Sí | Lo arregla el punto 2 |
+| `cp -a /repo ...` en el lock y en comandos de tareas | Sí, por el mismo dueño | Lo arregla el punto 2 |
+| clippy, nextest y mutantes con `CARGO_TARGET_DIR=/salida/target` | No | `/salida` va con `--bind`, igual que en podman |
+| `CARGO_HOME` | No | `PRELUDIO` lo fija en `/tmp/cargo-home`, que es un `tmpfs` |
+| `/repo` y `/trabajo` | No | Van en solo lectura en los dos modos |
+| La medida de Eficiencia | No | Desde la 149 usa `getrusage` y `/proc/stat`, sin cgroup |
+| Entrega | No corre en Colab | Necesita `podman build` |
+
+**Lo que no puedo ver desde el código.** La raíz de bwrap es el runtime, Ubuntu 24.04, no la imagen del oráculo, Debian. Un comando de tarea que use una herramienta que solo está en la imagen fallaría solo en Colab. El orquestador puede verlo con su envoltorio de bwrap en la próxima prueba de la 141: cada llamada que salga con un código distinto en Colab y en la laptop.
+
+## 4. La Tarea 155
+
+- **Archivos:** `src/colab_calibra.rs` y `src/oracle/colab.rs`. Un test puede leer `tools/colab/notebook-juez.py`.
+- **Base:** la punta de `laptop/tarea-154`, porque toca `src/colab_calibra.rs`. Arranca cuando termine la 154.
+- **El arreglo del dueño no puede ir aparte.** Vive en `script_preparar`, dentro de `src/colab_calibra.rs`. La parte de `colab.rs` es una línea, y va con él.
+- **No cambia nada que mida la versión congelada.** No toca rúbricas, ni el prompt del juez, ni comandos de sondas.
+
+Brief: `docs/builds/brief-local-155.md`.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | La Tarea 154 | Nada; compila ahora | Laptop | No |
+| 2 | La Tarea 155 | El paso 1 | Laptop | No |
+| 3 | Armar la cadena con la 153, la 154 y la 155, y su suite con podman | El paso 2 | Laptop | No |
+| 4 | El paso 0 otra vez: el binario de esa cadena y los cuatro paquetes | El paso 3 | Laptop, el usuario | No |
+| 5 | La prueba de la 141 otra vez, con el envoltorio de bwrap | El paso 4 | Colab, CPU | No |
+| 6 | La calibración v6 de Eficiencia, t1 a t3, en tres runtimes | El paso 5, con base 1,0 | Colab, CPU | No |
+| 7 | El paquete del juez y el arrastre a Drive | El paso 4 | Laptop y el usuario | No |
+| 8 | La etapa 1 de P107 a: dos casos de Diseño en t1 | El paso 7 | Colab, notebook | Cerca de 0,35 USD |
+| 9 | Las cinco etapas de P107 a, en la misma sesión | El paso 8 | Colab, notebook | Lo que quede del tope, cerca de 18 USD |
+| 10 | La mezcla de la cadena 110 a 155 | La orden del usuario | — | No |
+| 11 | Congelar la versión | Los pasos 6 y 9 | — | No |
+| 12 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 5 y 11 | Colab, cuatro runtimes | No |
+| 13 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 14 | P98 c: el final con 15 defectos reales | El paso 13 | — | No |
+| 15 | La validez sobre el final sellado | Los pasos 1 a 14 | Colab, notebook si usa el juez | Según el final |
+
+**Lo que el orquestador espera del paso 5.**
+- La base de Colab da 1,0, y la importación suma la fila.
+- El envoltorio muestra cada llamada de bwrap con código 0, salvo las que también fallan en la laptop.
+- `find /content/root-paquete ! -uid 0 | head` no imprime nada.
+
+**Si el paso 5 falla otra vez en la base,** el orquestador informa la primera llamada de bwrap con un código distinto del de la laptop, con su stderr. No corre la v6.
+
+**Preguntas al usuario:** ninguna nueva.
