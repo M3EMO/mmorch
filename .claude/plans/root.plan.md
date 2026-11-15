@@ -12137,3 +12137,108 @@ Actualicé `docs/builds/brief-local-142.md`.
 **El paso 4 puede correr a la vez que el 3.** La v6 corre en Colab, así que la carga de la laptop no la toca.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (63): el contrato que no se monta en bwrap
+
+**Estado.**
+- El usuario corrió `paso0-150.sh`. El binario fb9baf6 y cuatro paquetes están en `colab-pruebas/v150/`.
+- **La prueba de la 141 con la cadena 150.** La subida en trozos, la preparación, el trabajo, la vuelta y el `stop` anduvieron, en 212 s. `verificar-versiones.sh` dio rc 0.
+- **La importación no sumó la fila,** con "la base de Colab difiere de la base de la laptop: colab=[0.111111164] laptop=[1.0]". El control de la base funcionó.
+- **La causa:** "bwrap: Can't mkdir /oraculo/contrato: Read-only file system". El contrato del repo bueno no corrió.
+- El paquete trae `oraculos/s2-t1/registros/*.stderr` de corridas viejas de la laptop.
+- La v6 no corrió, porque usa el mismo camino.
+- Los builders de la 142 y la 151 compilan ahora.
+
+## 1. Por qué falla, y desde cuándo
+
+**bwrap no crea un punto de montaje dentro de una raíz de solo lectura.** `argumentos_bwrap` monta `/` con `--ro-bind`. Para montar en `/repo`, esa carpeta ya debe existir en el runtime. Por eso `preparar-runtime.sh` crea las seis carpetas de `CARPETAS_RUNTIME`.
+
+**`oraculo_destino` cambia el destino.** Sin valor, el oráculo va a `/oraculo`, que está en la lista. Con valor, va a otra ruta que no está:
+
+| Valor | Quién lo arma | Qué corre ahí |
+|---|---|---|
+| `/oraculo/contrato` (`DIR_CONTRATO`) | `ejecucion_de_suite`, en `src/oracle/mod.rs` | La suite del contrato |
+| `/oraculo/oculto` (`DIR_OCULTO`) | `ejecucion_de_suite` | La suite oculta, salvo pytest, que corre desde `/salida` |
+| `/oraculo/escenarios` | `ejecucion_de_evaluacion`, en `src/oracle/entrega.rs` | Los escenarios de Entrega |
+
+**Las cinco dimensiones de Colab quedan tocadas, no solo Funciona.** Toda calibración evalúa primero el repo bueno, y esa evaluación corre el contrato. Sin contrato, la base da 0,111 en vez de 1,0. Por eso Seguridad también falló el control de la base.
+
+**La prueba de la 139 en Colab no probaba lo que parecía.** Dio Seguridad con sensibilidad y especificidad 1,0, y la huella coincidió. Pero ese día nadie comparaba la base. Su resultado no vale como evidencia de que bwrap corre el oráculo. El control de la base de la 141 encontró el defecto.
+
+## 2. Los otros destinos de montaje
+
+Revisé las seis llamadas a `montaje_bwrap` en `argumentos_bwrap` y cada lugar que llena `oraculo_destino`:
+
+| Destino | Fijo o variable | ¿Está en `CARPETAS_RUNTIME`? |
+|---|---|---|
+| `/repo` | Fijo | Sí |
+| `/trabajo` | Fijo | Sí |
+| `/oraculo`, o el valor de `oraculo_destino` | Variable | Solo `/oraculo` |
+| `/cache` | Fijo | Sí |
+| `/rustsec` | Fijo | Sí |
+| `/salida` | Fijo | Sí |
+
+- `/dev`, `/proc` y `/tmp` existen en todo Linux. `/tmp` va con `--tmpfs`.
+- Los demás lugares que arman una `Ejecucion` dejan `oraculo_destino` en `None`: `descarga.rs`, `descarga/python.rs`, `perfiles/herramientas.rs` y los tests.
+- **El único destino que falta es el de `oraculo_destino`,** con sus tres valores. Entrega no corre en Colab hoy, porque necesita `podman build`. Igual queda cubierta por el arreglo.
+
+## 3. El arreglo: un `tmpfs` en `/oraculo`, no una lista más larga
+
+**Las dos opciones del pedido.**
+- **Sumar los tres destinos a `CARPETAS_RUNTIME`.** Arregla hoy. Pero un destino nuevo vuelve a romper Colab en silencio. Y la lista crece con cada suite.
+- **Derivar la lista del código.** Los guiones del runtime corren antes que `r00t`. Para leer la lista del código, `r00t` necesitaría un comando nuevo en `cli.rs`, que es un archivo de la 142.
+
+**Elijo una tercera: `--tmpfs /oraculo` antes del montaje del oráculo.** bwrap sí crea carpetas dentro de un `tmpfs` que él mismo armó. Con eso, cualquier destino bajo `/oraculo` funciona sin tocar el runtime. La lista queda en seis carpetas de primer nivel, y no crece.
+
+**La lista tiene una sola fuente en el código.** `contenedor.rs` define `CARPETAS_RUNTIME` como constante pública. `tests/colab_preparar.rs` deja su copia y compara los dos guiones contra esa constante. Los guiones conservan su copia, porque corren sin `r00t`.
+
+**El código frena un destino que bwrap no puede crear.** `argumentos_bwrap` revisa cada destino de montaje. Vale si está en `CARPETAS_RUNTIME`, o si está bajo `/oraculo`. Si no, da un error que nombra el destino. Ese error aparece antes de lanzar bwrap, con un texto claro.
+
+## 4. Los registros viejos
+
+**Sí, salen del paquete.**
+- No son parte de la tarea. Son el stderr de corridas viejas de la laptop.
+- Confunden el diagnóstico: uno dice "could not find `Cargo.toml` in `/`", y no es de esta corrida.
+- Por A2, pueden traer texto de los tests ocultos. Hoy no salen de Colab, pero no tienen por qué viajar.
+
+**Además, un test dice algo que no prueba.** `paquete_no_trae_registros_ni_colab_ni_evidencia` no revisa `registros`. `EXCLUIDOS` tampoco lo tiene.
+
+**Va en otra tarea, la 153, después de la 142.** El arreglo vive en `src/colab_calibra.rs`, que es un archivo de la 142. Los registros no cambian ningún resultado, así que la 141 y la v6 no esperan a la 153. Su brief llega con el informe de la 142, porque ese informe puede sumar puntos en el mismo archivo.
+
+## 5. La Tarea 152
+
+- **Archivos:** `src/oracle/contenedor.rs` y `tests/colab_preparar.rs`.
+- **No comparte archivos con la 142 ni con la 151.** Corre ya, a la vez.
+- **Base:** la punta de `laptop/cadena-110-150`.
+- **El test que falla hoy:** cada destino que arma `argumentos_bwrap`, para los tres valores de `oraculo_destino` y para `None`, está en `CARPETAS_RUNTIME` o bajo un `--tmpfs` que los mismos argumentos crean antes.
+
+Brief: `docs/builds/brief-local-152.md`.
+
+**Error mío.** El brief de la 139 pidió las carpetas de los montajes fijos. No revisé `oraculo_destino`, que cambia el destino del oráculo. Un destino armado en otro archivo queda fuera de una lista escrita a mano.
+
+## 6. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | Las Tareas 142, 151 y 152, a la vez | Nada; la 142 y la 151 compilan ahora | Laptop | No |
+| 2 | Armar `laptop/cadena-110-152` con la 151 y la 152, y su suite con podman | La 151 y la 152 | Laptop | No |
+| 3 | El paso 0 otra vez: el binario de la cadena 152 y los cuatro paquetes | El paso 2 | Laptop, el usuario | No |
+| 4 | La prueba de la 141 otra vez, con Seguridad de s2-t1 | El paso 3 | Colab, CPU | No |
+| 5 | La calibración v6 de Eficiencia, t1 a t3, en tres runtimes | El paso 4 | Colab, CPU | No |
+| 6 | La Tarea 153: los registros fuera del paquete | La 142 en la cadena | Laptop | No |
+| 7 | Armar la cadena con la 142 y la 153, y su suite con podman | El paso 6 | Laptop | No |
+| 8 | El paquete del juez y el arrastre a Drive | El paso 7 | Laptop y el usuario | No |
+| 9 | La etapa 1 de P107 a: dos casos de Diseño en t1 | El paso 8 | Colab, notebook | Cerca de 0,35 USD |
+| 10 | Las cinco etapas de P107 a, en la misma sesión | El paso 9 | Colab, notebook | Hasta 18,45 USD |
+| 11 | La mezcla de la cadena 110 a 153 | La orden del usuario | — | No |
+| 12 | Congelar la versión | Los pasos 5 y 10 | — | No |
+| 13 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 4 y 12 | Colab, cuatro runtimes | No |
+| 14 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 15 | P98 c: el final con 15 defectos reales | El paso 14 | — | No |
+| 16 | La validez sobre el final sellado | Los pasos 1 a 15 | Colab, notebook si usa el juez | Según el final |
+
+**Lo que el orquestador espera del paso 4.** Lo mismo que en la vuelta (62), sección 7. Además, la base de Colab debe dar 1,0, igual que la de la laptop, y la importación debe sumar la fila.
+
+**Si el paso 4 falla otra vez en la base,** el orquestador corre `r00t oraculo evaluar` sobre el repo bueno en el runtime. Informa el stderr del contenedor, sin repetir la v6.
+
+**Preguntas al usuario:** ninguna nueva.
