@@ -764,6 +764,12 @@ pub fn version_de_rustc(salida: &str) -> Option<String> {
     campos.next().map(String::from)
 }
 
+/// Recorta un monto en USD al centavo inferior. Nunca sube el tope por encima de lo que queda.
+/// El épsilon de 1e-9 evita que 18.45 se vuelva 18.44 por error de coma flotante.
+pub fn tope_hacia_abajo(tope: f64) -> f64 {
+    (tope * 100.0 + 1e-9).floor() / 100.0
+}
+
 /// Orden de un trabajo: comando, argumentos y entorno.
 pub fn comando_de_trabajo(
     tarea: &str,
@@ -796,7 +802,10 @@ pub fn comando_de_trabajo(
     ]);
     // Solo los trabajos con ítems del juez gastan API, así que solo ellos llevan tope.
     if let Some(tope) = tope_usd.filter(|_| tiene_items_de_juez(dimension)) {
-        args.extend(["--tope-usd".to_string(), format!("{tope:.2}")]);
+        args.extend([
+            "--tope-usd".to_string(),
+            format!("{:.2}", tope_hacia_abajo(tope)),
+        ]);
     }
     args.push("--json".to_string());
     let comando = format!("r00t {}", args.join(" "));
@@ -3361,6 +3370,29 @@ mod tests {
             "{:?}",
             sin.args
         );
+    }
+
+    #[test]
+    fn tope_usd_se_redondea_hacia_abajo() {
+        let tope_de = |tope: f64| {
+            let orden = comando_de_trabajo(
+                "tarea-prueba",
+                Dimension::Diseno,
+                "sha256:imagen",
+                N_POR_DEFECTO,
+                SEMILLA_POR_DEFECTO,
+                Some(tope),
+            );
+            orden
+                .args
+                .windows(2)
+                .find(|p| p[0] == "--tope-usd")
+                .map(|p| p[1].clone())
+                .expect("lleva --tope-usd")
+        };
+        assert_eq!(tope_de(18.456), "18.45");
+        assert_eq!(tope_de(18.45), "18.45");
+        assert_eq!(tope_de(0.019), "0.01");
     }
 
     #[test]
