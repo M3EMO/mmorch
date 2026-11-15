@@ -4238,6 +4238,57 @@ mod tests_importar {
     }
 
     #[test]
+    fn agregar_gasto_espera_el_lock_de_eventos() {
+        use crate::tipos::TipoEvento::Llamada;
+        let home = tempfile::tempdir().expect("home");
+        let ruta = crate::observe::ruta_eventos_en(home.path());
+        // Otro escritor tiene el lock exclusivo de eventos.jsonl.
+        let candado = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(home.path().join("eventos.jsonl.lock"))
+            .expect("candado");
+        fs4::FileExt::lock(&candado).expect("lock exclusivo");
+        let gasto = vec![Evento {
+            corrida: "colab-calibrar".into(),
+            fase: "juez".into(),
+            ts: TS_COLAB + 1.0,
+            tipo: Llamada,
+            via: Some(crate::tipos::Via::Api),
+            cost_usd: 0.01,
+            ..Default::default()
+        }];
+        let home_hilo = home.path().to_path_buf();
+        let hilo = thread::spawn(move || agregar_gasto(&home_hilo, &gasto));
+
+        // Con el lock tomado, el hilo espera: no escribe ni termina.
+        thread::sleep(Duration::from_millis(300));
+        let escrito_mientras_hay_lock = fs::read_to_string(&ruta).unwrap_or_default();
+        let termino_mientras_hay_lock = hilo.is_finished();
+
+        // Se suelta el lock antes de cualquier assert, para que el hilo nunca quede colgado.
+        drop(candado);
+        let resultado = hilo.join().expect("hilo");
+
+        assert!(
+            escrito_mientras_hay_lock.is_empty(),
+            "{escrito_mientras_hay_lock}"
+        );
+        assert!(
+            !termino_mientras_hay_lock,
+            "agregar_gasto no esperó el lock"
+        );
+        assert_eq!(resultado.expect("agrega el gasto"), 1);
+        let eventos = eventos_de_colab(home.path());
+        assert_eq!(eventos.len(), 1, "{eventos:?}");
+        assert_eq!(
+            eventos[0].extra.get("origen"),
+            Some(&serde_json::json!("colab"))
+        );
+    }
+
+    #[test]
     fn importar_dos_veces_con_gasto_no_duplica_eventos() {
         use crate::tipos::TipoEvento::Llamada;
         let e = laptop_con_base(0.5);
