@@ -12242,3 +12242,108 @@ Brief: `docs/builds/brief-local-152.md`.
 **Si el paso 4 falla otra vez en la base,** el orquestador corre `r00t oraculo evaluar` sobre el repo bueno en el runtime. Informa el stderr del contenedor, sin repetir la v6.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (64): el gasto de S2 que el registro no separa
+
+**Estado.**
+- La 142, la 151 y la 152 terminaron en verde sin podman.
+- `laptop/cadena-110-152` las suma sin conflictos, en el orden 151, 152 y 142. Su suite con podman corre ahora.
+- La 142 tocó `src/lib.rs` para el cableado de `--juez`, `--sha` y `--ida`, aunque su brief lo prohibía.
+- El usuario va a correr `colab-pruebas/paso0-152.sh`. Después, el orquestador repite la prueba de la 141. Si la base da 1,0, corre la v6.
+
+## 1. Las diez preguntas de la 142
+
+1. **El gasto de S2 sin filtro por tarea.** No alcanza. La sección 2 explica por qué, y P112 decide la regla.
+2. **Un tope de 0 o negativo.** El paquete se rechaza, con un error que da el gastado y el tope. Un paquete que no puede gastar nada no sirve, y su falla aparecería recién en Colab. Va en la 153.
+3. **`colab importar --sha --ida`.** Acepto la decisión.
+4. **`src/lib.rs` para el cableado.** Acepto el cambio. El error fue mío: desde la 146 sé que `lib.rs` desestructura `ColabAccion` sin `..`. El brief de la 142 debió listar `lib.rs`.
+5. **Solo `llamada` y `reserva` en el gasto importado.** Acepto la decisión. Un mensaje sin contenido protege los datos.
+6. **La deduplicación por corrida, reserva y `ts`.** Acepto la decisión.
+7. **El respaldo de `eventos.jsonl` sin lock.** Acepto el respaldo así. Pero la importación que agrega líneas debe tomar el mismo lock que los demás escritores. La 153 lo revisa, y lo arregla si falta.
+8. **`--tope-usd` con redondeo.** No acepto que pueda pasarse. El tope se redondea hacia abajo, al centavo. Va en la 153.
+9. **La hora UTC de la CELDA 4.** Acepto la decisión.
+10. **El `--sha` sin distinguir mayúsculas.** Acepto la decisión.
+
+**Un resto fuera del repo.** Un subagente dejó `/home/mpera/.cache/root-tests/smoke-juez.*`. Lo borra el usuario o el orquestador a mano. El planner no escribe fuera del worktree.
+
+## 2. Por qué el registro no puede dar el gasto de S2
+
+**Medí `eventos.jsonl` de la laptop, solo leyendo.**
+- Las llamadas a la API suman cerca de 223 USD en total. Las corridas `corre-memora-*` de antes de S2 dan 181 USD.
+- Todas las llamadas del juez usan la misma corrida, `oraculo-juez-diseno`. Ningún evento trae la tarea.
+- Con la regla de la 142, el gasto supera los 25 USD, y el tope queda en 0. P107 a no podría correr.
+
+**El registro tampoco separa S2 por fecha.** El 2026-11-09 el juez gastó cerca de 10,4 USD. Una parte fue P101 a, de S2. Otra parte fue `auditar`, que no es S2. La primera corrida `corre-s2-*` es del 2026-11-10 a las 01:46 UTC. Desde ahí, las llamadas suman 4,83 USD. Ese número es menor que los 6,55 USD que sumó el orquestador a mano.
+
+**Los 6,55 USD los sumó el orquestador, corrida por corrida.** Con ese número decidió el usuario P107 a. Qué gasto cuenta contra los 25 USD es una decisión del usuario. Va en P112.
+
+## 3. Cambia la 153 algo que midan la v6 o las doce calibraciones
+
+**No.** La versión congelada fija las rúbricas, el prompt del juez y la versión de las sondas. La huella de una fila sale de la dimensión, del prompt y de la versión. La 153 no toca nada de eso.
+- Los registros fuera del paquete no cambian ningún resultado.
+- El tope y su redondeo solo tocan las calibraciones con juez.
+- El rechazo de `..` en los destinos de bwrap frena una ruta que ningún llamador arma.
+
+**La v6 no espera a la 153.** Las doce calibraciones de oráculo tampoco.
+
+## 4. Las dos preguntas de la 151
+
+1. **`subir_binario` pasa a `subir_archivo`.** Acepto la decisión.
+2. **La función queda.** Acepto la decisión. Junta la subida, la unión y el SHA-256 en un solo lugar.
+
+## 5. Las tres preguntas de la 152
+
+1. **`/oraculo/../x` pasa la revisión.** Sí, se rechaza un componente `..`. Hoy ningún llamador lo arma, pero una revisión que deja pasar `..` no revisa lo que dice. Va en la 153.
+2. **Los comentarios de los guiones siguen ciertos.** Bien.
+3. **`lista_de_carpetas` entra en pánico sin nombrar el guion.** Un test que falla debe decir qué archivo falló. Va en la 153.
+
+## 6. La Tarea 153
+
+| Punto | Qué | Archivo |
+|---|---|---|
+| 1 | Los registros viejos fuera del paquete, y el test que dice revisarlos | `src/colab_calibra.rs` |
+| 2 | Un tope de S2 de 0 o menos rechaza el paquete | `src/colab_calibra.rs` |
+| 3 | `--tope-usd` redondeado hacia abajo | `src/colab_calibra.rs` |
+| 4 | El lock de `eventos.jsonl` en la importación | `src/colab_calibra.rs` |
+| 5 | Un componente `..` en un destino de bwrap se rechaza | `src/oracle/contenedor.rs` |
+| 6 | `lista_de_carpetas` nombra el guion | `tests/colab_preparar.rs` |
+
+- **Base:** la punta de `laptop/cadena-110-152`.
+- **Corre ya.** Ningún otro builder corre ahora.
+- **El gasto de S2 no va en la 153.** Espera P112, y va en la Tarea 154. La 154 también toca `src/colab_calibra.rs`, así que va después de la 153.
+
+Brief: `docs/builds/brief-local-153.md`.
+
+## 7. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | La suite con podman de `laptop/cadena-110-152` | Nada; corre ahora | Laptop | No |
+| 2 | `paso0-152.sh`: el binario de la cadena 152 y los cuatro paquetes | El paso 1 | Laptop, el usuario | No |
+| 3 | La prueba de la 141 otra vez | El paso 2 | Colab, CPU | No |
+| 4 | La calibración v6 de Eficiencia, t1 a t3, en tres runtimes | El paso 3, con base 1,0 | Colab, CPU | No |
+| 5 | La Tarea 153 | Nada | Laptop | No |
+| 6 | P112 | El usuario | — | No |
+| 7 | La Tarea 154: el gasto de S2 según P112 | Los pasos 5 y 6 | Laptop | No |
+| 8 | Armar la cadena con la 153 y la 154, y su suite con podman | El paso 7 | Laptop | No |
+| 9 | El paquete del juez y el arrastre a Drive | El paso 8 | Laptop y el usuario | No |
+| 10 | La etapa 1 de P107 a: dos casos de Diseño en t1 | El paso 9 | Colab, notebook | Cerca de 0,35 USD |
+| 11 | Las cinco etapas de P107 a, en la misma sesión | El paso 10 | Colab, notebook | Lo que deje P112 |
+| 12 | La mezcla de la cadena 110 a 154 | La orden del usuario | — | No |
+| 13 | Congelar la versión | Los pasos 4 y 11 | — | No |
+| 14 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 3 y 13 | Colab, cuatro runtimes | No |
+| 15 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 16 | P98 c: el final con 15 defectos reales | El paso 15 | — | No |
+| 17 | La validez sobre el final sellado | Los pasos 1 a 16 | Colab, notebook si usa el juez | Según el final |
+
+**La 153 puede compilar mientras corre la v6.** La v6 corre en Colab.
+
+## 8. Pregunta al usuario
+
+**P112. ¿Qué gasto cuenta contra el tope de 25 USD de S2?** El registro de la laptop no dice a qué tarea pertenece cada llamada del juez. Root necesita una regla para calcular cuánto queda.
+
+- **a) Los 6,55 USD que sumó el orquestador, más toda llamada a la API desde el 2026-11-14 a las 00:00 UTC, de cualquier tarea.** Hoy da cerca de 6,97 USD gastados y 18,03 USD libres. Puede contar dos veces hasta 0,42 USD, si esas llamadas ya estaban en los 6,55. *(recomendada)*
+- **b) Toda llamada desde la primera corrida de S2, el 2026-11-10 a las 01:46 UTC.** Hoy da 4,83 USD gastados y 20,17 USD libres. Deja fuera el gasto de P101 a del 2026-11-09, que sí fue de S2.
+- **c) Los 6,55 USD, más solo las llamadas que Root etiquete desde ahora con una tarea `s2-*`.** Es exacta desde hoy. Pide cambiar el camino del juez para que cada evento lleve su tarea.
+
+Recomiendo la (a). Cuenta de más, nunca de menos, y no toca el camino del juez. Root no usa la API para otra cosa mientras corre S2.
