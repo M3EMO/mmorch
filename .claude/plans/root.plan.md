@@ -12347,3 +12347,60 @@ Brief: `docs/builds/brief-local-153.md`.
 - **c) Los 6,55 USD, más solo las llamadas que Root etiquete desde ahora con una tarea `s2-*`.** Es exacta desde hoy. Pide cambiar el camino del juez para que cada evento lleve su tarea.
 
 Recomiendo la (a). Cuenta de más, nunca de menos, y no toca el camino del juez. Root no usa la API para otra cosa mientras corre S2.
+
+## Vuelta del 2026-11-14 (65): el gasto de S2 según P112 a
+
+**Estado.**
+- La suite con podman de `laptop/cadena-110-152` dio 3888/0/5.
+- La Tarea 153 compila ahora en `local121`, desde 47cb2a9.
+- **P112, respuesta del usuario: "a) 6,55 más lo de hoy".** Cuentan contra el tope de 25 USD de S2 los 6,55 USD que sumó el orquestador, más toda llamada a la API desde el 2026-11-14 a las 00:00 UTC, de cualquier tarea.
+- El usuario todavía no corrió `paso0-152.sh`.
+
+## 1. Dónde viven el 6,55 y la fecha de corte
+
+**Las dos cifras son decisiones del usuario, no medidas del código.** Por eso van juntas, con nombre y con su fuente, al lado de `TOPE_S2_USD`, en `src/colab_calibra.rs`:
+- `TOPE_S2_USD = 25.0`, de P107 a. Ya existe.
+- `GASTO_S2_PREVIO_USD = 6.55`: la suma del orquestador, corrida por corrida, antes del corte. Fuente: P112 a, y las vueltas (52) y (64).
+- `CORTE_S2 = "2026-11-14T00:00:00Z"`: la fecha de corte, como texto ISO. El código la convierte a epoch con el crate `time`, que ya es dependencia. Nadie escribe el epoch a mano.
+
+**Las cifras no quedan escondidas: salen en cada paquete.**
+- `colab empaquetar --juez` imprime una línea con las cuatro partes: el previo, el gasto desde el corte, el total y lo que queda del tope.
+- El manifiesto guarda esas mismas cuatro cifras. Quien abre un paquete ve de dónde sale su tope.
+
+**El gasto desde el corte usa el helper que ya existe.** `observe::uso::gasto_api_desde(eventos, inicio)` cuenta las llamadas con `ts >= inicio` y las reservas abiertas desde `inicio`. Hoy `gastado_s2_usd` lo llama con `inicio = 0`. La 154 le pasa el corte y suma el previo.
+
+**Hoy da cerca de 6,97 USD gastados y 18,03 USD libres.** El gasto del 2026-11-14 fue de 0,417 USD hasta la última lectura. Las líneas de gasto que vuelvan de Colab llevan su `ts` original, así que cuentan si son posteriores al corte.
+
+## 2. La Tarea 154
+
+- **Archivo:** solo `src/colab_calibra.rs`.
+- **Base:** la punta de `laptop/tarea-153`. Arranca cuando termine la 153.
+- **No cambia nada que midan la v6 o las doce calibraciones.** Solo toca el tope de las calibraciones con juez.
+
+Brief: `docs/builds/brief-local-154.md`.
+
+## 3. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | `paso0-152.sh`: el binario de la cadena 152 y los cuatro paquetes | El usuario | Laptop, el usuario | No |
+| 2 | La prueba de la 141 otra vez | El paso 1 | Colab, CPU | No |
+| 3 | La calibración v6 de Eficiencia, t1 a t3, en tres runtimes | El paso 2, con base 1,0 | Colab, CPU | No |
+| 4 | La Tarea 153 | Nada; compila ahora | Laptop | No |
+| 5 | La Tarea 154 | El paso 4 | Laptop | No |
+| 6 | Armar la cadena con la 153 y la 154, y su suite con podman | El paso 5 | Laptop | No |
+| 7 | El paquete del juez y el arrastre a Drive | El paso 6 | Laptop y el usuario | No |
+| 8 | La etapa 1 de P107 a: dos casos de Diseño en t1 | El paso 7 | Colab, notebook | Cerca de 0,35 USD |
+| 9 | Las cinco etapas de P107 a, en la misma sesión | El paso 8 | Colab, notebook | Hasta lo que quede del tope, cerca de 18 USD |
+| 10 | La mezcla de la cadena 110 a 154 | La orden del usuario | — | No |
+| 11 | Congelar la versión | Los pasos 3 y 9 | — | No |
+| 12 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 2 y 11 | Colab, cuatro runtimes | No |
+| 13 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 14 | P98 c: el final con 15 defectos reales | El paso 13 | — | No |
+| 15 | La validez sobre el final sellado | Los pasos 1 a 14 | Colab, notebook si usa el juez | Según el final |
+
+**Los pasos 1 a 3 y los pasos 4 a 6 corren a la vez.** Los primeros usan Colab, y los segundos la laptop.
+
+**Antes del paso 7, el orquestador compara** la línea de gasto de `empaquetar --juez` con su propia suma. Si difieren en más de 0,05 USD, informa las dos cifras y no arma el paquete.
+
+**Preguntas al usuario:** ninguna nueva.
