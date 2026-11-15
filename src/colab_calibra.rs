@@ -83,6 +83,7 @@ pub const EXCLUIDOS: &[(&str, &str)] = &[
     ("transcripts", "transcripciones de sesiones"),
     ("evidencia", "evidencia de corridas locales"),
     ("colab", "estado de runtimes de Colab (activo.json)"),
+    ("registros", "stderr de corridas viejas de la laptop"),
 ];
 
 /// Tope de gasto de API de S2, en USD. Con `--juez`, el manifiesto guarda lo que queda de este tope.
@@ -2937,6 +2938,12 @@ mod tests {
             fs::write(home.join("colab/activo.json"), "{}\n").expect("escribe");
             fs::create_dir_all(home.join("evidencia")).expect("dir");
             fs::write(home.join("evidencia/x.json"), "{}\n").expect("escribe");
+            fs::create_dir_all(home.join("oraculos/tarea-prueba/registros")).expect("dir");
+            fs::write(
+                home.join("oraculos/tarea-prueba/registros/x.stderr"),
+                "error viejo\n",
+            )
+            .expect("escribe");
 
             // Raíz de Root y binario.
             fs::create_dir_all(e.raiz.path().join("tools/colab")).expect("dir");
@@ -3064,7 +3071,13 @@ mod tests {
         let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
             .expect("empaqueta");
         let nombres = listar(&resumen.salida);
-        let prohibidos = ["eventos.jsonl", "runs.jsonl", "transcripts", "evidencia"];
+        let prohibidos = [
+            "eventos.jsonl",
+            "runs.jsonl",
+            "transcripts",
+            "evidencia",
+            "registros",
+        ];
         for nombre in &nombres {
             assert!(
                 !nombre.split('/').any(|c| prohibidos.contains(&c)),
@@ -3072,6 +3085,42 @@ mod tests {
             );
             assert!(!nombre.starts_with("colab/"), "entra {nombre}");
         }
+    }
+
+    #[test]
+    fn paquete_no_trae_registros_de_la_tarea() {
+        // `oraculos/tarea-prueba/registros/` tiene stderr de corridas viejas: no sale del paquete.
+        let e = Escenario::con_contrato("cargo test");
+        assert!(
+            e.home
+                .path()
+                .join("oraculos/tarea-prueba/registros/x.stderr")
+                .is_file()
+        );
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let nombres = listar(&resumen.salida);
+        assert!(
+            !nombres
+                .iter()
+                .any(|n| n.split('/').any(|c| c == "registros")),
+            "{nombres:?}"
+        );
+    }
+
+    #[test]
+    fn repo_con_carpeta_registros_la_lleva() {
+        // `registros` está en EXCLUIDOS para ROOT_HOME, pero no para el código de un repo.
+        let e = Escenario::con_contrato("cargo test");
+        fs::create_dir_all(e.repo.path().join("registros")).expect("dir");
+        fs::write(e.repo.path().join("registros/a.txt"), "a\n").expect("escribe");
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let nombres = listar(&resumen.salida);
+        assert!(
+            nombres.contains("repos/tarea-prueba/registros/a.txt"),
+            "{nombres:?}"
+        );
     }
 
     #[test]
