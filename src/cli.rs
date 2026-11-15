@@ -211,6 +211,12 @@ pub enum ColabAccion {
         /// Repo de Root: de ahí sale el commit de la laptop. Por defecto, el directorio actual.
         #[arg(long)]
         raiz_root: Option<PathBuf>,
+        /// SHA-256 en hexadecimal (64 caracteres) del paquete. Si no coincide, no se importa nada.
+        #[arg(long)]
+        sha: Option<String>,
+        /// Paquete de ida. Con él, el archivo es la vuelta cruda del runtime. Exige `--sha`.
+        #[arg(long, requires = "sha")]
+        ida: Option<PathBuf>,
     },
     /// Calibra en Colab: corre cada paquete de `colab empaquetar` en su runtime de CPU e importa la vuelta.
     Calibrar {
@@ -737,6 +743,48 @@ mod tests {
                 assert_eq!(semilla, 42);
             }
             otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    /// Argumentos base de `colab importar`, con el paquete y sin banderas.
+    fn importar_base() -> Vec<&'static str> {
+        vec!["r00t", "colab", "importar", "paquete.tar.gz"]
+    }
+
+    #[test]
+    fn colab_importar_parsea_sha() {
+        let mut args = importar_base();
+        args.extend(["--sha", "abc"]);
+        let cli = Cli::try_parse_from(args).expect("colab importar con --sha parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Importar { sha, ida, .. },
+            } => {
+                assert_eq!(sha.as_deref(), Some("abc"));
+                assert!(ida.is_none());
+            }
+            otro => panic!("se esperaba colab importar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_importar_ida_sin_sha_es_error_de_clap() {
+        let mut args = importar_base();
+        args.extend(["--ida", "ida.tar.gz"]);
+        let error = Cli::try_parse_from(args).expect_err("--ida sin --sha debe fallar");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn colab_importar_ida_con_sha_parsea() {
+        let mut args = importar_base();
+        args.extend(["--sha", "abc", "--ida", "ida.tar.gz"]);
+        let cli = Cli::try_parse_from(args).expect("colab importar con --sha e --ida parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Importar { ida, .. },
+            } => assert_eq!(ida, Some(PathBuf::from("ida.tar.gz"))),
+            otro => panic!("se esperaba colab importar, llegó {otro:?}"),
         }
     }
 }

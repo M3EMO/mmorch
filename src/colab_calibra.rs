@@ -1050,6 +1050,8 @@ pub struct DondeSeMidio {
 pub struct PedidoImportar {
     pub archivo: PathBuf,
     pub raiz_root: Option<PathBuf>,
+    pub sha: Option<String>,
+    pub ida: Option<PathBuf>,
 }
 
 /// Una fila que no entró, con su motivo.
@@ -1258,13 +1260,82 @@ pub fn valores_distintos(valores: impl IntoIterator<Item = f32>) -> Vec<f32> {
 
 /// Punto de entrada de `colab importar`. Toma el commit de la laptop de `raiz_root` y el ROOT_HOME real.
 pub fn importar_cli(pedido: PedidoImportar) -> Result<ResumenImportar, ErrorOraculo> {
-    let raiz_root = match pedido.raiz_root {
-        Some(raiz) => raiz,
+    let raiz_root = match &pedido.raiz_root {
+        Some(raiz) => raiz.clone(),
         None => std::env::current_dir()
             .map_err(|e| ErrorOraculo::Infra(format!("directorio actual: {e}")))?,
     };
     let commit = commit_de(&raiz_root)?;
-    importar(&root_home(), &pedido.archivo, &commit)
+    importar_verificado(&root_home(), pedido, &commit)
+}
+
+/// Importa según el pedido. Con `--sha`, revisa el SHA-256 antes de abrir el paquete.
+/// Con `--ida`, el archivo es la vuelta cruda: se arma con la ida y después se importa.
+/// `commit_laptop` llega como argumento para que los tests no dependan de git.
+pub fn importar_verificado(
+    home: &Path,
+    pedido: PedidoImportar,
+    commit_laptop: &str,
+) -> Result<ResumenImportar, ErrorOraculo> {
+    let PedidoImportar {
+        archivo, sha, ida, ..
+    } = pedido;
+    let Some(sha) = sha else {
+        if ida.is_some() {
+            return Err(ErrorOraculo::Uso("--ida exige --sha".into()));
+        }
+        return importar(home, &archivo, commit_laptop);
+    };
+    if !es_sha256_hex(&sha) {
+        return Err(ErrorOraculo::Uso(format!(
+            "--sha quiere 64 caracteres hexadecimales, llegó {sha}"
+        )));
+    }
+    verificar_sha_del_paquete(&sha, &archivo)?;
+    match ida {
+        None => importar(home, &archivo, commit_laptop),
+        Some(ida) => importar_vuelta_cruda(home, &ida, &archivo, commit_laptop),
+    }
+}
+
+/// Compara el SHA-256 del paquete con `--sha`. Sin coincidencia, el paquete no se abre.
+/// No se reusa `verificar_sha_de_la_vuelta`: su mensaje habla del cierre de Colab.
+fn verificar_sha_del_paquete(esperado: &str, archivo: &Path) -> Result<(), ErrorOraculo> {
+    if !archivo.is_file() {
+        return Err(ErrorOraculo::Uso(format!(
+            "no existe el paquete {}",
+            archivo.display()
+        )));
+    }
+    let bytes = fs::read(archivo)
+        .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", archivo.display())))?;
+    let real = sha256_hex(&bytes);
+    if real == esperado.to_ascii_lowercase() {
+        return Ok(());
+    }
+    Err(ErrorOraculo::Infra(format!(
+        "el SHA-256 del paquete es {real}, --sha dio {esperado}; el paquete no se abrió y no se importó nada"
+    )))
+}
+
+/// Con `--ida`: revisa la vuelta cruda del runtime, la arma con su ida, la importa y borra el armado.
+fn importar_vuelta_cruda(
+    home: &Path,
+    ida: &Path,
+    vuelta: &Path,
+    commit_laptop: &str,
+) -> Result<ResumenImportar, ErrorOraculo> {
+    let tmp = home.join("tmp");
+    fs::create_dir_all(&tmp)
+        .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", tmp.display())))?;
+    verificar_vuelta_del_runtime(vuelta, &tmp)?;
+    let sesion = format!("importar-{}", colab::epoch_segundos());
+    let resultado = importar_vuelta(home, ida, vuelta, &sesion, commit_laptop, &Mutex::new(()));
+    let armado = tmp.join(format!("vuelta-{sesion}.tar.gz"));
+    let limpieza = borrado::borrar_archivo_dentro(&tmp, &armado);
+    let resumen = resultado?;
+    limpieza.map_err(|e| ErrorOraculo::Infra(format!("borrar el paquete armado: {e}")))?;
+    Ok(resumen)
 }
 
 /// Importa el paquete de vuelta en `home`. `commit_laptop` es el commit de la laptop.
@@ -3583,6 +3654,7 @@ mod tests {
 #[cfg(test)]
 mod tests_importar {
     use super::tests::Escenario;
+    use super::tests_calibrar::{empaquetar_dir, paquete_de_ida};
     use super::*;
     use crate::oracle::tarea::cargar_en;
 
@@ -4157,6 +4229,166 @@ mod tests_importar {
         assert!(texto.contains("línea 1"), "{texto}");
         assert_eq!(instantanea(home), antes);
     }
+
+    /// Pedido de prueba: el paquete, el `--sha` y el `--ida` que se pasan tal cual.
+    fn pedido_con(archivo: &Path, sha: Option<String>, ida: Option<PathBuf>) -> PedidoImportar {
+        PedidoImportar {
+            archivo: archivo.to_path_buf(),
+            raiz_root: None,
+            sha,
+            ida,
+        }
+    }
+
+    /// Importa con el commit de la laptop de prueba, `abc123`.
+    fn importar_con(home: &Path, pedido: PedidoImportar) -> Result<ResumenImportar, ErrorOraculo> {
+        importar_verificado(home, pedido, "abc123")
+    }
+
+    /// Vuelta cruda del runtime: calibracion.json, sus casos, verificación y manifiesto-vuelta.json, en tar.gz.
+    fn vuelta_cruda(caja: &Path, fila: &Fila, casos: &str) -> PathBuf {
+        let dir = caja.join("vuelta-cruda");
+        fs::create_dir_all(dir.join(CARPETA_CALIBRACION)).expect("carpeta de casos");
+        fs::write(dir.join("verificacion.txt"), VERIFICACION_OK).expect("verificación");
+        let cal = serde_json::json!({"v": 1, "filas": [fila]}).to_string();
+        fs::write(dir.join(ARCHIVO_CALIBRACION), cal).expect("calibración");
+        fs::write(
+            dir.join(CARPETA_CALIBRACION).join(nombre_casos(TS_COLAB)),
+            casos,
+        )
+        .expect("casos");
+        let archivos = archivos_de(&dir).expect("archivos de la vuelta");
+        let manifiesto = serde_json::json!({"v": 1, "archivos": archivos}).to_string();
+        fs::write(dir.join(MANIFIESTO_DEL_RUNTIME), manifiesto).expect("manifiesto de vuelta");
+        let tgz = caja.join("vuelta-cruda.tar.gz");
+        empaquetar_dir(&dir, &tgz);
+        tgz
+    }
+
+    /// Nombres de lo que queda en `ROOT_HOME/tmp`. Vacío si la carpeta no existe.
+    fn nombres_en_tmp(home: &Path) -> Vec<String> {
+        fs::read_dir(home.join("tmp"))
+            .map(|entradas| {
+                entradas
+                    .map(|e| {
+                        e.expect("entrada")
+                            .file_name()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sha_distinto_no_importa_nada_y_nombra_los_dos_sha() {
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        let fila = fila_de(TS_COLAB, &huella(), &tarea_hash(home));
+        let v = vuelta(vec![fp(fila, &nombre_casos(TS_COLAB), &linea_caso(0.5))]);
+        let (_caja, tgz) = armar_paquete(&v, None);
+        let real = sha256_hex(&fs::read(&tgz).expect("lee el paquete"));
+        let esperado = "0".repeat(64);
+        let antes = instantanea(home);
+
+        let texto = importar_con(home, pedido_con(&tgz, Some(esperado.clone()), None))
+            .expect_err("frena por el SHA")
+            .to_string();
+
+        assert!(texto.contains(&real), "{texto}");
+        assert!(texto.contains(&esperado), "{texto}");
+        assert!(texto.contains("no se abrió"), "{texto}");
+        assert_eq!(instantanea(home), antes);
+        assert!(!home.join("colab/respaldos").exists());
+    }
+
+    #[test]
+    fn sha_correcto_importa_como_antes() {
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        let fila = fila_de(TS_COLAB, &huella(), &tarea_hash(home));
+        let v = vuelta(vec![fp(fila, &nombre_casos(TS_COLAB), &linea_caso(0.5))]);
+        let (_caja, tgz) = armar_paquete(&v, None);
+        let sha = sha256_hex(&fs::read(&tgz).expect("lee el paquete"));
+
+        let resumen = importar_con(home, pedido_con(&tgz, Some(sha), None))
+            .expect("importa con el SHA correcto");
+
+        assert_eq!(resumen.entraron, 1, "{resumen:?}");
+    }
+
+    #[test]
+    fn sha_con_formato_malo_es_error_de_uso_y_no_toca_nada() {
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        let (_caja, tgz) = armar_paquete(&vuelta(vec![]), None);
+        let antes = instantanea(home);
+
+        let error = importar_con(home, pedido_con(&tgz, Some("abc".into()), None))
+            .expect_err("frena el formato del SHA");
+
+        assert!(matches!(error, ErrorOraculo::Uso(_)), "{error}");
+        assert_eq!(instantanea(home), antes);
+    }
+
+    #[test]
+    fn ida_sin_sha_es_error_de_uso() {
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        let (_caja, tgz) = armar_paquete(&vuelta(vec![]), None);
+        let caja = tempfile::tempdir().expect("caja");
+        let ida = paquete_de_ida(caja.path(), "ida", "{\"v\":1,\"filas\":[]}\n");
+
+        let error =
+            importar_con(home, pedido_con(&tgz, None, Some(ida))).expect_err("--ida exige --sha");
+
+        assert!(error.to_string().contains("--sha"), "{error}");
+    }
+
+    #[test]
+    fn ida_con_sha_correcto_arma_e_importa_la_vuelta_cruda() {
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        let caja = tempfile::tempdir().expect("caja");
+        let ida = paquete_de_ida(caja.path(), "ida", "{\"v\":1,\"filas\":[]}\n");
+        let fila = fila_de(TS_COLAB, &huella(), &tarea_hash(home));
+        let vuelta = vuelta_cruda(caja.path(), &fila, &linea_caso(0.5));
+        let sha = sha256_hex(&fs::read(&vuelta).expect("lee la vuelta"));
+
+        let resumen = importar_con(home, pedido_con(&vuelta, Some(sha), Some(ida)))
+            .expect("arma e importa la vuelta cruda");
+
+        assert_eq!(resumen.entraron, 1, "{resumen:?}");
+        let sobrantes: Vec<String> = nombres_en_tmp(home)
+            .into_iter()
+            .filter(|n| n.starts_with("vuelta-") || n.starts_with("verificar-vuelta"))
+            .collect();
+        assert!(sobrantes.is_empty(), "{sobrantes:?}");
+    }
+
+    #[test]
+    fn ida_con_sha_distinto_no_arma_ni_importa_nada() {
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        let caja = tempfile::tempdir().expect("caja");
+        let ida = paquete_de_ida(caja.path(), "ida", "{\"v\":1,\"filas\":[]}\n");
+        let fila = fila_de(TS_COLAB, &huella(), &tarea_hash(home));
+        let vuelta = vuelta_cruda(caja.path(), &fila, &linea_caso(0.5));
+        let antes = instantanea(home);
+
+        let texto = importar_con(home, pedido_con(&vuelta, Some("0".repeat(64)), Some(ida)))
+            .expect_err("frena por el SHA")
+            .to_string();
+
+        assert!(texto.contains("no se abrió"), "{texto}");
+        assert_eq!(instantanea(home), antes);
+        assert!(
+            nombres_en_tmp(home).is_empty(),
+            "{:?}",
+            nombres_en_tmp(home)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4388,7 +4620,7 @@ mod tests_calibrar {
     }
 
     /// Empaqueta `dir` en `tgz` con la misma forma que `colab empaquetar`.
-    fn empaquetar_dir(dir: &Path, tgz: &Path) {
+    pub(in crate::colab_calibra) fn empaquetar_dir(dir: &Path, tgz: &Path) {
         tar(&[
             "-czf",
             tgz.to_str().expect("ruta"),
@@ -4411,7 +4643,11 @@ mod tests_calibrar {
     }
 
     /// Paquete de ida hecho a mano. El manifiesto sale de `armar_manifiesto`, como en el punto 1.
-    fn paquete_de_ida(caja: &Path, nombre: &str, calibracion: &str) -> PathBuf {
+    pub(in crate::colab_calibra) fn paquete_de_ida(
+        caja: &Path,
+        nombre: &str,
+        calibracion: &str,
+    ) -> PathBuf {
         let staging = caja.join(format!("{nombre}-src"));
         let archivos_base = [
             ("r00t", "binario\n"),

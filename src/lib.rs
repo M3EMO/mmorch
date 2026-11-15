@@ -1037,12 +1037,20 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
             *semilla,
         ),
         Comando::Colab {
-            accion: ColabAccion::Importar { archivo, raiz_root },
+            accion:
+                ColabAccion::Importar {
+                    archivo,
+                    raiz_root,
+                    sha,
+                    ida,
+                },
         } => colab_importar(
             cli.json,
             colab_calibra::PedidoImportar {
                 archivo: archivo.clone(),
                 raiz_root: raiz_root.clone(),
+                sha: sha.clone(),
+                ida: ida.clone(),
             },
         ),
         Comando::Colab {
