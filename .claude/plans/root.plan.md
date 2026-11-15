@@ -11984,3 +11984,156 @@ Briefs: `docs/builds/brief-local-148.md` (rehecho), `brief-local-149.md` y `brie
 | 15 | La validez sobre el final sellado | Los pasos 1 a 14 | Colab, notebook si usa el juez | Según el final |
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-14 (62): el paquete por Drive, y lo que se espera de la 141 y de la v6
+
+**Estado.**
+- La 148, la 149 y la 150 terminaron en verde sin podman: 3793/0/5, 3803/0/5 y 3815/0/5.
+- `laptop/cadena-110-150` las suma sin conflictos. Su suite con podman dio 3831/0/5.
+- La prueba de la 141 con la cadena 145 falló en la subida: el paquete entero de 182 MB dio "500 Internal Server Error". La 150 ya sube en trozos de 40 MiB.
+- El usuario corre `colab-pruebas/paso0-150.sh`. Arma el binario de la cadena 150 y cuatro paquetes: Seguridad de s2-t1, y Eficiencia de s2-t1 a s2-t3.
+- El usuario pidió que el orquestador corra la Prueba 1, la prueba de la 141 y la calibración v6.
+- **Prueba 1, la clave:** el descriptor anduvo. El hijo en `bwrap --clearenv` no vio la variable, ni el descriptor, ni el valor.
+- **Prueba 1, la subida:** `colab-mcp` no sube archivos. La CLI no ve la sesión del notebook. El notebook sí montó Drive.
+- El runtime del notebook tiene 2 núcleos y no trae bwrap. Se instala con `apt-get install bubblewrap`.
+
+## 1. Las dos preguntas de la 148
+
+1. **Los informes de la 147 citan el motivo viejo.** Un informe es un registro de lo que pasó en su tarea. No se corrige después. Esta vuelta anota que la 148 cambió el texto.
+2. **`SondaFalsa` con `Option`.** Acepto la decisión.
+
+## 2. Las cuatro preguntas de la 149, y lo que dejó abierto
+
+1. **El orden de los motivos.** Acepto la decisión: primero la lectura de `/proc/stat`, después la CPU propia, después los núcleos.
+2. **Sin núcleos, sin aviso.** Acepto la decisión. El motivo del caso ya lleva el error.
+3. **Las corridas de memoria fuera del control de carga.** Acepto la decisión. El pico de un proceso cuenta sus propias páginas, y la carga de otro proceso no lo cambia.
+4. **Error si falta `steal`.** Acepto la decisión. Linux trae `steal` desde 2.6.11. Un error visible es mejor que un cero supuesto.
+
+**Lo que dejó abierto:**
+- **El aviso de carga ajena en la fila.** El orquestador lo revisa en las filas de la v6. Si no llega, una tarea chica lo agrega después.
+- **La carpeta que queda si `escribir_guion` falla.** Es un camino de error raro. No se arregla ahora: tocaría `eficiencia.rs` después de la v6, y la versión calibrada cambiaría. Queda para después de la validez.
+- **El memo.** Acepto que no hay test. `Alcance::Deterministas` excluye Eficiencia, y eso basta.
+
+## 3. Las cinco preguntas de la 150
+
+1. **`DIMENSIONES_COLAB` suma Eficiencia.** Acepto la decisión. Sin ella, el rechazo seguía por otro camino.
+2. **El sufijo "no llegó" según el archivo.** Basta. El sufijo dice un hecho del archivo, y el archivo lo decide.
+3. **El paquete entero en memoria para su SHA-256.** Lo acepto por ahora. Son 182 MB una vez, y la laptop tiene memoria de sobra.
+4. **El `stderr.trim()` de podman.** Acepto la decisión.
+5. **Los binarios chicos suben sin control de SHA-256.** No lo acepto. La regla de la 150 dice que lo que se sube se verifica. Hay dos caminos de subida, y uno no verifica. La Tarea 151 deja un solo camino: todo archivo sube por la función de trozos, con su SHA-256.
+
+## 4. Cómo llega un paquete grande al runtime del notebook
+
+**Lo que pide P107 a.** Las cinco etapas corren en una sola sesión del notebook. Un solo paquete trae todos sus trabajos. El tamaño se parece al de la 141: cerca de 180 MB.
+
+**Las acciones que cualquier forma pide.** El montaje de Drive pide una aprobación en el navegador. La lectura de la clave con `userdata.get` pide otra. Esas dos van en toda sesión.
+
+| Forma | Acciones extra del usuario por paquete | Problema |
+|---|---|---|
+| a) El usuario arrastra el paquete a `root-colab` en Drive, desde el navegador | 1 | Ninguno serio. Drive tarda en tener el archivo disponible |
+| b) Trozos de 10 MB por la herramienta de Drive | Cerca de 19, una por trozo | Demasiadas aprobaciones para 180 MB |
+| c) Un paquete del juez más chico | Las mismas que a) o b) | Estructura y Arquitectura corren clippy, y clippy necesita la caché y las herramientas. El paquete no baja de 10 MB |
+| d) El notebook baja el paquete de un lugar que publica la laptop | Público: 1, privado: 3 o más | El paquete trae `oraculos/`, los tests ocultos. Publicarlo los expone. Uno privado pide un token nuevo en Colab Secrets |
+| e) `rclone` en la laptop, con acceso a Drive | 1 o 2 una sola vez, después 0 | Da al agente escritura en Drive sin aprobación por archivo. Es una herramienta nueva con permiso amplio |
+
+**Elijo la a).** Pide una sola acción extra en toda la sesión, porque P107 a usa un solo paquete. No expone los tests ocultos. No suma herramientas ni permisos. La e) solo convendría si el notebook corriera muchas sesiones, y hoy corre una.
+
+**Cómo queda el camino de ida:**
+1. La laptop arma el paquete con `r00t colab empaquetar --juez`. El comando imprime el SHA-256 del tar.
+2. El usuario arrastra el tar a `root-colab` en Drive.
+3. El orquestador escribe el nombre y el SHA-256 en la CELDA 1 con `colab-mcp`.
+4. La CELDA 1 monta Drive y espera el archivo hasta 10 minutos. Lo copia a `/content/paquete.tar.gz` y verifica el SHA-256 contra el valor de la celda.
+5. Un SHA distinto frena la celda. No abre nada.
+
+**Por qué el SHA va en la celda y no en el manifiesto.** El manifiesto viaja dentro del mismo tar. Un tar entero reemplazado traería su propio manifiesto. Es el mismo motivo del punto 6 de la 147.
+
+**El camino de vuelta.** El paquete de vuelta es chico: filas, casos y líneas de gasto. La CELDA 4 lo copia a `root-colab` en Drive, e imprime `ROOT_SHA_VUELTA`. El orquestador lo baja con la herramienta de Drive y compara el SHA-256. Si pasa de 10 MB, el usuario lo baja desde el navegador: una acción más.
+
+**bwrap.** La CELDA 1 instala `bubblewrap` con `apt-get` si `bwrap` no existe. Después corre `preparar-runtime.sh`, como en los runtimes de la CLI.
+
+## 5. La Tarea 142, actualizada
+
+- **Base:** la punta de `laptop/cadena-110-150`.
+- **El punto 3 pasa a ser el camino de Drive** de la sección 4.
+- **Eficiencia ya no se rechaza.** La 150 la acepta. El brief viejo pedía rechazarla con `--juez`, y ese pedido sale.
+- **La Prueba 1 ya terminó.** El descriptor anduvo con `bwrap --clearenv`. El punto 3 ya no espera nada.
+
+Actualicé `docs/builds/brief-local-142.md`.
+
+## 6. La Tarea 151
+
+**Un solo camino de subida, con SHA-256.** Toca solo `src/oracle/colab.rs`. La 142 no toca ese archivo, así que las dos corren a la vez. Su base es la punta de `laptop/cadena-110-150`. Brief: `docs/builds/brief-local-151.md`.
+
+## 7. Qué espera el orquestador de la prueba de la 141
+
+**Lo que corre:** `colab calibrar` con el paquete de Seguridad de s2-t1, en un runtime de CPU.
+
+**Lo que debe pasar:**
+1. La subida va en 5 trozos de `/content/root-paq.00` a `.04`.
+2. La unión da `ROOT_UNIDO=ok`, y el SHA-256 coincide.
+3. La preparación da `ROOT_OK=preparar`.
+4. El trabajo da 2 defectos y 2 limpios, con sensibilidad y especificidad 1,0. La huella y el `tarea_hash` son los de la fila de la laptop.
+5. `verificacion.txt` da `ok` en todos los controles, también `rustc` y `clippy`.
+6. `ROOT_SHA_VUELTA` coincide con el tar bajado. La importación suma la fila.
+7. `stop` cierra el runtime.
+
+**Si falla:**
+
+| Dónde falla | Qué hace el orquestador |
+|---|---|
+| Un trozo no sube | Lee el mensaje: ahora trae el número del trozo y el stdout. Repite una vez. Si falla igual, informa sin repetir más |
+| La unión o el SHA de ida | Informa el SHA de la laptop y el del runtime. No repite |
+| `verificacion.txt` con `mal rustc` | Corre la comprobación de la vuelta (61), sección 6, en el mismo runtime. Informa las dos salidas |
+| El resultado difiere de la laptop | Informa la huella y las dos filas. No repite |
+| `ROOT_SHA_VUELTA` distinto | Informa los dos SHA. No importa nada |
+
+**La v6 espera a la 141.** La 141 prueba el transporte con un trabajo de 11 s. Si falla ahí, la v6 fallaría igual.
+
+## 8. Qué espera el orquestador de la calibración v6
+
+**Lo que corre:** tres runtimes de CPU a la vez, uno por tarea, de s2-t1 a s2-t3. Cada uno con `eficiencia:4` y semilla 42.
+
+**Lo que debe pasar en cada tarea:**
+1. `sonda_lastre` da `corrio: true`, sin motivo, con unas 200 funciones.
+2. Los defectos son aplicables, con `lugar_por: sonda`.
+3. `memoria_pico` tiene valor en todos los casos. En un defecto, la razón pasa del ruido, porque 64 MiB es mucho para un proceso de test. En un limpio, la razón queda dentro del ruido.
+4. Los tiempos tienen valor. Cada caso trae su aviso de mayor carga ajena, debajo de 1 núcleo.
+5. Todos los limpios dan bien.
+6. Cada detección viene de `memoria_pico`, como pide la vuelta (59).
+
+**Si falla:**
+
+| Lo que pasa | Qué hace el orquestador |
+|---|---|
+| `memoria_pico` "sin medida de memoria por proceso" en todos los casos | nextest no aplicó el runner. Para la v6 e informa el comando y la salida de un caso |
+| La sonda da "no llegó a sus marcas" | Informa el motivo y si `/salida/root-sonda.lista` existía. No repite |
+| Un defecto aplicable con la memoria igual | Informa el lugar y las medidas. No repite |
+| Un limpio detectado por tiempo, con carga ajena baja | Informa las medidas. No repite. Es ruido de Colab, y la vuelta siguiente lo decide |
+| Un limpio detectado con carga ajena alta | Repite esa tarea en un runtime nuevo, una vez |
+| Una tarea pasa el tope de 4 horas | La parte en dos trabajos de `n=2`, con la misma semilla |
+| El aviso de carga ajena no llega a la fila | Lo informa. La v6 vale igual |
+
+**Con una tarea que detecte por memoria y los limpios bien en las tres, Eficiencia cumple P102 a.**
+
+## 9. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | `colab-pruebas/paso0-150.sh`: el binario y los cuatro paquetes | Corre ahora | Laptop, el usuario | No |
+| 2 | La prueba de la 141 con el paquete de Seguridad | El paso 1 | Colab, CPU | No |
+| 3 | La calibración v6 de Eficiencia, t1 a t3, en tres runtimes | El paso 2 | Colab, CPU | No |
+| 4 | Las Tareas 142 y 151, a la vez | Nada | Laptop | No |
+| 5 | Armar `laptop/cadena-110-151` con la 142, y su suite con podman | El paso 4 | Laptop | No |
+| 6 | El paquete del juez y el arrastre a Drive | El paso 5 | Laptop y el usuario | No |
+| 7 | La etapa 1 de P107 a: dos casos de Diseño en t1 | El paso 6 | Colab, notebook | Cerca de 0,35 USD |
+| 8 | Las cinco etapas de P107 a, en la misma sesión | El paso 7 | Colab, notebook | Hasta 18,45 USD |
+| 9 | La mezcla de la cadena 110 a 151 y la 142 | La orden del usuario | — | No |
+| 10 | Congelar la versión | Los pasos 3 y 8 | — | No |
+| 11 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 2 y 10 | Colab, cuatro runtimes | No |
+| 12 | P97 c: la reserva nueva, con una tarea con `[entrega]` si se puede | Nada | — | No |
+| 13 | P98 c: el final con 15 defectos reales | El paso 12 | — | No |
+| 14 | La validez sobre el final sellado | Los pasos 1 a 13 | Colab, notebook si usa el juez | Según el final |
+
+**El paso 4 puede correr a la vez que el 3.** La v6 corre en Colab, así que la carga de la laptop no la toca.
+
+**Preguntas al usuario:** ninguna nueva.
