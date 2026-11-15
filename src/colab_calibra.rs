@@ -94,17 +94,14 @@ pub const TOPE_S2_USD: f64 = 25.0;
 
 /// Gasto de API de S2 antes del corte. Es la suma del orquestador, corrida por corrida.
 /// Fuente: P112 a del usuario.
-#[allow(dead_code)] // El punto 2 de la Tarea 154 lo usa.
 pub const GASTO_S2_PREVIO_USD: f64 = 6.55;
 
 /// Desde este instante, toda llamada a la API cuenta contra S2. Formato RFC 3339.
 /// Fuente: P112 a del usuario.
-#[allow(dead_code)] // El punto 2 de la Tarea 154 lo usa.
 pub const CORTE_S2: &str = "2026-11-14T00:00:00Z";
 
 /// Convierte el texto del corte de S2 a segundos desde la época Unix.
 /// Un texto que no sea RFC 3339 da error de infraestructura.
-#[allow(dead_code)] // El punto 2 de la Tarea 154 lo usa.
 pub fn corte_s2_epoch(texto: &str) -> Result<f64, ErrorOraculo> {
     let momento =
         time::OffsetDateTime::parse(texto, &time::format_description::well_known::Rfc3339)
@@ -611,12 +608,13 @@ pub fn tope_s2_restante(gastado: f64) -> f64 {
     (TOPE_S2_USD - gastado).max(0.0)
 }
 
-/// Gasto de API que ya lleva ROOT_HOME: suma todo el gasto de API de `eventos.jsonl`, sin filtrar por tarea.
-/// Los eventos no traen la tarea, así que este número sobreestima el gasto de S2 y nunca lo subestima.
+/// Gasto de API de S2 que ya lleva ROOT_HOME. Regla P112 a: el previo, más toda llamada a la API desde el corte.
+/// Cuenta de cualquier tarea, porque los eventos no traen la tarea. Por eso sobreestima el gasto de S2.
 pub fn gastado_s2_usd(home: &Path) -> Result<f64, ErrorOraculo> {
     let eventos = crate::observe::uso::leer_eventos(&crate::observe::ruta_eventos_en(home))
         .map_err(|e| ErrorOraculo::Infra(format!("leer eventos.jsonl: {e}")))?;
-    Ok(crate::observe::uso::gasto_api_desde(&eventos, 0.0))
+    let desde_corte = crate::observe::uso::gasto_api_desde(&eventos, corte_s2_epoch(CORTE_S2)?);
+    Ok(GASTO_S2_PREVIO_USD + desde_corte)
 }
 
 /// Revisa los trabajos: dimensión calibrable y comandos sin `pytest`.
@@ -3018,16 +3016,52 @@ mod tests {
         }
     }
 
-    /// Escribe un `eventos.jsonl` con una llamada de API que costó `usd` dólares.
-    fn eventos_con_api(home: &Path, usd: f64) {
-        let evento = crate::tipos::Evento {
-            tipo: crate::tipos::TipoEvento::Llamada,
+    /// Epoch del corte de S2, en segundos. Los tests suman segundos a este valor.
+    fn epoch_corte() -> f64 {
+        corte_s2_epoch(CORTE_S2).expect("corte válido")
+    }
+
+    /// Llamada de API de `corrida`, en `ts`, que costó `usd` dólares.
+    fn llamada_api(ts: f64, corrida: &str, usd: f64) -> Evento {
+        Evento {
+            ts,
+            corrida: corrida.into(),
+            tipo: TipoEvento::Llamada,
             via: Some(crate::tipos::Via::Api),
             cost_usd: usd,
             ..Default::default()
-        };
-        let linea = serde_json::to_string(&evento).expect("evento");
-        fs::write(home.join("eventos.jsonl"), format!("{linea}\n")).expect("escribe");
+        }
+    }
+
+    /// Reserva de API con id `id`, en `ts`, por `usd` dólares.
+    fn reserva_api(ts: f64, id: &str, usd: f64) -> Evento {
+        Evento {
+            tipo: TipoEvento::Reserva,
+            extra: serde_json::Map::from_iter([("reserva".to_string(), serde_json::json!(id))]),
+            ..llamada_api(ts, "corre-s2", usd)
+        }
+    }
+
+    /// Llamada de API que cierra las reservas `ids`, en `ts`, por `usd` dólares.
+    fn cierre_api(ts: f64, ids: &[&str], usd: f64) -> Evento {
+        Evento {
+            extra: serde_json::Map::from_iter([("reservas".to_string(), serde_json::json!(ids))]),
+            ..llamada_api(ts, "corre-s2", usd)
+        }
+    }
+
+    /// Escribe `eventos.jsonl` con un evento JSON por línea.
+    fn escribir_eventos(home: &Path, eventos: &[Evento]) {
+        let texto: String = eventos
+            .iter()
+            .map(|ev| format!("{}\n", serde_json::to_string(ev).expect("evento")))
+            .collect();
+        fs::write(home.join("eventos.jsonl"), texto).expect("escribe");
+    }
+
+    /// Escribe un `eventos.jsonl` con una llamada de API de `usd` dólares, justo después del corte.
+    fn eventos_con_api(home: &Path, usd: f64) {
+        escribir_eventos(home, &[llamada_api(epoch_corte() + 1.0, "corre-s2", usd)]);
     }
 
     /// Lista las entradas de archivo del paquete, sin `./` ni carpetas.
@@ -3373,7 +3407,57 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         eventos_con_api(home.path(), 6.55);
         let gastado = gastado_s2_usd(home.path()).expect("lee eventos");
+        assert!((gastado - 13.10).abs() < 1e-9, "{gastado}");
+    }
+
+    #[test]
+    fn gastado_s2_ignora_la_llamada_anterior_al_corte() {
+        let home = tempfile::tempdir().expect("home");
+        escribir_eventos(
+            home.path(),
+            &[
+                llamada_api(epoch_corte() - 3600.0, "corre-vieja", 100.0),
+                llamada_api(epoch_corte() + 60.0, "corre-s2", 1.0),
+            ],
+        );
+        let gastado = gastado_s2_usd(home.path()).expect("lee eventos");
+        assert!((gastado - 7.55).abs() < 1e-9, "{gastado}");
+    }
+
+    #[test]
+    fn gastado_s2_cuenta_la_llamada_de_otra_corrida_despues_del_corte() {
+        let home = tempfile::tempdir().expect("home");
+        escribir_eventos(
+            home.path(),
+            &[llamada_api(epoch_corte() + 60.0, "corre-memora-x", 2.0)],
+        );
+        let gastado = gastado_s2_usd(home.path()).expect("lee eventos");
+        assert!((gastado - 8.55).abs() < 1e-9, "{gastado}");
+    }
+
+    #[test]
+    fn gastado_s2_cuenta_la_reserva_abierta_y_no_duplica_la_cerrada() {
+        let home = tempfile::tempdir().expect("home");
+        let corte = epoch_corte();
+        escribir_eventos(
+            home.path(),
+            &[
+                reserva_api(corte + 10.0, "r-abierta", 3.0),
+                reserva_api(corte + 20.0, "r-cerrada", 4.0),
+                cierre_api(corte + 30.0, &["r-cerrada"], 1.5),
+            ],
+        );
+        let gastado = gastado_s2_usd(home.path()).expect("lee eventos");
+        // 6.55 previo + 3.0 de la reserva abierta + 1.5 de la llamada que cierra la otra reserva.
+        assert!((gastado - 11.05).abs() < 1e-9, "{gastado}");
+    }
+
+    #[test]
+    fn gastado_s2_sin_eventos_es_el_previo() {
+        let home = tempfile::tempdir().expect("home");
+        let gastado = gastado_s2_usd(home.path()).expect("lee eventos");
         assert!((gastado - 6.55).abs() < 1e-9, "{gastado}");
+        assert!((tope_s2_restante(gastado) - 18.45).abs() < 1e-9);
     }
 
     #[test]
@@ -3445,14 +3529,15 @@ mod tests {
         let texto =
             fs::read_to_string(extraido.path().join("manifiesto.json")).expect("manifiesto");
         let m: Manifiesto = serde_json::from_str(&texto).expect("JSON del manifiesto");
+        // Previo 6.55 + 6.55 desde el corte = 13.10 gastados; 25.00 - 13.10 = 11.90 de tope.
         let tope = m.tope_s2_usd.expect("tope de S2");
-        assert!((tope - 18.45).abs() < 1e-9, "{tope}");
+        assert!((tope - 11.90).abs() < 1e-9, "{tope}");
         let con_juez = &m.trabajos[0].args;
         let i = con_juez
             .iter()
             .position(|a| a == "--tope-usd")
             .expect("el trabajo con juez lleva --tope-usd");
-        assert_eq!(con_juez[i + 1], "18.45");
+        assert_eq!(con_juez[i + 1], "11.90");
         assert!(
             !m.trabajos[1].args.iter().any(|a| a == "--tope-usd"),
             "{:?}",
@@ -3469,8 +3554,9 @@ mod tests {
         let Err(ErrorOraculo::Uso(m)) = empaquetar(&paquete, &Doble) else {
             panic!("con juez y tope agotado debe fallar con Uso");
         };
-        assert!(m.contains("25"), "{m}");
-        assert!(m.contains("25.00"), "falta el gastado: {m}");
+        // Previo 6.55 + 25.00 desde el corte = 31.55 gastados, por encima del tope de 25.
+        assert!(m.contains("31.55"), "falta el gastado: {m}");
+        assert!(m.contains("25 USD"), "falta el tope: {m}");
         assert!(m.contains("no se arma el paquete"), "{m}");
     }
 
