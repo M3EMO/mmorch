@@ -2909,7 +2909,11 @@ try:
         sys.exit(1)
     sha_ok = True
     os.makedirs(D, exist_ok=True)
-    subprocess.run(["tar", "-xzf", TAR, "-C", D], check=True)
+    # El runtime de Colab corre como root y `tar -xzf` conserva el uid de la laptop. bwrap con
+    # `--unshare-user --uid 0` mapea solo root a root; un archivo de otro uid aparece adentro como
+    # 65534 y un `tar` o `cp -a` falla con "Cannot change ownership to uid 65534". Con
+    # `--no-same-owner`, todo queda de root.
+    subprocess.run(["tar", "--no-same-owner", "-xzf", TAR, "-C", D], check=True)
     subprocess.run(["bash", D + "/tools/colab/preparar-runtime.sh", D], check=True)
     print("ROOT_OK=preparar")
 finally:
@@ -4239,6 +4243,24 @@ mod tests {
             trabajo.comando.ends_with("--n 8 --semilla 7 --json"),
             "comando: {}",
             trabajo.comando
+        );
+    }
+
+    /// Guarda sobre `tools/colab/notebook-juez.py`. Su `abrir_paquete` extrae con `filter="data"`.
+    /// Ese filtro ignora uid/gid del tar: los dueños no se aplican. Por eso el guion de
+    /// preparación usa `--no-same-owner`. Este test fija el texto; no prueba el filtro.
+    #[test]
+    fn juez_abrir_paquete_usa_filter_data() {
+        let ruta = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/colab/notebook-juez.py");
+        let texto = fs::read_to_string(&ruta).expect("lee notebook-juez.py");
+        let cuerpo = texto
+            .split("def abrir_paquete")
+            .nth(1)
+            .expect("abrir_paquete existe");
+        let cuerpo = cuerpo.split("\ndef ").next().expect("cuerpo");
+        assert!(
+            cuerpo.contains(r#"paquete.extractall(d, filter="data")"#),
+            "{cuerpo}"
         );
     }
 }
@@ -6435,5 +6457,71 @@ mod tests_calibrar {
             !caja.path().join("root-paquete").exists(),
             "se extrajo igual"
         );
+    }
+
+    #[test]
+    fn guion_preparar_extrae_con_no_same_owner() {
+        let texto = guion_preparar_en(
+            &["a".to_string()],
+            "/content/paquete.tar.gz",
+            "/content/root-paquete",
+            "abc",
+        );
+        assert!(
+            texto.contains(r#"["tar", "--no-same-owner", "-xzf", TAR, "-C", D]"#),
+            "{texto}"
+        );
+    }
+
+    /// Guarda: GNU tar sin root no cambia dueños, así que este test pasa sin root.
+    /// No se ve rojo sin root. Como root, sin `--no-same-owner`, `dato.txt` quedaría con uid 4242.
+    #[test]
+    fn guion_preparar_deja_los_archivos_con_el_uid_de_quien_extrae() {
+        use std::os::unix::fs::MetadataExt;
+        if Command::new("tar").arg("--version").output().is_err()
+            || Command::new("python3").arg("--version").output().is_err()
+        {
+            eprintln!("sin tar o python3: se salta el test de dueños del guion");
+            return;
+        }
+        let caja = tempfile::tempdir().expect("caja");
+        let fuente = caja.path().join("fuente");
+        fs::create_dir_all(fuente.join("tools/colab")).expect("carpeta");
+        fs::write(
+            fuente.join("tools/colab/preparar-runtime.sh"),
+            "#!/bin/bash\nexit 0\n",
+        )
+        .expect("guion");
+        fs::write(fuente.join("dato.txt"), "dato\n").expect("dato");
+        let original = caja.path().join("original.tar.gz");
+        let estado = Command::new("tar")
+            .args(["--owner=4242", "--group=4242", "-czf"])
+            .arg(&original)
+            .arg("-C")
+            .arg(&fuente)
+            .arg(".")
+            .status()
+            .expect("tar");
+        assert!(estado.success(), "tar falló");
+
+        let bytes = fs::read(&original).expect("lee el original");
+        let (uno, dos) = bytes.split_at(bytes.len() / 2);
+        let raiz = caja.path().join("content");
+        fs::create_dir_all(&raiz).expect("raíz");
+        let trozos = vec![raiz.join("root-paq.00"), raiz.join("root-paq.01")];
+        fs::write(&trozos[0], uno).expect("trozo 0");
+        fs::write(&trozos[1], dos).expect("trozo 1");
+        let sha = sha256_hex(&bytes);
+
+        let Some(salida) = correr_preparar(caja.path(), &trozos, &sha) else {
+            return;
+        };
+        let stderr = String::from_utf8_lossy(&salida.stderr);
+        assert!(salida.status.success(), "{stderr}");
+
+        let extraido = caja.path().join("root-paquete/dato.txt");
+        let uid_extraido = fs::metadata(&extraido).expect("dato.txt").uid();
+        let uid_caja = fs::metadata(caja.path()).expect("caja").uid();
+        assert_eq!(uid_extraido, uid_caja, "dato.txt quedó con otro uid");
     }
 }

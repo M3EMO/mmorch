@@ -160,9 +160,13 @@ print("ROOT_GPU=" + (lineas[0] if r.returncode == 0 and lineas else ""))
 
 /// Script de preparación. Descomprime el paquete e instala pytest en el runtime. Rust no va acá:
 /// lo prepara `guion_rust`, con `rustup-init` verificado.
+// El runtime de Colab corre como root y `tar -xzf` conserva el uid de la laptop. bwrap con
+// `--unshare-user --uid 0` mapea solo root a root; un archivo de otro uid aparece adentro como
+// 65534 y un `tar` o `cp -a` falla con "Cannot change ownership to uid 65534". Con
+// `--no-same-owner`, todo queda de root.
 const GUION_PREPARAR: &str = r#"import os, subprocess, sys
 os.makedirs("/content/root-paquete", exist_ok=True)
-subprocess.run(["tar", "-xzf", "/content/root-paquete.tar.gz", "-C", "/content/root-paquete"], check=True)
+subprocess.run(["tar", "--no-same-owner", "-xzf", "/content/root-paquete.tar.gz", "-C", "/content/root-paquete"], check=True)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pytest"], check=True)
 print("ROOT_PREPARADO=1")
 "#;
@@ -3452,6 +3456,16 @@ mod tests {
                 .iter()
                 .any(|l| l.starts_with("exec") && l.contains("corre.py")),
             "{lineas:?}"
+        );
+    }
+
+    #[test]
+    fn guion_preparar_extrae_con_no_same_owner() {
+        assert!(
+            GUION_PREPARAR.contains(
+                r#"["tar", "--no-same-owner", "-xzf", "/content/root-paquete.tar.gz", "-C", "/content/root-paquete"]"#
+            ),
+            "{GUION_PREPARAR}"
         );
     }
 
