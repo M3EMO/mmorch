@@ -12501,3 +12501,148 @@ Brief: `docs/builds/brief-local-155.md`.
 **Si el paso 5 falla otra vez en la base,** el orquestador informa la primera llamada de bwrap con un código distinto del de la laptop, con su stderr. No corre la v6.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-15 (67): el plan de P97 c, para empezar ya
+
+**Estado.**
+- La 155 terminó en verde. `laptop/cadena-110-155` (0f8342f) lleva la 153, la 154 y la 155 sobre la 152. Su suite con podman dio 3917/0/5.
+- El usuario corre `paso0-155.sh`. Después, el orquestador corre la prueba de la 141 en Colab, sola.
+- Los pasos 5 a 12 de la vuelta (66) esperan esa prueba. P97 c no depende de nada, y lleva muchas vueltas sin empezar.
+
+## 1. Lo que fijaron P97 c, P98 c y P99 a
+
+Releí la sección 5 de la vuelta (32), el diseño de Colab de la misma vuelta y las reglas de la minería (P79, P85, P90, P94).
+
+- **P97 c.** Los 5 arreglos de broot entran al dataset. Se mina una reserva nueva. Colab corre solo el filtro barato: "¿pasa `cargo test` en la punta?". La admisión, con los criterios 1 a 5, corre en la laptop, en un solo entorno. Los repos nuevos dan tareas de arreglo y de función nueva.
+- **P98 c.** El final no se abre hasta tener 15 reales. Hoy tiene 11, de 4 repos. Hacen falta 4 o más, de repos que no sean broot ni esos 4. Los reales se sellan al minarse: la etiqueta se fija antes de medir.
+- **P99 a.** La ficha declara la interfaz que usan los tests. Los nombres salen del rojo de compilación. Las firmas salen de `diff.txt`. Un E0624 entra como "hacer público". La fuga exime solo esos nombres. Un esbozo con `todo!()` prueba en contenedor que la interfaz está completa.
+- **Las reglas de P79 siguen.** Repos de Rust con licencia MIT o Apache-2.0, 1000 estrellas o más, elegidos con semilla. El usuario ve la lista antes de clonar. Ningún código ajeno corre en el host.
+
+**Las cuentas.**
+- **El dataset de D3** pide 20 tareas. Hoy tiene 14: las 6 de función nueva, los 5 arreglos de broot y las 3 de S2, que con P97 c dejan de ser solo piloto. Faltan 6 o más. Deben venir de repos que no sean broot, porque hoy el dataset es casi de un solo repo.
+- **El final** pide 4 reales más.
+- **El rendimiento medido:** 8 de 25 repos pasaron la base, y salieron 16 commits admitidos de 109. Eso es cerca de 2 admitidos por repo que pasa.
+- **Con un 30 % de pérdida** por la fuga y por P99 a, hacen falta unos 14 admitidos. Son unos 7 repos que pasan la base, de unos 22 candidatos. **Pido 30 candidatos, con margen.**
+
+## 2. Los scripts de `~/.cache/root-wt/mineria/`
+
+Los listé y leí sus cabeceras. No corrí ninguno. No abrí `s2-sellado/`, `copias/` ni `ajuste-reales.jsonl`.
+
+| Script | Qué hace | Estado |
+|---|---|---|
+| `elegir.py` | Paso 2: elige commits por reglas, sin ejecutar nada | **Sirve tal cual.** Recibe la lista y la salida por argumento. Reanuda |
+| `mina2.sh` | Clona con `--filter=blob:none`, y encadena elegir, base, ampliar y criterios | **Cambia.** Sus rutas fijas apuntan a `reserva3.txt` y a `commits.json` |
+| `base.py` | Paso 3: `cargo test` de la punta en podman sin red | **Cambia.** Fija la imagen `root-oraculo-rust:2`, la lista `RESERVA` y `commits.json` en el código |
+| `ampliar.py` | Lleva a 15 los commits de los repos que pasan la base | **Cambia poco.** Lee `commits.json` y `base.json` fijos |
+| `criterios.py` | Criterios 1 a 4 de arreglo, en podman | **Sirve,** con la salida en un archivo nuevo. El criterio 5 no está |
+| `criterios_nf.py` | Criterio 1 de función nueva, y 2 a 4 iguales | **Sirve,** con la misma salvedad |
+| `allf.py` | Informativo: repite con `--all-features` | No hace falta |
+| `interfaz_nf.py` | La interfaz con la regla vieja de la vuelta 73 | **Cambia.** P99 a pide los nombres del rojo de compilación, no del cruce con `tests.diff` |
+| `fuga.py` | Criterio 5: la ficha no cita identificadores nuevos | **Cambia.** Debe eximir los nombres de `interfaz.json` |
+| `huella_f.py`, `s2_*.py`, `p101*.sh`, `serie*.sh`, `ajr_v3.py`, `techo_juez.py`, `armar_s2.py` | Mediciones de S2 y del ajuste real | No son de minería |
+
+**Lo que falta:**
+1. **`sorteo_r4.py`:** arma la lista de candidatos con `gh search repos`, con las reglas de P79 y una semilla nueva.
+2. **`filtro_colab.py`:** el filtro barato en Colab, con la CLI `colab`.
+3. **`esbozos.py`:** el chequeo de P99 a. Arma el padre con un esbozo `todo!()` de cada firma, aplica `tests.diff`, y compila en podman.
+4. **`sellar_r4.py`:** sella los reales del final.
+5. **Una salida por reserva.** Todo lo nuevo escribe en `r4/`, para no mezclarse con `commits.json`, `base.json` ni `criterios.json` de las reservas viejas.
+
+Todo esto es trabajo del orquestador, fuera del repo de Root. No es código de Root.
+
+## 3. Los pasos, en orden
+
+**Paso 0. Los 5 arreglos de broot.** El orquestador confirma que ya están en el dataset, como pide P97 c. Si no están, los suma. No corre nada nuevo: el ajuste real ya los midió.
+
+**Paso 1. El sorteo de candidatos** (`sorteo_r4.py`, en la laptop, sin podman).
+1. **La fuente:** `gh search repos --language=Rust --license=mit --license=apache-2.0 --stars=">=1000" --archived=false`, con `pushed` en los últimos 12 meses. Es la misma búsqueda de P79, más la fecha.
+2. **Se excluyen** los 25 repos ya probados, broot, los 4 repos del final y los repos de las tareas de S2. La lista de exclusión va en `r4/excluidos.txt`, y el script la lee.
+3. **Semilla 20261115.** Se ordenan los resultados por `sha256(semilla/nombre)` y se toman los 30 primeros. Los siguientes 10 quedan de reserva, en ese orden.
+4. **La lista va al usuario antes de clonar,** por la regla de P79. Es P113.
+
+**Paso 2. El filtro barato en Colab** (`filtro_colab.py`).
+1. **Un runtime de CPU por tanda de 10 repos.** Sin Drive, sin Secrets, sin claves.
+2. **Por repo:** `git clone --depth 1`, `cargo fetch`, y después `cargo test --offline --no-fail-fast`, con un plazo de 15 minutos.
+3. **La versión de Rust** es la de `versiones.env`: la misma de la imagen del oráculo.
+4. **La salida por repo:** el código, los conteos de tests y una línea de motivo. El motivo marca "servicio externo" si un test falla por conexión, base de datos o Docker.
+5. **El filtro no admite nada.** Solo ordena qué repos van a la laptop. Un repo que pasa en Colab y falla en la laptop queda fuera. Por la regla de un solo entorno, solo cuenta la laptop.
+6. **Costo:** 30 repos, unos 12 minutos cada uno, dan unas 6 horas de runtime. Son cerca de 0,5 unidades.
+
+**Paso 3. Clonar y elegir commits** (`elegir.py`, en la laptop, sin podman).
+1. Se clonan con `--filter=blob:none` solo los repos que pasaron en Colab. Nada del repo corre en el host.
+2. `elegir.py r4/pasan.txt r4/commits.json` elige hasta 15 commits por repo. Es la misma regla de siempre: `fix|bug|...`, 3 archivos de producción o menos, y tests en el mismo commit.
+
+**Paso 4. La admisión en la laptop** (`base.py`, `criterios.py` y `criterios_nf.py`, en podman).
+1. **La base:** `cargo test` de la punta en podman, sin red, con la imagen vigente del oráculo. Un repo que falla aquí sale, aunque haya pasado en Colab.
+2. **Los criterios 1 a 4,** de arreglo y de función nueva, con los scripts de siempre. Las salidas van a `r4/`.
+3. **Reanudan.** Cada script salta lo que ya está en su salida. Se puede parar y seguir.
+
+**Paso 5. El reparto entre el dataset y el final.** Se fija antes de mirar ningún resultado de la Línea Buscador.
+1. Los repos con commits admitidos se ordenan por `sha256(20261115/final/nombre)`.
+2. En ese orden, cada repo va al final hasta sumar 4 reales nuevos. El resto va al dataset.
+3. Un real cuenta a 3 líneas o menos de una línea que el arreglo cambió, sobre el estado anterior. Es la regla de siempre.
+4. Si los repos no dan 4 reales, se informa "muestra corta". No se sortean más sin avisar.
+
+**Paso 6. El sellado de los reales del final** (`sellar_r4.py`, sin podman).
+1. Por cada commit del final, el script escribe el defecto en `r4/final-reales-r4.sellado.jsonl`: repo, sha, archivo y líneas.
+2. El script imprime solo los conteos y el SHA-256 del archivo sellado. Nadie lo lee después, como al resto del final.
+3. Las carpetas de trabajo de esos commits se borran después de sellar.
+
+**Paso 7. Las fichas con P99 a** (para el dataset).
+1. **Interfaz:** `interfaz_nf.py`, cambiado, saca los nombres del rojo de compilación de `criterios_nf.py` y las firmas de `diff.txt`.
+2. **Esbozos:** `esbozos.py` arma el padre con `todo!()` y aplica `tests.diff`. Corre en podman. Si no compila, la tarea sale.
+3. **La ficha** la escribe el orquestador, con el método de P81. `fuga.py`, cambiado, la revisa contra el diff y exime solo los nombres de la interfaz.
+4. **El usuario revisa las 3 primeras fichas,** como pide P81.
+5. **Una tarea con `[entrega]`, si se puede.** Si un repo nuevo trae un binario con un caso de uso claro, su ficha suma escenarios de Entrega. Si ninguno lo trae, se informa.
+
+## 4. La regla de carga, y qué corre cuándo
+
+| Paso | Dónde | ¿Carga la laptop? | ¿Puede correr ya? |
+|---|---|---|---|
+| 0, broot en el dataset | Laptop, solo archivos | No | Sí |
+| 1, el sorteo | Laptop, `gh` | No | Sí. La lista espera P113 |
+| Escribir y cambiar los scripts | Laptop, solo texto | No | Sí |
+| 2, el filtro | Colab | No | Después de P113. Choca solo con el cupo de runtimes de la v6 |
+| 3, clonar y elegir | Laptop, git | Poco, sin podman | Después del paso 2 |
+| 4, la admisión | Laptop, podman | **Sí** | En una ventana sin otra suite, sin el paso 0 del usuario y sin builders |
+| 5 y 6, reparto y sellado | Laptop, solo archivos | No | Después del paso 4 |
+| 7, las fichas | Laptop, podman para los esbozos | Sí, en los esbozos | Después del paso 4 |
+
+**Choques.**
+- **El paso 0 del usuario usa podman ahora.** El paso 4 no corre mientras dure.
+- **La prueba de la 141 y la v6 corren en Colab.** No cargan la laptop, así que el paso 4 puede correr a la vez.
+- **El filtro y la v6 comparten el cupo de runtimes de la cuenta.** La v6 usa tres runtimes. El filtro usa uno o dos, y espera si la cuenta no da más. El orquestador lo ve con la lista de sesiones de la CLI.
+- **Si la prueba de la 141 pide una tarea nueva, un builder compila en la laptop.** Entonces el paso 4 se pausa, y sigue después. Los scripts reanudan.
+- **Las unidades:** el filtro cuesta cerca de 0,5, y la v6 cerca de 0,5. Las dos juntas quedan lejos del tope de 50. El orquestador anota el gasto de cada corrida.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | `paso0-155.sh` | Corre ahora | Laptop, el usuario | No |
+| 2 | La prueba de la 141, con el envoltorio de bwrap | El paso 1 | Colab, CPU | No |
+| 3 | La calibración v6 de Eficiencia, t1 a t3 | El paso 2, con base 1,0 | Colab, CPU | No |
+| 4 | El paquete del juez y el arrastre a Drive | El paso 2 | Laptop y el usuario | No |
+| 5 | La etapa 1 de P107 a | El paso 4 | Colab, notebook | Cerca de 0,35 USD |
+| 6 | Las cinco etapas de P107 a | El paso 5 | Colab, notebook | Cerca de 18 USD |
+| 7 | P97 c, pasos 0 y 1, y los scripts | Nada; corre ya | Laptop, sin podman | No |
+| 8 | P113 | El usuario | — | No |
+| 9 | P97 c, pasos 2 y 3: el filtro y la elección | El paso 8 | Colab y laptop | No |
+| 10 | P97 c, paso 4: la admisión | El paso 9, en una ventana libre | Laptop, podman | No |
+| 11 | P97 c, pasos 5 a 7: reparto, sellado y fichas | El paso 10 | Laptop | No |
+| 12 | La mezcla de la cadena 110 a 155 | La orden del usuario | — | No |
+| 13 | Congelar la versión | Los pasos 3 y 6 | — | No |
+| 14 | Las doce calibraciones de oráculo con la versión congelada | Los pasos 2 y 13 | Colab, cuatro runtimes | No |
+| 15 | P98 c: el final con 15 reales | El paso 11 | — | No |
+| 16 | La validez sobre el final sellado | Los pasos 1 a 15 | Colab, notebook si usa el juez | Según el final |
+
+**Los dos caminos no se esperan.** Los pasos 1 a 6 van por Colab. Los pasos 7 a 11 van por la laptop y por runtimes aparte.
+
+## 6. Pregunta al usuario
+
+**P113. ¿Querés ver la lista de candidatos antes de clonar?** P79 y P85 fijaron que el usuario ve la lista antes de clonar. Desde entonces cambió algo: el filtro clona y corre en Colab, no en la laptop. La laptop solo clona sin ejecutar, y la admisión sigue en podman sin red.
+
+- **a) Sí, como en P85.** El orquestador muestra los 30 candidatos y la reserva. Nada se clona hasta tu respuesta. Cuesta una vuelta de espera. *(recomendada)*
+- **b) No. El sorteo es mecánico, y la lista sale en el informe.** El filtro arranca apenas sale el sorteo. Si un repo no te sirve, lo sacás después y entra el siguiente de la reserva.
+
+Recomiendo la (a). La regla viene de P79 y P85. Además, una vuelta de espera no frena nada: los scripts se escriben mientras tanto.
