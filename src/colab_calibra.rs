@@ -374,6 +374,16 @@ pub fn empaquetar(paquete: &Paquete, imagen: &dyn Imagen) -> Result<Resumen, Err
         });
     }
     validar_trabajos(&trabajos, paquete.juez)?;
+    // Con juez, sin tope de S2 no hay gasto para calibrar. Se revisa antes de armar nada.
+    if paquete.juez {
+        let gastado = gastado_s2_usd(&paquete.home)?;
+        if tope_s2_restante(gastado) <= 0.0 {
+            return Err(ErrorOraculo::Uso(format!(
+                "con --juez no se arma el paquete: no queda tope de S2. \
+                 Gastado: {gastado:.2} USD. TOPE_S2_USD: {TOPE_S2_USD:.0} USD."
+            )));
+        }
+    }
 
     for nombre in tareas.keys() {
         if !paquete.repos.contains_key(nombre) {
@@ -3380,6 +3390,28 @@ mod tests {
             "{:?}",
             m.trabajos[1].args
         );
+    }
+
+    #[test]
+    fn con_juez_y_tope_agotado_rechaza_el_paquete() {
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 25.0);
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+        paquete.juez = true;
+        let Err(ErrorOraculo::Uso(m)) = empaquetar(&paquete, &Doble) else {
+            panic!("con juez y tope agotado debe fallar con Uso");
+        };
+        assert!(m.contains("25"), "{m}");
+        assert!(m.contains("25.00"), "falta el gastado: {m}");
+        assert!(m.contains("no se arma el paquete"), "{m}");
+    }
+
+    #[test]
+    fn sin_juez_y_tope_agotado_el_paquete_se_arma() {
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 25.0);
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble);
+        assert!(resumen.is_ok(), "sin juez el tope no importa");
     }
 
     #[test]
