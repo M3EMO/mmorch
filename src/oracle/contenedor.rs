@@ -193,6 +193,12 @@ pub(crate) fn argumentos_separado_con(
     }
 }
 
+/// Carpetas que el runtime de Colab crea antes de correr bwrap. bwrap no las crea en una raíz de solo lectura.
+/// Los dos scripts tools/colab/*.sh y tests/colab_preparar.rs deben coincidir con esta lista.
+pub const CARPETAS_RUNTIME: [&str; 6] = [
+    "/repo", "/salida", "/oraculo", "/cache", "/rustsec", "/trabajo",
+];
+
 /// Argumentos de `bwrap` para la ejecución, sin el binario `bwrap`. Corre sin podman y sin secretos.
 /// Los montajes siguen el orden y los destinos de `opciones`. `entorno` es el de la imagen.
 pub fn argumentos_bwrap(
@@ -204,6 +210,7 @@ pub fn argumentos_bwrap(
             "en modo bwrap no hay secretos: en Colab no hay claves".into(),
         ));
     }
+    revisar_destinos_bwrap(e)?;
     let mut args: Vec<String> = Vec::new();
     args.extend(
         [
@@ -243,6 +250,9 @@ pub fn argumentos_bwrap(
         montaje_bwrap(&mut args, "--ro-bind", trabajo, "/trabajo");
     }
     if let Some(oraculo) = &e.oraculo {
+        // bwrap no crea un punto de montaje en una raíz de solo lectura, pero sí dentro de un tmpfs
+        // suyo. Sin este tmpfs, Colab falla con "bwrap: Can't mkdir /oraculo/contrato: Read-only file system".
+        args.extend(["--tmpfs", "/oraculo"].map(String::from));
         let destino = e.oraculo_destino.as_deref().unwrap_or("/oraculo");
         montaje_bwrap(&mut args, "--ro-bind", oraculo, destino);
     }
@@ -275,6 +285,36 @@ fn montaje_bwrap(args: &mut Vec<String>, flag: &str, origen: &Path, destino: &st
     args.push(flag.into());
     args.push(origen.display().to_string());
     args.push(destino.into());
+}
+
+/// Revisa que cada destino de montaje sea una carpeta de `CARPETAS_RUNTIME` o esté bajo `/oraculo/`.
+/// Da error antes de armar los argumentos. Así bwrap no intenta un montaje que el runtime no crea.
+fn revisar_destinos_bwrap(e: &Ejecucion) -> Result<(), ErrorOraculo> {
+    let mut destinos: Vec<&str> = Vec::new();
+    if e.repo.is_some() {
+        destinos.push("/repo");
+    }
+    if e.trabajo.is_some() {
+        destinos.push("/trabajo");
+    }
+    if e.oraculo.is_some() {
+        destinos.push(e.oraculo_destino.as_deref().unwrap_or("/oraculo"));
+    }
+    if e.cache.is_some() {
+        destinos.push("/cache");
+    }
+    if e.rustsec.is_some() {
+        destinos.push("/rustsec");
+    }
+    destinos.push("/salida");
+    for destino in destinos {
+        if !CARPETAS_RUNTIME.contains(&destino) && !destino.starts_with("/oraculo/") {
+            return Err(ErrorOraculo::Infra(format!(
+                "el destino {destino} no es una carpeta del runtime ni está bajo /oraculo/"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Entorno de la imagen para el modo bwrap. Lee `ruta`: una línea `CLAVE=valor` por variable.
@@ -1941,6 +1981,122 @@ mod tests {
         assert_eq!(args.first().map(String::as_str), Some("run"));
         assert!(!args.iter().any(|a| a == "--unshare-net"), "{args:?}");
         assert!(!args.iter().any(|a| a == "--clearenv"), "{args:?}");
+    }
+
+    #[test]
+    fn bwrap_guarda_argumentos_de_podman_literales_no_cambian() {
+        let esperados = [
+            "run",
+            "--rm",
+            "--name",
+            "n",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--pids-limit=512",
+            "--memory=2g",
+            "--pull=never",
+            "--http-proxy=false",
+            "--network",
+            "none",
+            "--tmpfs",
+            "/tmp:rw",
+            "-v",
+            "/tmp/r:/repo:ro,z",
+            "-v",
+            "/tmp/o:/oraculo:ro,z",
+            "-v",
+            "/tmp/s:/salida:z",
+            "-e",
+            "CARGO_PROFILE_DEV_DEBUG=0",
+            "-e",
+            "CARGO_PROFILE_TEST_DEBUG=0",
+            "-e",
+            "PYTHONPATH=/repo",
+            "docker.io/library/alpine:3.20",
+            "sh",
+            "-c",
+            "pytest -q",
+        ];
+        assert_eq!(
+            argumentos(&ejecucion(), "n"),
+            esperados.map(String::from).to_vec()
+        );
+    }
+
+    /// Posición del primer tramo `pat` dentro de `args`, o `None` si no aparece.
+    fn posicion(args: &[String], pat: &[&str]) -> Option<usize> {
+        args.windows(pat.len())
+            .position(|w| w.iter().zip(pat).all(|(a, p)| a == p))
+    }
+
+    #[test]
+    fn bwrap_destinos_de_montaje_salen_de_la_raiz_runtime_o_de_un_tmpfs() {
+        const BASE: [&str; 4] = ["/", "/dev", "/proc", "/tmp"];
+        let destinos = [
+            None,
+            Some(super::super::DIR_CONTRATO),
+            Some(super::super::DIR_OCULTO),
+            Some("/oraculo/escenarios"),
+        ];
+        for destino in destinos {
+            let mut e = ejecucion();
+            e.oraculo_destino = destino.map(String::from);
+            let args = argumentos_bwrap(&e, &[]).expect("arma");
+            for (i, arg) in args.iter().enumerate() {
+                let montado = match arg.as_str() {
+                    "--ro-bind" | "--bind" => args.get(i + 2),
+                    "--tmpfs" => args.get(i + 1),
+                    _ => None,
+                };
+                let Some(montado) = montado else { continue };
+                if BASE.contains(&montado.as_str()) {
+                    continue;
+                }
+                let en_runtime = CARPETAS_RUNTIME.contains(&montado.as_str());
+                let bajo_tmpfs = args[..i].windows(2).any(|w| {
+                    w[0] == "--tmpfs"
+                        && (montado == &w[1] || montado.starts_with(&format!("{}/", w[1])))
+                });
+                assert!(
+                    en_runtime || bajo_tmpfs,
+                    "destino {montado} sin carpeta runtime ni tmpfs previo (oraculo_destino {destino:?}): {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bwrap_oraculo_destino_fuera_del_runtime_da_error_que_lo_nombra() {
+        let mut e = ejecucion();
+        e.oraculo_destino = Some("/otra".into());
+        match argumentos_bwrap(&e, &[]) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("/otra"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra: {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn bwrap_tmpfs_oraculo_va_antes_del_ro_bind_del_oraculo() {
+        let mut e = ejecucion();
+        let sin_destino = argumentos_bwrap(&e, &[]).expect("arma");
+        let tmpfs = posicion(&sin_destino, &["--tmpfs", "/oraculo"]);
+        let montaje = posicion(&sin_destino, &["--ro-bind", "/tmp/o", "/oraculo"]);
+        assert!(tmpfs.is_some() && tmpfs < montaje, "{sin_destino:?}");
+
+        e.oraculo_destino = Some("/oraculo/contrato".into());
+        let con_destino = argumentos_bwrap(&e, &[]).expect("arma");
+        let tmpfs = posicion(&con_destino, &["--tmpfs", "/oraculo"]);
+        let montaje = posicion(&con_destino, &["--ro-bind", "/tmp/o", "/oraculo/contrato"]);
+        assert!(tmpfs.is_some() && tmpfs < montaje, "{con_destino:?}");
+
+        e.oraculo = None;
+        let sin_oraculo = argumentos_bwrap(&e, &[]).expect("arma");
+        assert!(
+            posicion(&sin_oraculo, &["--tmpfs", "/oraculo"]).is_none(),
+            "{sin_oraculo:?}"
+        );
     }
 
     #[test]
