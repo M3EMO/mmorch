@@ -27,7 +27,7 @@ use crate::oracle::colab::{self, ColabCli, SalidaColab, Senales, TIMEOUT_LLAMADA
 use crate::oracle::contenedor::correr_programa;
 use crate::oracle::descarga::cache_de;
 use crate::oracle::tarea::{Tarea, cargar_en};
-use crate::tipos::Dimension;
+use crate::tipos::{Dimension, Evento, TipoEvento};
 
 /// Variable que el paquete fija para elegir el modo de contenedor del trabajo.
 /// Mismo nombre y valor que define la Tarea 139 en contenedor.rs. Al encadenar, el orquestador deja una sola definición.
@@ -54,7 +54,7 @@ const HERRAMIENTAS: [&str; 5] = [
     "hadolint",
 ];
 
-/// Dimensiones que Colab calibra. Las demás se rechazan.
+/// Dimensiones que Colab calibra sin el juez. Las de juez entran solo con `--juez`.
 const DIMENSIONES_COLAB: [Dimension; 5] = [
     Dimension::Seguridad,
     Dimension::Funciona,
@@ -84,6 +84,10 @@ pub const EXCLUIDOS: &[(&str, &str)] = &[
     ("evidencia", "evidencia de corridas locales"),
     ("colab", "estado de runtimes de Colab (activo.json)"),
 ];
+
+/// Tope de gasto de API de S2, en USD. Con `--juez`, el manifiesto guarda lo que queda de este tope.
+/// decisión P107 a del usuario: el tope de S2 sube a 25 USD.
+pub const TOPE_S2_USD: f64 = 25.0;
 
 /// Tiempo máximo de cada llamada a podman.
 const PLAZO_PODMAN: Duration = Duration::from_secs(300);
@@ -211,6 +215,8 @@ pub struct Paquete {
     pub commit_root: String,
     /// Semilla de `oraculo calibrar` para los trabajos del paquete.
     pub semilla: u64,
+    /// Con `--juez`, entran las dimensiones con ítems del juez y el manifiesto fija el tope de S2.
+    pub juez: bool,
 }
 
 /// Pedido tal como llega de la línea de comandos.
@@ -222,6 +228,8 @@ pub struct PedidoEmpaquetar {
     pub rustup_sha256: String,
     pub salida: PathBuf,
     pub raiz_root: Option<PathBuf>,
+    /// Con `--juez`, entran las dimensiones con ítems del juez.
+    pub juez: bool,
 }
 
 /// Lo que devuelve el comando: dónde quedó el paquete y qué trae.
@@ -230,10 +238,12 @@ pub struct Resumen {
     pub salida: PathBuf,
     pub archivos: usize,
     pub trabajos: usize,
+    /// SHA-256 hexadecimal del tar armado.
+    pub sha256: String,
 }
 
 /// Manifiesto del paquete. Lo lee quien corre los trabajos en Colab.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifiesto {
     pub v: u32,
     pub commit_root: String,
@@ -241,6 +251,9 @@ pub struct Manifiesto {
     pub archivos: BTreeMap<String, String>,
     pub trabajos: Vec<TrabajoManifiesto>,
     pub imagenes: BTreeMap<String, String>,
+    /// Tope de gasto de API de S2 que queda, en USD. Solo lo lleva el paquete con `--juez`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tope_s2_usd: Option<f64>,
 }
 
 /// Un trabajo dentro del manifiesto.
@@ -272,12 +285,13 @@ pub struct DatoTrabajo {
 }
 
 /// Datos que arman el manifiesto, sin tocar el disco.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DatosManifiesto {
     pub commit_root: String,
     pub binario_sha256: String,
     pub trabajos: Vec<DatoTrabajo>,
     pub imagenes: BTreeMap<String, String>,
+    pub tope_s2_usd: Option<f64>,
 }
 
 /// Orden de un trabajo: el comando, sus argumentos y su entorno.
@@ -297,6 +311,7 @@ pub fn empaquetar_cli_con(
 ) -> Result<Resumen, ErrorOraculo> {
     let trabajos = parsear_trabajos(&pedido.trabajos, n)?;
     let repos = parsear_repos(&pedido.repos)?;
+    let juez = pedido.juez;
     let raiz_root = match pedido.raiz_root {
         Some(raiz) => raiz,
         None => std::env::current_dir()
@@ -313,6 +328,7 @@ pub fn empaquetar_cli_con(
         salida: pedido.salida,
         commit_root,
         semilla,
+        juez,
     };
     let imagen = PodmanReal {
         binario: binario_podman(),
@@ -356,7 +372,7 @@ pub fn empaquetar(paquete: &Paquete, imagen: &dyn Imagen) -> Result<Resumen, Err
             comandos: vec![tarea.contrato.cmd.clone(), tarea.oculto.cmd.clone()],
         });
     }
-    validar_trabajos(&trabajos)?;
+    validar_trabajos(&trabajos, paquete.juez)?;
 
     for nombre in tareas.keys() {
         if !paquete.repos.contains_key(nombre) {
@@ -504,11 +520,17 @@ fn armar_y_empaquetar(
     }
     let imagenes: BTreeMap<String, String> =
         tareas.keys().map(|n| (n.clone(), id.clone())).collect();
+    let tope_s2_usd = if paquete.juez {
+        Some(tope_s2_restante(gastado_s2_usd(&paquete.home)?))
+    } else {
+        None
+    };
     let datos = DatosManifiesto {
         commit_root: paquete.commit_root.clone(),
         binario_sha256,
         trabajos,
         imagenes,
+        tope_s2_usd,
     };
     let manifiesto = armar_manifiesto(&datos, archivos);
     let json = serde_json::to_string_pretty(&manifiesto)
@@ -535,24 +557,46 @@ fn armar_y_empaquetar(
             String::from_utf8_lossy(&estado.stderr).trim()
         )));
     }
+    let tar = fs::read(&salida)
+        .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", salida.display())))?;
+    let sha256 = sha256_hex(&tar);
     Ok(Resumen {
         salida,
         archivos: contados,
         trabajos: paquete.trabajos.len(),
+        sha256,
     })
 }
 
+/// Dice si Colab calibra `dimension`. Con `juez`, también las dimensiones con ítems del juez.
+pub fn dimension_calibrable(dimension: Dimension, juez: bool) -> bool {
+    DIMENSIONES_COLAB.contains(&dimension) || (juez && tiene_items_de_juez(dimension))
+}
+
+/// Lo que queda del tope de S2 después de `gastado` USD. Nunca baja de 0.
+pub fn tope_s2_restante(gastado: f64) -> f64 {
+    (TOPE_S2_USD - gastado).max(0.0)
+}
+
+/// Gasto de API que ya lleva ROOT_HOME: suma todo el gasto de API de `eventos.jsonl`, sin filtrar por tarea.
+/// Los eventos no traen la tarea, así que este número sobreestima el gasto de S2 y nunca lo subestima.
+pub fn gastado_s2_usd(home: &Path) -> Result<f64, ErrorOraculo> {
+    let eventos = crate::observe::uso::leer_eventos(&crate::observe::ruta_eventos_en(home))
+        .map_err(|e| ErrorOraculo::Infra(format!("leer eventos.jsonl: {e}")))?;
+    Ok(crate::observe::uso::gasto_api_desde(&eventos, 0.0))
+}
+
 /// Revisa los trabajos: dimensión calibrable y comandos sin `pytest`.
-pub fn validar_trabajos(trabajos: &[Trabajo]) -> Result<(), ErrorOraculo> {
+pub fn validar_trabajos(trabajos: &[Trabajo], juez: bool) -> Result<(), ErrorOraculo> {
     for trabajo in trabajos {
         let dimension = trabajo.dimension;
         let quien = format!("tarea {}, dimensión {}", trabajo.tarea, dimension.clave());
-        if tiene_items_de_juez(dimension) {
+        if tiene_items_de_juez(dimension) && !juez {
             return Err(ErrorOraculo::Uso(format!(
                 "{quien}: el juez necesita Colab Secrets, que `exec` no lee"
             )));
         }
-        if !DIMENSIONES_COLAB.contains(&dimension) {
+        if !dimension_calibrable(dimension, juez) {
             return Err(ErrorOraculo::Uso(format!(
                 "{quien}: dimensión no calibrable en Colab"
             )));
@@ -640,7 +684,14 @@ pub fn armar_manifiesto(datos: &DatosManifiesto, archivos: BTreeMap<String, Stri
         .trabajos
         .iter()
         .map(|t| {
-            let orden = comando_de_trabajo(&t.tarea, t.dimension, &t.imagen_id, t.n, t.semilla);
+            let orden = comando_de_trabajo(
+                &t.tarea,
+                t.dimension,
+                &t.imagen_id,
+                t.n,
+                t.semilla,
+                datos.tope_s2_usd,
+            );
             TrabajoManifiesto {
                 tarea: t.tarea.clone(),
                 dimension: t.dimension.clave().to_string(),
@@ -662,6 +713,7 @@ pub fn armar_manifiesto(datos: &DatosManifiesto, archivos: BTreeMap<String, Stri
         archivos,
         trabajos,
         imagenes: datos.imagenes.clone(),
+        tope_s2_usd: datos.tope_s2_usd,
     }
 }
 
@@ -708,6 +760,7 @@ pub fn comando_de_trabajo(
     imagen_id: &str,
     n: u32,
     semilla: u64,
+    tope_usd: Option<f64>,
 ) -> Orden {
     let repo = format!("repos/{tarea}");
     let mut args: Vec<String> = [
@@ -723,14 +776,18 @@ pub fn comando_de_trabajo(
     .iter()
     .map(|s| s.to_string())
     .collect();
-    // Las repeticiones y la semilla van antes de `--json`, como pide el CLI de `oraculo calibrar`.
+    // Las repeticiones, la semilla y el tope van antes de `--json`, como pide el CLI de `oraculo calibrar`.
     args.extend([
         "--n".to_string(),
         n.to_string(),
         "--semilla".to_string(),
         semilla.to_string(),
-        "--json".to_string(),
     ]);
+    // Solo los trabajos con ítems del juez gastan API, así que solo ellos llevan tope.
+    if let Some(tope) = tope_usd.filter(|_| tiene_items_de_juez(dimension)) {
+        args.extend(["--tope-usd".to_string(), format!("{tope:.2}")]);
+    }
+    args.push("--json".to_string());
     let comando = format!("r00t {}", args.join(" "));
     let entorno = BTreeMap::from([
         (ROOT_CONTENEDOR_MODO.to_string(), MODO_BWRAP.to_string()),
@@ -953,6 +1010,8 @@ const TOLERANCIA_VALOR: f32 = 1e-6;
 const CARPETA_CALIBRACION: &str = "calibracion";
 /// Nombre del manifiesto dentro del paquete de vuelta.
 const MANIFIESTO_VUELTA: &str = "manifiesto.json";
+/// Gasto de la vuelta: solo las llamadas y reservas de API de `eventos.jsonl` del runtime.
+const ARCHIVO_GASTO: &str = "gasto.jsonl";
 /// Aviso fijo: la comparación no mira el estado de los mutantes de la base.
 const AVISO_MUTANTES: &str = "Pruebas: solo se comparó el valor de la base; el estado de los mutantes de la base no está guardado.";
 
@@ -1275,6 +1334,7 @@ fn importar_desde(
         )));
     }
 
+    let gasto = gasto_de_paquete(dir)?;
     let calibracion = Calibraciones::cargar(home)?;
     let mut entran: Vec<&Fila> = Vec::new();
     let mut nombres_a_copiar: BTreeSet<String> = BTreeSet::new();
@@ -1319,7 +1379,14 @@ fn importar_desde(
     if !filas.is_empty() {
         avisos.push(AVISO_MUTANTES.to_string());
     }
-    if entran.is_empty() {
+    let hay_gasto_nuevo = if gasto.is_empty() {
+        false
+    } else {
+        let existentes = crate::observe::uso::leer_eventos(&crate::observe::ruta_eventos_en(home))
+            .map_err(|e| ErrorOraculo::Infra(format!("leer eventos.jsonl: {e}")))?;
+        !gasto_pendiente(&existentes, &gasto).is_empty()
+    };
+    if entran.is_empty() && !hay_gasto_nuevo {
         return Ok(ResumenImportar {
             entraron: 0,
             rechazadas,
@@ -1329,7 +1396,7 @@ fn importar_desde(
         });
     }
 
-    let respaldo = respaldar(home)?;
+    let respaldo = respaldar(home, hay_gasto_nuevo)?;
     for fila in &entran {
         calibra::agregar(home, fila)?;
     }
@@ -1345,6 +1412,16 @@ fn importar_desde(
             avisos.push(format!("no se copió {nombre}: ya existe en la laptop"));
         }
     }
+    let gasto_agregado = if gasto.is_empty() {
+        0
+    } else {
+        agregar_gasto(home, &gasto)?
+    };
+    if gasto_agregado > 0 {
+        avisos.push(format!(
+            "gasto: {gasto_agregado} líneas de la vuelta entraron a eventos.jsonl"
+        ));
+    }
     Ok(ResumenImportar {
         entraron: entran.len(),
         rechazadas,
@@ -1352,6 +1429,78 @@ fn importar_desde(
         respaldo: Some(respaldo),
         avisos,
     })
+}
+
+/// Dice si un tipo de evento es gasto de API de la vuelta: solo llamadas y reservas.
+fn es_gasto(tipo: TipoEvento) -> bool {
+    matches!(tipo, TipoEvento::Llamada | TipoEvento::Reserva)
+}
+
+/// Eventos de `gasto.jsonl`. Sin el archivo no hay eventos. Una línea que no es un gasto frena el paquete.
+/// El error nombra la línea, nunca su contenido.
+fn gasto_de_paquete(dir: &Path) -> Result<Vec<Evento>, ErrorOraculo> {
+    let Some(texto) = leer_texto_si_existe(&dir.join(ARCHIVO_GASTO))? else {
+        return Ok(Vec::new());
+    };
+    let mut eventos = Vec::new();
+    for (indice, linea) in texto.lines().enumerate() {
+        if linea.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Evento>(linea) {
+            Ok(ev) if es_gasto(ev.tipo) => eventos.push(ev),
+            _ => {
+                return Err(ErrorOraculo::Uso(format!(
+                    "el paquete de vuelta no pasa la revisión:\n- {ARCHIVO_GASTO} línea {} no es un evento de gasto",
+                    indice + 1
+                )));
+            }
+        }
+    }
+    Ok(eventos)
+}
+
+/// Clave de una línea de gasto: corrida, `extra.reserva` (o ausente) y `ts`.
+fn clave_de_gasto(ev: &Evento) -> (String, Option<String>, u64) {
+    (
+        ev.corrida.clone(),
+        ev.extra.get("reserva").map(serde_json::Value::to_string),
+        ev.ts.to_bits(),
+    )
+}
+
+/// Líneas de `gasto` que `existentes` no tiene. Una clave repetida, en la laptop o en el paquete, cuenta una vez.
+fn gasto_pendiente(existentes: &[Evento], gasto: &[Evento]) -> Vec<Evento> {
+    let mut vistos: BTreeSet<(String, Option<String>, u64)> =
+        existentes.iter().map(clave_de_gasto).collect();
+    let mut pendientes = Vec::new();
+    for ev in gasto {
+        if vistos.insert(clave_de_gasto(ev)) {
+            pendientes.push(ev.clone());
+        }
+    }
+    pendientes
+}
+
+/// Agrega a `eventos.jsonl` de `home` el gasto que falta, con `extra.origen = "colab"`. Devuelve cuántas líneas agregó.
+/// Lee y escribe con el mismo lock: otro proceso no se cuela entre la lectura y la escritura.
+fn agregar_gasto(home: &Path, gasto: &[Evento]) -> Result<usize, ErrorOraculo> {
+    let ruta = crate::observe::ruta_eventos_en(home);
+    crate::observe::uso::con_eventos_bloqueados(
+        &ruta,
+        |existentes, log| -> Result<usize, crate::observe::ErrorObserve> {
+            let pendientes = gasto_pendiente(existentes, gasto);
+            for ev in &pendientes {
+                let mut ev = ev.clone();
+                ev.extra.insert("origen".into(), serde_json::json!("colab"));
+                let linea =
+                    serde_json::to_string(&ev).map_err(crate::observe::ErrorObserve::from)?;
+                log.agregar(&linea, crate::observe::jsonl::UMBRAL_POR_DEFECTO)?;
+            }
+            Ok(pendientes.len())
+        },
+    )
+    .map_err(|e| ErrorOraculo::Infra(format!("escribir el gasto en eventos.jsonl: {e}")))
 }
 
 /// Dice si dos filas son de la misma tarea y dimensión.
@@ -1562,7 +1711,8 @@ fn copiar_caso(origen: &Path, destino: &Path) -> Result<bool, ErrorOraculo> {
 }
 
 /// Respaldo de `calibracion.json` y `calibracion/` en `colab/respaldos/<fecha>/`, con `cp`.
-fn respaldar(home: &Path) -> Result<PathBuf, ErrorOraculo> {
+/// Con `con_eventos`, respalda también `eventos.jsonl`, que la importación va a cambiar.
+fn respaldar(home: &Path, con_eventos: bool) -> Result<PathBuf, ErrorOraculo> {
     let padre = home.join("colab").join("respaldos");
     fs::create_dir_all(&padre)
         .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", padre.display())))?;
@@ -1574,13 +1724,14 @@ fn respaldar(home: &Path) -> Result<PathBuf, ErrorOraculo> {
         .map_err(|e| ErrorOraculo::Infra(format!("fecha del respaldo: {e}")))?;
     let destino = reservar_carpeta(&padre, &fecha)
         .map_err(|e| ErrorOraculo::Infra(format!("crear el respaldo: {e}")))?;
-    let fuentes: Vec<PathBuf> = [
+    let mut candidatas = vec![
         home.join("calibracion.json"),
         home.join(CARPETA_CALIBRACION),
-    ]
-    .into_iter()
-    .filter(|p| p.exists())
-    .collect();
+    ];
+    if con_eventos {
+        candidatas.push(crate::observe::ruta_eventos_en(home));
+    }
+    let fuentes: Vec<PathBuf> = candidatas.into_iter().filter(|p| p.exists()).collect();
     if !fuentes.is_empty() {
         let salida = Command::new("cp")
             .arg("--reflink=auto")
@@ -2307,6 +2458,12 @@ fn armar_en(
     if let Some(texto) = leer_texto_si_existe(&vuelta_dir.join("verificacion.txt"))? {
         escribir(&staging.join("verificacion.txt"), texto.as_bytes())?;
     }
+    // El gasto pasa tal cual: la importación lo revisa línea por línea.
+    let gasto_vuelta = vuelta_dir.join(ARCHIVO_GASTO);
+    if gasto_vuelta.is_file() {
+        fs::copy(&gasto_vuelta, staging.join(ARCHIVO_GASTO))
+            .map_err(|e| ErrorOraculo::Infra(format!("copiar {ARCHIVO_GASTO}: {e}")))?;
+    }
     let casos_vuelta = vuelta_dir.join(CARPETA_CALIBRACION);
     let mut nombres_casos = Vec::new();
     if casos_vuelta.is_dir() {
@@ -2549,7 +2706,39 @@ def sha256(ruta):
 
 with open(D + "/verificacion.txt", "w") as verificacion:
     subprocess.run(["bash", D + "/tools/colab/verificar-versiones.sh", D], stdout=verificacion)
-partes = ["verificacion.txt"]
+TIPOS_DE_GASTO = ("llamada", "reserva")
+
+
+def lineas_de_eventos():
+    rotados = sorted(
+        (int(n[len("eventos.jsonl."):]), n)
+        for n in os.listdir(D)
+        if n.startswith("eventos.jsonl.") and n[len("eventos.jsonl."):].isdigit()
+    )
+    nombres = [n for _, n in rotados]
+    if os.path.isfile(D + "/eventos.jsonl"):
+        nombres.append("eventos.jsonl")
+    lineas = []
+    for nombre in nombres:
+        with open(os.path.join(D, nombre), encoding="utf-8") as entrada:
+            lineas.extend(entrada)
+    return lineas
+
+
+def es_gasto(linea):
+    try:
+        evento = json.loads(linea)
+    except ValueError:
+        return True
+    return not isinstance(evento, dict) or evento.get("tipo") in TIPOS_DE_GASTO
+
+
+# Una línea que no es JSON pasa tal cual: la laptop la rechaza con su número.
+with open(D + "/{ARCHIVO_GASTO}", "w", encoding="utf-8") as gasto:
+    for linea in lineas_de_eventos():
+        if linea.strip() and es_gasto(linea):
+            gasto.write(linea.rstrip("\n") + "\n")
+partes = ["verificacion.txt", "{ARCHIVO_GASTO}"]
 if os.path.isfile(D + "/calibracion.json"):
     partes.append("calibracion.json")
 if os.path.isdir(D + "/calibracion"):
@@ -2705,8 +2894,21 @@ mod tests {
                 salida: self.salida.path().join("paquete.tar.gz"),
                 commit_root: "abc123".into(),
                 semilla: SEMILLA_POR_DEFECTO,
+                juez: false,
             }
         }
+    }
+
+    /// Escribe un `eventos.jsonl` con una llamada de API que costó `usd` dólares.
+    fn eventos_con_api(home: &Path, usd: f64) {
+        let evento = crate::tipos::Evento {
+            tipo: crate::tipos::TipoEvento::Llamada,
+            via: Some(crate::tipos::Via::Api),
+            cost_usd: usd,
+            ..Default::default()
+        };
+        let linea = serde_json::to_string(&evento).expect("evento");
+        fs::write(home.join("eventos.jsonl"), format!("{linea}\n")).expect("escribe");
     }
 
     /// Lista las entradas de archivo del paquete, sin `./` ni carpetas.
@@ -2946,7 +3148,138 @@ mod tests {
             dimension: Dimension::Eficiencia,
             comandos: vec!["cargo test".to_string()],
         };
-        validar_trabajos(&[trabajo]).expect("acepta eficiencia");
+        validar_trabajos(&[trabajo], false).expect("acepta eficiencia");
+    }
+
+    #[test]
+    fn acepta_eficiencia_con_juez() {
+        let trabajo = Trabajo {
+            tarea: "s2-t1".to_string(),
+            dimension: Dimension::Eficiencia,
+            comandos: vec!["cargo test".to_string()],
+        };
+        validar_trabajos(&[trabajo], true).expect("acepta eficiencia con juez");
+    }
+
+    #[test]
+    fn diseno_se_rechaza_sin_juez_y_entra_con_juez() {
+        let trabajo = Trabajo {
+            tarea: "s2-t1".to_string(),
+            dimension: Dimension::Diseno,
+            comandos: vec!["cargo test".to_string()],
+        };
+        let texto = validar_trabajos(std::slice::from_ref(&trabajo), false)
+            .expect_err("sin juez rechaza diseño")
+            .to_string();
+        assert!(
+            texto.contains("el juez necesita Colab Secrets, que `exec` no lee"),
+            "{texto}"
+        );
+        validar_trabajos(&[trabajo], true).expect("con juez entra diseño");
+    }
+
+    #[test]
+    fn dimension_calibrable_suma_las_de_juez_solo_con_juez() {
+        assert!(!dimension_calibrable(Dimension::Diseno, false));
+        assert!(dimension_calibrable(Dimension::Diseno, true));
+        assert!(dimension_calibrable(Dimension::Eficiencia, false));
+        assert!(dimension_calibrable(Dimension::Eficiencia, true));
+        assert!(!dimension_calibrable(Dimension::Entrega, true));
+    }
+
+    #[test]
+    fn tope_s2_restante_tiene_piso_cero() {
+        assert!((tope_s2_restante(6.55) - 18.45).abs() < 1e-9);
+        assert_eq!(tope_s2_restante(30.0), 0.0);
+    }
+
+    #[test]
+    fn gastado_s2_usd_suma_el_gasto_de_api() {
+        let home = tempfile::tempdir().expect("home");
+        eventos_con_api(home.path(), 6.55);
+        let gastado = gastado_s2_usd(home.path()).expect("lee eventos");
+        assert!((gastado - 6.55).abs() < 1e-9, "{gastado}");
+    }
+
+    #[test]
+    fn comando_con_juez_lleva_tope_usd_con_dos_decimales() {
+        let con = comando_de_trabajo(
+            "tarea-prueba",
+            Dimension::Diseno,
+            "sha256:imagen",
+            N_POR_DEFECTO,
+            SEMILLA_POR_DEFECTO,
+            Some(18.45),
+        );
+        assert!(
+            con.args
+                .windows(2)
+                .any(|p| p[0] == "--tope-usd" && p[1] == "18.45"),
+            "{:?}",
+            con.args
+        );
+        let sin = comando_de_trabajo(
+            "tarea-prueba",
+            Dimension::Pruebas,
+            "sha256:imagen",
+            N_POR_DEFECTO,
+            SEMILLA_POR_DEFECTO,
+            Some(18.45),
+        );
+        assert!(
+            !sin.args.iter().any(|a| a == "--tope-usd"),
+            "{:?}",
+            sin.args
+        );
+    }
+
+    #[test]
+    fn con_juez_el_manifiesto_fija_tope_y_solo_sus_trabajos_lo_llevan() {
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 6.55);
+        let mut paquete = e.paquete(&[
+            ("tarea-prueba", Dimension::Diseno),
+            ("tarea-prueba", Dimension::Funciona),
+        ]);
+        paquete.juez = true;
+        let resumen = empaquetar(&paquete, &Doble).expect("empaqueta con juez");
+        let extraido = extraer(&resumen.salida);
+        let texto =
+            fs::read_to_string(extraido.path().join("manifiesto.json")).expect("manifiesto");
+        let m: Manifiesto = serde_json::from_str(&texto).expect("JSON del manifiesto");
+        let tope = m.tope_s2_usd.expect("tope de S2");
+        assert!((tope - 18.45).abs() < 1e-9, "{tope}");
+        let con_juez = &m.trabajos[0].args;
+        let i = con_juez
+            .iter()
+            .position(|a| a == "--tope-usd")
+            .expect("el trabajo con juez lleva --tope-usd");
+        assert_eq!(con_juez[i + 1], "18.45");
+        assert!(
+            !m.trabajos[1].args.iter().any(|a| a == "--tope-usd"),
+            "{:?}",
+            m.trabajos[1].args
+        );
+    }
+
+    #[test]
+    fn sin_juez_el_manifiesto_no_lleva_tope_s2() {
+        let e = Escenario::con_contrato("cargo test");
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let extraido = extraer(&resumen.salida);
+        let texto =
+            fs::read_to_string(extraido.path().join("manifiesto.json")).expect("manifiesto");
+        assert!(!texto.contains("tope_s2_usd"), "{texto}");
+    }
+
+    #[test]
+    fn resumen_trae_el_sha256_del_tar() {
+        let e = Escenario::con_contrato("cargo test");
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let bytes = fs::read(&resumen.salida).expect("lee el tar");
+        assert_eq!(resumen.sha256, sha256_hex(&bytes));
     }
 
     #[test]
@@ -3166,6 +3499,7 @@ mod tests {
             "sha256:imagen",
             N_POR_DEFECTO,
             SEMILLA_POR_DEFECTO,
+            None,
         );
         assert_eq!(
             orden.comando,
@@ -3333,15 +3667,56 @@ mod tests_importar {
         commit: String,
         verificacion: Option<String>,
         filas: Vec<FilaPrueba>,
+        /// Contenido de `gasto.jsonl`. `None`: el paquete no lo trae (Tarea 141/145).
+        gasto: Option<String>,
     }
 
-    /// Vuelta con commit `abc123` y verificación en verde.
+    /// Vuelta con commit `abc123` y verificación en verde. Sin `gasto.jsonl`.
     fn vuelta(filas: Vec<FilaPrueba>) -> VueltaPrueba {
         VueltaPrueba {
             commit: "abc123".into(),
             verificacion: Some(VERIFICACION_OK.into()),
             filas,
+            gasto: None,
         }
+    }
+
+    /// Línea de gasto de la corrida de calibración: un `Evento` serializado.
+    fn linea_de_gasto(ts: f64, tipo: crate::tipos::TipoEvento, reserva: Option<&str>) -> String {
+        let mut extra = serde_json::Map::new();
+        if let Some(id) = reserva {
+            extra.insert("reserva".into(), serde_json::json!(id));
+        }
+        let evento = crate::tipos::Evento {
+            corrida: "colab-calibrar".into(),
+            fase: "juez".into(),
+            ts,
+            tipo,
+            via: Some(crate::tipos::Via::Api),
+            cost_usd: 0.01,
+            extra,
+            ..Default::default()
+        };
+        serde_json::to_string(&evento).expect("evento de prueba")
+    }
+
+    /// Vuelta de una fila nueva que casa con la base de la laptop, con su `gasto.jsonl`.
+    fn vuelta_con_gasto(home: &Path, gasto: String) -> VueltaPrueba {
+        let fila = fila_de(TS_COLAB, &huella(), &tarea_hash(home));
+        let mut v = vuelta(vec![fp(fila, &nombre_casos(TS_COLAB), &linea_caso(0.5))]);
+        v.gasto = Some(gasto);
+        v
+    }
+
+    /// Deja `eventos.jsonl` de la laptop vacío. El fixture trae un `{}` que no es un `Evento`.
+    fn vaciar_eventos(home: &Path) {
+        fs::write(home.join("eventos.jsonl"), "").expect("vacía eventos.jsonl");
+    }
+
+    /// Eventos de la corrida de calibración que la laptop tiene en `eventos.jsonl`.
+    fn eventos_de_colab(home: &Path) -> Vec<crate::tipos::Evento> {
+        crate::observe::uso::leer_eventos(&crate::observe::ruta_eventos_en(home))
+            .expect("lee eventos.jsonl")
     }
 
     /// Escribe la carpeta del paquete de vuelta con sus SHA-256 y la empaqueta en un tar.gz.
@@ -3381,6 +3756,9 @@ mod tests_importar {
         escribir("filas.json", &json_filas);
         if let Some(texto) = &v.verificacion {
             escribir("verificacion.txt", texto);
+        }
+        if let Some(texto) = &v.gasto {
+            escribir("gasto.jsonl", texto);
         }
         let manifiesto = ManifiestoVuelta {
             v: 1,
@@ -3644,6 +4022,140 @@ mod tests_importar {
             decidir_fila(&e),
             Decision::NoEntra("sin valores de base para comparar".into())
         );
+    }
+
+    #[test]
+    fn gasto_de_la_vuelta_entra_a_eventos_con_origen_colab() {
+        use crate::tipos::TipoEvento::{Llamada, Reserva};
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        vaciar_eventos(home);
+        let gasto = format!(
+            "{}\n{}\n",
+            linea_de_gasto(TS_COLAB + 1.0, Llamada, None),
+            linea_de_gasto(TS_COLAB + 2.0, Reserva, Some("r-1"))
+        );
+        let (_caja, tgz) = armar_paquete(&vuelta_con_gasto(home, gasto), None);
+
+        let resumen = importar(home, &tgz, "abc123").expect("importa");
+
+        assert_eq!(resumen.entraron, 1, "{resumen:?}");
+        let eventos = eventos_de_colab(home);
+        assert_eq!(eventos.len(), 2, "{eventos:?}");
+        assert!(
+            eventos
+                .iter()
+                .all(|ev| ev.extra.get("origen") == Some(&serde_json::json!("colab"))),
+            "{eventos:?}"
+        );
+        let respaldo = resumen.respaldo.expect("hay respaldo");
+        assert!(respaldo.join("eventos.jsonl").is_file());
+    }
+
+    #[test]
+    fn importar_dos_veces_con_gasto_no_duplica_eventos() {
+        use crate::tipos::TipoEvento::Llamada;
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        vaciar_eventos(home);
+        let gasto = format!("{}\n", linea_de_gasto(TS_COLAB + 1.0, Llamada, None));
+        let (_caja, tgz) = armar_paquete(&vuelta_con_gasto(home, gasto), None);
+        importar(home, &tgz, "abc123").expect("primera importación");
+        let despues_de_la_primera = instantanea(home);
+
+        let segunda = importar(home, &tgz, "abc123").expect("segunda importación");
+
+        assert_eq!(eventos_de_colab(home).len(), 1);
+        assert!(segunda.respaldo.is_none(), "{segunda:?}");
+        assert_eq!(instantanea(home), despues_de_la_primera);
+    }
+
+    #[test]
+    fn linea_de_gasto_ya_presente_no_se_repite_y_entra_la_nueva() {
+        use crate::tipos::TipoEvento::Llamada;
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        let ya_presente = linea_de_gasto(TS_COLAB + 1.0, Llamada, None);
+        fs::write(home.join("eventos.jsonl"), format!("{ya_presente}\n")).expect("eventos previos");
+        let gasto = format!(
+            "{ya_presente}\n{}\n",
+            linea_de_gasto(TS_COLAB + 2.0, Llamada, None)
+        );
+        let (_caja, tgz) = armar_paquete(&vuelta_con_gasto(home, gasto), None);
+
+        importar(home, &tgz, "abc123").expect("importa");
+
+        let eventos = eventos_de_colab(home);
+        assert_eq!(eventos.len(), 2, "{eventos:?}");
+        assert_eq!(
+            eventos
+                .iter()
+                .filter(|ev| ev.extra.get("origen").is_some())
+                .count(),
+            1,
+            "solo la línea nueva lleva origen: {eventos:?}"
+        );
+    }
+
+    #[test]
+    fn paquete_sin_gasto_importa_como_antes_y_no_toca_eventos() {
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        let fila = fila_de(TS_COLAB, &huella(), &tarea_hash(home));
+        let v = vuelta(vec![fp(fila, &nombre_casos(TS_COLAB), &linea_caso(0.5))]);
+        let (_caja, tgz) = armar_paquete(&v, None);
+        // El fixture trae un `eventos.jsonl` con `{}`: si la importación lo leyera, fallaría.
+        let eventos_antes = fs::read(home.join("eventos.jsonl")).expect("eventos");
+
+        let resumen = importar(home, &tgz, "abc123").expect("importa");
+
+        assert_eq!(resumen.entraron, 1, "{resumen:?}");
+        assert_eq!(
+            fs::read(home.join("eventos.jsonl")).expect("eventos"),
+            eventos_antes
+        );
+    }
+
+    #[test]
+    fn gasto_con_linea_que_no_es_evento_rechaza_el_paquete_sin_mostrarla() {
+        use crate::tipos::TipoEvento::Llamada;
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        vaciar_eventos(home);
+        let gasto = format!(
+            "{}\n{{\"dato\":\"VALOR-NO-MOSTRAR\"}}\n",
+            linea_de_gasto(TS_COLAB + 1.0, Llamada, None)
+        );
+        let (_caja, tgz) = armar_paquete(&vuelta_con_gasto(home, gasto), None);
+        let antes = instantanea(home);
+
+        let texto = importar(home, &tgz, "abc123")
+            .expect_err("frena la importación")
+            .to_string();
+
+        assert!(texto.contains("gasto.jsonl"), "{texto}");
+        assert!(texto.contains("línea 2"), "{texto}");
+        assert!(!texto.contains("VALOR-NO-MOSTRAR"), "{texto}");
+        assert_eq!(instantanea(home), antes);
+        assert!(!home.join("colab/respaldos").exists());
+    }
+
+    #[test]
+    fn gasto_con_evento_que_no_es_gasto_rechaza_el_paquete() {
+        use crate::tipos::TipoEvento::Gate;
+        let e = laptop_con_base(0.5);
+        let home = e.home.path();
+        vaciar_eventos(home);
+        let gasto = format!("{}\n", linea_de_gasto(TS_COLAB + 1.0, Gate, None));
+        let (_caja, tgz) = armar_paquete(&vuelta_con_gasto(home, gasto), None);
+        let antes = instantanea(home);
+
+        let texto = importar(home, &tgz, "abc123")
+            .expect_err("frena la importación")
+            .to_string();
+
+        assert!(texto.contains("línea 1"), "{texto}");
+        assert_eq!(instantanea(home), antes);
     }
 }
 
@@ -3927,6 +4439,7 @@ mod tests_calibrar {
                 semilla: SEMILLA_POR_DEFECTO,
             }],
             imagenes: BTreeMap::from([("tarea-prueba".to_string(), "imagen".to_string())]),
+            tope_s2_usd: None,
         };
         let manifiesto = armar_manifiesto(&datos, archivos);
         let json = serde_json::to_string_pretty(&manifiesto).expect("manifiesto");
@@ -4462,6 +4975,105 @@ mod tests_calibrar {
     }
 
     #[test]
+    fn cierre_menciona_gasto_y_filtra_llamada_y_reserva() {
+        let texto = script_cierre_en("/r", "/v.tar.gz");
+        assert!(texto.contains("gasto.jsonl"), "{texto}");
+        assert!(texto.contains("\"llamada\""), "{texto}");
+        assert!(texto.contains("\"reserva\""), "{texto}");
+    }
+
+    #[test]
+    fn guion_de_cierre_gasto_trae_solo_llamadas_y_reservas_con_rotados() {
+        if Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("sin python3: se salta el test del guion de cierre");
+            return;
+        }
+        let caja = tempfile::tempdir().expect("caja");
+        let raiz = caja.path().join("raiz");
+        fs::create_dir_all(raiz.join("tools/colab")).expect("carpeta");
+        fs::write(raiz.join("tools/colab/verificar-versiones.sh"), "exit 0\n")
+            .expect("verificador");
+        fs::write(
+            raiz.join("eventos.jsonl.1"),
+            "{\"tipo\":\"llamada\",\"n\":\"rotada\"}\n",
+        )
+        .expect("eventos rotados");
+        fs::write(
+            raiz.join("eventos.jsonl"),
+            "{\"tipo\":\"llamada\",\"n\":\"vigente\"}\n\
+             {\"tipo\":\"gate\",\"n\":\"gate\"}\n\
+             {\"tipo\":\"reserva\",\"n\":\"vigente\"}\n",
+        )
+        .expect("eventos");
+        let guion = caja.path().join("cierre.py");
+        let vuelta = caja.path().join("vuelta.tar.gz");
+        let texto = script_cierre_en(raiz.to_str().expect("ruta"), vuelta.to_str().expect("ruta"));
+        fs::write(&guion, texto).expect("guion");
+
+        let salida = Command::new("python3")
+            .arg("-I")
+            .arg(&guion)
+            .output()
+            .expect("python3");
+        assert!(
+            salida.status.success(),
+            "el guion de cierre falló: {}",
+            String::from_utf8_lossy(&salida.stderr)
+        );
+
+        let extraido = extraer(&vuelta);
+        let gasto = fs::read_to_string(extraido.path().join("gasto.jsonl"))
+            .expect("gasto.jsonl en la vuelta");
+        assert_eq!(
+            gasto,
+            "{\"tipo\":\"llamada\",\"n\":\"rotada\"}\n\
+             {\"tipo\":\"llamada\",\"n\":\"vigente\"}\n\
+             {\"tipo\":\"reserva\",\"n\":\"vigente\"}\n"
+        );
+        let texto = fs::read_to_string(extraido.path().join(MANIFIESTO_DEL_RUNTIME))
+            .expect("manifiesto de vuelta");
+        let manifiesto: serde_json::Value = serde_json::from_str(&texto).expect("json");
+        assert_eq!(
+            manifiesto["archivos"]["gasto.jsonl"],
+            serde_json::json!(sha256_hex(gasto.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn armado_copia_el_gasto_de_la_vuelta_al_paquete() {
+        const GASTO: &str = "{\"tipo\":\"llamada\"}\n";
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let ida_cal = serde_json::json!({"v": 1, "filas": [fila_json(100.0)]}).to_string();
+        let ida = paquete_de_ida(caja.path(), "ida", &ida_cal);
+        let dir = caja.path().join("vuelta-con-gasto");
+        fs::create_dir_all(&dir).expect("carpeta");
+        fs::write(dir.join("verificacion.txt"), "ok tests\n").expect("verificación");
+        fs::write(dir.join(ARCHIVO_CALIBRACION), &ida_cal).expect("calibración");
+        fs::write(dir.join("gasto.jsonl"), GASTO).expect("gasto");
+        con_manifiesto_de_vuelta(&dir);
+        let vuelta = caja.path().join("vuelta.tar.gz");
+        empaquetar_dir(&dir, &vuelta);
+
+        let salida = armar_paquete_de_vuelta(home.path(), &ida, &vuelta, "root-g-1")
+            .expect("arma la vuelta");
+
+        let extraido = extraer(&salida);
+        assert_eq!(
+            fs::read_to_string(extraido.path().join("gasto.jsonl")).expect("gasto del paquete"),
+            GASTO
+        );
+        let manifiesto: ManifiestoVuelta = serde_json::from_str(
+            &fs::read_to_string(extraido.path().join(MANIFIESTO_VUELTA)).expect("manifiesto"),
+        )
+        .expect("manifiesto de vuelta");
+        assert!(
+            manifiesto.archivos.contains_key("gasto.jsonl"),
+            "{manifiesto:?}"
+        );
+    }
+
+    #[test]
     fn vuelta_con_archivo_alterado_no_se_importa() {
         let caja = tempfile::tempdir().expect("caja");
         let home = tempfile::tempdir().expect("home");
@@ -4727,6 +5339,7 @@ mod tests_calibrar {
             archivos: BTreeMap::new(),
             trabajos: Vec::new(),
             imagenes: BTreeMap::new(),
+            tope_s2_usd: None,
         };
         let mut codigos = Vec::new();
         correr_runtime(

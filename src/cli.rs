@@ -200,6 +200,9 @@ pub enum ColabAccion {
         /// Semilla del sorteo.
         #[arg(long, default_value_t = crate::colab_calibra::SEMILLA_POR_DEFECTO)]
         semilla: u64,
+        /// Incluye las dimensiones con ítems del juez. Exige Colab Secrets. Fija el tope de gasto de S2.
+        #[arg(long)]
+        juez: bool,
     },
     /// Importa la vuelta de una calibración de Colab: revisa el paquete y agrega sus filas.
     Importar {
@@ -693,6 +696,30 @@ mod tests {
                 assert_eq!(n, 8);
                 assert_eq!(semilla, 7);
             }
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_empaquetar_parsea_juez() {
+        let mut args = empaquetar_base();
+        args.push("--juez");
+        let cli = Cli::try_parse_from(args).expect("colab empaquetar con --juez parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { juez, .. },
+            } => assert!(juez),
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_empaquetar_sin_juez_por_defecto() {
+        let cli = Cli::try_parse_from(empaquetar_base()).expect("colab empaquetar parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { juez, .. },
+            } => assert!(!juez),
             otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
         }
     }

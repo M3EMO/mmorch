@@ -654,12 +654,19 @@ fn colab_empaquetar_con(
                 "salida": salida,
                 "archivos": resumen.archivos,
                 "trabajos": resumen.trabajos,
+                "sha256": resumen.sha256,
             })
         );
     } else {
         println!("{salida}: {} archivos", resumen.archivos);
+        println!("{}", linea_sha(&resumen));
     }
     Ok(())
+}
+
+/// Línea que `colab empaquetar` imprime con el SHA-256 del tar.
+fn linea_sha(resumen: &colab_calibra::Resumen) -> String {
+    format!("ROOT_SHA_PAQUETE={}", resumen.sha256)
 }
 
 /// `colab calibrar`: corre cada paquete en su runtime, importa cada vuelta e imprime el resumen de todos.
@@ -1013,6 +1020,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                     raiz_root,
                     n,
                     semilla,
+                    juez,
                 },
         } => colab_empaquetar(
             cli.json,
@@ -1023,6 +1031,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                 rustup_sha256: rustup_sha256.clone(),
                 salida: salida.clone(),
                 raiz_root: raiz_root.clone(),
+                juez: *juez,
             },
             *n,
             *semilla,
@@ -1710,7 +1719,19 @@ mod tests {
             rustup_sha256: "0".repeat(64),
             salida: PathBuf::from("s.tar.gz"),
             raiz_root: None,
+            juez: false,
         }
+    }
+
+    #[test]
+    fn linea_sha_da_la_linea_del_sha_del_paquete() {
+        let resumen = colab_calibra::Resumen {
+            salida: PathBuf::from("s.tar.gz"),
+            archivos: 1,
+            trabajos: 1,
+            sha256: "ab12".into(),
+        };
+        assert_eq!(linea_sha(&resumen), "ROOT_SHA_PAQUETE=ab12");
     }
 
     #[test]
@@ -1722,6 +1743,7 @@ mod tests {
                 salida: PathBuf::from("s.tar.gz"),
                 archivos: 1,
                 trabajos: 1,
+                sha256: String::new(),
             })
         };
         colab_empaquetar_con(false, pedido_empaquetar(), 8, 7, &registrar)
@@ -1738,6 +1760,7 @@ mod tests {
                 salida: PathBuf::from("s.tar.gz"),
                 archivos: 1,
                 trabajos: 1,
+                sha256: String::new(),
             })
         };
         colab_empaquetar_con(
@@ -1786,6 +1809,7 @@ mod tests {
                 salida: PathBuf::from("s.tar.gz"),
                 archivos: 1,
                 trabajos: 1,
+                sha256: String::new(),
             })
         };
         colab_empaquetar_con(false, pedido_empaquetar(), n, semilla, &registrar)
