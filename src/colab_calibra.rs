@@ -532,11 +532,13 @@ fn armar_y_empaquetar(
     copiar_dir(
         &paquete.raiz_root.join("tools/colab"),
         &staging.join("tools/colab"),
+        Nombres::Avisar,
     )?;
     for nombre in tareas.keys() {
         copiar_dir(
             &paquete.home.join("oraculos").join(nombre),
             &staging.join("oraculos").join(nombre),
+            Nombres::Avisar,
         )?;
     }
     for (nombre, tarea) in tareas {
@@ -545,12 +547,12 @@ fn armar_y_empaquetar(
             let relativa = cache.strip_prefix(&paquete.home).map_err(|_| {
                 ErrorOraculo::Infra(format!("la caché {} no está en ROOT_HOME", cache.display()))
             })?;
-            copiar_dir(&cache, &staging.join(relativa))?;
+            copiar_dir(&cache, &staging.join(relativa), Nombres::Libres)?;
         }
     }
     let rustsec = paquete.home.join("cache/rustsec");
     if rustsec.is_dir() {
-        copiar_dir(&rustsec, &staging.join("cache/rustsec"))?;
+        copiar_dir(&rustsec, &staging.join("cache/rustsec"), Nombres::Libres)?;
     }
     copiar_archivo_si_existe(
         &paquete.home.join("calibracion.json"),
@@ -558,7 +560,7 @@ fn armar_y_empaquetar(
     )?;
     let configs = paquete.home.join("configs");
     if configs.is_dir() {
-        copiar_dir(&configs, &staging.join("configs"))?;
+        copiar_dir(&configs, &staging.join("configs"), Nombres::Avisar)?;
     }
     copiar_archivo_si_existe(&paquete.home.join("root.toml"), &staging.join("root.toml"))?;
     for nombre in tareas.keys() {
@@ -989,9 +991,20 @@ fn commit_de(raiz: &Path) -> Result<String, ErrorOraculo> {
     Ok(String::from_utf8_lossy(&salida.stdout).trim().to_string())
 }
 
-/// Copia el contenido de `origen` a `destino`. Omite los nombres de `EXCLUIDOS`.
-/// En archivos, omite los `.env*` y los nombres secretos. Los enlaces simbólicos no se copian.
-fn copiar_dir(origen: &Path, destino: &Path) -> Result<(), ErrorOraculo> {
+/// Qué hace `copiar_dir` con un archivo `.env*` o de nombre secreto.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Nombres {
+    /// Falla con `Uso` que nombra el archivo. Para `tools/colab`, oráculos y configs.
+    Avisar,
+    /// Copia el archivo igual. Para la caché de cargo y `cache/rustsec`.
+    Libres,
+}
+
+/// Copia el contenido de `origen` a `destino`, en cualquier nivel.
+/// Omite los nombres de `EXCLUIDOS`, en cualquier nivel. Omite los enlaces simbólicos sin avisar.
+/// Con `Nombres::Avisar`, un `.env*` o de nombre secreto falla con `Uso` que nombra su ruta.
+/// Con `Nombres::Libres`, copia esos archivos igual.
+fn copiar_dir(origen: &Path, destino: &Path, politica: Nombres) -> Result<(), ErrorOraculo> {
     let error = |e: io::Error| ErrorOraculo::Infra(format!("copiar {}: {e}", origen.display()));
     fs::create_dir_all(destino)
         .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", destino.display())))?;
@@ -1006,8 +1019,15 @@ fn copiar_dir(origen: &Path, destino: &Path) -> Result<(), ErrorOraculo> {
         let ruta = entrada.path();
         let destino_entrada = destino.join(&*nombre);
         if tipo.is_dir() {
-            copiar_dir(&ruta, &destino_entrada)?;
-        } else if tipo.is_file() && !(nombre.starts_with(".env") || es_nombre_secreto(&nombre)) {
+            copiar_dir(&ruta, &destino_entrada, politica)?;
+        } else if tipo.is_file() {
+            let secreto = nombre.starts_with(".env") || es_nombre_secreto(&nombre);
+            if secreto && politica == Nombres::Avisar {
+                return Err(ErrorOraculo::Uso(format!(
+                    "{} parece un secreto (.env o nombre secreto). Quítalo o renómbralo.",
+                    ruta.display()
+                )));
+            }
             fs::copy(&ruta, &destino_entrada)
                 .map_err(|e| ErrorOraculo::Infra(format!("copiar {}: {e}", ruta.display())))?;
         }
@@ -3321,21 +3341,18 @@ mod tests {
     }
 
     #[test]
-    fn copiar_dir_copia_archivos_normales_y_filtra_secretos_y_excluidos() {
-        // Guarda del cambio de firma de `copiar_dir`: lo que copia hoy, lo sigue copiando.
+    fn copiar_dir_avisar_copia_normales_y_omite_excluidos() {
         let origen = tempfile::tempdir().expect("origen");
         let destino = tempfile::tempdir().expect("destino");
         let o = origen.path();
         fs::create_dir_all(o.join("sub")).expect("dir");
         fs::write(o.join("normal.txt"), "n\n").expect("escribe");
         fs::write(o.join("sub/anidado.txt"), "a\n").expect("escribe");
-        fs::write(o.join(".env"), "CLAVE=v\n").expect("escribe");
-        fs::write(o.join("api_key"), "v\n").expect("escribe");
         fs::write(o.join("eventos.jsonl"), "{}\n").expect("escribe");
         fs::create_dir_all(o.join("evidencia")).expect("dir");
         fs::write(o.join("evidencia/x.json"), "{}\n").expect("escribe");
 
-        copiar_dir(o, destino.path()).expect("copia");
+        copiar_dir(o, destino.path(), Nombres::Avisar).expect("copia");
 
         let d = destino.path();
         assert_eq!(
@@ -3346,10 +3363,56 @@ mod tests {
             fs::read_to_string(d.join("sub/anidado.txt")).expect("anidado"),
             "a\n"
         );
-        assert!(!d.join(".env").exists());
-        assert!(!d.join("api_key").exists());
         assert!(!d.join("eventos.jsonl").exists());
         assert!(!d.join("evidencia").exists());
+    }
+
+    #[test]
+    fn copiar_dir_avisar_falla_con_env_y_nombre_secreto() {
+        // `Avisar` no salta el archivo: falla con `Uso` que nombra su ruta, también en subcarpetas.
+        for nombre in [".env", "api_key", "sub/token.rs"] {
+            let origen = tempfile::tempdir().expect("origen");
+            let destino = tempfile::tempdir().expect("destino");
+            fs::create_dir_all(origen.path().join("sub")).expect("dir");
+            fs::write(origen.path().join(nombre), "v\n").expect("escribe");
+
+            let error = copiar_dir(origen.path(), destino.path(), Nombres::Avisar)
+                .expect_err("un secreto debía frenar la copia");
+
+            let mensaje = error.to_string();
+            assert!(matches!(error, ErrorOraculo::Uso(_)), "{mensaje}");
+            assert!(mensaje.contains(nombre), "{mensaje}");
+        }
+    }
+
+    #[test]
+    fn copiar_dir_libres_copia_env_y_nombre_secreto() {
+        // `Libres` copia todo archivo, y `EXCLUIDOS` sigue aplicando.
+        let origen = tempfile::tempdir().expect("origen");
+        let destino = tempfile::tempdir().expect("destino");
+        let o = origen.path();
+        fs::create_dir_all(o.join("sub")).expect("dir");
+        fs::write(o.join(".env"), "CLAVE=v\n").expect("escribe");
+        fs::write(o.join("api_key"), "v\n").expect("escribe");
+        fs::write(o.join("sub/token.rs"), "pub fn t() {}\n").expect("escribe");
+        fs::write(o.join("eventos.jsonl"), "{}\n").expect("escribe");
+
+        copiar_dir(o, destino.path(), Nombres::Libres).expect("copia");
+
+        let d = destino.path();
+        assert_eq!(
+            fs::read_to_string(d.join(".env")).expect(".env"),
+            "CLAVE=v\n"
+        );
+        assert_eq!(
+            fs::read_to_string(d.join("api_key")).expect("api_key"),
+            "v\n"
+        );
+        assert_eq!(
+            fs::read_to_string(d.join("sub/token.rs")).expect("token.rs"),
+            "pub fn t() {}\n"
+        );
+        assert!(!d.join("eventos.jsonl").exists());
     }
 
     #[test]
@@ -3386,14 +3449,76 @@ mod tests {
     }
 
     #[test]
-    fn token_de_root_home_no_sale_al_paquete() {
-        // `copiar_dir` sigue filtrando los nombres secretos de ROOT_HOME.
+    fn token_en_configs_de_root_home_falla_el_empaquetado() {
+        // `configs/` usa `Avisar`: un nombre secreto frena el empaquetado y nombra el archivo.
         let e = Escenario::con_contrato("cargo test");
         fs::write(e.home.path().join("configs/token.json"), "{}\n").expect("escribe");
+        let Err(error) = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+        else {
+            panic!("un secreto en configs debía frenar el empaquetado");
+        };
+        let mensaje = error.to_string();
+        assert!(matches!(error, ErrorOraculo::Uso(_)), "{mensaje}");
+        assert!(mensaje.contains("token.json"), "{mensaje}");
+    }
+
+    #[test]
+    fn cache_de_cargo_trae_fuentes_con_nombre_secreto() {
+        // `token.rs` del vendor es código de la caché: `Libres` lo copia.
+        let e = Escenario::con_contrato("cargo test");
+        let h = crate::oracle::descarga::hash_corto(b"lock\n");
+        let fuente = e
+            .home
+            .path()
+            .join("cache/rust")
+            .join(&h)
+            .join("vendor/syn-2.0.74/src");
+        fs::create_dir_all(&fuente).expect("dir");
+        fs::write(fuente.join("token.rs"), "pub fn t() {}\n").expect("escribe");
         let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
             .expect("empaqueta");
         let nombres = listar(&resumen.salida);
-        assert!(!nombres.contains("configs/token.json"), "{nombres:?}");
+        let esperado = format!("cache/rust/{h}/vendor/syn-2.0.74/src/token.rs");
+        assert!(nombres.contains(&esperado), "{nombres:?}");
+    }
+
+    #[test]
+    fn rustsec_trae_avisos_con_nombre_secreto() {
+        // `cache/rustsec` usa `Libres`: copia todo archivo, también los de nombre secreto.
+        let e = Escenario::con_contrato("cargo test");
+        let dir = e.home.path().join("cache/rustsec/crates/jsonwebtoken");
+        fs::create_dir_all(&dir).expect("dir");
+        fs::write(dir.join("RUSTSEC-0000-0000.md"), "# aviso\n").expect("escribe");
+        fs::write(dir.join("token.md"), "# aviso\n").expect("escribe");
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let nombres = listar(&resumen.salida);
+        assert!(
+            nombres.contains("cache/rustsec/crates/jsonwebtoken/RUSTSEC-0000-0000.md"),
+            "{nombres:?}"
+        );
+        assert!(
+            nombres.contains("cache/rustsec/crates/jsonwebtoken/token.md"),
+            "{nombres:?}"
+        );
+    }
+
+    #[test]
+    fn oraculo_con_nombre_secreto_falla_el_empaquetado() {
+        // `oraculos/<tarea>` usa `Avisar`: el archivo se nombra y no se salta en silencio.
+        let e = Escenario::con_contrato("cargo test");
+        let ruta = e
+            .home
+            .path()
+            .join("oraculos/tarea-prueba/oculto/test_token.py");
+        fs::write(&ruta, "assert True\n").expect("escribe");
+        let Err(error) = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+        else {
+            panic!("un secreto en el oráculo debía frenar el empaquetado");
+        };
+        let mensaje = error.to_string();
+        assert!(matches!(error, ErrorOraculo::Uso(_)), "{mensaje}");
+        assert!(mensaje.contains("test_token.py"), "{mensaje}");
     }
 
     #[test]
