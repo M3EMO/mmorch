@@ -2,7 +2,7 @@
 
 use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -308,6 +308,14 @@ fn revisar_destinos_bwrap(e: &Ejecucion) -> Result<(), ErrorOraculo> {
     }
     destinos.push("/salida");
     for destino in destinos {
+        let sube = Path::new(destino)
+            .components()
+            .any(|componente| componente == Component::ParentDir);
+        if sube {
+            return Err(ErrorOraculo::Infra(format!(
+                "el destino {destino} tiene un componente `..`"
+            )));
+        }
         if !CARPETAS_RUNTIME.contains(&destino) && !destino.starts_with("/oraculo/") {
             return Err(ErrorOraculo::Infra(format!(
                 "el destino {destino} no es una carpeta del runtime ni está bajo /oraculo/"
@@ -2075,6 +2083,24 @@ mod tests {
             }
             otro => panic!("se esperaba Infra: {otro:?}"),
         }
+    }
+
+    #[test]
+    fn bwrap_oraculo_destino_con_punto_punto_da_error_que_lo_nombra() {
+        let mut e = ejecucion();
+        e.oraculo_destino = Some("/oraculo/../x".into());
+        match argumentos_bwrap(&e, &[]) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("/oraculo/../x"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra: {otro:?}"),
+        }
+
+        e.oraculo_destino = Some("/oraculo/contrato".into());
+        assert!(
+            argumentos_bwrap(&e, &[]).is_ok(),
+            "/oraculo/contrato debe pasar"
+        );
     }
 
     #[test]
