@@ -1529,22 +1529,10 @@ fn binario_local(
         .map_err(|e| e.to_string())?;
     // El binario va donde el `cargo` mínimo lo busca: `target/debug` del paquete (CARGO_TARGET_DIR).
     let destino = format!("{CARPETA_REMOTA}/target/debug/{nombre}");
-    subir_binario(cli, lim, sesion, &binario, tmp, &destino).map_err(|e| e.to_string())?;
+    subir_archivo(cli, lim, sesion, &binario, tmp, &destino).map_err(|e| e.to_string())?;
     let cargo = escribir(tmp, "cargo", &guion_cargo(&nombre)).map_err(|e| e.to_string())?;
     let destino_cargo = format!("{CARPETA_REMOTA}/bin/cargo");
-    let subida_cargo = paso(
-        cli,
-        lim,
-        &args(&["upload", "-s", sesion, &ruta(&cargo), &destino_cargo]),
-        TIMEOUT_LLAMADA,
-    )
-    .map_err(|e| e.to_string())?;
-    if subida_cargo.codigo != 0 {
-        return Err(format!(
-            "no se pudo subir el cargo mínimo: {}",
-            subida_cargo.detalle()
-        ));
-    }
+    subir_archivo(cli, lim, sesion, &cargo, tmp, &destino_cargo).map_err(|e| e.to_string())?;
     let guion = escribir(tmp, "prueba-binario.py", &guion_probar_binario(&nombre))
         .map_err(|e| e.to_string())?;
     let prueba = exec(cli, lim, sesion, SEG_PRUEBA_BINARIO, &guion).map_err(|e| e.to_string())?;
@@ -1731,35 +1719,18 @@ fn unir_en_runtime(
     Ok(())
 }
 
-/// Sube el binario a `destino`. Si pesa más de `TROZO_SUBIDA`, lo sube en trozos y lo une en el runtime.
-fn subir_binario(
+/// Sube un archivo en trozos, lo une en `destino` y exige que el SHA-256 coincida. Es el único camino
+/// de subida de archivos sueltos. El permiso de ejecución lo fija `prueba-binario.py` después de la unión.
+fn subir_archivo(
     cli: &dyn ColabCli,
     lim: &Limites,
     sesion: &str,
-    binario: &Path,
+    origen: &Path,
     tmp: &Path,
     destino: &str,
 ) -> Result<(), ErrorOraculo> {
-    let tamano = fs::metadata(binario)
-        .map_err(|e| infra("leer el binario", e))?
-        .len();
-    if tamano <= TROZO_SUBIDA {
-        let subida = paso(
-            cli,
-            lim,
-            &args(&["upload", "-s", sesion, &ruta(binario), destino]),
-            TIMEOUT_LLAMADA,
-        )?;
-        if subida.codigo != 0 {
-            return Err(ErrorOraculo::Infra(format!(
-                "no se pudo subir el binario: {}",
-                subida.detalle()
-            )));
-        }
-        return Ok(());
-    }
-    let trozos = subir_en_trozos(cli, lim, sesion, binario, tmp, TIMEOUT_LLAMADA)?;
-    let sha256 = sha256_de_archivo(binario)?;
+    let trozos = subir_en_trozos(cli, lim, sesion, origen, tmp, TIMEOUT_LLAMADA)?;
+    let sha256 = sha256_de_archivo(origen)?;
     unir_en_runtime(cli, lim, sesion, tmp, trozos, destino, Some(&sha256))
 }
 
@@ -3290,15 +3261,18 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let home = tempfile::tempdir().expect("home");
         let binario = binario_falso(base.path());
-        let guiones: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-        let guiones_en = Rc::clone(&guiones);
+        // Cada llamada: sus argumentos unidos y el texto del guion, si la llamada es un `exec`.
+        let registro: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        let registro_en = Rc::clone(&registro);
         let respuesta = cambiando(feliz("Tesla T4"), "prepara-rust.py", "ROOT_RUST=falla:hash");
         let falso = Falso::nuevo(move |args: &[String]| {
-            if args[0] == "exec" {
+            let texto = if args[0] == "exec" {
                 let guion = args.last().expect("ruta del guion");
-                let texto = fs::read_to_string(guion).expect("el guion se puede leer");
-                guiones_en.borrow_mut().push(texto);
-            }
+                fs::read_to_string(guion).expect("el guion se puede leer")
+            } else {
+                String::new()
+            };
+            registro_en.borrow_mut().push((args.join(" "), texto));
             respuesta(args)
         });
         let compilador = CompiladorFalso {
@@ -3318,21 +3292,20 @@ mod tests {
         assert!(r.is_ok(), "{r:?}");
         assert_eq!(compilador.llamadas.get(), 1, "compila una vez");
 
-        let lineas = falso.lineas();
-        let i_subida = lineas
-            .iter()
-            .position(|l| {
-                l.starts_with("upload -s root-memora-1 ")
-                    && l.ends_with(" /content/root-paquete/target/debug/memora")
+        let reg = registro.borrow();
+        let lineas: Vec<String> = reg.iter().map(|(l, _)| l.clone()).collect();
+        // Posición del `exec` de `une-trozos.py` cuyo guion une en `destino`.
+        let une_en = |destino: &str| {
+            reg.iter().position(|(l, guion)| {
+                l.starts_with("exec ")
+                    && l.contains("une-trozos.py")
+                    && guion.contains(&format!("\"{destino}\""))
             })
-            .unwrap_or_else(|| panic!("falta la subida del binario: {lineas:?}"));
-        let i_cargo = lineas
-            .iter()
-            .position(|l| {
-                l.starts_with("upload -s root-memora-1 ")
-                    && l.ends_with(" /content/root-paquete/bin/cargo")
-            })
-            .unwrap_or_else(|| panic!("falta la subida del cargo mínimo: {lineas:?}"));
+        };
+        let i_subida = une_en("/content/root-paquete/target/debug/memora")
+            .unwrap_or_else(|| panic!("falta la unión del binario: {lineas:?}"));
+        let i_cargo = une_en("/content/root-paquete/bin/cargo")
+            .unwrap_or_else(|| panic!("falta la unión del cargo mínimo: {lineas:?}"));
         let i_prueba = lineas
             .iter()
             .position(|l| l.contains("prueba-binario.py"))
@@ -3352,7 +3325,7 @@ mod tests {
         assert_eq!(gates[0]["extra"]["camino"], "binario-local", "{gates:?}");
         assert!(gates[0]["extra"]["causa"].is_null(), "{gates:?}");
 
-        for guion in guiones.borrow().iter() {
+        for (_, guion) in reg.iter() {
             assert!(
                 prohibidos_en(guion).is_empty(),
                 "un guion trae texto prohibido {:?}:\n{guion}",
@@ -4361,6 +4334,155 @@ mod tests {
         assert_eq!(subidas, 2, "no sube el tercero: {:?}", falso.lineas());
         // Punto 4: con error también se borra el trozo local que falló.
         assert!(trozos_en(&tmp).is_empty(), "{:?}", trozos_en(&tmp));
+    }
+
+    #[test]
+    fn colab_subir_binario_chico_sube_un_trozo_y_pasa_por_la_union() {
+        let base = tempfile::tempdir().expect("base");
+        let tmp = carpeta_tmp(base.path());
+        let origen = base.path().join("memora-compilado");
+        fs::write(&origen, vec![3u8; 1024 * 1024]).expect("escribe el binario");
+        let guiones: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let guiones_en = Rc::clone(&guiones);
+        let respuesta = feliz("Tesla T4");
+        let falso = Falso::nuevo(move |args: &[String]| {
+            if args[0] == "exec"
+                && let Some(guion) = guion_de(args).filter(|g| g.ends_with("une-trozos.py"))
+            {
+                let texto = fs::read_to_string(&guion).expect("el guion se puede leer");
+                guiones_en.borrow_mut().push(texto);
+            }
+            respuesta(args)
+        });
+        let senales = Senales::default();
+        let lim = limites_holgados(&senales);
+        subir_archivo(
+            &falso,
+            &lim,
+            "root-memora-1",
+            &origen,
+            &tmp,
+            "/content/root-paquete/target/debug/memora",
+        )
+        .expect("sube el binario");
+
+        let llamadas = falso.llamadas.borrow().clone();
+        let subidas: Vec<&Vec<String>> = llamadas.iter().filter(|a| a[0] == "upload").collect();
+        assert_eq!(subidas.len(), 1, "{llamadas:?}");
+        assert_eq!(subidas[0][4], "/content/root-paq.00", "{llamadas:?}");
+        let uniones = llamadas
+            .iter()
+            .filter(|a| a[0] == "exec" && guion_de(a).is_some_and(|g| g.ends_with("une-trozos.py")))
+            .count();
+        assert_eq!(uniones, 1, "{llamadas:?}");
+
+        let guiones = guiones.borrow();
+        assert_eq!(guiones.len(), 1, "{guiones:?}");
+        let sha = sha256_de_archivo(&origen).expect("sha256 del binario");
+        assert!(guiones[0].contains(&format!("\"{sha}\"")), "{}", guiones[0]);
+        assert!(
+            guiones[0].contains("\"/content/root-paquete/target/debug/memora\""),
+            "{}",
+            guiones[0]
+        );
+    }
+
+    #[test]
+    fn colab_cargo_minimo_pasa_por_la_union_con_sha256() {
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let binario = binario_falso(base.path());
+        // Cada llamada: sus argumentos unidos y el texto del guion, si la llamada es un `exec`.
+        let registro: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        let registro_en = Rc::clone(&registro);
+        let respuesta = cambiando(feliz("Tesla T4"), "prepara-rust.py", "ROOT_RUST=falla:hash");
+        let falso = Falso::nuevo(move |args: &[String]| {
+            let texto = if args[0] == "exec" {
+                let guion = args.last().expect("ruta del guion");
+                fs::read_to_string(guion).expect("el guion se puede leer")
+            } else {
+                String::new()
+            };
+            registro_en.borrow_mut().push((args.join(" "), texto));
+            respuesta(args)
+        });
+        let compilador = CompiladorFalso {
+            llamadas: Cell::new(0),
+            binario,
+        };
+        let r = correr_en_colab(
+            &falso,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+            &Senales::default(),
+            TOPE_HOLGADO,
+            &compilador,
+        );
+        assert!(r.is_ok(), "{r:?}");
+
+        let llamadas = falso.llamadas.borrow().clone();
+        for a in llamadas.iter().filter(|a| a[0] == "upload") {
+            assert_ne!(a[4], "/content/root-paquete/bin/cargo", "{llamadas:?}");
+            assert_ne!(
+                a[4], "/content/root-paquete/target/debug/memora",
+                "{llamadas:?}"
+            );
+        }
+        let reg = registro.borrow();
+        let union_cargo = reg
+            .iter()
+            .find(|(l, g)| {
+                l.starts_with("exec ")
+                    && l.contains("une-trozos.py")
+                    && g.contains("\"/content/root-paquete/bin/cargo\"")
+            })
+            .unwrap_or_else(|| panic!("falta la unión del cargo mínimo: {llamadas:?}"));
+        let esperado = union_cargo
+            .1
+            .lines()
+            .find_map(|l| l.strip_prefix("ESPERADO = "))
+            .expect("el guion trae ESPERADO")
+            .trim_matches('"');
+        assert_eq!(esperado.len(), 64, "{esperado:?}");
+        assert!(
+            esperado.chars().all(|c| c.is_ascii_hexdigit()),
+            "{esperado:?}"
+        );
+    }
+
+    #[test]
+    fn colab_subir_binario_con_sha256_distinto_falla_y_nombra_el_binario() {
+        let base = tempfile::tempdir().expect("base");
+        let tmp = carpeta_tmp(base.path());
+        let origen = base.path().join("memora-compilado");
+        fs::write(&origen, vec![3u8; 1024 * 1024]).expect("escribe el binario");
+        let falso = Falso::nuevo(|args: &[String]| {
+            if args[0] == "exec" && guion_de(args).is_some_and(|g| g.ends_with("une-trozos.py")) {
+                return salida(1, "", "ROOT_UNIR_ERROR: sha256 distinto");
+            }
+            salida(0, "", "")
+        });
+        let senales = Senales::default();
+        let lim = limites_holgados(&senales);
+        let r = subir_archivo(
+            &falso,
+            &lim,
+            "root-memora-1",
+            &origen,
+            &tmp,
+            "/content/root-paquete/target/debug/memora",
+        );
+        match r {
+            Err(ErrorOraculo::Infra(m)) => {
+                assert!(
+                    m.contains("/content/root-paquete/target/debug/memora"),
+                    "{m}"
+                );
+            }
+            otro => panic!("esperaba error de infraestructura, llegó {otro:?}"),
+        }
     }
 
     /// Corre un guion de Python con `python3 -I` y un entorno casi vacío.
