@@ -241,6 +241,7 @@ fn sin_valor(medida: Medida, motivo: String) -> ResultadoMedida {
         motivo: Some(motivo),
         corridas_referencia: vec![],
         corridas_repo: vec![],
+        carga_ajena: None,
     }
 }
 
@@ -310,6 +311,7 @@ fn combinar(
                     motivo: None,
                     corridas_referencia: completa,
                     corridas_repo: p.clone(),
+                    carga_ajena: None,
                 },
                 None => sin_valor(medida, "no se puede comparar".into()),
             }
@@ -884,6 +886,9 @@ pub struct ResultadoMedida {
     pub corridas_referencia: Vec<f64>,
     /// Cada corrida del repo, en orden. Vacía si no hay valor.
     pub corridas_repo: Vec<f64>,
+    /// Mayor carga ajena de las corridas medidas de la medición, en núcleos. `None` sin fuente de carga, sin CPU
+    /// propia leída, o sin corridas medidas. Se pone igual en todas las medidas de la medición.
+    pub carga_ajena: Option<f64>,
 }
 
 /// Lo que midió el lado inicial de una medición. Una calibración la mide una vez y sus casos la reusan.
@@ -1271,6 +1276,17 @@ fn aplicar_carga(resultados: Vec<ResultadoMedida>, motivo: Option<String>) -> Ve
         .collect()
 }
 
+/// Pone la mayor carga ajena de la medición en cada resultado. `None` si no hubo corrida con CPU propia medida.
+fn con_carga_ajena(resultados: Vec<ResultadoMedida>, mayor: Option<f64>) -> Vec<ResultadoMedida> {
+    resultados
+        .into_iter()
+        .map(|r| ResultadoMedida {
+            carga_ajena: mayor,
+            ..r
+        })
+        .collect()
+}
+
 /// Las cuatro medidas de dos lados. Con referencia fijada, solo mide el repo. Si no, mide los dos lados y
 /// guarda lo que midió el inicial para `tomar_referencia`.
 fn medir_lados(inicial: &Lado, repo: &Lado, avisos: &mut Vec<String>) -> Vec<ResultadoMedida> {
@@ -1324,6 +1340,7 @@ fn medir_los_dos_lados(
         &mut vigilancia,
     );
     let carga = vigilancia.motivo();
+    let mayor = vigilancia.mayor;
     if let Some(aviso) = vigilancia.aviso() {
         avisos.push(aviso);
     }
@@ -1336,7 +1353,8 @@ fn medir_los_dos_lados(
         carga: carga.clone(),
     };
     let resultados = combinar_medidas(&tiempo, &memoria, &compilacion, &tamano, &ancla);
-    (aplicar_carga(resultados, carga), referencia)
+    let resultados = con_carga_ajena(aplicar_carga(resultados, carga), mayor);
+    (resultados, referencia)
 }
 
 /// Mide el repo y el lado inicial en vivo, en tests. Tiempo y memoria salen de esas dos series, alternadas.
@@ -1393,9 +1411,12 @@ fn medir_contra_referencia(
     }
     // Una base cargada pasa su motivo al caso. La carga propia del caso va primero.
     let motivo = vigilancia.motivo().or_else(|| referencia.carga.clone());
-    aplicar_carga(
-        combinar_medidas(&tiempo, &memoria, &compilacion, &tamano, &ancla),
-        motivo,
+    con_carga_ajena(
+        aplicar_carga(
+            combinar_medidas(&tiempo, &memoria, &compilacion, &tamano, &ancla),
+            motivo,
+        ),
+        vigilancia.mayor,
     )
 }
 
@@ -3129,6 +3150,55 @@ mod tests {
             assert_eq!(r.comparacion, None, "caso {medida:?}");
         }
         assert_eq!(por_medida(&caso, Medida::MemoriaPico).motivo, None);
+    }
+
+    /// Todas las medidas traen la misma carga ajena, de unos 1 núcleo. El valor sale del reloj real: solo se acota.
+    fn comprobar_carga_ajena_de_un_nucleo(resultados: &[ResultadoMedida]) {
+        let primera = resultados[0].carga_ajena;
+        for r in resultados {
+            let v = r
+                .carga_ajena
+                .unwrap_or_else(|| panic!("{:?} sin carga ajena", r.medida));
+            assert!(v > 0.1 && v <= 1.0 + 1e-9, "{:?}: {v}", r.medida);
+            assert_eq!(r.carga_ajena, primera, "{:?}", r.medida);
+        }
+    }
+
+    #[test]
+    fn la_carga_ajena_llega_a_cada_resultado_de_dos_lados() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // 2 ticks por corrida son 1 núcleo ajeno. El reloj corre al menos 20 ms, así que queda bajo 1.
+        let (fuente, maquina) = maquina_de(dir.path(), 8, |_| 2, |_| Some(0));
+        let (resultados, _) = medir_bajo_carga(fuente, &maquina);
+        comprobar_carga_ajena_de_un_nucleo(&resultados);
+    }
+
+    #[test]
+    fn la_carga_ajena_llega_a_cada_resultado_contra_referencia() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (fuente, maquina) = maquina_de(dir.path(), 8, |_| 2, |_| Some(0));
+        let resultados = medir_caso_bajo_carga(fuente, &maquina);
+        comprobar_carga_ajena_de_un_nucleo(&resultados);
+    }
+
+    #[test]
+    fn sin_fuente_de_carga_no_hay_carga_ajena() {
+        let log = RefCell::new(Vec::new());
+        let resultados =
+            medir_de_prueba(&sano("inicial", &log, &["a"]), &sano("repo", &log, &["a"]));
+        for r in &resultados {
+            assert_eq!(r.carga_ajena, None, "{:?}", r.medida);
+        }
+    }
+
+    #[test]
+    fn sin_root_cpu_us_no_hay_carga_ajena() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (fuente, maquina) = maquina_de(dir.path(), 8, |_| 2, |_| None);
+        let (resultados, _) = medir_bajo_carga(fuente, &maquina);
+        for r in &resultados {
+            assert_eq!(r.carga_ajena, None, "{:?}", r.medida);
+        }
     }
 
     #[test]

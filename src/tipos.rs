@@ -518,6 +518,10 @@ pub struct Veredicto {
     /// Medidas de Eficiencia contra el estado inicial, que Root mide sola en Rust. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub eficiencia_auto: Vec<MedidaEficiencia>,
+    /// Mayor carga ajena de las corridas de Eficiencia automática, en núcleos. `None` si no hubo control de
+    /// carga o si la medición no leyó la CPU propia. Un veredicto viejo lee None.
+    #[serde(default)]
+    pub carga_ajena: Option<f64>,
 }
 
 impl Default for Veredicto {
@@ -552,6 +556,7 @@ impl Default for Veredicto {
             extractos: Vec::new(),
             no_compila: false,
             eficiencia_auto: Vec::new(),
+            carga_ajena: None,
         }
     }
 }
@@ -779,6 +784,7 @@ mod tests {
             extractos: Vec::new(),
             no_compila: false,
             eficiencia_auto: Vec::new(),
+            carga_ajena: None,
         }
     }
 
@@ -1257,6 +1263,22 @@ mod tests {
             "{:?}",
             viejo.eficiencia_auto
         );
+    }
+
+    #[test]
+    fn veredicto_viejo_sin_carga_ajena_lee_none() {
+        // Un veredicto anterior al campo `carga_ajena` lo lee con None.
+        let v = Veredicto {
+            carga_ajena: Some(0.30),
+            ..Veredicto::default()
+        };
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("carga_ajena")
+            .expect("el veredicto nuevo trae la clave");
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee");
+        assert_eq!(viejo.carga_ajena, None);
     }
 
     #[test]

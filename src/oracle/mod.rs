@@ -1094,6 +1094,7 @@ fn evaluar_con(
         extractos: medicion.extractos,
         no_compila,
         eficiencia_auto: medicion.eficiencia_auto,
+        carga_ajena: medicion.carga_ajena,
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
     let redactor_medido = deps
@@ -1182,6 +1183,8 @@ struct Medicion {
     extractos: Vec<ExtractoGuardado>,
     /// Medidas de Eficiencia contra el estado inicial, en el orden de `Medida`. Van al `Veredicto`.
     eficiencia_auto: Vec<MedidaEficiencia>,
+    /// Mayor carga ajena de las medidas de Eficiencia, en núcleos. Va al `Veredicto`.
+    carga_ajena: Option<f64>,
 }
 
 /// El juez de diseño que `medir` usa: el modelo si se armó, su nombre y las rúbricas de la evaluación.
@@ -1223,6 +1226,7 @@ fn medir(
     auto: &[ResultadoMedida],
 ) -> Result<Medicion, ErrorOraculo> {
     let eficiencia_auto: Vec<MedidaEficiencia> = auto.iter().map(medida_de_eficiencia).collect();
+    let carga_ajena = auto.iter().filter_map(|r| r.carga_ajena).reduce(f64::max);
     let resultados = requisitos::desde_clasificaciones(contrato, oculto);
     let estados = requisitos::evaluar_requisitos(
         &tarea.requisito,
@@ -1457,6 +1461,7 @@ fn medir(
         hallazgos_descartados: descartados,
         extractos,
         eficiencia_auto,
+        carga_ajena,
     })
 }
 

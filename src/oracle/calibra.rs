@@ -757,6 +757,10 @@ pub struct CasoGuardado {
     /// caso no midió. Un renglón viejo sin el campo lo lee vacío.
     #[serde(default)]
     pub eficiencia: Vec<MedidaEficiencia>,
+    /// Mayor carga ajena de las corridas medidas del caso, en núcleos. `None` si la dimensión no es Eficiencia, si
+    /// no hubo control de carga, o en un renglón viejo.
+    #[serde(default)]
+    pub carga_ajena: Option<f64>,
     /// Motivo por el que el caso no aplica. Solo en el renglón de un caso no aplicable.
     #[serde(default)]
     pub no_aplicable: Option<String>,
@@ -2866,6 +2870,7 @@ impl CasoGuardado {
             valor: caso.valor,
             extractos: caso.extractos.clone(),
             eficiencia: caso.veredicto.eficiencia_auto.clone(),
+            carga_ajena: caso.veredicto.carga_ajena,
             no_aplicable: None,
             piso: caso.piso,
             omitidos: caso.omitidos.clone(),
@@ -2909,6 +2914,7 @@ impl CasoGuardado {
             valor: None,
             extractos: Vec::new(),
             eficiencia: Vec::new(),
+            carga_ajena: None,
             no_aplicable: Some(no.motivo.clone()),
             piso: false,
             omitidos: Vec::new(),
@@ -11884,6 +11890,100 @@ mod tests {
         for renglon in medidos {
             assert_eq!(renglon.eficiencia, medidas, "renglón {}", renglon.caso);
         }
+    }
+
+    /// Renglones medidos de una calibración de Eficiencia sobre la base `base`. Sin los no aplicables.
+    fn renglones_medidos_de_eficiencia(base: &Veredicto) -> Vec<CasoGuardado> {
+        let dir = copia_fixture();
+        let ev = falso(dir.path(), base, |_, _, base| base.clone());
+        let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| ev(ruta);
+        let tarea = tarea_en(
+            dir.path(),
+            "\n[eficiencia]\ncmd = \"true\"\npiso = 1000.0\n\n[calibracion]\ncamino_caliente = [\"ejecutar\"]\n",
+        );
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Eficiencia,
+            10,
+            42,
+            dir.path(),
+            &sin_tipo,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+            None,
+        )
+        .expect("mide");
+        let fila = medida.fila.as_ref().expect("hay fila");
+        let home = tempfile::tempdir().expect("home");
+        let ruta = escribir_casos(
+            home.path(),
+            &tarea.nombre,
+            Dimension::Eficiencia,
+            fila,
+            &medida.casos,
+            &medida.no_aplicables,
+        )
+        .expect("escribe")
+        .expect("hay casos");
+        let texto = fs::read_to_string(ruta).expect("lee");
+        texto
+            .lines()
+            .map(|linea| serde_json::from_str::<CasoGuardado>(linea).expect("renglón"))
+            .filter(|r| r.no_aplicable.is_none())
+            .collect()
+    }
+
+    /// Un caso de Eficiencia guarda la mayor carga ajena de su base en el renglón.
+    #[test]
+    fn caso_de_eficiencia_guarda_la_carga_ajena_en_el_renglon() {
+        let base = Veredicto {
+            carga_ajena: Some(0.30),
+            ..base_eficiencia_con_medidas(medida_eficiencia_de_prueba())
+        };
+        let renglones = renglones_medidos_de_eficiencia(&base);
+        assert!(!renglones.is_empty(), "ningún renglón medido");
+        for renglon in renglones {
+            assert_eq!(renglon.carga_ajena, Some(0.30), "renglón {}", renglon.caso);
+        }
+    }
+
+    /// Sin control de carga en la base, el renglón de Eficiencia no trae carga ajena.
+    #[test]
+    fn caso_de_eficiencia_sin_carga_en_la_base_guarda_none() {
+        let base = base_eficiencia_con_medidas(medida_eficiencia_de_prueba());
+        let renglones = renglones_medidos_de_eficiencia(&base);
+        assert!(!renglones.is_empty(), "ningún renglón medido");
+        for renglon in renglones {
+            assert_eq!(renglon.carga_ajena, None, "renglón {}", renglon.caso);
+        }
+    }
+
+    /// Un caso de otra dimensión no trae carga ajena en su renglón.
+    #[test]
+    fn caso_de_otra_dimension_guarda_carga_ajena_none() {
+        let base = veredicto_de(Dimension::Estructura, 0.9, None);
+        let caso = Caso::nuevo(1, Some(inyeccion_modulo()), base);
+        assert_eq!(CasoGuardado::de(&caso).carga_ajena, None);
+    }
+
+    /// Un renglón de `.casos.jsonl` sin el campo `carga_ajena` se lee con None.
+    #[test]
+    fn renglon_viejo_sin_carga_ajena_se_lee_como_none() {
+        let base = Veredicto {
+            carga_ajena: Some(0.30),
+            ..veredicto_de(Dimension::Eficiencia, 0.9, None)
+        };
+        let caso = Caso::nuevo(1, Some(inyeccion_modulo()), base);
+        let mut json = serde_json::to_value(CasoGuardado::de(&caso)).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("carga_ajena")
+            .expect("el renglón nuevo trae la clave");
+        let viejo: CasoGuardado = serde_json::from_value(json).expect("lee");
+        assert_eq!(viejo.carga_ajena, None);
     }
 
     /// Un renglón de `.casos.jsonl` sin el campo `eficiencia` se lee con lista vacía.

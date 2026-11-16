@@ -1158,6 +1158,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "default": null
     },
+    "carga_ajena": {
+      "description": "Mayor carga ajena de las corridas medidas del caso, en núcleos. `None` si la dimensión no es Eficiencia, si\nno hubo control de carga, o en un renglón viejo.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double",
+      "default": null
+    },
     "caso": {
       "description": "Índice `i` del bucle de la calibración. Los casos sin defecto aplicable no entran, así que puede haber huecos.",
       "type": "integer",
@@ -3405,6 +3414,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "items": {
             "type": "string"
           }
+        },
+        "carga_ajena": {
+          "description": "Mayor carga ajena de las corridas de Eficiencia automática, en núcleos. `None` si no hubo control de\ncarga o si la medición no leyó la CPU propia. Un veredicto viejo lee None.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
         },
         "commit": {
           "type": "string"
@@ -6045,6 +6063,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "items": {
         "type": "string"
       }
+    },
+    "carga_ajena": {
+      "description": "Mayor carga ajena de las corridas de Eficiencia automática, en núcleos. `None` si no hubo control de\ncarga o si la medición no leyó la CPU propia. Un veredicto viejo lee None.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double",
+      "default": null
     },
     "commit": {
       "type": "string"
