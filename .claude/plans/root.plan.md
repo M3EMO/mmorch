@@ -13249,3 +13249,139 @@ La corrida usa la cadena 155. Esa cadena no tiene el campo `carga_ajena` de la 1
 - **b) Una clave SSH nueva y `colab ssh --proxy-mode`.** El orquestador muestrea por ssh durante la primera corrida, sin pasar por el kernel. No pide código de Root. Pide crear una clave en `~/.ssh`, con entrada a los runtimes de la cuenta.
 
 Recomiendo la (a). No suma una credencial, y `--sin-stop` sirve después para diagnosticar cualquier trabajo. La 157 puede construirse mientras llega tu respuesta. Si elegís la (b), la 157 se descarta.
+
+## Vuelta del 2026-11-16 (72): las preguntas de la 157, el plan de la Prueba 0g, y los literales exactos
+
+**Estado.**
+- **La 157 terminó con exit 0.** La lib pasa de 3323 a 3331 verdes, sin fallas. Su informe trae 8 preguntas.
+- **La cadena 110 a 157 es `laptop/tarea-157` (e839d74).** Su suite con podman corre ahora.
+- **La sonda de v155 falló primero por el nombre de la sesión.** Con el nombre local de `activo.json`, no respondió en 60 segundos. Queda confirmado: el kernel corre los exec de a uno.
+- **Fichas: 4 tandas hechas, con 24 fichas.** 22 pasan `fuga.py` y `r00t ficha revisar`. Falta la tanda 5, con una tarea.
+- **Dos fichas esperan por la regla 10 del método:** bytes f2cf483f13 y ron f1597420a9. Sus tests exigen un literal nuevo exacto.
+- **Tres tareas dependen de un tiempo:** watchexec 0e0146fa51, ron 72134854bb y watchexec c25cb0d6d6.
+
+## 1. Las 8 preguntas de la 157
+
+Todas son técnicas. Ninguna va al usuario.
+
+1. **¿Una marca de "abierto a propósito" en `activo.json`? No.** El aviso impreso nombra el runtime y cómo cerrarlo. `--vigilar` solo cierra después del tope, y `--liberar` lo corre el orquestador cuando quiere. Una marca no cambiaría ninguna de las dos.
+2. **¿Un elemento por trabajo en `ROOT_TRABAJO_CMD`? Sí.** Acepto el array, con `cmd`, `entorno`, `tarea` y `dimension`.
+3. **¿Un secreto como `null`? Sí,** con una regla para el orquestador.
+   - Al repetir un trabajo, un `null` significa que la variable no va.
+   - El orquestador nunca escribe un valor secreto en un comando ni en un guion.
+   - Un trabajo que necesita una clave, como el juez, no se repite por este camino.
+4. **¿`ROOT_HOME` en el comando? Sí.** Es la carpeta real del runtime, y el trabajo la necesita.
+5. **¿El aviso sale aunque `colab new` falle? Sí.** Nombrar un runtime que no existe no hace daño, y `stop` o `--liberar` lo limpian. Ocultar un runtime que sí existe sería peor.
+6. **¿`trabajo-N.py` envía valores secretos al runtime? Hoy no.** Revisé `comando_de_trabajo`: el entorno lleva solo `ROOT_CONTENEDOR_MODO`, `ROOT_BWRAP_ENTORNO` y `ROOT_BWRAP_IMAGEN_ID`. `GITHUB_TOKEN` aparece solo en un test, como valor falso. **Pero nada lo impide.** La Tarea 158 suma una guarda: `script_trabajo` falla si una variable con nombre secreto trae un valor.
+7. **El costo de 0,08 unidades por hora.** Sale de una medición anterior del orquestador. En la Prueba 0g, el orquestador lo confirma con el saldo de unidades antes y después.
+8. **¿`colab stop -s <sesión>` en el aviso? Sí.** El código ya usa `-s` en `upload`, `exec` y `download`, con el nombre local. En la Prueba 0g, el orquestador cierra los runtimes con esa misma línea, y así queda verificada.
+
+**Lo que quedó incompleto, y está bien así:**
+- El cableado de `lib.rs` no tiene test propio. El compilador obliga a nombrar el campo en el `match`, y el test de clap prueba el parseo.
+- `docs/interfaces.md` se escribe a mano. Bien actualizado.
+
+Brief de la 158: `docs/builds/brief-local-158.md`.
+
+## 2. El plan de la Prueba 0g con `--sin-stop`
+
+**`paso0-157.sh`, que corre el usuario.**
+1. Arma el binario de e839d74 en `rust:1`, como los pasos 0 anteriores.
+2. Arma **un solo paquete con tres trabajos:** `s2-t1:eficiencia:1`, `s2-t2:eficiencia:1` y `s2-t3:eficiencia:1`. `n=1` basta: la prueba mide la carga, no la detección.
+3. Imprime el SHA-256 del paquete.
+
+**La primera corrida, del orquestador.**
+1. Copia el `ROOT_HOME` real a `colab-pruebas/home0g-157`. Nada se importa al `ROOT_HOME` real.
+2. Corre `r00t colab calibrar --sin-stop --json` con ese paquete, sobre la copia. Calibrar abre tres runtimes, uno por trabajo.
+3. Guarda, por runtime, la sesión, la carpeta y `trabajo_cmd`.
+4. **Esta corrida ya da un dato:** con la 156, cada caso trae su `carga_ajena`. El orquestador anota el máximo por runtime.
+
+**`repetir-0g.py`, el guion del orquestador.** Uno por runtime, con su `trabajo_cmd` escrito adentro. Corre con un solo `colab exec -s <sesión> -f repetir-0g.py`.
+1. **Arma el entorno:** el entorno del runtime, más las variables de `entorno`. Una variable con `null` no va.
+2. **Lanza el comando** con `subprocess.Popen`, en la carpeta remota. La salida va a un archivo, no a la pantalla.
+3. **Un hilo muestrea cada 2 segundos** mientras el comando vive. Toma tres lecturas:
+   - la línea `cpu` de `/proc/stat`, con cada campo aparte, incluido `steal`;
+   - por proceso: pid, ppid, nombre y CPU acumulada, de `/proc/<pid>/stat`;
+   - los procesos que el `init` de bwrap adoptó: los que tienen como padre al primer hijo de bwrap.
+4. **Clasifica la CPU de cada intervalo en tres grupos:**
+   - **trabajo:** el árbol del `Popen`;
+   - **huérfanos:** procesos adoptados dentro del árbol de bwrap;
+   - **fuera:** todo lo demás, con su nombre.
+5. **Al terminar, imprime un resumen en JSON,** solo con números y nombres de proceso, nunca argumentos:
+   - la duración;
+   - los núcleos promedio de cada grupo, y el robo promedio;
+   - la ventana de 60 segundos con más CPU "fuera", y los 5 procesos de fuera con más CPU;
+   - la `carga_ajena` de cada caso nuevo, desde el archivo de casos del runtime.
+6. **Después, el orquestador corre `colab stop -s <sesión>`.**
+
+**Los tres runtimes corren a la vez,** como en la v6, para que alguno muestre la carga. Cuesta cerca de 0,3 unidades, con las dos corridas.
+
+**El número que contesta la pregunta: los núcleos "fuera" durante el trabajo, al lado de la `carga_ajena` de Root.**
+
+| Fuera | Huérfanos | Robo | `carga_ajena` de Root | Qué significa | Qué sigue |
+|---|---|---|---|---|---|
+| Cerca de 1, con un proceso de Colab | Cerca de 0 | Cerca de 0 | Cerca de 1 | La maquinaria de `exec` o del kernel compite | Una tarea: el trabajo corre separado, con `setsid`, y la laptop lo consulta con execs cortos |
+| Cerca de 0 | Cerca de 1 | Cerca de 0 | Cerca de 1 | Root cuenta de menos su propia CPU | Una tarea: `root-medir.py` como `subreaper`, con `prctl` |
+| Cerca de 0 | Cerca de 0 | Cerca de 1 | Cerca de 1 | Robo de CPU durante el trabajo | El procedimiento de la vuelta (69): medir el robo antes de calibrar, y cambiar de runtime |
+| Cerca de 0 | Cerca de 0 | Cerca de 0 | Cerca de 1 | Root mide algo que el muestreo no ve | Informa las dos series. La vuelta siguiente compara los cálculos |
+| Cualquiera | Cualquiera | Cualquiera | Cerca de 0 en los tres runtimes | La carga no se reprodujo | Informa. No frena nada: la memoria decide |
+
+**Una diferencia que se acepta.** El muestreo ve el trabajo entero. Root mide solo las corridas medidas. Por eso se compara con la ventana de 60 segundos de más carga, y no solo con el promedio.
+
+## 3. P119: un test que exige un literal nuevo exacto
+
+**El caso general.** Algunos tests ocultos comparan un literal que el commit agrega: un mensaje de pánico, un mensaje de error, o una palabra clave nueva de un formato. Un builder que sigue la ficha no puede adivinar ese texto exacto. El test falla aunque la solución sea correcta.
+
+**Hoy hay dos casos:** bytes f2cf483f13, con un mensaje de pánico, y ron f1597420a9, con una palabra clave de un atributo de esquema.
+
+**La regla 10 del método** prohíbe partir o disfrazar un literal para esquivar `fuga.py`. Está bien: la ficha de ron describía la palabra en otras palabras, y eso es esconder la fuga, no evitarla.
+
+**La pregunta es de producto.** Decide qué cuenta como especificación y qué cuenta como filtrar la solución. Va en P119, más abajo.
+
+**Si P119 sale a:**
+- **La regla 10 cambia:** "Si un test exige un literal exacto, decláralo tal cual en la sección Interfaz. Nunca lo partas ni lo disfraces."
+- **`interfaz.json` suma un campo `literales`.** Un script lo llena con los literales de cadena que aparecen en las líneas agregadas de `tests.diff` y también de `diff.txt`. El orquestador revisa la lista, y quita los que el test no compara.
+- **`fuga.py` exime esos literales,** y solo esos. Sigue rechazando cualquier otra línea copiada.
+- La ficha de ron se reescribe, declarando la palabra en vez de describirla.
+
+**Si P119 sale b,** las dos tareas salen del dataset, y `fuga.py` y la regla 10 no cambian.
+
+## 4. Las tres tareas que dependen de un tiempo
+
+**No piden una decisión ahora.** Pasaron el criterio 2: rojo y verde estables en dos repeticiones.
+- `dataset.json` suma un campo `depende_de_tiempo`, verdadero en las tres.
+- Si en las evaluaciones una de ellas cambia de resultado sin cambio de código, se informa como inestable y se revisa ahí.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | El usuario | Laptop y el usuario | No |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD |
+| 4 | La suite con podman de la cadena 157 | Nada; corre ahora | Laptop, podman | No |
+| 5 | Leer la corrida v155 cuando termine | Que termine | Laptop, solo lectura | No |
+| 6 | `paso0-157.sh` | El paso 4 | Laptop, el usuario | No |
+| 7 | La Prueba 0g: `calibrar --sin-stop`, y `repetir-0g.py` en tres runtimes | El paso 6 | Colab, CPU | No |
+| 8 | La Tarea 158: la guarda de secretos en `script_trabajo` | El paso 4 | Laptop, builder | No |
+| 9 | P119 | El usuario | — | No |
+| 10 | La tanda 5, y las 2 fichas en espera según P119 | El paso 9 | Laptop, cupo | No |
+| 11 | La aprobación de las 3 fichas de revisión, por P81 | El usuario | — | No |
+| 12 | La mezcla de la cadena 110 a 158 | La orden del usuario | — | No |
+| 13 | Congelar la versión | El paso 3 | — | No |
+| 14 | Las doce calibraciones de oráculo con la versión congelada | El paso 13 | Colab, cuatro runtimes | No |
+| 15 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 13 | Laptop | Según la regla del final |
+| 16 | La validez sobre el final sellado | Los pasos 1 a 15 | Colab, notebook si usa el juez | Según el final |
+
+**La regla de carga.** El paso 4 usa podman, y el paso 8 compila. Corren de a uno en la laptop. Los pasos 2, 3, 7 y 14 van en Colab. Si el paso 7 coincide con el notebook de P107 a, el orquestador revisa el cupo de la cuenta.
+
+**La 158 no cambia nada que fije la versión congelada.**
+
+## 6. Pregunta al usuario
+
+**P119. Un test oculto exige un literal nuevo exacto, como un mensaje de pánico o una palabra clave. ¿Qué hace la ficha?** El builder no puede adivinar el texto. La regla 10 prohíbe esconderlo con otras palabras. Hoy hay dos tareas así: bytes f2cf483f13 y ron f1597420a9.
+
+- **a) La ficha declara el literal tal cual, en la sección Interfaz, como P99 a declara los nombres.** `fuga.py` exime solo esos literales. El literal es comportamiento observable que el test exige, no la implementación. Se conservan los tests reales. *(recomendada)*
+- **b) Las tareas con un literal nuevo exacto salen del dataset.** El método no cambia. Hoy se pierden 2 tareas, y el dataset queda en cerca de 29.
+- **c) El oráculo compara el test sin el literal:** por ejemplo, que haya un pánico, sin mirar el texto. Cambia los tests del commit, y su etiqueta deja de ser real, como en P99 c.
+
+Recomiendo la (a). Sigue la misma lógica que P99 a, y conserva los tests reales. Lo único que la ficha agrega es lo que el test ya exige ver.
