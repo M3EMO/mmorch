@@ -12646,3 +12646,199 @@ Todo esto es trabajo del orquestador, fuera del repo de Root. No es código de R
 - **b) No. El sorteo es mecánico, y la lista sale en el informe.** El filtro arranca apenas sale el sorteo. Si un repo no te sirve, lo sacás después y entra el siguiente de la reserva.
 
 Recomiendo la (a). La regla viene de P79 y P85. Además, una vuelta de espera no frena nada: los scripts se escriben mientras tanto.
+
+## Vuelta del 2026-11-16 (68): Eficiencia cumple, el paso 7 de P97 c, y el final con un repo grande
+
+**Estado.**
+- **La v6 de Eficiencia terminó en Colab:** rc 0, 116 minutos, tres runtimes. En t1, t2 y t3, la sensibilidad y la especificidad dan 1.
+- **Los 6 defectos se detectan por `memoria_pico`,** con razones de 5,96 a 6,44 y ruido 0,02. Los 6 limpios dan razón 1,0. La sonda corrió con 101, 131 y 141 funciones.
+- **Por la sección 8 de la vuelta (62), Eficiencia cumple P102 a.**
+- **Una anomalía:** en t1 y t3, casi todos los casos omiten los tiempos con "la máquina tenía carga ajena: 1.00 núcleos de 2", de 1,00 a 1,02. En t2, los tiempos tienen valor.
+- **P97 c llegó hasta el paso 6.**
+  - r4 y r5 dieron 7 repos con admitidos.
+  - El reparto literal mandó BoilR (0 reales) e IronCalc (11 reales) al final.
+  - El dataset recibió 11 tareas de arreglo y 11 de función nueva, de bytes, ron, eyre, watchexec y heapless.
+  - `sellar_r4.py` selló 11 reales. El final pasa de 11 a 22 reales, y la mitad son de IronCalc.
+- Quedan sin borrar `trabajo/ironcalc_IronCalc` (22 MB) y `trabajo/PhilipK_BoilR` (8 MB).
+- El paquete del juez espera que el usuario corra `paso0-juez.sh`.
+
+## 1. La anomalía de carga ajena
+
+**Lo que dice el código** (`src/oracle/eficiencia.rs` en `laptop/cadena-110-155`):
+- `Vigilancia::correr` lee la línea `cpu ` de `/proc/stat` antes y después de cada corrida medida.
+- Resta `ROOT_CPU_US`. Ese valor sale de `getrusage` del guion `root-medir.py`: la CPU del comando y de sus hijos esperados.
+- Divide por el reloj de la corrida. El umbral es la mitad de `available_parallelism`, que en Colab vale 2.
+
+**Lo que descarto, leyendo el código:**
+- **Root no gira en un bucle.** `esperar`, en `contenedor.rs`, duerme `SONDEO` entre consultas. Los guiones del runtime usan `subprocess.run`, que espera sin gastar CPU.
+- **El código es el mismo en las tres tareas.** Si Root se midiera a sí mismo, t2 también daría 1,00. No lo da.
+
+**Lo que queda, y no se ve desde el código.** Un núcleo entero ocupado durante cada corrida, en dos runtimes de tres. Hay dos explicaciones posibles:
+- **A. La máquina virtual tiene más CPU que las que Root puede usar.** La línea `cpu ` de `/proc/stat` suma todas las CPU de la VM. `available_parallelism` cuenta solo las que permite el cgroup o la afinidad. Un servicio de Colab en otra CPU cuenta como carga ajena, aunque no compite con la corrida.
+- **B. Un proceso del runtime gira y ocupa un núcleo de los dos.** Entonces la carga es real, y el control hace bien en anular los tiempos.
+
+**El valor fijo de 1,00 favorece la A.** Un servicio fijo en una CPU extra da siempre un núcleo. Pero no hay dato que lo pruebe.
+
+**Prueba 0f, para decidir.** El orquestador la corre con `colab exec` en dos runtimes de CPU nuevos, sin trabajo:
+
+```sh
+nproc; nproc --all; grep -c '^cpu[0-9]' /proc/stat; grep Cpus_allowed_list /proc/self/status; cat /sys/fs/cgroup/cpu.max 2>/dev/null; head -1 /proc/stat; sleep 10; head -1 /proc/stat; top -bn1 -o %CPU | head -12
+```
+
+**Qué buscar:**
+- **Si `nproc --all` o las líneas `cpuN` pasan de 2,** la VM tiene CPU extra. Es la A.
+- **La resta de las dos líneas `cpu`, sin trabajo:** los ticks ocupados sobre 1000 dan los núcleos ocupados en reposo. Cerca de 1 confirma un núcleo ajeno fijo.
+- **`top`** muestra si un proceso gira. Si uno ocupa cerca del 100 % y la VM tiene solo 2 CPU, es la B.
+- Cuesta menos de 0,01 unidades.
+
+**El aviso de carga ajena no llega a las filas.** Los casos de la v6 no traen "mayor carga ajena" en ningún campo. El informe de la 149 lo había dejado abierto, y ahora está confirmado.
+
+**¿Hace falta una tarea? Sí, la 156.**
+- **Punto 1, solo si la Prueba 0f da la A.** La carga ajena descuenta las CPU que Root no puede usar. Si la VM tiene `v` CPU visibles y Root puede usar `n`, la carga ajena efectiva es `max(0, ajena − (v − n))`. En la laptop, `v = n = 8`, y nada cambia.
+- **Punto 2, siempre.** El aviso de mayor carga ajena llega al renglón de cada caso, sin cambio de esquema. Si no hay lugar sin cambio de esquema, el builder se detiene y lo informa.
+- **Si la Prueba 0f da la B,** el punto 1 no se hace. La carga es real. El orquestador informa el proceso que gira.
+
+Brief: `docs/builds/brief-local-156.md`.
+
+**La v6 sigue valiendo para P102 a.** Las seis detecciones vienen de `memoria_pico`, que no depende de la carga. Pero la especificidad con tiempos válidos en Colab solo la midió t2. **Después de la 156, si cambia el punto 1, se repite la v6.** Cuesta cerca de 0,5 unidades y 2 horas, sin API. Va antes de congelar.
+
+## 2. El paso 7 de P97 c
+
+**El hueco.** P99 a pide los nombres de la interfaz "del rojo de compilación". `criterios.py` y `criterios_nf.py` no guardan la salida del compilador: solo guardan la etapa. Para r4 y r5 no existen `diff.txt` ni `tests.diff`. Las 6 tareas viejas los tienen en `nf/<commit10>/`, pero ningún script de hoy los arma.
+
+**Dos scripts nuevos del orquestador.** Ninguno es código de Root, así que no hace falta un builder.
+
+**`armar_tarea.py`, sin podman.** Por cada tarea admitida del dataset, arma `dataset/<repo>/<commit10>/` con los mismos archivos que `nf/`:
+- `sha.txt` y `mensaje.txt`: el commit y su mensaje.
+- `tests.diff`: los archivos de test del commit, más los hunks de tests en línea de los archivos de producción. Usa `hunks_de_test` de `criterios.py`, sin copiarlo.
+- `diff.txt`: el diff de producción del commit menos esos hunks de test. Es el arreglo o la función nueva.
+- `ids-rojo-a-verde.txt` o `pruebas.txt`: los tests de la etiqueta, desde `criterios.json` o `criterios-nf.json`. El script los escribe al archivo y nunca los imprime.
+- **Un control:** aplicar `tests.diff` y `diff.txt` sobre el padre da el árbol del commit. Si no, la tarea sale con su motivo.
+
+**`esbozos.py`, en podman, solo para función nueva.** Hace dos corridas en el mismo contenedor de siempre, sin red, con el `target` compartido:
+1. **El rojo:** el padre con `tests.diff` aplicado. Corre `cargo test --no-run --offline --message-format=json`, y guarda los diagnósticos en `rojo.json`. Nunca los imprime.
+2. **El esbozo:** el padre, más un esbozo de cada ítem de la interfaz, más `tests.diff`. Corre el mismo comando. Si compila, la interfaz está completa. Si no, la tarea sale, por P99 a.
+
+**Los códigos de error que dan nombres:**
+
+| Código | Qué dice | Qué entra a la interfaz |
+|---|---|---|
+| E0425 | No existe la función o el valor | Una función o una constante nueva |
+| E0412 | No existe el tipo | Un tipo nuevo |
+| E0433 | No se resuelve la ruta: tipo o módulo | Un tipo o un módulo nuevo |
+| E0432 | No se resuelve el `use` | El ítem del final de la ruta |
+| E0422 | No existe el struct o la variante | Un struct o una variante nueva |
+| E0599 | No existe el método o el ítem asociado en un tipo | Un método nuevo de ese tipo |
+| E0609 | No existe el campo | Un campo nuevo |
+| E0560 | El struct no tiene ese campo, en una construcción | Un campo nuevo |
+| E0624 | El método es privado | "Hacer público" |
+| E0603 | El ítem es privado | "Hacer público" |
+| E0061 | Otra cantidad de argumentos | La firma nueva de una función que ya existe |
+
+- **El nombre sale del mensaje,** entre comillas invertidas. La firma sale de `diff.txt`, con `definiciones` de `interfaz_nf.py`. El módulo sale de la ruta del archivo.
+- **Otro código,** como E0277 o E0046, no da un nombre. La tarea queda marcada "revisar". Si el esbozo compila igual, sigue.
+- **Un método de trait** no se esboza solo. Su tarea queda marcada "revisar".
+
+**El esbozo de cada ítem:**
+- **Una función o un método:** la firma de `diff.txt` con cuerpo `todo!()`. Un método va en un bloque `impl` nuevo del tipo, en el mismo archivo del tipo.
+- **Un tipo o un campo:** las líneas de declaración de `diff.txt`, sin bloques `impl`.
+- **"Hacer público":** el `pub` agregado a la línea que ya existe.
+
+**El resultado, por tarea:**
+- `interfaz.json`: una lista de ítems, cada uno con `nombre`, `tipo` (función, método, tipo, campo, constante o visibilidad), `firma`, `modulo`, `archivo` y `codigo`.
+- `esbozo.json`: solo conteos. `compila`, cuántos errores quedan, y cuántos ítems quedan para revisar.
+- **La salida en pantalla da solo conteos por tarea,** nunca nombres de tests.
+
+**`interfaz_nf.py` y `fuga.py` cambian.**
+- `interfaz_nf.py` pasa a dar solo `definiciones`, que usa `esbozos.py`. Su regla vieja, el cruce con `tests.diff`, sale.
+- `fuga.py` recibe un cuarto argumento: `interfaz.json`. Exime solo esos nombres.
+
+**Las tareas viejas de `nf/`** pasan por `esbozos.py` también. Su `interfaz.json` viejo salió con la regla vieja.
+
+## 3. Las fichas de las tareas de arreglo
+
+**Siguen el método de P81 tal cual.** Una tarea de arreglo no tiene interfaz: su criterio 1 exige que el padre con los tests compile. Los tests usan solo API que ya existe.
+
+**`fuga.py` chequea, en cada ficha de arreglo:**
+- que no cite un identificador nuevo de `diff.txt`;
+- que no copie una línea agregada del arreglo;
+- con `tests.diff` como tercer argumento, que no copie un literal de los tests ocultos.
+
+Sin `interfaz.json`, no exime ningún nombre. Las fichas las escribe el orquestador con el cupo, sin API.
+
+## 4. Los 5 arreglos de broot
+
+**Cómo se confirma.** No hay un índice del dataset: cada tarea es una carpeta. Hoy `nf/` tiene las 6 de función nueva. Los 5 arreglos de broot admitidos están en `criterios.json`: `dfd25e0c224d`, `f8203f9eaadc`, `acfc065e13ea`, `1f77962e6ff3` y `136a5c6c719e`. Ninguno tiene carpeta de tarea.
+
+**Entonces, todavía no están en el dataset.**
+- `armar_tarea.py` les arma su carpeta, igual que a las de r4 y r5.
+- Se suma un índice: `mineria/dataset.json`, con una línea por tarea. Cada línea lleva repo, sha, tipo, carpeta, origen y estado de la ficha.
+- Ese índice responde la pregunta de una vez, y la próxima no hace falta buscar.
+
+## 5. El final con 11 reales de un solo repo
+
+**P98 c pide 15 reales o más.** El final tiene 22, de 5 repos: smallvec 4, iwe 3, serie 2, ractor 2 e IronCalc 11.
+
+**El problema es la independencia, no la cantidad.** La cota de Wilson supone defectos independientes. Once defectos de un repo comparten estilo, autores y tests. Si V3 acierta o falla en IronCalc, acierta o falla en bloque. Con la mitad del final en un repo, la cota de 22 defectos promete más de lo que mide.
+
+**El reparto no cambia.** La regla se fijó antes de mirar, y la aplicamos tal cual. Lo que se puede fijar todavía, antes de abrir, es cómo se analiza el final. Eso es P115.
+
+**BoilR quedó en el final con 0 reales.** No aporta nada al final, y sus 2 tareas de función nueva no van al dataset. El dataset no las necesita: ya pasa de 20. No propongo cambiarlo.
+
+## 6. El dataset pasa de 20
+
+**El dataset de D3 tiene ahora 36 tareas:** las 14 de antes y las 22 de r4 y r5. D3 pide 20, estratificadas.
+- Cada tarea suma evaluaciones y fichas. Con 20 tareas, una vuelta anterior estimó 460 evaluaciones.
+- Elegir 20 antes de escribir fichas ahorra 16 fichas.
+
+Es una decisión del usuario. Va en P116.
+
+## 7. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | `paso0-juez.sh` | El usuario | Laptop, el usuario | No |
+| 2 | El arrastre del paquete del juez a Drive | El paso 1 | El usuario | No |
+| 3 | La etapa 1 de P107 a: dos casos de Diseño en t1 | El paso 2 | Colab, notebook | Cerca de 0,35 USD |
+| 4 | Las cinco etapas de P107 a | El paso 3 | Colab, notebook | Cerca de 18 USD |
+| 5 | La Prueba 0f | Nada; puede correr ya | Colab, CPU | No |
+| 6 | La Tarea 156 | El paso 5 | Laptop, builder | No |
+| 7 | Armar la cadena con la 156, y su suite con podman | El paso 6 | Laptop, podman | No |
+| 8 | La v6 otra vez, solo si la 156 hizo su punto 1 | El paso 7 | Colab, tres runtimes | No |
+| 9 | `armar_tarea.py` y el índice del dataset | Nada; puede correr ya | Laptop, sin podman | No |
+| 10 | P115 y P116 | El usuario | — | No |
+| 11 | `esbozos.py` en las tareas de función nueva que elija P116 | Los pasos 9 y 10 | Laptop, podman, en una ventana libre | No |
+| 12 | Las fichas, y la revisión de 3 por el usuario | El paso 11 | Laptop, cupo | No |
+| 13 | La mezcla de la cadena 110 a 156 | La orden del usuario | — | No |
+| 14 | Congelar la versión | Los pasos 4 y 8 | — | No |
+| 15 | Las doce calibraciones de oráculo con la versión congelada | El paso 14 | Colab, cuatro runtimes | No |
+| 16 | P98 c: abrir el final, con la regla de P115 | Los pasos 14 y 10 | Laptop | Según la regla del final |
+| 17 | La validez sobre el final sellado | Los pasos 1 a 16 | Colab, notebook si usa el juez | Según el final |
+
+**La regla de carga.**
+- El paso 6 compila en la laptop. Los pasos 7 y 11 usan podman. Solo uno corre a la vez.
+- Los pasos 3, 4, 5 y 8 van en Colab, y no cargan la laptop.
+- El paso 8 usa tres runtimes. Si coincide con el notebook de P107 a, el orquestador revisa el cupo de la cuenta.
+
+## 8. Preguntas al usuario
+
+**P115. ¿Cómo se analiza el final, si la mitad de sus reales sale de un repo?** El final tiene 22 reales: 11 de IronCalc y 11 de cuatro repos. La cota de 0,8 supone defectos independientes. Defectos del mismo repo tienden a acertarse o fallarse juntos. La regla se fija ahora, antes de abrir nada.
+
+- **a) Un tope de 5 reales por repo, elegidos con semilla antes de abrir.** IronCalc aporta 5, y los demás quedan igual: 16 reales en total. La cota se calcula sobre esos 16. Ningún repo pasa del 31 %. *(recomendada)*
+- **b) Los 22, y además el recall de cada repo por separado.** La cota se calcula sobre 22. El informe muestra si IronCalc se aparta del resto. Promete más precisión de la que hay.
+- **c) Minar más repos (r6) hasta que ninguno pase del 30 %.** Hace falta otra tanda de Colab y de admisión: varios días.
+
+Recomiendo la (a). Pasa el mínimo de 15, limita el peso de un repo, y no pide más minería. El script elige los 5 con semilla, sin mostrar ningún defecto.
+
+**P116. El dataset tiene 36 tareas, y D3 pide 20. ¿Cuántas se usan?**
+
+- **a) 20, sorteadas con semilla.** Máximo 4 por repo. Mitad de arreglo y mitad de función nueva, si alcanza. Las 3 de S2 entran siempre, porque ya tienen ficha aprobada. Las demás quedan de reserva, sin ficha. *(recomendada)*
+- **b) Las 36.** Más casos por dimensión, pero cerca de 1,8 veces el costo de evaluación y 16 fichas más.
+- **c) 20, eligiendo las de más mutantes matados.** Se eligen las que mejor separan, pero mirar los resultados para elegir sesga el dataset.
+
+Recomiendo la (a). Cumple D3, reparte el peso entre repos, y ahorra 16 fichas.
+
+**P117. ¿Borro `mineria/trabajo/ironcalc_IronCalc` (22 MB) y `trabajo/PhilipK_BoilR` (8 MB)?** Son carpetas de trabajo de repos del final. El paso 6 de la vuelta (67) pedía borrarlas después de sellar, porque guardan rastros de los defectos sellados.
+
+- **a) Sí, borrarlas ahora.** *(recomendada)*
+- **b) No, dejarlas.**
