@@ -2082,6 +2082,33 @@ pub struct ResultadoRuntime {
     pub sesion: String,
     pub resultado: Result<ResumenImportar, String>,
     pub codigos_de_trabajos: Vec<CodigoTrabajo>,
+    pub abierto: Option<RuntimeAbierto>,
+}
+
+/// Runtime que se dejó abierto con `sin_stop`: lo que hace falta para retomarlo a mano.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeAbierto {
+    pub sesion: String,
+    /// Carpeta remota donde está el paquete de ida.
+    pub carpeta: String,
+    /// Una línea de JSON: un elemento por trabajo, con su comando y su entorno.
+    pub trabajo_cmd: String,
+}
+
+/// Líneas de texto de un runtime abierto. Vacío si el runtime se liberó.
+pub fn lineas_runtime_abierto(r: &ResultadoRuntime) -> Vec<String> {
+    let Some(abierto) = &r.abierto else {
+        return Vec::new();
+    };
+    let sesion = &abierto.sesion;
+    vec![
+        format!("ROOT_SESION_ABIERTA={sesion}"),
+        format!("ROOT_CARPETA_REMOTA={}", abierto.carpeta),
+        format!("ROOT_TRABAJO_CMD={}", abierto.trabajo_cmd),
+        format!(
+            "El runtime {sesion} sigue abierto y gasta cerca de 0,08 unidades por hora. Ciérrelo con `colab stop -s {sesion}` o con `oraculo pendientes --liberar`."
+        ),
+    ]
 }
 
 /// Resultado de `calibrar`: un resultado por paquete, en el orden de los paquetes.
@@ -2094,6 +2121,7 @@ pub struct ResumenCalibrar {
 pub fn calibrar_cli(
     paquetes: Vec<PathBuf>,
     raiz_root: Option<PathBuf>,
+    sin_stop: bool,
 ) -> Result<ResumenCalibrar, ErrorOraculo> {
     for paquete in &paquetes {
         if !paquete.is_file() {
@@ -2119,6 +2147,7 @@ pub fn calibrar_cli(
         &commit,
         &senales,
         TOPE_RUNTIME,
+        sin_stop,
     )
 }
 
@@ -2131,6 +2160,7 @@ pub fn calibrar_con(
     commit_laptop: &str,
     senales: &Senales,
     tope: Duration,
+    sin_stop: bool,
 ) -> Result<ResumenCalibrar, ErrorOraculo> {
     colab::liberar_anotado(cli, home)?;
     let importacion = Mutex::new(());
@@ -2150,6 +2180,7 @@ pub fn calibrar_con(
                         senales,
                         tope,
                         importacion,
+                        sin_stop,
                     )
                 });
                 (paquete, hilo)
@@ -2174,12 +2205,14 @@ fn sin_runtime(paquete: &Path, motivo: String, sesion: String) -> ResultadoRunti
         sesion,
         resultado: Err(format!("{motivo}; su paquete de vuelta no llegó")),
         codigos_de_trabajos: Vec::new(),
+        abierto: None,
     }
 }
 
 /// Ciclo completo de un paquete: anota, pide el runtime, corre los trabajos, baja la vuelta,
 /// libera el runtime y, si llegó la vuelta, la importa. Si la parada falla tras bajar la vuelta,
 /// importa igual y deja un aviso. Siempre intenta liberar y borrar sus temporales.
+/// Con `sin_stop` no libera: el runtime queda abierto y `abierto` lo describe.
 #[allow(clippy::too_many_arguments)]
 fn ciclo_de_runtime<C: ColabCli + Sync>(
     cli: &C,
@@ -2190,6 +2223,7 @@ fn ciclo_de_runtime<C: ColabCli + Sync>(
     senales: &Senales,
     tope: Duration,
     importacion: &Mutex<()>,
+    sin_stop: bool,
 ) -> ResultadoRuntime {
     let paquete = match std::path::absolute(paquete) {
         Ok(absoluto) => absoluto,
@@ -2231,6 +2265,13 @@ fn ciclo_de_runtime<C: ColabCli + Sync>(
         return sin_runtime(&paquete, e.to_string(), sesion);
     }
 
+    // Antes de correr: el JSON sale igual aunque un trabajo falle.
+    let abierto = sin_stop.then(|| RuntimeAbierto {
+        sesion: sesion.clone(),
+        carpeta: D_REMOTO.into(),
+        trabajo_cmd: trabajos_json(&manifiesto),
+    });
+
     let lim = colab::Limites {
         cancelar: senales,
         inicio: Instant::now(),
@@ -2247,13 +2288,20 @@ fn ciclo_de_runtime<C: ColabCli + Sync>(
         &manifiesto,
         &mut codigos,
     );
-    let fin = match &fase {
-        Ok(_) => colab::Fin::Bien(CAUSA_CALIBRACION_OK),
-        Err(_) if lim.vencido() => colab::Fin::Fallo(Some(CAUSA_CALIBRACION_TOPE)),
-        Err(_) if senales.recibida().is_some() => colab::Fin::Fallo(Some(CAUSA_CALIBRACION_SENAL)),
-        Err(_) => colab::Fin::Fallo(Some(CAUSA_CALIBRACION_FALLO)),
+    // Con `sin_stop` el runtime queda abierto: no se libera y la parada no cuenta como fallida.
+    let liberado = if sin_stop {
+        Ok(())
+    } else {
+        let fin = match &fase {
+            Ok(_) => colab::Fin::Bien(CAUSA_CALIBRACION_OK),
+            Err(_) if lim.vencido() => colab::Fin::Fallo(Some(CAUSA_CALIBRACION_TOPE)),
+            Err(_) if senales.recibida().is_some() => {
+                colab::Fin::Fallo(Some(CAUSA_CALIBRACION_SENAL))
+            }
+            Err(_) => colab::Fin::Fallo(Some(CAUSA_CALIBRACION_FALLO)),
+        };
+        liberar_calibracion(cli, home, &sesion, senales, fin)
     };
-    let liberado = liberar_calibracion(cli, home, &sesion, senales, fin);
     // Antes de limpiar: sin archivo de vuelta, el paquete de vuelta no llegó.
     let vuelta_no_bajo = !tmp.join("vuelta.tar.gz").is_file();
 
@@ -2294,6 +2342,7 @@ fn ciclo_de_runtime<C: ColabCli + Sync>(
         sesion,
         resultado,
         codigos_de_trabajos: codigos,
+        abierto,
     }
 }
 
@@ -2327,18 +2376,8 @@ fn correr_runtime<C: ColabCli>(
         )));
     }
 
-    let archivos = &manifiesto.archivos;
     for (indice, trabajo) in manifiesto.trabajos.iter().enumerate() {
-        let args: Vec<String> = trabajo
-            .args
-            .iter()
-            .map(|a| ruta_remota(a, archivos))
-            .collect();
-        let entorno: BTreeMap<String, String> = trabajo
-            .entorno
-            .iter()
-            .map(|(clave, valor)| (clave.clone(), ruta_remota(valor, archivos)))
-            .collect();
+        let (args, entorno) = trabajo_remoto(trabajo, &manifiesto.archivos);
         let guion = colab::escribir(
             tmp,
             &format!("trabajo-{indice}.py"),
@@ -2821,6 +2860,56 @@ pub fn argumentos_sin_secretos(args: &[String], entorno: &[(String, String)]) ->
         .iter()
         .filter(|(clave, valor)| es_nombre_secreto(clave) && valor.chars().count() >= 4)
         .all(|(_, valor)| args.iter().all(|arg| !arg.contains(valor.as_str())))
+}
+
+/// Argumentos y entorno de un trabajo dentro del runtime. Los dos lados (correr y el JSON de `ROOT_TRABAJO_CMD`) usan esto.
+fn trabajo_remoto(
+    trabajo: &TrabajoManifiesto,
+    archivos: &BTreeMap<String, String>,
+) -> (Vec<String>, BTreeMap<String, String>) {
+    let args = trabajo
+        .args
+        .iter()
+        .map(|a| ruta_remota(a, archivos))
+        .collect();
+    let entorno = trabajo
+        .entorno
+        .iter()
+        .map(|(clave, valor)| (clave.clone(), ruta_remota(valor, archivos)))
+        .collect();
+    (args, entorno)
+}
+
+/// JSON de los trabajos para correrlos a mano: un elemento por trabajo, con su comando y su entorno.
+/// El valor de una clave secreta va como `null`: el nombre sale, el valor nunca.
+fn trabajos_json(manifiesto: &Manifiesto) -> String {
+    let lista: Vec<serde_json::Value> = manifiesto
+        .trabajos
+        .iter()
+        .map(|trabajo| {
+            let (args, entorno) = trabajo_remoto(trabajo, &manifiesto.archivos);
+            let mut cmd = vec![format!("{D_REMOTO}/r00t")];
+            cmd.extend(args);
+            let mut env = serde_json::Map::new();
+            for (clave, valor) in entorno {
+                let valor = if es_nombre_secreto(&clave) {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(valor)
+                };
+                env.insert(clave, valor);
+            }
+            // El script real de cada trabajo fija ROOT_HOME; el JSON lo lleva para que sea igual.
+            env.insert("ROOT_HOME".into(), D_REMOTO.into());
+            serde_json::json!({
+                "tarea": trabajo.tarea,
+                "dimension": trabajo.dimension,
+                "cmd": cmd,
+                "entorno": env,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(lista).to_string()
 }
 
 /// Ruta remota de un valor: `D_REMOTO/valor` si es una ruta relativa que existe en el paquete; si no, el valor.
@@ -5370,7 +5459,15 @@ mod tests_calibrar {
         paquetes: &[PathBuf],
         tope: Duration,
     ) -> Result<ResumenCalibrar, ErrorOraculo> {
-        calibrar_con(cli, home, paquetes, COMMIT, &Senales::default(), tope)
+        calibrar_con(
+            cli,
+            home,
+            paquetes,
+            COMMIT,
+            &Senales::default(),
+            tope,
+            false,
+        )
     }
 
     fn comandos_de(llamadas: &[Vec<String>], sesion: &str) -> Vec<String> {
@@ -6523,5 +6620,180 @@ mod tests_calibrar {
         let uid_extraido = fs::metadata(&extraido).expect("dato.txt").uid();
         let uid_caja = fs::metadata(caja.path()).expect("caja").uid();
         assert_eq!(uid_extraido, uid_caja, "dato.txt quedó con otro uid");
+    }
+
+    /// Como `paquete_de_ida`, con `entorno` puesto en el trabajo de prueba.
+    fn paquete_de_ida_con_entorno(caja: &Path, nombre: &str, entorno: &[(&str, &str)]) -> PathBuf {
+        // `paquete_de_ida` deja su carpeta de staging con el manifiesto ya escrito.
+        paquete_de_ida(caja, nombre, "{\"v\":1,\"filas\":[]}\n");
+        let staging = caja.join(format!("{nombre}-src"));
+        let texto = fs::read_to_string(staging.join("manifiesto.json")).expect("manifiesto");
+        let mut manifiesto: Manifiesto = serde_json::from_str(&texto).expect("manifiesto");
+        for (clave, valor) in entorno {
+            manifiesto.trabajos[0]
+                .entorno
+                .insert(clave.to_string(), valor.to_string());
+        }
+        let json = serde_json::to_string_pretty(&manifiesto).expect("manifiesto");
+        fs::write(staging.join("manifiesto.json"), json).expect("manifiesto");
+        let tgz = caja.join(format!("{nombre}-entorno.tar.gz"));
+        empaquetar_dir(&staging, &tgz);
+        tgz
+    }
+
+    /// Corre `paquetes` con `sin_stop` activo.
+    fn correr_sin_stop(
+        cli: &Falso,
+        home: &Path,
+        paquetes: &[PathBuf],
+    ) -> Result<ResumenCalibrar, ErrorOraculo> {
+        calibrar_con(
+            cli,
+            home,
+            paquetes,
+            COMMIT,
+            &Senales::default(),
+            TOPE_PRUEBA,
+            true,
+        )
+    }
+
+    #[test]
+    fn sin_stop_no_llama_a_stop() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr_sin_stop(&cli, home.path(), &[p0]).expect("calibra");
+
+        let sesion = &resumen.runtimes[0].sesion;
+        let comandos = comandos_de(&cli.llamadas(), sesion);
+        assert!(!comandos.iter().any(|c| c == "stop"), "{comandos:?}");
+        assert!(comandos.contains(&"exec".to_string()), "{comandos:?}");
+        assert!(comandos.contains(&"download".to_string()), "{comandos:?}");
+    }
+
+    #[test]
+    fn sin_stop_imprime_las_tres_lineas_por_runtime() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let p1 = paquete_de_ida(caja.path(), "ida-1", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr_sin_stop(&cli, home.path(), &[p0, p1]).expect("calibra");
+
+        assert_eq!(resumen.runtimes.len(), 2);
+        for runtime in &resumen.runtimes {
+            let lineas = lineas_runtime_abierto(runtime);
+            assert_eq!(lineas.len(), 4, "{lineas:?}");
+            let sesion = &runtime.sesion;
+            assert_eq!(lineas[0], format!("ROOT_SESION_ABIERTA={sesion}"));
+            assert!(lineas[1].starts_with("ROOT_CARPETA_REMOTA="), "{lineas:?}");
+            assert!(lineas[2].starts_with("ROOT_TRABAJO_CMD="), "{lineas:?}");
+            assert!(lineas[3].contains("sigue abierto"), "{lineas:?}");
+            assert!(lineas[3].contains("0,08 unidades por hora"), "{lineas:?}");
+            assert!(
+                lineas[3].contains(&format!("colab stop -s {sesion}")),
+                "{lineas:?}"
+            );
+            assert!(
+                lineas[3].contains("oraculo pendientes --liberar"),
+                "{lineas:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sin_stop_no_filtra_el_valor_de_una_clave() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida_con_entorno(
+            caja.path(),
+            "ida-0",
+            &[
+                ("GITHUB_TOKEN", "valor-falso-secreto"),
+                ("IDIOMA_SALIDA", "valor-normal-123"),
+            ],
+        );
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr_sin_stop(&cli, home.path(), &[p0]).expect("calibra");
+
+        let trabajo_cmd = lineas_runtime_abierto(&resumen.runtimes[0])
+            .into_iter()
+            .find_map(|l| l.strip_prefix("ROOT_TRABAJO_CMD=").map(str::to_string))
+            .expect("línea ROOT_TRABAJO_CMD");
+        assert!(trabajo_cmd.contains("GITHUB_TOKEN"), "{trabajo_cmd}");
+        assert!(
+            !trabajo_cmd.contains("valor-falso-secreto"),
+            "{trabajo_cmd}"
+        );
+        assert!(trabajo_cmd.contains("valor-normal-123"), "{trabajo_cmd}");
+        let json: serde_json::Value = serde_json::from_str(&trabajo_cmd).expect("json");
+        let entorno = &json[0]["entorno"];
+        assert!(entorno["GITHUB_TOKEN"].is_null(), "{trabajo_cmd}");
+        assert_eq!(entorno["ROOT_HOME"], D_REMOTO);
+        assert_eq!(json[0]["cmd"][0], format!("{D_REMOTO}/r00t"));
+    }
+
+    #[test]
+    fn sin_stop_con_trabajo_que_falla_deja_el_runtime_abierto() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_falla("-0");
+
+        let resumen = correr_sin_stop(&cli, home.path(), &[p0]).expect("calibra");
+
+        let runtime = &resumen.runtimes[0];
+        assert!(runtime.resultado.is_err(), "{:?}", runtime.resultado);
+        let comandos = comandos_de(&cli.llamadas(), &runtime.sesion);
+        assert!(!comandos.iter().any(|c| c == "stop"), "{comandos:?}");
+        let lineas = lineas_runtime_abierto(runtime);
+        assert_eq!(lineas.len(), 4, "{lineas:?}");
+        assert!(lineas[0].starts_with("ROOT_SESION_ABIERTA="), "{lineas:?}");
+        assert!(lineas[2].starts_with("ROOT_TRABAJO_CMD="), "{lineas:?}");
+    }
+
+    #[test]
+    fn sin_stop_conserva_la_sesion_en_activo_json() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr_sin_stop(&cli, home.path(), &[p0]).expect("calibra");
+
+        let sesion = &resumen.runtimes[0].sesion;
+        let activo = fs::read_to_string(home.path().join("colab/activo.json")).expect("activo");
+        assert!(activo.contains(sesion.as_str()), "{activo}");
+    }
+
+    #[test]
+    fn sin_la_bandera_la_lista_termina_en_stop() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let runtime = &resumen.runtimes[0];
+        let comandos = comandos_de(&cli.llamadas(), &runtime.sesion);
+        assert_eq!(
+            comandos.last().map(String::as_str),
+            Some("stop"),
+            "{comandos:?}"
+        );
+        assert!(runtime.abierto.is_none(), "{:?}", runtime.abierto);
+        assert!(lineas_runtime_abierto(runtime).is_empty());
     }
 }

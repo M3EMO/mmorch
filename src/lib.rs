@@ -676,7 +676,7 @@ fn colab_calibrar(
     paquetes: Vec<PathBuf>,
     raiz_root: Option<PathBuf>,
 ) -> Result<(), Error> {
-    let resumen = colab_calibra::calibrar_cli(paquetes, raiz_root)?;
+    let resumen = colab_calibra::calibrar_cli(paquetes, raiz_root, false)?;
     let fallidos = resumen
         .runtimes
         .iter()
@@ -720,6 +720,11 @@ fn runtime_a_json(runtime: &colab_calibra::ResultadoRuntime) -> serde_json::Valu
         "resumen": resumen,
         "error": error,
         "codigos_de_trabajos": runtime.codigos_de_trabajos,
+        "abierto": runtime.abierto.as_ref().map(|a| serde_json::json!({
+            "sesion": a.sesion,
+            "carpeta": a.carpeta,
+            "trabajo_cmd": a.trabajo_cmd,
+        })),
     })
 }
 
@@ -754,6 +759,10 @@ fn imprimir_runtime(runtime: &colab_calibra::ResultadoRuntime) {
             "  trabajo {} {}: código {}",
             codigo.tarea, codigo.dimension, codigo.codigo
         );
+    }
+    // Sin sangría: las líneas ROOT_ se copian y se buscan con grep.
+    for linea in colab_calibra::lineas_runtime_abierto(runtime) {
+        println!("{linea}");
     }
 }
 
