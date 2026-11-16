@@ -13146,3 +13146,106 @@ Cuando un grupo se agota, sus lugares van a los otros grupos.
 **La regla de carga.** El paso 8 usa podman, y el paso 5 compila. Corren de a uno en la laptop. Los pasos 2, 3, 4 y 12 van en Colab. El paso 4 usa tres runtimes. Si coincide con el notebook de P107 a, el orquestador revisa el cupo de la cuenta.
 
 **Preguntas al usuario:** ninguna nueva. La aprobación de las 3 fichas de revisión sigue abierta, por P81.
+
+## Vuelta del 2026-11-16 (71): un runtime que queda abierto, y el muestreo en el mismo exec
+
+**Estado.**
+- **Los arreglos de la vuelta (70) en la minería están hechos.** `esbozos.py` resuelve E0432 y E0061, corre hasta 3 rondas, y suma el `use` de un tipo que el commit importa en grupo. `armar_tarea.py` separa los tests en línea por bloque de nivel 0, solo en las tareas de función nueva.
+- **El dataset tiene 36 filas:** 31 ok, 3 duplicadas de S2 y 2 que salen.
+  - Sale 6f8e882844: GitHub responde "not our ref".
+  - Sale da832dd544: la firma nueva rompe llamadores de producción del padre.
+- **Quedan 15 de función nueva.** 10 compilan con interfaz. 6 compilan en el padre con los tests, así que su rojo es de ejecución y su interfaz queda vacía.
+- **`nf/` pasó a `nf-viejo/`.** Las 5 válidas se rearmaron en `dataset/Canop_broot/`.
+- **Las 3 fichas de revisión vuelven a pasar `fuga.py`.** P81 sigue abierta.
+- **La opción sin código de la Prueba 0g falló.** El kernel del runtime corre los exec de a uno, y un segundo exec no respondió en 60 segundos. La corrida de `calibrar` v155 sigue, en `colab-pruebas/home0g-155`.
+- **Existe `colab ssh --proxy-mode`,** que no pasa por el kernel. Necesita una clave SSH que la laptop no tiene.
+
+**Una nota sobre los números.** 10 con interfaz y 6 sin interfaz suman 16, no 15. El orquestador revisa si una tarea cuenta en los dos grupos.
+
+**Dos lecturas de la minería.**
+- **Una tarea de función nueva con interfaz vacía es válida.** Su test compila contra el padre y falla al correr. Por P99 a, la ficha no declara nada nuevo, igual que un arreglo.
+- **Las 3 rondas de `esbozos.py`** y el `use` sumado siguen la regla de P99 a: el esbozo solo declara lo que nombra el rojo.
+
+## 1. Cómo medir la carga durante un trabajo real
+
+**El problema de `--sin-stop` solo.** Deja el runtime abierto después del trabajo, cuando la carga ya pasó. Un muestreo posterior mide un runtime quieto.
+
+**La salida: repetir el trabajo dentro de un solo exec, con el muestreo al lado.**
+1. `r00t colab calibrar --sin-stop` corre como siempre: prepara, corre el trabajo, arma la vuelta, la baja y la importa.
+2. **No llama a `stop`.** Imprime una línea por runtime con la sesión, la carpeta remota y el comando exacto del trabajo.
+3. **El orquestador manda un solo exec** con un guion suyo, `repetir-0g.py`.
+   - El guion lanza el mismo comando del trabajo en un subproceso, con el mismo entorno y la misma carpeta.
+   - Un hilo del mismo proceso corre `muestreo-0g.py` cada 2 segundos.
+   - El kernel ve un solo exec, así que no hay espera.
+4. **Al terminar,** el guion imprime el resumen del muestreo y la `carga_ajena` de cada caso nuevo. No importa nada a la laptop.
+5. **El orquestador cierra el runtime con `colab stop`** al final del mismo paso.
+
+**Lo que mide de verdad.** La segunda corrida usa el mismo binario, el mismo bwrap y la misma maquinaria de `exec`. Si el kernel o el agente de `exec` gastan un núcleo mientras esperan, también lo gastan aquí.
+- La segunda corrida reusa la caché de la primera, y eso cambia los tiempos.
+- La carga ajena se mide igual: la caché no cambia qué procesos compiten.
+
+**La vía `colab ssh`.** Mide la primera corrida sin repetir nada, por un camino que no pasa por el kernel.
+- Pide crear una clave SSH en la laptop. Es una credencial nueva, que da entrada a los runtimes de la cuenta.
+- No mide la maquinaria de `exec` desde adentro, porque ssh corre aparte. Pero muestra sus procesos en `ps`.
+- No pide código de Root.
+
+**Elijo `--sin-stop` con el muestreo en el mismo exec.** No pide una credencial nueva. El código es chico, y sirve después para diagnosticar cualquier trabajo. La vía ssh queda como pregunta, P118, por si el usuario prefiere no tocar Root.
+
+**El costo de dejar un runtime abierto.** Un runtime de CPU cuesta cerca de 0,08 unidades por hora. `--sin-stop` lo anota en `activo.json`, y el aviso de liberación pendiente que ya existe lo nombra. El orquestador lo cierra en el mismo paso. El tope de 4 horas de `TOPE_RUNTIME` sigue.
+
+Brief: `docs/builds/brief-local-157.md`.
+
+## 2. Qué mira el orquestador en la corrida v155
+
+La corrida usa la cadena 155. Esa cadena no tiene el campo `carga_ajena` de la 156, así que solo quedan los motivos de texto.
+
+**Lo que mira, por runtime:**
+1. **Cuántos casos traen "la máquina tenía carga ajena: X núcleos de 2",** y sus valores.
+2. **Si el valor se repite igual en todos los casos.** Un mismo texto en todos apunta a la base, cuyo motivo heredan los casos. Valores distintos, como 1,00, 1,01 y 1,02 en t1 de la v6, son mediciones propias de cada caso.
+3. **Si la base trae su propio motivo de carga.**
+4. **Las medidas de detección:** sensibilidad, especificidad y razón de `memoria_pico`. Esta corrida es una réplica de la v6.
+
+**Qué hace con cada resultado:**
+
+| Resultado | Qué significa | Qué hace |
+|---|---|---|
+| Carga cerca de 1,00 en algún runtime, con valores distintos por caso | La carga se reprodujo | Sigue con la 157 y el muestreo de la sección 1 |
+| Carga solo en la base, heredada por todos los casos | Un solo momento cargado, no una carga continua | Informa. La 157 mide igual, y conviene mirar el arranque del trabajo |
+| Sin carga en los tres runtimes | La carga es intermitente | Informa. La 157 se construye igual, pero el muestreo corre cuando se repita la carga. No frena nada: la memoria decide |
+| La réplica da sensibilidad y especificidad 1 | Eficiencia se replica | Lo anota en el plan como evidencia. No se importa: la copia de `ROOT_HOME` es aparte |
+| La réplica da otro resultado de detección | La v6 no se replica | Informa las filas. No se importa nada, y la vuelta siguiente decide |
+
+**No se importa nada de `home0g-155` al `ROOT_HOME` real.** Las filas de la v6 ya están ahí. Una segunda fila mezclaría dos corridas de la misma versión.
+
+## 3. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | El usuario | Laptop y el usuario | No |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD |
+| 4 | Leer la corrida v155 de `home0g-155` | Que termine; corre ahora | Laptop, solo lectura | No |
+| 5 | La Tarea 157: `--sin-stop` | Nada; puede empezar ya | Laptop, builder | No |
+| 6 | Armar la cadena con la 157, y su suite con podman | El paso 5 | Laptop, podman | No |
+| 7 | `paso0-157.sh`: el binario y un paquete de Eficiencia | El paso 6 | Laptop, el usuario | No |
+| 8 | La Prueba 0g con `--sin-stop` y `repetir-0g.py`, en tres runtimes | El paso 7 | Colab, CPU | No |
+| 9 | La aprobación de las 3 fichas de revisión | El usuario | — | No |
+| 10 | Las fichas restantes, en tandas de 6 | El paso 9 | Laptop, cupo | No |
+| 11 | La mezcla de la cadena 110 a 157 | La orden del usuario | — | No |
+| 12 | Congelar la versión | El paso 3 | — | No |
+| 13 | Las doce calibraciones de oráculo con la versión congelada | El paso 12 | Colab, cuatro runtimes | No |
+| 14 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 12 | Laptop | Según la regla del final |
+| 15 | La validez sobre el final sellado | Los pasos 1 a 14 | Colab, notebook si usa el juez | Según el final |
+
+**La regla de carga.** El paso 5 compila, y el paso 6 usa podman. Corren de a uno en la laptop. Los pasos 2, 3, 8 y 13 van en Colab. El paso 8 usa tres runtimes. Si coincide con el notebook de P107 a, el orquestador revisa el cupo de la cuenta.
+
+**La 157 no cambia nada que fije la versión congelada.** No toca rúbricas, ni el prompt del juez, ni comandos de sondas.
+
+## 4. Pregunta al usuario
+
+**P118. ¿Cómo se mide la carga ajena durante un trabajo real en Colab?** El kernel del runtime corre los exec de a uno. Un muestreo en un exec aparte espera a que termine el trabajo, y entonces mide un runtime quieto.
+
+- **a) `--sin-stop` en `colab calibrar`.** Root deja el runtime abierto, y el orquestador repite el trabajo en un solo exec, con el muestreo al lado. Pide la Tarea 157, chica. No pide credenciales nuevas. *(recomendada)*
+- **b) Una clave SSH nueva y `colab ssh --proxy-mode`.** El orquestador muestrea por ssh durante la primera corrida, sin pasar por el kernel. No pide código de Root. Pide crear una clave en `~/.ssh`, con entrada a los runtimes de la cuenta.
+
+Recomiendo la (a). No suma una credencial, y `--sin-stop` sirve después para diagnosticar cualquier trabajo. La 157 puede construirse mientras llega tu respuesta. Si elegís la (b), la 157 se descarta.
