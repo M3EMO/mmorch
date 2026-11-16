@@ -2378,11 +2378,9 @@ fn correr_runtime<C: ColabCli>(
 
     for (indice, trabajo) in manifiesto.trabajos.iter().enumerate() {
         let (args, entorno) = trabajo_remoto(trabajo, &manifiesto.archivos);
-        let guion = colab::escribir(
-            tmp,
-            &format!("trabajo-{indice}.py"),
-            &script_trabajo(indice, &args, &entorno),
-        )?;
+        // El guion se calcula antes de escribirlo: si falla, no queda `trabajo-N.py` a medias.
+        let texto = script_trabajo(indice, &args, &entorno)?;
+        let guion = colab::escribir(tmp, &format!("trabajo-{indice}.py"), &texto)?;
         let salida = ejecutar_guion(cli, lim, sesion, SEG_TRABAJO_CALIBRAR, &guion)?;
         if salida.codigo != 0 || colab::marcador(&salida.stdout, "ROOT_OK=").is_none() {
             return Err(ErrorOraculo::Infra(format!(
@@ -2931,9 +2929,28 @@ fn literal_python(texto: &str) -> String {
     serde_json::to_string(texto).expect("un texto siempre se serializa")
 }
 
+/// Falla si una variable secreta lleva valor: el guion no debe llevar claves.
+/// El error nombra la variable y nunca muestra su valor.
+fn revisar_entorno_sin_secretos(entorno: &BTreeMap<String, String>) -> Result<(), ErrorOraculo> {
+    for (clave, valor) in entorno {
+        if es_nombre_secreto(clave) && !valor.is_empty() {
+            return Err(ErrorOraculo::Uso(format!(
+                "la variable secreta {clave} tiene valor y no puede ir al guion remoto"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Script que corre un trabajo del paquete. El JSON del trabajo va como literal que `json.loads` lee.
 /// La salida del trabajo va a `trabajo-<indice>.log`. Un código distinto de cero no falla el script.
-fn script_trabajo(indice: usize, args: &[String], entorno: &BTreeMap<String, String>) -> String {
+/// Falla con `Uso` si el entorno trae una variable secreta con valor.
+fn script_trabajo(
+    indice: usize,
+    args: &[String],
+    entorno: &BTreeMap<String, String>,
+) -> Result<String, ErrorOraculo> {
+    revisar_entorno_sin_secretos(entorno)?;
     let cuerpo = serde_json::json!({
         "indice": indice,
         "args": args,
@@ -2941,7 +2958,7 @@ fn script_trabajo(indice: usize, args: &[String], entorno: &BTreeMap<String, Str
     })
     .to_string();
     let literal = literal_python(&cuerpo);
-    format!(
+    Ok(format!(
         r#"import json
 import os
 import subprocess
@@ -2957,7 +2974,7 @@ with open(ruta_log, "w") as log:
 print("ROOT_OK=trabajo-%d" % TRABAJO["indice"])
 print("ROOT_CODIGO=%d" % r.returncode)
 "#
-    )
+    ))
 }
 
 /// Script que une los `n` trozos, compara su SHA-256 con `sha` y, si coincide, prepara el runtime.
@@ -5662,7 +5679,7 @@ mod tests_calibrar {
             format!("{D_REMOTO}/entorno.env"),
         )]);
 
-        let script = script_trabajo(3, &args, &entorno);
+        let script = script_trabajo(3, &args, &entorno).expect("guion sin secretos");
 
         let linea = script
             .lines()
@@ -5677,6 +5694,61 @@ mod tests_calibrar {
             trabajo["entorno"]["ROOT_BWRAP_ENTORNO"],
             format!("{D_REMOTO}/entorno.env")
         );
+    }
+
+    #[test]
+    fn script_trabajo_rechaza_secreto_con_valor_sin_mostrarlo() {
+        let entorno = BTreeMap::from([("GITHUB_TOKEN".to_string(), "valor-falso".to_string())]);
+
+        let err = script_trabajo(0, &[], &entorno).expect_err("un secreto con valor no entra");
+        let ErrorOraculo::Uso(mensaje) = err else {
+            panic!("se esperaba Uso, llegó {err:?}");
+        };
+
+        assert!(mensaje.contains("GITHUB_TOKEN"), "{mensaje}");
+        assert!(!mensaje.contains("valor-falso"), "{mensaje}");
+    }
+
+    #[test]
+    fn falla_de_script_trabajo_no_deja_guion_a_medias() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let entorno = BTreeMap::from([("GITHUB_TOKEN".to_string(), "valor-falso".to_string())]);
+
+        // Mismo orden que en producción: el guion se calcula con `?` antes de escribirlo.
+        let escribir = |indice: usize| -> Result<PathBuf, ErrorOraculo> {
+            let texto = script_trabajo(indice, &[], &entorno)?;
+            colab::escribir(tmp.path(), &format!("trabajo-{indice}.py"), &texto)
+        };
+        assert!(escribir(0).is_err());
+
+        let sobras: Vec<String> = fs::read_dir(tmp.path())
+            .expect("leer la carpeta")
+            .map(|e| {
+                e.expect("entrada")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|nombre| nombre.starts_with("trabajo-") && nombre.ends_with(".py"))
+            .collect();
+        assert!(sobras.is_empty(), "{sobras:?}");
+    }
+
+    #[test]
+    fn entorno_de_comando_de_trabajo_pasa_sin_error() {
+        let orden = comando_de_trabajo(
+            "tarea-prueba",
+            Dimension::Diseno,
+            "sha256:imagen",
+            N_POR_DEFECTO,
+            SEMILLA_POR_DEFECTO,
+            Some(18.45),
+        );
+
+        let guion = script_trabajo(0, &orden.args, &orden.entorno)
+            .expect("el entorno de un trabajo no tiene secretos");
+
+        assert!(guion.contains("TRABAJO = json.loads("));
     }
 
     #[test]
