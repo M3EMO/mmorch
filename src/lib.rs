@@ -675,8 +675,9 @@ fn colab_calibrar(
     json: bool,
     paquetes: Vec<PathBuf>,
     raiz_root: Option<PathBuf>,
+    sin_stop: bool,
 ) -> Result<(), Error> {
-    let resumen = colab_calibra::calibrar_cli(paquetes, raiz_root, false)?;
+    let resumen = colab_calibra::calibrar_cli(paquetes, raiz_root, sin_stop)?;
     let fallidos = resumen
         .runtimes
         .iter()
@@ -1063,8 +1064,13 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
             },
         ),
         Comando::Colab {
-            accion: ColabAccion::Calibrar { paquete, raiz_root },
-        } => colab_calibrar(cli.json, paquete.clone(), raiz_root.clone()),
+            accion:
+                ColabAccion::Calibrar {
+                    paquete,
+                    raiz_root,
+                    sin_stop,
+                },
+        } => colab_calibrar(cli.json, paquete.clone(), raiz_root.clone(), *sin_stop),
         Comando::Observa { accion } => observa(cli.json, accion),
         Comando::Corre {
             tarea,

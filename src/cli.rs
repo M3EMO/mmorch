@@ -226,6 +226,10 @@ pub enum ColabAccion {
         /// Repo de Root: de ahí sale el commit de la laptop. Por defecto, el directorio actual.
         #[arg(long)]
         raiz_root: Option<PathBuf>,
+        /// No libera el runtime al terminar. Queda abierto y gasta unidades, cerca de 0,08 por hora.
+        /// Cierra el runtime con `colab stop` u `oraculo pendientes --liberar`.
+        #[arg(long)]
+        sin_stop: bool,
     },
 }
 
@@ -773,6 +777,35 @@ mod tests {
         args.extend(["--ida", "ida.tar.gz"]);
         let error = Cli::try_parse_from(args).expect_err("--ida sin --sha debe fallar");
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    /// Argumentos base de `colab calibrar`, con un paquete y sin banderas.
+    fn calibrar_base() -> Vec<&'static str> {
+        vec!["r00t", "colab", "calibrar", "--paquete", "x.tar.gz"]
+    }
+
+    #[test]
+    fn colab_calibrar_con_sin_stop_lo_activa() {
+        let mut args = calibrar_base();
+        args.push("--sin-stop");
+        let cli = Cli::try_parse_from(args).expect("colab calibrar con --sin-stop parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Calibrar { sin_stop, .. },
+            } => assert!(sin_stop),
+            otro => panic!("se esperaba colab calibrar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_calibrar_sin_la_bandera_da_falso() {
+        let cli = Cli::try_parse_from(calibrar_base()).expect("colab calibrar parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Calibrar { sin_stop, .. },
+            } => assert!(!sin_stop),
+            otro => panic!("se esperaba colab calibrar, llegó {otro:?}"),
+        }
     }
 
     #[test]
