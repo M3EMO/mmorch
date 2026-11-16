@@ -1,6 +1,6 @@
-# Informe de la Tarea 156
+# Informe de la Tarea 156 (segunda vuelta)
 
-La tarea no cambia código. El punto 1 quedó fuera por la Prueba 0f. El punto 2 se detuvo: ningún campo existente sirve.
+El caso de Eficiencia guarda su mayor carga ajena como número. El campo es `CasoGuardado.carga_ajena`. Este informe reemplaza el de la primera vuelta.
 
 ## 1. Resultado de la suite
 
@@ -8,75 +8,59 @@ Con `ROOT_SIN_PODMAN=1` y `tools/test-seguro.sh`:
 
 | Momento | Verdes | Fallas | Ignorados |
 |---|---|---|---|
-| Base (0f8342f) | 3917 | 0 | 5 |
-| Final | 3917 | 0 | 5 |
+| Base (8570e9e) | 3917 | 0 | 5 |
+| Final | 3926 | 0 | 5 |
 
-El código no cambió, así que los dos números coinciden. La biblioteca sola da 3314 verdes y 1 ignorado.
+Los 9 verdes nuevos son los tests de este punto. El hook del commit corrió la suite y pasó sin reintento.
 
 ## 2. Commits
 
 | Punto | Defecto | Tests vistos en rojo | Commit |
 |---|---|---|---|
-| 1, las CPU que Root no puede usar | No se hizo. Ver la sección 3. | ninguno | ninguno |
-| 2, el aviso en el caso | Se detuvo. Ver la sección 3. | ninguno | ninguno |
+| 1, la carga ajena como número | `CasoGuardado` no guardaba la carga ajena. El valor moría en `CasoGuardado::de`. | `caso_de_eficiencia_guarda_la_carga_ajena_en_el_renglon`, `la_carga_ajena_llega_a_cada_resultado_de_dos_lados`, `la_carga_ajena_llega_a_cada_resultado_contra_referencia` | eb0f2ce |
 
-El único commit es este informe.
+Guardas que nacieron verdes:
+- `sin_fuente_de_carga_no_hay_carga_ajena`
+- `sin_root_cpu_us_no_hay_carga_ajena`
+- `caso_de_eficiencia_sin_carga_en_la_base_guarda_none`
+- `caso_de_otra_dimension_guarda_carga_ajena_none`
+- `renglon_viejo_sin_carga_ajena_se_lee_como_none`
+- `veredicto_viejo_sin_carga_ajena_lee_none`
 
 ## 3. Qué falló o quedó incompleto
 
-**Punto 1: fuera por la Prueba 0f.**
-- En dos VMs de CPU de Colab, `nproc` y `nproc --all` dan 2.
-- `/proc/stat` trae 2 líneas `cpuN`, y `Cpus_allowed_list` es 0-1. Entonces `v = n = 2`.
-- En reposo, la carga ocupada fue 0,18 y 0,29 núcleos. `top` no mostró ningún proceso que gire.
-- La VM no tiene CPU extra, así que la resta `v − n` valdría 0. El punto 1 no cambiaría nada.
+- **Sin puntos incompletos.**
+- **Tercer archivo tocado: `src/oracle/mod.rs`.** Solo lleva el número de `ResultadoMedida` al `Veredicto`.
+- **Un cuarto archivo: `docs/interfaces.md`.** El brief pide regenerarlo. Lo regeneró `ROOT_ACTUALIZAR_SNAPSHOT=1 tools/test-seguro.sh --test interfaces`. El diff agrega solo `carga_ajena`.
+- **El test de 0,30 núcleos no es exacto en `eficiencia.rs`.** El valor sale del reloj real. Esos tests acotan la carga a (0,1; 1,0] y exigen el mismo valor en las cuatro medidas. El test de `calibra.rs` sí usa 0,30 exacto, puesto en la base.
+- **Podman.** Ningún test nuevo lo necesita. La suite con podman queda para el orquestador.
 
-**Punto 2: detenido, sin cambio de código.** El brief pide parar si ningún campo existente sirve.
+## 4. El camino del número
 
-El camino del aviso hoy es este:
-- `Vigilancia::aviso` arma la línea "eficiencia: mayor carga ajena de una corrida: X núcleos de N".
-- `medir_contra_referencia` la suma a `avisos`.
-- `oracle/mod.rs` la pasa a `Veredicto.avisos`.
-- `CasoGuardado::de`, en `src/oracle/calibra.rs`, no copia `veredicto.avisos`. El aviso se pierde ahí.
+1. `Vigilancia.mayor` (`Option<f64>`) ya guardaba la mayor carga ajena. Es `None` sin fuente o sin `ROOT_CPU_US`.
+2. `medir_los_dos_lados` y `medir_contra_referencia` llaman a `con_carga_ajena`. Esa función copia `mayor` a cada resultado.
+3. **Campo nuevo:** `ResultadoMedida.carga_ajena: Option<f64>`.
+4. `medir` de `oracle/mod.rs` toma el máximo de `ResultadoMedida.carga_ajena` y lo pone en `Medicion`.
+5. **Campo nuevo:** `Medicion.carga_ajena` (struct interno).
+6. **Campo nuevo:** `Veredicto.carga_ajena: Option<f64>`, con `#[serde(default)]`.
+7. **Campo nuevo:** `CasoGuardado.carga_ajena: Option<f64>`, con `#[serde(default)]`. `CasoGuardado::de` lo copia del veredicto. `de_no_aplicable` lo deja vacío.
 
-Revisé los campos de texto de `CasoGuardado` y de `MedidaEficiencia`:
-
-| Campo | Por qué no sirve |
-|---|---|
-| `CasoGuardado.motivo` | Dice por qué `detectado` es true. Un aviso lo confundiría con una detección. |
-| `CasoGuardado.sin_veredicto` | Dice por qué la dimensión quedó sin veredicto. El caso de Eficiencia sí tiene veredicto. |
-| `CasoGuardado.filtro` | Es el `-F` de cargo-mutants. |
-| `MedidaEficiencia.motivo` | Dice "por qué la medida no tiene valor". Ver abajo. |
-
-`MedidaEficiencia.motivo` es el único candidato técnico. Tiene dos problemas:
-- Cambia su significado: hoy `None` equivale a "la medida tiene valor".
-- `puntaje_de_eficiencia`, en `src/oracle/mod.rs`, junta esos motivos en el texto de "sin veredicto" cuando ninguna medida tiene valor. Un aviso con valor se mezclaría con los motivos reales.
-
-**Opciones para el planner:**
-- **A.** Campo nuevo `carga_ajena: Option<f64>` en `CasoGuardado`, con `#[serde(default)]`. Es el más claro y pide cambio de esquema. Se guardaría el valor numérico, no el texto.
-- **B.** Campo nuevo `avisos: Vec<String>` en `CasoGuardado`. Lleva también los demás avisos del veredicto. Pide cambio de esquema.
-- **C.** Escribir el aviso en `MedidaEficiencia.motivo` de `tiempo_tests` y `tiempo_compilacion`. No cambia el esquema. Obliga a cambiar la regla de `puntaje_de_eficiencia`.
-
-**Recomendación del organizador:** la opción A. El umbral se revisa con un número, y un número no necesita parseo. Si el planner quiere el texto del aviso, la opción B lo cubre.
-
-Si el planner elige A o B, el archivo de producción es `src/oracle/calibra.rs`, además de `src/oracle/eficiencia.rs`. El esquema de `CasoGuardado` es JSON Schema, así que el cambio llega a quien lo lea.
-
-## 4. Dónde quedó el aviso
-
-No quedó en ningún campo del renglón. Los casos siguen sin llevar la mayor carga ajena. Ejemplo de la línea que se pierde:
-
-`eficiencia: mayor carga ajena de una corrida: 0.30 núcleos de 2`
+El aviso de texto en `Veredicto.avisos` no cambió.
 
 ## 5. Tests que cambiaron de valor
 
-Ninguno. No se editó ningún test de otro archivo.
+- Ningún test cambió de valor.
+- No edité tests de otros archivos.
 
 ## 6. Llamadores revisados
 
-No se cambió ninguna firma. No hizo falta `codegraph`.
+La única firma cambiada es el struct `ResultadoMedida`, con un campo nuevo. Sus literales viven solo en `eficiencia.rs`.
+- `medir`, `medir_con` y `medir_lados` no cambian de firma.
+- `codegraph callers medida_de_eficiencia`: `medir` en `oracle/mod.rs`.
+- `grep -w` de `medir_lados`, `medir_contra_referencia` y `medir_los_dos_lados` fuera de `eficiencia.rs`: cero resultados.
+- Un cero de una herramienta no prueba nada. El compilador lo confirma: la suite compila con los literales nuevos.
 
 ## 7. Preguntas para el planner
 
-1. ¿Qué opción toma el aviso: A (campo numérico nuevo), B (lista de avisos nueva) o C (reusar `MedidaEficiencia.motivo`)?
-   - Decisión del organizador: no se tomó. Se recomienda A, y la tarea queda detenida hasta tu respuesta.
-2. ¿El punto 1 se reabre? Con `v = n = 2` en Colab, la carga ajena de 1,00 núcleos no viene de CPU invisibles.
-   - Decisión del organizador: no se hizo. La explicación B (un proceso real ocupa un núcleo) sigue abierta. La Prueba 0f no vio un proceso que gire, y la carga en reposo fue menor de 0,3 núcleos.
+1. **`CasoGuardado::de` no filtra por dimensión.** Copia la carga del veredicto. Hoy solo Eficiencia la llena. Decisión del organizador: sin filtro, igual que `eficiencia`. ¿Se agrega un filtro explícito?
+2. **El valor es el de la medición propia del caso.** No incluye la carga de la base que hereda `referencia.carga`. Decisión del organizador: solo la propia, como dice el brief.
