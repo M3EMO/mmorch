@@ -12842,3 +12842,154 @@ Recomiendo la (a). Cumple D3, reparte el peso entre repos, y ahorra 16 fichas.
 
 - **a) Sí, borrarlas ahora.** *(recomendada)*
 - **b) No, dejarlas.**
+
+## Vuelta del 2026-11-16 (69): el aviso con un número, el robo de CPU, y los diffs con contexto
+
+**Estado.**
+- **Respuestas del usuario a la vuelta (68):** P115 "a) Tope de 5 por repo (Recomendada)". P116 "b) Las 36". P117 "a) Sí, borrarlas (Recomendada)".
+- **P115 a aplicado.** 5 de los 11 reales de IronCalc, elegidos por `sha256("20261116/tope5/"+sha)`, sin abrir el sellado. El final queda en 16 reales.
+- **P117 a aplicado.** Las dos carpetas de trabajo se borraron.
+- **La Prueba 0f no confirmó ni la A ni la B.** Las VMs tienen 2 CPU visibles y 2 usables. En reposo, la carga ocupada fue de 0,18 y 0,29 núcleos, y ningún proceso giraba.
+- **La 156 terminó sin código.** El punto 1 quedó fuera por la 0f. El punto 2 se detuvo: el aviso no cabe sin cambio de esquema.
+- **`armar_tarea.py` armó 27 carpetas,** y `dataset.json` indexa las 36 tareas. Las 36 pasan el control.
+- **Un hallazgo:** `tests.diff` y `diff.txt` son diffs `-U0` sobre el padre. Aplicados en serie sobre el mismo archivo, el segundo cae en otro lugar.
+- El orquestador escribe `esbozos.py`. El paquete del juez espera `paso0-juez.sh`.
+
+## 1. El aviso de la 156: la opción A
+
+**Decido la A: un campo numérico `carga_ajena: Option<f64>` en `CasoGuardado`, con `#[serde(default)]`.**
+- **Es una decisión técnica.** Un campo opcional con valor por defecto no rompe las filas viejas: al leerlas, el campo queda vacío.
+- **El umbral se revisa con números.** Un número no pide parseo de texto.
+- **La B guarda todos los avisos,** pero en texto. Para revisar el umbral, alguien tendría que parsearlo. Además, mezcla avisos de distinto tipo.
+- **La C cambia el significado de `MedidaEficiencia.motivo`.** Hoy, sin motivo, la medida tiene valor. Un aviso con valor rompería esa regla, y `puntaje_de_eficiencia` mezclaría motivos reales con avisos.
+- **No cambia nada que mida la versión congelada:** ni rúbricas, ni el prompt del juez, ni comandos de sondas.
+
+**El número viaja por la estructura, no por el texto del aviso.** Hoy la línea llega a `Veredicto.avisos` como texto, y `CasoGuardado::de` no la copia. Parsear ese texto sería frágil. El builder lleva el número por el camino que ya trae las medidas de Eficiencia hasta el caso. Si ese camino cruza `Veredicto`, suma ahí un campo opcional, también con `#[serde(default)]`.
+
+**El punto 1 no se reabre.** Con 2 CPU visibles y 2 usables, la resta vale 0. La causa está en la sección 2.
+
+Reescribí `docs/builds/brief-local-156.md`.
+
+## 2. La carga ajena de 1,00 núcleos: el robo de CPU
+
+**Una explicación que encaja con todo: el robo de CPU, `steal`.** Una VM de Colab comparte su máquina física con otras VM.
+- **En reposo, la VM no pide CPU, y el robo es casi cero.** Por eso la Prueba 0f no vio nada.
+- **Durante una corrida medida, la VM pide sus 2 núcleos.** Si la máquina física está llena, el hipervisor le da cerca de uno. El otro núcleo aparece como `steal` en `/proc/stat`.
+- **Root cuenta `steal` como CPU ocupada,** y no como CPU propia. Entonces el robo de un núcleo da "1.00 núcleos de 2".
+- **El valor casi fijo de 1,00 a 1,02** es la mitad de 2 núcleos: el hipervisor da la mitad.
+- **t2 cayó en una máquina física con menos vecinos.** El robo depende de la máquina física, no del código ni del runtime.
+
+**Si es robo, el control hace bien.** Con la mitad de la CPU robada, los tiempos de esa corrida no valen. El defecto no está en Root.
+
+**Hay otra explicación posible, más rara:** procesos del sandbox que quedan huérfanos. `getrusage(RUSAGE_CHILDREN)` cuenta solo los hijos que alguien esperó. Un proceso que se separa de su padre y termina adoptado por el `init` de bwrap no entra en `ROOT_CPU_US`. Su CPU cuenta como ajena.
+
+**Prueba 0g, en dos etapas.**
+
+**Etapa 1: carga con CPU fija, en tres runtimes nuevos a la vez.** Tres, como la v6, para que alguno caiga en una máquina llena. Cuesta menos de 0,01 unidades.
+
+```sh
+head -1 /proc/stat > /tmp/a; for i in 1 2; do timeout 60 sh -c 'while :; do :; done' & done; wait; head -1 /proc/stat > /tmp/b; paste /tmp/a /tmp/b
+```
+
+- **Qué buscar:** la resta de cada campo, dividida por 6000 ticks, da núcleos durante 60 segundos.
+  - Con `user` cerca de 2 y `steal` cerca de 0, la máquina física da los 2 núcleos.
+  - Con `user` cerca de 1 y `steal` cerca de 1, hay robo de un núcleo.
+
+**Etapa 2, solo si la etapa 1 no muestra robo en ningún runtime:** una corrida real con muestreo.
+- En un runtime preparado con el paquete de Eficiencia de s2-t1, el orquestador corre `r00t oraculo evaluar` sobre el repo bueno, en modo bwrap.
+- A la vez, un muestreo cada 5 segundos guarda la línea `cpu` de `/proc/stat` y `ps -eo pid,ppid,stat,time,pcpu,comm --sort=-pcpu | head -20`.
+- **Qué buscar:**
+  - un proceso fuera del árbol del sandbox con CPU sostenida, con su nombre;
+  - un proceso del sandbox cuyo padre es el `init` de bwrap, que nadie espera.
+- Cuesta cerca de 0,1 unidades.
+
+**Qué hace el orquestador con cada resultado:**
+
+| Resultado | Qué significa | Qué hace |
+|---|---|---|
+| Robo de cerca de 1 núcleo en algún runtime de la etapa 1 | La causa es el robo. El control acierta | Antes de cada calibración de Eficiencia en Colab, corre la etapa 1 en el runtime. Con robo de más de 0,25 núcleos, cierra el runtime y pide otro, hasta tres veces. No hace falta código |
+| Sin robo, y un proceso ajeno al sandbox con CPU | Un servicio del runtime compite | Informa el nombre del proceso. La vuelta siguiente decide |
+| Sin robo, y huérfanos del sandbox | La CPU propia se cuenta de menos | Una tarea: `root-medir.py` se marca como `subreaper` con `prctl`, así los huérfanos le quedan a él y entran en `getrusage` |
+| Nada de lo anterior | Sin causa | Informa los números. Los tiempos marcados en Colab siguen sin valor, y la memoria decide |
+
+**La v6 sigue valiendo.** Las seis detecciones vienen de `memoria_pico`, que no depende de la CPU.
+
+## 3. Los diffs `-U0`: pasan a llevar contexto
+
+**Un dato que cambia la respuesta.** Revisé las carpetas del dataset sin imprimir nombres. En 22 de las 33 tareas con los dos diffs, `tests.diff` toca archivos que `diff.txt` también toca. Son tests en línea, dentro de un módulo `#[cfg(test)]` de un archivo de producción.
+
+**Los consumidores:**
+
+| Consumidor | ¿Aplica los diffs? | ¿Le alcanza `-U0`? |
+|---|---|---|
+| `esbozos.py` | Aplica `tests.diff` sobre el padre, y suma los esbozos | Sí, si los esbozos van al final del archivo, después de aplicar `tests.diff` |
+| La solución de referencia | Aplica `tests.diff` y después `diff.txt` | No: el segundo parche cae corrido |
+| `fuga.py` | No aplica nada. Solo lee las líneas agregadas | Sí |
+| El armado del oráculo oculto | Aplica `tests.diff` sobre el repo del builder | **No.** El builder cambió el archivo de producción. Un parche sin contexto no encuentra su lugar |
+
+**El último consumidor decide.** En 22 tareas, los tests ocultos van dentro de un archivo que el builder modifica. Un parche `-U0` lleva solo números de línea del padre. Sobre el archivo del builder, esos números no valen. Un parche con contexto se ubica por las líneas vecinas, aunque el archivo haya cambiado.
+
+**Decisión: `diff.txt` y `tests.diff` se regeneran con contexto, y en un orden fijo.**
+1. **`tests.diff` es el diff con 3 líneas de contexto** entre el padre y "padre + tests". El estado "padre + tests" sale de aplicar los hunks de test que ya separa `hunks_de_test`.
+2. **`diff.txt` es el diff con 3 líneas de contexto** entre "padre + tests" y el commit.
+3. **El orden de aplicación queda fijo:** primero `tests.diff` sobre el padre, después `diff.txt`. Cada parche se calcula sobre el estado anterior, así que ninguno cae corrido.
+4. **El control de `armar_tarea.py`** aplica los dos en ese orden y compara con el árbol del commit.
+5. **`dataset.json` suma un campo `tests_en_linea`,** verdadero en las tareas cuyos tests tocan archivos de producción.
+
+**Un riesgo que queda para el armado del oráculo.** En las 22 tareas con tests en línea, el parche oculto se aplica sobre el archivo del builder. Si el builder reescribió justo esa zona, el parche no aplica, aun con contexto. Entonces la tarea queda sin veredicto en Pruebas o Funciona, nunca con un veredicto falso. El orquestador cuenta cuántas veces pasa en las primeras evaluaciones. Si es frecuente, la vuelta siguiente lo resuelve.
+
+## 4. Los esbozos y las fichas de las 36 tareas
+
+**Una corrección de números.** `dataset.json` tiene 17 tareas de función nueva, no 21: 11 de r4 (watchexec 6, heapless 5) y 6 de `nf/`. Ninguna es de BoilR ni de IronCalc, que son repos del final. Está bien así.
+
+**El dataset, por tipo y por repo:**
+- **Arreglo, 16:** broot 5, ron 5, bytes 4, eyre 1 y watchexec 1.
+- **Función nueva, 17:** broot 6, watchexec 6 y heapless 5.
+- **S2, 3:** broot. Ya tienen ficha aprobada.
+- **broot tiene 14 de 36.** Con P116 b, el dataset queda así. Las métricas se informan también por repo.
+
+**El orden:**
+1. **`armar_tarea.py` regenera los diffs con contexto,** sin podman. Va antes de todo lo demás.
+2. **`esbozos.py` corre sobre las 17 de función nueva,** en podman, en una ventana libre. Las 6 de `nf/` también: su `interfaz.json` viejo salió con la regla vieja.
+3. **Las fichas de arreglo se escriben mientras corren los esbozos.** No necesitan interfaz, y escribir no carga la laptop.
+4. **Las fichas de función nueva van después de sus esbozos.** Una tarea cuyo esbozo no compila sale, por P99 a, y no lleva ficha.
+
+**Las fichas son 33:** las 36 menos las 3 de S2. Las 6 de `nf/` tienen un `SPEC.md` viejo, sin interfaz, y se reescriben.
+
+**Las 3 que revisa primero el usuario.** Una de cada grupo distinto, elegida por `sha256("20261116/revision/"+sha)` dentro del grupo:
+1. un arreglo de un repo nuevo: ron, bytes, eyre o watchexec;
+2. una función nueva de un repo nuevo: watchexec o heapless;
+3. un arreglo de broot.
+
+Cada una muestra un riesgo distinto: un repo que Root no conoce, la interfaz de P99 a, y el repo que domina el dataset.
+
+**Las tandas.** Después de la aprobación de las 3 primeras:
+- **El orquestador escribe 6 fichas por tanda,** 2 de cada grupo, hasta terminar los grupos.
+- **Cada ficha pasa `fuga.py` antes de entrar a la tanda.** Una ficha que falla se reescribe, y no cuenta para la tanda.
+- **Una tanda se cierra con un resumen al usuario:** cuántas pasaron `fuga.py` y cuántas tareas salieron por esbozos.
+- **El usuario no revisa cada ficha.** Por P81, revisa las 3 primeras, y después puede pedir cualquiera.
+- **Las fichas las escribe el orquestador con el cupo,** sin API.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | El usuario | Laptop y el usuario | No |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD |
+| 4 | La Prueba 0g, etapa 1, y la 2 si hace falta | Nada; puede correr ya | Colab, CPU | No |
+| 5 | `armar_tarea.py` con diffs con contexto, y `tests_en_linea` | Nada; puede correr ya | Laptop, sin podman | No |
+| 6 | `esbozos.py` sobre las 17 de función nueva | El paso 5 | Laptop, podman, en una ventana libre | No |
+| 7 | Las 3 fichas de revisión, y su aprobación | El paso 5. La de función nueva espera el paso 6 | Laptop, cupo, y el usuario | No |
+| 8 | La Tarea 156 con la opción A | Nada. No corre a la vez que el paso 6 | Laptop, builder | No |
+| 9 | Armar la cadena con la 156, y su suite con podman | El paso 8 | Laptop, podman | No |
+| 10 | Las 30 fichas restantes, en tandas de 6 | El paso 7 | Laptop, cupo | No |
+| 11 | La mezcla de la cadena 110 a 156 | La orden del usuario | — | No |
+| 12 | Congelar la versión | Los pasos 3 y 9 | — | No |
+| 13 | Las doce calibraciones de oráculo con la versión congelada | El paso 12 | Colab, cuatro runtimes | No |
+| 14 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 12 | Laptop | Según la regla del final |
+| 15 | La validez sobre el final sellado | Los pasos 1 a 14 | Colab, notebook si usa el juez | Según el final |
+
+**La regla de carga.** Los pasos 6, 8 y 9 cargan la laptop, y corren de a uno. Los pasos 2, 3, 4 y 13 van en Colab. Los pasos 5, 7 y 10 no cargan la laptop.
+
+**Preguntas al usuario:** ninguna nueva.

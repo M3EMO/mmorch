@@ -1,6 +1,6 @@
 # Brief de la Tarea 156 para el builder local
 
-Este brief vale solo. No necesita otra conversación. La fuente de verdad es `.claude/plans/root.plan.md`, vuelta (68).
+Este brief vale solo. No necesita otra conversación. La fuente de verdad es `.claude/plans/root.plan.md`, vueltas (68) y (69).
 
 ## Qué es Root
 
@@ -10,11 +10,11 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 ## Base, rama y roles
 
-- Arrancá desde la punta de `laptop/cadena-110-155`. Trae las Tareas 84 a 155 y la 127b.
-- **Arrancá cuando el orquestador te pase el resultado de la Prueba 0f.** Ese resultado decide si el punto 1 se hace.
-- Ningún otro builder corre a la vez.
+- **Esta es la segunda versión del brief.** La primera terminó sin código, en `laptop/tarea-156` (8570e9e). Su informe propuso tres opciones, y el planner eligió la A.
+- Arrancá desde la punta de `laptop/tarea-156`. Trae la cadena 110 a 155 y el informe de la primera versión.
+- Ningún otro builder corre a la vez. **No corras mientras el orquestador use podman** para `esbozos.py`.
 - No uses `isolation: "worktree"` para tus subagentes.
-- Trabajá en tu propio worktree, en una rama nueva: `laptop/tarea-156`. Después de `git worktree add`, fijá `git config --worktree core.hooksPath .githooks`. Preguntale al orquestador qué worktree usar.
+- Trabajá en el mismo worktree y en la misma rama: `laptop/tarea-156`. Preguntale al orquestador si cambió.
 - La mezcla espera la orden del usuario.
 - Sonnet organiza y revisa. Haiku construye cada parte. Una corrección empieza con un test en rojo.
 - El builder no decide producto. Una duda de producto va a "Preguntas para el planner" del informe.
@@ -25,16 +25,16 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 | Punto | Podés tocar |
 |---|---|
-| 1, las CPU que Root no puede usar | `src/oracle/eficiencia.rs` |
-| 2, el aviso de carga ajena en el caso | `src/oracle/eficiencia.rs`, y el lugar de la fila del caso que lo reciba |
+| 1, la carga ajena como número en el caso | `src/oracle/eficiencia.rs`, `src/oracle/calibra.rs` |
+| 1, si el número cruza `Veredicto` | además, el archivo donde vive el struct que lleva las medidas de Eficiencia al veredicto |
 
-- Los dos puntos comparten archivo. Van en serie, en este orden.
-- **El punto 2 puede pedir otro archivo,** por ejemplo `src/oracle/calibra.rs`, donde se arma el renglón del caso. Antes de tocarlo, anotá en el informe qué archivo y por qué. Solo ese archivo, y solo para llevar el aviso.
+- **Antes de tocar un tercer archivo,** anotá en el informe cuál es y por qué. Solo ese archivo, y solo para llevar el número.
 - **Tests de otros archivos.** Podés editar un test de cualquier archivo si lee un literal o una firma que esta tarea cambia. Solo el test, no código de producción. Anotá cada uno en el informe.
-- **No toques:** `src/oracle/contenedor.rs`, `src/colab_calibra.rs`, `src/tipos.rs`, el resto de `src/`, `tools/`, `imagenes/`, `rubricas/` y `$ROOT_HOME/`.
-- **Sin cambio de esquema.** Si el aviso no cabe en un campo que ya existe, detenete y escribilo en el informe.
+- **No toques:** `src/oracle/contenedor.rs`, `src/colab_calibra.rs`, el resto de `src/`, `tools/`, `imagenes/`, `rubricas/` y `$ROOT_HOME/`.
+- **El esquema cambia solo por adición.** Cada campo nuevo es `Option<…>` con `#[serde(default)]`. Una fila vieja se lee igual, con el campo vacío.
+- **Interfaces.** Si `r00t esquema` o `docs/interfaces.md` muestran `CasoGuardado` o `Veredicto`, regeneralos.
 - **Sin dependencias nuevas** en `Cargo.toml`.
-- Si un arreglo necesita un archivo fuera de tu lista, detenete y escribilo en el informe.
+- Si un arreglo necesita otro archivo fuera de tu lista, detenete y escribilo en el informe.
 
 ## Entorno
 
@@ -47,45 +47,39 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 ## Por qué
 
-**La v6 de Eficiencia corrió en Colab, en tres runtimes de 2 núcleos.** En t1 y t3, casi todos los casos perdieron sus tiempos con "la máquina tenía carga ajena: 1.00 núcleos de 2", de 1,00 a 1,02. En t2, los tiempos tuvieron valor.
+**La v6 de Eficiencia corrió en Colab.** En t1 y t3, casi todos los casos perdieron sus tiempos con "la máquina tenía carga ajena: 1.00 núcleos de 2". En t2, no. Para revisar el umbral hace falta el valor de cada caso, y hoy ese valor se pierde.
 
-**Cómo mide Root la carga ajena hoy.** `Vigilancia::correr` lee la línea `cpu ` de `/proc/stat` antes y después de cada corrida medida. Le resta `ROOT_CPU_US`, la CPU propia que mide `root-medir.py` con `getrusage`. Divide por el reloj. El umbral es la mitad de `available_parallelism`.
+**Dónde se pierde, según el informe de la primera versión:**
+- `Vigilancia::aviso` arma la línea "eficiencia: mayor carga ajena de una corrida: X núcleos de N".
+- `medir_contra_referencia` la suma a `avisos`.
+- `oracle/mod.rs` la pasa a `Veredicto.avisos`.
+- `CasoGuardado::de`, en `src/oracle/calibra.rs`, no copia `veredicto.avisos`. El valor se pierde ahí.
 
-**Una causa posible: la VM tiene más CPU de las que Root puede usar.** La línea `cpu ` suma todas las CPU de la VM. `available_parallelism` cuenta solo las que permiten el cgroup o la afinidad. Un servicio de Colab en una CPU extra cuenta como carga ajena, aunque no compite con la corrida. El valor fijo de 1,00 apunta a eso. La Prueba 0f del orquestador lo confirma o lo descarta.
+**Por qué la A.** El planner eligió un campo numérico, `carga_ajena: Option<f64>`.
+- El umbral se revisa con números, y un número no pide parseo.
+- Una lista de avisos en texto, la B, mezcla avisos de distinto tipo y obliga a parsear.
+- Reusar `MedidaEficiencia.motivo`, la C, rompe su regla: hoy, sin motivo, la medida tiene valor.
 
-**El aviso de mayor carga ajena no llega al caso.** La 149 suma a `avisos` de `medir` la línea "eficiencia: mayor carga ajena de una corrida: X núcleos de N". Los casos de la v6 no la traen en ningún campo. Sin ese dato, el umbral no se puede revisar.
+**El punto 1 de la primera versión no vuelve.** La Prueba 0f mostró 2 CPU visibles y 2 usables en Colab. La causa probable de la carga ajena es el robo de CPU del hipervisor. La Prueba 0g del orquestador lo va a medir. No pide código en esta tarea.
 
 ## Tarea
 
-La regla que manda: **la carga ajena cuenta solo lo que compite con la corrida, y su valor queda en el caso.** Hacé un commit por punto. Cada punto empieza con su test en rojo.
+La regla que manda: **el caso guarda su mayor carga ajena como número, y el número viaja por la estructura, no por un texto.** Hacé un commit. Empieza con su test en rojo.
 
-### 1. Las CPU que Root no puede usar
+### 1. La carga ajena como número en el caso
 
-**Hacelo solo si la Prueba 0f muestra más CPU en `/proc/stat` que `available_parallelism`.** Si no, no lo hagas, y anotalo en el informe.
-
-1. **Contá las CPU visibles:** las líneas `cpuN` de la misma fuente de `/proc/stat`. Llamalas `v`.
-2. **Las CPU que Root puede usar** siguen siendo `available_parallelism`. Llamalas `n`.
-3. **La carga ajena efectiva** es `max(0, ajena − (v − n))`. Un servicio en una CPU que Root no puede usar no compite con la corrida.
-4. **Con `v = n`, nada cambia.** Es el caso de la laptop.
-5. **Con `v < n`,** algo anda mal en la lectura. La corrida no tiene control, con un motivo que da `v` y `n`.
-6. **El comentario** explica la resta y cita la v6: "1.00 núcleos de 2" en t1 y t3.
-7. **`ROOT_PROC_STAT` sigue sirviendo** para los tests. El archivo falso puede traer líneas `cpuN`.
+1. **`CasoGuardado` suma `carga_ajena: Option<f64>`,** con `#[serde(default)]`. Es la mayor carga ajena de las corridas medidas del caso, en núcleos.
+2. **El número viaja por la estructura.** Seguí el camino que ya lleva las medidas de Eficiencia desde `medir` hasta `CasoGuardado::de`. No parsees el texto de `Veredicto.avisos`.
+3. **Si el camino cruza `Veredicto`,** sumá ahí un campo opcional, también con `#[serde(default)]`. Elegí el struct que ya lleva las medidas de Eficiencia, si existe.
+4. **Un caso de otra dimensión** deja `carga_ajena` vacío.
+5. **Un caso de Eficiencia sin control de carga,** por ejemplo sin fuente o sin `ROOT_CPU_US`, también lo deja vacío. Nunca se escribe un cero supuesto.
+6. **El aviso de texto en `Veredicto.avisos` no cambia.**
 
 **Tests en rojo primero:**
-- Unitario: con `v = 4`, `n = 2`, y un núcleo ajeno fijo, la corrida no queda cargada. Hoy queda cargada con "1.00 núcleos de 2".
-- Unitario: con `v = 4`, `n = 2`, y 3,5 núcleos ajenos, la corrida queda cargada.
-- Unitario: con `v = 2` y `n = 4`, la corrida no tiene control, con un motivo que da los dos números.
-- Guarda: con `v = n = 8`, los tests de carga de la 149 siguen verdes.
-
-### 2. El aviso de carga ajena en el caso
-
-1. **Buscá dónde se arma el renglón de un caso** de la calibración, y qué campo de texto ya existente puede llevar el aviso. Por ejemplo, un `motivo` o una lista de avisos del caso.
-2. **El renglón de cada caso de Eficiencia lleva su mayor carga ajena,** aunque no haya pasado el umbral.
-3. **Sin cambio de esquema.** Si ningún campo existente sirve, no lo agregues. Detenete y anotá las opciones en el informe.
-
-**Tests en rojo primero:**
-- Unitario: un caso de Eficiencia con una carga ajena de 0,30 núcleos guarda ese valor en su renglón. Hoy no lo guarda.
-- Guarda: un caso de otra dimensión no cambia.
+- Unitario: un caso de Eficiencia con una carga ajena de 0,30 núcleos guarda 0,30 en `carga_ajena`. Hoy no guarda nada.
+- Unitario: un caso de Eficiencia sin control de carga deja `carga_ajena` vacío.
+- Guarda: un caso de otra dimensión deja `carga_ajena` vacío.
+- Guarda: un renglón viejo, sin el campo, se lee sin error.
 
 No corras la validez, `corre`, `calibrar` ni la pasada reales. Las corre el orquestador.
 
@@ -93,7 +87,6 @@ No corras la validez, `corre`, `calibrar` ni la pasada reales. Las corre el orqu
 
 El builder no corre suites con podman. Quedan para el orquestador:
 - La suite con podman de la cadena con la 156.
-- Si se hizo el punto 1, la v6 otra vez en Colab, con tres runtimes.
 
 ## Reglas
 
@@ -103,17 +96,16 @@ El builder no corre suites con podman. Quedan para el orquestador:
 - **Sin dinero.** No llames a ninguna API real ni a Colab.
 - **Borrados.** Todo borrado de archivos de Root pasa por `src/borrado.rs`.
 - **Temporales.** Ningún test crea carpetas en `/tmp` del host.
-- **Interfaces.** Esta tarea no cambia el esquema.
 - **Idioma.** Los documentos y los mensajes van en Español Técnico Simplificado: oraciones de 20 palabras o menos, una idea por oración, voz activa.
 
 ## Informe
 
-Al terminar, escribí `docs/builds/informe-local-156.md` con estas secciones:
+Al terminar, reemplazá `docs/builds/informe-local-156.md` con estas secciones:
 
 1. **Resultado de la suite**: la base y el final, con verdes, fallas e ignorados, con `ROOT_SIN_PODMAN=1`.
 2. **Commits**: una tabla con punto, defecto, tests vistos en rojo y commit.
-3. **Qué falló o quedó incompleto**: cada punto sin hacer o sin probar, con su motivo. Si no hiciste el punto 1, decí qué mostró la Prueba 0f.
-4. **Dónde quedó el aviso**: el campo del renglón, y un ejemplo.
+3. **Qué falló o quedó incompleto**: cada punto sin hacer o sin probar, con su motivo.
+4. **El camino del número**: desde `Vigilancia` hasta `CasoGuardado`, struct por struct, y cada campo nuevo.
 5. **Tests que cambiaron de valor**, con su motivo, y cada test de otro archivo que editaste.
 6. **Llamadores revisados**: por cada firma cambiada, los llamadores de codegraph y de grep.
 7. **Preguntas para el planner**: numeradas, con la decisión que tomó el organizador.
