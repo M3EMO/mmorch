@@ -12993,3 +12993,156 @@ Cada una muestra un riesgo distinto: un repo que Root no conoce, la interfaz de 
 **La regla de carga.** Los pasos 6, 8 y 9 cargan la laptop, y corren de a uno. Los pasos 2, 3, 4 y 13 van en Colab. Los pasos 5, 7 y 10 no cargan la laptop.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-16 (70): las preguntas de la 156, los esbozos que fallan, y la carga medida en la misma VM
+
+**Estado.**
+- **La 156 implementó la opción A** en eb0f2ce. Su informe es 505cf34. Tocó `src/oracle/mod.rs`, `src/tipos.rs` y `docs/interfaces.md`, y lo anotó. `tipos.rs` es el archivo de `Veredicto`, que el brief permitía.
+- **La suite de `laptop/cadena-110-156`** (505cf34) dio 3926/0/5.
+- **`armar_tarea.py` ya escribe diffs con contexto.** Las 33 tareas únicas pasan el control. 3 arreglos de broot quedan marcados como duplicados de S2.
+- **Las carpetas de `nf/` siguen con sus diffs viejos.**
+- **`esbozos.py` corrió sobre 17 tareas:** compilan 7 y fallan 10.
+- **`fuga.py` cambió:** compara literales por palabra entera, y exime la interfaz y el nombre del programa.
+- **Las 3 fichas de revisión están escritas y pasan los chequeos.** Esperan la aprobación del usuario, por P81.
+- **La Prueba 0g etapa 1 no mostró robo de CPU.** La etapa 2 está bloqueada: no hay un modo que deje un runtime preparado abierto.
+- El paquete del juez espera `paso0-juez.sh`.
+
+## 1. Las dos preguntas de la 156
+
+1. **¿Un filtro por dimensión en `CasoGuardado::de`? No.**
+   - La fuente del número es `Veredicto.carga_ajena`, y solo la medición de Eficiencia lo llena.
+   - Un filtro repetiría esa regla en otro lugar, y un lector tendría que mantener las dos iguales.
+   - El test `caso_de_otra_dimension_guarda_carga_ajena_none` ya fija el comportamiento.
+2. **¿Solo la carga propia del caso, sin la de la base? Sí, está bien.**
+   - El número sirve para revisar el umbral de cada medición.
+   - La carga de la base ya llega al caso como motivo heredado. Sumarla al número mezclaría dos mediciones.
+   - Cuando la base está cargada, el caso ya lo dice en su motivo.
+
+**No hace falta la Tarea 157 por estas preguntas.**
+
+## 2. Los 10 fallos de `esbozos.py`
+
+**heapless, 5 tareas. La causa: `hunks_de_test` corta los tests en línea por hunk.**
+- Con `-U0`, un hunk entra a los tests solo si agrega un atributo de test.
+- Un módulo `#[cfg(test)]` nuevo trae, en hunks aparte, sus `use`, sus helpers y sus constantes. Esos hunks no tienen atributo, y caen en `diff.txt`.
+- El estado "padre + tests" queda sin esas piezas, y no compila.
+
+**El arreglo: separar por bloque `#[cfg(test)]` completo.**
+1. En cada archivo de producción, se ubican los ítems con `#[cfg(test)]` del padre y del commit: un `mod` entero, un `use` o una función.
+2. El límite de un `mod` sale de contar llaves. El contador salta las cadenas, los caracteres, las cadenas crudas y los comentarios.
+3. "Padre + tests" es el archivo del padre con sus ítems de test reemplazados por los del commit. Un ítem nuevo va al final del archivo.
+4. Si el contador no cierra un bloque, la tarea sale con el motivo "tests en línea sin separar".
+5. **La regla nueva se aplica solo donde la vieja falla:** el control o el esbozo. En las tareas de arreglo que ya pasaron, la separación de la admisión no cambia, porque su etiqueta se midió con ella.
+6. **En heapless, la etiqueta no cambia.** Las tareas son de función nueva. Su criterio 1 comparó el padre y el commit enteros, sin separar nada.
+
+**watchexec da832dd544, un E0061. La causa: el esbozo no cambia la firma de una función que ya existe.**
+- E0061 dice que una función recibe otra cantidad de argumentos. Es una firma cambiada, no un nombre nuevo.
+- **El arreglo:** el esbozo reemplaza la firma de esa función en el padre por la de `diff.txt`, con cuerpo `todo!()`. La interfaz la declara como "cambia su firma".
+- Si la función aparece más de una vez con ese nombre, la tarea sale.
+
+**watchexec 0e0146fa51, errores sin código.**
+- **La causa más probable es una macro nueva.** "cannot find macro" no tiene código de error.
+- El orquestador lee el mensaje del primer error de `rojo.json` en privado. No lo imprime si nombra un test.
+- **Si es una macro, la tarea sale.** Declarar una macro en la interfaz es dar su cuerpo, y eso filtra la solución.
+- Si es otra cosa, el orquestador lo informa en la vuelta siguiente.
+
+**nf 43e045ff7e, un E0432 sin nombre.**
+- **La causa:** en un `use a::{B, C}`, el nombre que falta no está en el mensaje principal. Está en una etiqueta del diagnóstico: "no `B` in `a`".
+- **El arreglo:** `esbozos.py` busca el nombre también en las etiquetas y en los hijos del diagnóstico, no solo en `message`.
+
+**nf 8f994ae89f, errores que quedan después del esbozo.**
+- El orquestador mira los códigos de los errores que quedan.
+- **Si son E0277 o E0046 por un `impl Trait for Tipo` de `diff.txt`,** el esbozo suma ese `impl`, con cada método en `todo!()`. La interfaz lo declara como "implementa Trait". Esto cabe en P99 a: son funciones, con nombre, firma y módulo.
+- **Si son otros,** la tarea sale con su código.
+
+**nf 6f8e882844, el padre no está en el clon.**
+- El clon es `--filter=blob:none`. Un padre en otra rama, o fuera del historial descargado, puede faltar.
+- **El arreglo:** `git fetch origin <padre>`, sin ejecutar nada del repo. GitHub entrega un commit por su sha si sigue alcanzable.
+- **Si el fetch falla,** el commit ya no existe en el repo, y la tarea sale.
+
+**Después de los arreglos, `esbozos.py` corre otra vez sobre las 10.** Las que siguen sin compilar salen del dataset, por P99 a.
+
+## 3. Las carpetas de `nf/`
+
+**Sí, se regeneran con `armar_tarea.py`,** con diffs con contexto y la misma regla de separación.
+- El oráculo aplica `tests.diff` sobre el repo del builder, y necesita contexto.
+- `esbozos.py` vuelve a correr sobre las 6, con los diffs nuevos.
+- Sus `SPEC.md` viejos ya se iban a reescribir, porque no tienen interfaz. Ahora se reescriben después del esbozo nuevo.
+- **Las carpetas viejas no se borran.** Se renombran a `nf-viejo/`, como respaldo, hasta que las 6 pasen.
+
+## 4. La Prueba 0g etapa 2: medir en la misma VM
+
+**El problema.** La etapa 1 no mostró robo de CPU. La carga de 1,00 núcleos aparece solo durante una corrida real. Para verla hay que muestrear mientras Root mide, en la misma VM.
+
+**La opción sin código: un muestreo en paralelo con el trabajo de `colab calibrar`.**
+1. El orquestador lanza `r00t colab calibrar` con un solo trabajo: `s2-t1:eficiencia:1`. Usa el binario de la cadena 156.
+2. La sesión del runtime queda en `ROOT_HOME/colab/activo.json`.
+3. Mientras el trabajo corre, el orquestador abre un segundo `colab exec -s <sesión>`. Ese exec corre un muestreo de 30 minutos: cada 2 segundos, la línea `cpu` de `/proc/stat`, y `ps -eo pid,ppid,pgid,stat,time,comm --sort=-time | head -25`.
+4. Al terminar, el muestreo imprime solo un resumen: por intervalo, los núcleos ocupados, el robo, y los procesos con más CPU dentro y fuera del árbol de bwrap.
+5. **Con la 156, cada caso trae su `carga_ajena`.** El orquestador cruza ese número con el resumen.
+6. Tres runtimes a la vez, como en la v6, para que alguno muestre la carga.
+7. Cuesta cerca de 0,2 unidades.
+
+**Si el segundo exec espera a que termine el primero,** la opción sin código no sirve. Entonces hace falta la Tarea 157: un flag `--sin-stop` en `colab calibrar`.
+- El flag deja el runtime abierto al final, e imprime su sesión.
+- `activo.json` lo anota, para que nadie lo olvide.
+- El orquestador corre el muestreo en ese runtime y lo cierra con `stop`.
+- Toca solo `src/colab_calibra.rs` y `src/cli.rs`.
+
+El brief de la 157 se escribe solo si la opción sin código falla.
+
+**Qué hace el orquestador con cada resultado:**
+
+| Resultado | Qué significa | Qué hace |
+|---|---|---|
+| Un proceso de Colab, fuera del árbol de bwrap, con cerca de un núcleo durante el trabajo. Por ejemplo, el kernel de Jupyter o el agente de `exec` | La maquinaria de `exec` compite mientras espera al trabajo | Una tarea: el guion del trabajo corre separado, con `setsid` y `nohup`, y la laptop consulta su estado con execs cortos |
+| Procesos dentro del árbol de bwrap, adoptados por su `init` | Huérfanos que `getrusage` no cuenta | Una tarea: `root-medir.py` se marca como `subreaper` con `prctl` |
+| El robo de CPU aparece solo durante el trabajo | Robo que la etapa 1 no provocó | El procedimiento de la vuelta (69): medir el robo antes de calibrar, y cambiar de runtime |
+| Nada de lo anterior, y la carga de los casos cerca de 0 | La carga no se reprodujo | Se informa. Los tiempos marcados siguen sin valor, y la memoria decide |
+
+**Por qué t2 pudo no tener el problema.** Si la causa es la maquinaria de `exec`, t2 pudo esperar con menos consultas o con menos salida. Si es el robo, t2 cayó en una máquina física con menos vecinos. El muestreo distingue las dos.
+
+## 5. Las fichas que faltan
+
+**Las cuentas.**
+- **33 tareas únicas.** Las 3 de S2 ya tienen ficha aprobada.
+- **Quedan 30 fichas.** 3 ya están escritas para la revisión.
+- **Faltan 27,** menos las tareas que salgan por los esbozos.
+- **Un control antes de la tanda 1:** la ficha de revisión de broot, 136a5c6c71, no debe ser uno de los 3 arreglos duplicados de S2. Si lo es, se elige otra con la misma semilla.
+
+**Las tandas de 6 se confirman,** con 2 fichas por grupo mientras alcance:
+- arreglo de un repo nuevo;
+- función nueva de un repo nuevo;
+- broot.
+
+Cuando un grupo se agota, sus lugares van a los otros grupos.
+
+**Ninguna tanda empieza antes de que el usuario apruebe las 3 de revisión.**
+
+**Si el usuario pide cambios en las 3 de revisión:**
+- **Un cambio en una sola ficha:** el orquestador la reescribe, y vuelve a pasar `fuga.py` y `r00t ficha revisar`. Después la reenvía.
+- **Un cambio de método,** que vale para todas: el orquestador lo escribe como regla en `mineria/METODO.md`, y lo aplica a las 3. Las tandas usan la regla nueva desde la primera.
+- **Un rechazo de la tarea,** no de la ficha: la tarea sale del dataset, y entra otra del mismo grupo con la misma semilla.
+
+## 6. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API |
+|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | El usuario | Laptop y el usuario | No |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD |
+| 4 | La Prueba 0g etapa 2, sin código | Nada; puede correr ya | Colab, tres runtimes de CPU | No |
+| 5 | La Tarea 157, solo si el paso 4 no puede muestrear en paralelo | El paso 4 | Laptop, builder | No |
+| 6 | La aprobación de las 3 fichas de revisión | El usuario | — | No |
+| 7 | Los arreglos de `esbozos.py`, `armar_tarea.py` y el fetch del padre | Nada; puede correr ya | Laptop, sin podman | No |
+| 8 | `armar_tarea.py` sobre `nf/`, y `esbozos.py` otra vez sobre las 10 y las 6 de `nf/` | El paso 7 | Laptop, podman, en una ventana libre | No |
+| 9 | Las 27 fichas restantes, en tandas de 6 | Los pasos 6 y 8 | Laptop, cupo | No |
+| 10 | La mezcla de la cadena 110 a 156 | La orden del usuario | — | No |
+| 11 | Congelar la versión | El paso 3 | — | No |
+| 12 | Las doce calibraciones de oráculo con la versión congelada | El paso 11 | Colab, cuatro runtimes | No |
+| 13 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 11 | Laptop | Según la regla del final |
+| 14 | La validez sobre el final sellado | Los pasos 1 a 13 | Colab, notebook si usa el juez | Según el final |
+
+**La regla de carga.** El paso 8 usa podman, y el paso 5 compila. Corren de a uno en la laptop. Los pasos 2, 3, 4 y 12 van en Colab. El paso 4 usa tres runtimes. Si coincide con el notebook de P107 a, el orquestador revisa el cupo de la cuenta.
+
+**Preguntas al usuario:** ninguna nueva. La aprobación de las 3 fichas de revisión sigue abierta, por P81.
