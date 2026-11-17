@@ -20,7 +20,8 @@ use crate::oracle::tarea::{Requisito, Tarea};
 use crate::tipos::{Dimension, Fuente, Hallazgo};
 
 /// Sube cuando cambia una sonda de Seguridad. Cambia la clave de la línea base guardada.
-pub const VERSION_SONDAS_SEGURIDAD: u32 = 3;
+/// 4: `configs-secretos` deja de marcar `read`, `write` y `none` (Tarea 159).
+pub const VERSION_SONDAS_SEGURIDAD: u32 = 4;
 
 /// Aviso del veredicto cuando la tarea no trae `bootstrap/`.
 pub const AVISO_SIN_ESTADO_INICIAL: &str =
@@ -1088,6 +1089,36 @@ mod tests {
         );
         let marcada = LineaBase {
             cargo_audit: BTreeMap::from([("MARCA|3".to_string(), vec![1])]),
+            ..LineaBase::default()
+        };
+        let ruta = home
+            .path()
+            .join(CARPETA)
+            .join(&tarea.nombre)
+            .join(format!("{vieja}.json"));
+        guardar(&ruta, &marcada).expect("guarda la base con la clave vieja");
+
+        let base = linea_base(home.path(), &tarea, bootstrap.path(), &ej);
+        assert_ne!(base, marcada, "la base con la clave vieja no se reusa");
+        assert!(ej.cuantos() > 0, "la base se recalcula con las sondas");
+    }
+
+    #[test]
+    fn previos_linea_base_con_la_version_3_no_se_reusa() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let bootstrap = tempfile::tempdir().expect("temp dir");
+        fs::write(bootstrap.path().join("Cargo.lock"), CARGO_LOCK).expect("escribe el lock");
+        let (_tarea_dir, tarea) = tarea_rust();
+        let ej = EjecutorContado::nuevo();
+
+        let vieja = clave_de_version(&tarea, bootstrap.path(), &ej, 3).expect("hay clave");
+        assert_ne!(
+            Some(vieja.clone()),
+            clave_de(&tarea, bootstrap.path(), &ej),
+            "la versión nueva de las sondas cambia la clave"
+        );
+        let marcada = LineaBase {
+            cargo_audit: BTreeMap::from([("MARCA|v3".to_string(), vec![1])]),
             ..LineaBase::default()
         };
         let ruta = home
