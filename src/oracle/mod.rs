@@ -2654,7 +2654,13 @@ fn evaluar_suite(
     let previa = clasificar(&completas, &[], excluidos);
     let mut extras = Vec::new();
     if !previa.inestables.is_empty() && c.tarea.repeticiones_inestable > c.tarea.repeticiones {
-        let reintento = reintento_de(comando, dir, &previa.inestables, &c.tarea.lenguaje)?;
+        let reintento = reintento_de(
+            comando,
+            dir,
+            &previa.inestables,
+            &previa.nombres,
+            &c.tarea.lenguaje,
+        )?;
         for _ in c.tarea.repeticiones..c.tarea.repeticiones_inestable {
             // El reintento corre solo los inestables: su junit no trae la lista completa.
             match correr_una(c, &reintento, dir, xml, pytest, None, correr)? {
@@ -2758,16 +2764,17 @@ fn esperados_de_requisitos(
 }
 
 /// Comando de las corridas extra: corre solo los tests `inestables` de la suite `dir`.
-/// Según `lenguaje`: Rust usa un filtro de nextest; los demás (Python, shell, etc.) usan node ids
-/// `archivo.py::nombre`. Sin plantilla `reintento`, reemplaza la cola de `cmd` que termina en `dir`.
+/// Según `lenguaje`: Rust filtra por el `name` del junit (`nombres`); los demás (Python, shell, etc.)
+/// usan node ids `archivo.py::nombre`. Sin plantilla `reintento`, reemplaza la cola de `cmd` que termina en `dir`.
 fn reintento_de(
     comando: &Comando,
     dir: &str,
     inestables: &[String],
+    nombres: &BTreeMap<String, String>,
     lenguaje: &str,
 ) -> Result<String, ErrorOraculo> {
     if lenguaje == "rust" {
-        return Ok(reintento_rust(comando, inestables));
+        return Ok(reintento_rust(comando, inestables, nombres));
     }
     let lista = inestables
         .iter()
@@ -2785,29 +2792,39 @@ fn reintento_de(
     }
 }
 
-/// Comando de reintento de Rust. Con `reintento`, `{tests}` pasa a un solo filtro de nextest.
-/// Sin `reintento`, devuelve `cmd` entero: el comando ya corre sus tests.
-fn reintento_rust(comando: &Comando, inestables: &[String]) -> String {
-    match &comando.reintento {
-        Some(plantilla) => {
-            let filtro = inestables
-                .iter()
-                .map(|id| termino_nextest(id))
-                .collect::<Vec<_>>()
-                .join(" | ");
-            plantilla.replace("{tests}", &comillas(&filtro))
-        }
-        None => comando.cmd.clone(),
-    }
+/// Comando de reintento de Rust. Con `reintento`, `{tests}` pasa a un filtro de nextest: un
+/// `test(=<name>)` por inestable, con el `name` del testcase del junit. Si algún inestable no tiene
+/// `name` anotado, o sin `reintento`, devuelve `cmd` entero: el comando ya corre sus tests.
+fn reintento_rust(
+    comando: &Comando,
+    inestables: &[String],
+    nombres: &BTreeMap<String, String>,
+) -> String {
+    let Some(plantilla) = &comando.reintento else {
+        return comando.cmd.clone();
+    };
+    let Some(names) = inestables
+        .iter()
+        .map(|id| nombres.get(id))
+        .collect::<Option<Vec<&String>>>()
+    else {
+        return comando.cmd.clone();
+    };
+    let filtro = names
+        .iter()
+        .map(|nombre| format!("test(={})", escapar_nextest(nombre)))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    plantilla.replace("{tests}", &comillas(&filtro))
 }
 
-/// Término de filtro de nextest para un id de Root `<binario>::<nombre>`.
-/// Separa en el primer `::`: lo anterior es el binario y lo demás el nombre. Sin `::`, es solo el nombre.
-fn termino_nextest(id: &str) -> String {
-    match id.split_once("::") {
-        Some((binario, nombre)) => format!("(binary_id(={binario}) & test(={nombre}))"),
-        None => format!("test(={id})"),
-    }
+/// Escapa un `name` de Rust para un matcher `test(=<name>)` de nextest. Antepone `\` a `\`, `)` y `,`.
+/// El `(` no se escapa. La barra va primero, para no escapar dos veces lo que se agrega.
+fn escapar_nextest(nombre: &str) -> String {
+    nombre
+        .replace('\\', "\\\\")
+        .replace(')', "\\)")
+        .replace(',', "\\,")
 }
 
 /// Node id de pytest para un test `archivo::nombre` de la suite `dir`.
@@ -2833,6 +2850,8 @@ pub struct Clasificacion {
     omitidos: BTreeSet<String>,
     /// Ids ordenados de los tests inestables.
     inestables: Vec<String>,
+    /// Nombre `name` del testcase de cada id, según las corridas completas. El primero que aparezca gana.
+    nombres: BTreeMap<String, String>,
     /// Tasa de cada test inestable, con la clave `archivo::nombre` (sin prefijo de suite).
     tasas: BTreeMap<String, TasaTest>,
     /// Conteo de la suite. Un inestable no pasa, pero sí cuenta en el total.
@@ -2887,6 +2906,13 @@ fn clasificar(
         .flat_map(|j| j.tests.keys().map(String::as_str))
         .collect();
     let mut c = Clasificacion::default();
+    for j in completas {
+        for (id, nombre) in &j.nombres {
+            c.nombres
+                .entry(id.clone())
+                .or_insert_with(|| nombre.clone());
+        }
+    }
     for id in ids {
         if excluidos.contains(id) {
             continue;
@@ -3853,6 +3879,7 @@ mod tests {
             &c,
             "/oraculo/oculto",
             &["test_f::t_flaky".to_string()],
+            &BTreeMap::new(),
             "python",
         )
         .expect("deriva");
@@ -3869,7 +3896,8 @@ mod tests {
             reintento: Some("pytest -q {tests}".into()),
         };
         let ids = ["a::t1".to_string(), "b::t2".to_string()];
-        let r = reintento_de(&c, "/oraculo/contrato", &ids, "python").expect("plantilla");
+        let r = reintento_de(&c, "/oraculo/contrato", &ids, &BTreeMap::new(), "python")
+            .expect("plantilla");
         assert_eq!(
             r,
             "pytest -q '/oraculo/contrato/a.py::t1' '/oraculo/contrato/b.py::t2'"
@@ -3883,7 +3911,13 @@ mod tests {
             reintento: None,
         };
         assert!(matches!(
-            reintento_de(&c, "/oraculo/oculto", &["a::t".to_string()], "python"),
+            reintento_de(
+                &c,
+                "/oraculo/oculto",
+                &["a::t".to_string()],
+                &BTreeMap::new(),
+                "python"
+            ),
             Err(ErrorOraculo::Tarea(_))
         ));
     }
@@ -3894,8 +3928,14 @@ mod tests {
             cmd: "x /oraculo/oculto".into(),
             reintento: None,
         };
-        let r = reintento_de(&c, "/oraculo/oculto", &["a::it's".to_string()], "python")
-            .expect("deriva");
+        let r = reintento_de(
+            &c,
+            "/oraculo/oculto",
+            &["a::it's".to_string()],
+            &BTreeMap::new(),
+            "python",
+        )
+        .expect("deriva");
         assert_eq!(r, "x '/oraculo/oculto/a.py::it'\\''s'");
     }
 
@@ -3906,10 +3946,12 @@ mod tests {
             reintento: Some("cargo nextest run -E {tests}".into()),
         };
         let ids = ["a::t1".to_string(), "t2".to_string()];
-        let r = reintento_de(&c, "tests", &ids, "rust").expect("filtro");
-        assert!(r.contains("test(="), "{r}");
-        assert!(r.contains(" | "), "{r}");
-        assert!(!r.contains(".py::"), "{r}");
+        let nombres = BTreeMap::from([
+            ("a::t1".to_string(), "t1".to_string()),
+            ("t2".to_string(), "t2".to_string()),
+        ]);
+        let r = reintento_de(&c, "tests", &ids, &nombres, "rust").expect("filtro");
+        assert_eq!(r, "cargo nextest run -E 'test(=t1) | test(=t2)'");
     }
 
     #[test]
@@ -3918,22 +3960,94 @@ mod tests {
             cmd: "cargo nextest run --workspace".into(),
             reintento: None,
         };
-        let r = reintento_de(&c, "/oraculo/oculto", &["a::t".to_string()], "rust");
+        let nombres = BTreeMap::from([("a::t".to_string(), "t".to_string())]);
+        let r = reintento_de(
+            &c,
+            "/oraculo/oculto",
+            &["a::t".to_string()],
+            &nombres,
+            "rust",
+        );
         assert_eq!(r.expect("nunca error"), "cargo nextest run --workspace");
     }
 
     #[test]
-    fn inestable_reintento_rust_binario_se_separa_en_primer_doble_dospuntos() {
+    fn inestable_reintento_rust_nunca_usa_binary_id() {
         let c = Comando {
             cmd: "cargo nextest run".into(),
             reintento: Some("cargo nextest run -E {tests}".into()),
         };
-        let ids = ["mi_crate::mod::t".to_string()];
-        let r = reintento_de(&c, "tests", &ids, "rust").expect("filtro");
+        let ids = ["mi_crate::mod::t".to_string(), "otro::x::y".to_string()];
+        let nombres = BTreeMap::from([
+            ("mi_crate::mod::t".to_string(), "mod::t".to_string()),
+            ("otro::x::y".to_string(), "x::y".to_string()),
+        ]);
+        let r = reintento_de(&c, "tests", &ids, &nombres, "rust").expect("filtro");
+        assert!(!r.contains("binary_id"), "{r}");
+        assert!(r.contains("test(=mod::t)"), "{r}");
+        assert!(r.contains("test(=x::y)"), "{r}");
+    }
+
+    #[test]
+    fn inestable_reintento_rust_sin_nombre_da_el_comando_entero() {
+        let c = Comando {
+            cmd: "cargo nextest run --workspace".into(),
+            reintento: Some("cargo nextest run -E {tests}".into()),
+        };
+        let ids = ["a::t1".to_string(), "a::t2".to_string()];
+        let nombres = BTreeMap::from([("a::t1".to_string(), "t1".to_string())]);
+        let r = reintento_de(&c, "tests", &ids, &nombres, "rust").expect("nunca error");
+        assert_eq!(r, "cargo nextest run --workspace");
+    }
+
+    #[test]
+    fn inestable_reintento_rust_usa_el_name_del_junit_de_punta_a_punta() {
+        let falla = junit::parsear(
+            r#"<testsuite>
+  <testcase classname="paquete::archivo" name="modulo::test_a"><failure message="x"/></testcase>
+</testsuite>"#,
+        )
+        .expect("parsea")
+        .con_ids();
+        let pasa = junit::parsear(
+            r#"<testsuite>
+  <testcase classname="paquete::archivo" name="modulo::test_a"/>
+</testsuite>"#,
+        )
+        .expect("parsea")
+        .con_ids();
+        let previa = clasificar(&[falla, pasa], &[], &sin_exclusiones());
+        assert_eq!(previa.inestables.len(), 1, "{:?}", previa.inestables);
+        let c = Comando {
+            cmd: "cargo nextest run".into(),
+            reintento: Some("cargo nextest run -E {tests}".into()),
+        };
+        let r =
+            reintento_de(&c, "tests", &previa.inestables, &previa.nombres, "rust").expect("filtro");
+        assert_eq!(r, "cargo nextest run -E 'test(=modulo::test_a)'");
+    }
+
+    #[test]
+    fn inestable_clasificar_guarda_el_nombre_del_inestable() {
+        let mut uno = Junit::default();
+        uno.tests.insert("a::t1".into(), ResultadoTest::Falla);
+        uno.nombres.insert("a::t1".into(), "modulo::t1".into());
+        let mut otro = Junit::default();
+        otro.tests.insert("a::t1".into(), ResultadoTest::Pasa);
+        otro.nombres.insert("a::t1".into(), "modulo::t1".into());
+        let c = clasificar(&[uno, otro], &[], &sin_exclusiones());
+        assert_eq!(c.inestables, vec!["a::t1".to_string()]);
         assert_eq!(
-            r,
-            "cargo nextest run -E '(binary_id(=mi_crate) & test(=mod::t))'"
+            c.nombres.get("a::t1").map(String::as_str),
+            Some("modulo::t1")
         );
+    }
+
+    #[test]
+    fn escapar_nextest_escapa_barra_parentesis_y_coma_sin_tocar_el_parentesis_abierto() {
+        assert_eq!(escapar_nextest("a::t(1),x\\y"), "a::t(1\\)\\,x\\\\y");
+        assert_eq!(escapar_nextest("t(1),x"), "t(1\\)\\,x");
+        assert_eq!(escapar_nextest("modulo::test_a"), "modulo::test_a");
     }
 
     #[test]
@@ -3949,11 +4063,11 @@ mod tests {
             reintento: Some("pytest -q {tests}".into()),
         };
         assert_eq!(
-            reintento_de(&sin, "/o/d", &ids, "python").expect("deriva"),
+            reintento_de(&sin, "/o/d", &ids, &BTreeMap::new(), "python").expect("deriva"),
             format!("pytest -q {lista}")
         );
         assert_eq!(
-            reintento_de(&con, "/o/d", &ids, "python").expect("plantilla"),
+            reintento_de(&con, "/o/d", &ids, &BTreeMap::new(), "python").expect("plantilla"),
             format!("pytest -q {lista}")
         );
     }
@@ -3964,8 +4078,14 @@ mod tests {
             cmd: "bash correr.sh /oraculo/oculto".into(),
             reintento: None,
         };
-        let r =
-            reintento_de(&c, "/oraculo/oculto", &["a::t1".to_string()], "shell").expect("deriva");
+        let r = reintento_de(
+            &c,
+            "/oraculo/oculto",
+            &["a::t1".to_string()],
+            &BTreeMap::new(),
+            "shell",
+        )
+        .expect("deriva");
         assert_eq!(r, "bash correr.sh '/oraculo/oculto/a.py::t1'");
     }
 
@@ -3975,7 +4095,14 @@ mod tests {
             cmd: "bash correr.sh /o/d".into(),
             reintento: Some("sh run {tests}".into()),
         };
-        let r = reintento_de(&c, "/o/d", &["a::t1".to_string()], "shell").expect("plantilla");
+        let r = reintento_de(
+            &c,
+            "/o/d",
+            &["a::t1".to_string()],
+            &BTreeMap::new(),
+            "shell",
+        )
+        .expect("plantilla");
         assert_eq!(r, "sh run '/o/d/a.py::t1'");
     }
 
@@ -3985,7 +4112,13 @@ mod tests {
             cmd: "go test ./...".into(),
             reintento: None,
         };
-        match reintento_de(&c, "/oraculo/oculto", &["a::t".to_string()], "go") {
+        match reintento_de(
+            &c,
+            "/oraculo/oculto",
+            &["a::t".to_string()],
+            &BTreeMap::new(),
+            "go",
+        ) {
             Err(ErrorOraculo::Tarea(msg)) => {
                 assert!(msg.contains("no termina en"), "{msg}");
                 assert!(!msg.contains("no tiene regla"), "{msg}");

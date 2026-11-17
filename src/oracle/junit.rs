@@ -30,7 +30,7 @@ pub enum ResultadoTest {
     Omite,
 }
 
-/// Junit leído: conteo por archivo, resultado por test y propiedades `"<test>.<nombre>" -> valor`.
+/// Junit leído: conteo por archivo, resultado y nombre por test, y propiedades `"<test>.<nombre>" -> valor`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Junit {
     pub archivos: BTreeMap<String, ConteoArchivo>,
@@ -39,14 +39,17 @@ pub struct Junit {
     pub tests: BTreeMap<String, ResultadoTest>,
     /// Cuántos testcases trae cada id, aunque se repitan. Misma clave que `tests`.
     pub testcases: BTreeMap<String, u32>,
+    /// Nombre `name` del testcase de cada clave de `tests`. Solo en memoria: no se escribe a disco.
+    /// Tras `con_ids`, la clave es el id `archivo::nombre`, igual que en `tests`.
+    pub nombres: BTreeMap<String, String>,
     pub propiedades: BTreeMap<String, String>,
     /// Marca de red de `correr.sh` (`con-red` o `sin-red`), si el junit la trae. Sin ella, `None`.
     pub red: Option<String>,
 }
 
 impl Junit {
-    /// Copia con las claves de `tests` y `testcases` pasadas a ids `archivo::nombre` (`id_de_clave`).
-    /// Dos claves que dan el mismo id se juntan: una falla gana, y los testcases se suman.
+    /// Copia con las claves de `tests`, `testcases` y `nombres` pasadas a ids `archivo::nombre` (`id_de_clave`).
+    /// Dos claves que dan el mismo id se juntan: una falla gana, los testcases se suman y queda el primer nombre.
     pub fn con_ids(&self) -> Junit {
         let mut salida = Junit {
             archivos: self.archivos.clone(),
@@ -62,6 +65,12 @@ impl Junit {
         }
         for (clave, veces) in &self.testcases {
             *salida.testcases.entry(id_de_clave(clave)).or_default() += veces;
+        }
+        for (clave, nombre) in &self.nombres {
+            salida
+                .nombres
+                .entry(id_de_clave(clave))
+                .or_insert_with(|| nombre.clone());
         }
         salida
     }
@@ -177,6 +186,7 @@ fn cierra(caso: &mut Option<Caso>, junit: &mut Junit) {
         ResultadoTest::Pasa
     };
     let clave = id_de(&c.classname, &c.nombre);
+    junit.nombres.insert(clave.clone(), c.nombre.clone());
     *junit.testcases.entry(clave.clone()).or_default() += 1;
     // Un id repetido con una falla queda en falla: el último pase no la tapa.
     let en_tests = if resultado == ResultadoTest::Falla
@@ -501,6 +511,39 @@ mod tests {
             parsear(r#"<testsuite><testcase classname="tests.test_a" name="t1"/></testsuite>"#)
                 .expect("parsea");
         assert_eq!(sin.red, None);
+    }
+
+    #[test]
+    fn junit_nombres_tras_con_ids_guarda_el_name_por_id() {
+        let xml = r#"<testsuite>
+  <testcase classname="paquete::archivo" name="modulo::test_a"/>
+</testsuite>"#;
+        let j = parsear(xml).expect("parsea").con_ids();
+        assert_eq!(j.nombres.len(), 1, "{:?}", j.nombres);
+        assert_eq!(
+            j.nombres
+                .get("paquete::archivo::modulo::test_a")
+                .map(String::as_str),
+            Some("modulo::test_a"),
+            "{:?}",
+            j.nombres
+        );
+    }
+
+    #[test]
+    fn junit_nombres_sin_con_ids_guarda_la_clave_cruda() {
+        let xml = r#"<testsuite>
+  <testcase classname="paquete::archivo" name="modulo::test_a"/>
+</testsuite>"#;
+        let j = parsear(xml).expect("parsea");
+        assert_eq!(
+            j.nombres
+                .get("paquete::archivo::modulo::test_a")
+                .map(String::as_str),
+            Some("modulo::test_a"),
+            "{:?}",
+            j.nombres
+        );
     }
 
     #[test]
