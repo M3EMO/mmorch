@@ -2758,7 +2758,8 @@ fn esperados_de_requisitos(
 }
 
 /// Comando de las corridas extra: corre solo los tests `inestables` de la suite `dir`.
-/// Según `lenguaje`: Python usa node ids de pytest; Rust usa un filtro de nextest; otro es error.
+/// Según `lenguaje`: Rust usa un filtro de nextest; los demás (Python, shell, etc.) usan node ids
+/// `archivo.py::nombre`. Sin plantilla `reintento`, reemplaza la cola de `cmd` que termina en `dir`.
 fn reintento_de(
     comando: &Comando,
     dir: &str,
@@ -2767,11 +2768,6 @@ fn reintento_de(
 ) -> Result<String, ErrorOraculo> {
     if lenguaje == "rust" {
         return Ok(reintento_rust(comando, inestables));
-    }
-    if lenguaje != "python" {
-        return Err(ErrorOraculo::Tarea(format!(
-            "el reintento no tiene regla para el lenguaje {lenguaje}"
-        )));
     }
     let lista = inestables
         .iter()
@@ -3963,13 +3959,37 @@ mod tests {
     }
 
     #[test]
-    fn inestable_reintento_lenguaje_sin_regla_es_error() {
+    fn inestable_reintento_shell_usa_la_cola_del_comando() {
+        let c = Comando {
+            cmd: "bash correr.sh /oraculo/oculto".into(),
+            reintento: None,
+        };
+        let r =
+            reintento_de(&c, "/oraculo/oculto", &["a::t1".to_string()], "shell").expect("deriva");
+        assert_eq!(r, "bash correr.sh '/oraculo/oculto/a.py::t1'");
+    }
+
+    #[test]
+    fn inestable_reintento_shell_con_plantilla() {
+        let c = Comando {
+            cmd: "bash correr.sh /o/d".into(),
+            reintento: Some("sh run {tests}".into()),
+        };
+        let r = reintento_de(&c, "/o/d", &["a::t1".to_string()], "shell").expect("plantilla");
+        assert_eq!(r, "sh run '/o/d/a.py::t1'");
+    }
+
+    #[test]
+    fn inestable_reintento_otro_lenguaje_sin_cola_ni_plantilla_es_error_de_tarea() {
         let c = Comando {
             cmd: "go test ./...".into(),
             reintento: None,
         };
         match reintento_de(&c, "/oraculo/oculto", &["a::t".to_string()], "go") {
-            Err(ErrorOraculo::Tarea(msg)) => assert!(msg.contains("go"), "{msg}"),
+            Err(ErrorOraculo::Tarea(msg)) => {
+                assert!(msg.contains("no termina en"), "{msg}");
+                assert!(!msg.contains("no tiene regla"), "{msg}");
+            }
             otro => panic!("esperaba error de tarea, salió {otro:?}"),
         }
     }
