@@ -13660,3 +13660,76 @@ Brief: `docs/builds/brief-local-159.md`.
 **La regla de carga.** El paso 5 compila, y los pasos 6 y 7 usan podman. Corren de a uno en la laptop. Los pasos 2, 3 y 10 van en Colab.
 
 **Preguntas al usuario:** ninguna nueva. La de presupuesto de D3 llega antes del paso 12.
+
+## Vuelta del 2026-11-17 (76): la regresión de la 159, y el id de un test de Rust
+
+**Estado.**
+- **El builder de la 159 terminó** en 18 minutos, con 0,65 USD. Hizo los commits 81677b2, 33211cb y a6d41c1, y el informe 4af12d3. Sin podman, la suite dio 3950 verdes.
+- **La suite con podman de la cadena 110 a 159 dio 4 fallas:** 3946 verdes y 5 ignorados. Las 4 están en `tests/oraculo.rs`, en los tests de inestables. Dan `Tarea("el reintento no tiene regla para el lenguaje shell")`.
+- **La causa es una regresión del punto 1.** `reintento_de` ahora falla con un lenguaje que no es python ni rust. Antes, ese lenguaje usaba la plantilla o la cola del comando.
+- **El error es mío.** El brief pedía "el error de hoy" para otro lenguaje. Pero el error de hoy solo sale cuando no hay plantilla ni cola. El brief debió pedir "la conducta de hoy".
+- **El orquestador probó nextest 0.9.100 en la imagen rust:4:**
+  - `binary_id(=x)` sin ningún binario que coincida es un error de parseo, y la corrida entera falla;
+  - `test(=x)` sin coincidencia no es error: elige 0 tests.
+- **El punto 1 tiene un segundo defecto.** `termino_nextest` separa el id en el primer `::`.
+  - Un test de integración tiene un id de binario `paquete::archivo`, y su nombre queda mal.
+  - Un paquete sin lib da `binary_id(=paquete)` sin coincidencia, y el reintento entero falla.
+- **Las notas del builder:**
+  - no subió `VERSION_SONDAS_SEGURIDAD` (`src/oracle/previos.rs`, vale 3), porque el archivo estaba fuera de su lista;
+  - `ENV TOKEN=read` en un Dockerfile ya no da hallazgo. Está bien: `read` no es un secreto.
+- **La 0g sigue en Colab.** Su tope local corta a las 19:27.
+
+## 1. La regla del id de un test de Rust
+
+**Por qué separar el id no sirve.** `junit::id_de` arma el id como `<classname>::<nombre>`. En nextest, el `classname` es el id del binario. Los dos lados pueden traer `::`: el binario como `paquete::archivo`, y el nombre como `modulo::test`. No hay un corte que siempre acierte.
+
+**Decido: el nombre se guarda al leer el junit, y el filtro usa solo `test(=<nombre>)`.**
+- El junit trae el binario y el nombre por separado, así que Root no tiene que adivinar el corte. El `binary_id` sale del filtro, porque un solo binario sin coincidencia hace fallar la corrida entera.
+- `test(=<nombre>)` sin el binario puede repetir un test con el mismo nombre en otro binario. Eso solo suma resultados, y la clasificación usa el id completo, así que no cambia nada.
+
+**El nombre se guarda en memoria.** Al leer el junit, Root anota, para cada id, el `name` del `testcase`. `reintento_de` toma el nombre de ahí. Nada de eso va a un archivo, así que el esquema no cambia.
+
+**Un id sin nombre anotado,** por ejemplo uno que no vino de un junit, no se adivina. Esa corrida extra repite el comando entero, como una tarea Rust sin `reintento`.
+
+## 2. La regresión de shell
+
+**La regla vuelve a ser la de antes de la 159, salvo para Rust:**
+- **Rust:** la conducta nueva, con la regla del id de la sección 1.
+- **Cualquier otro lenguaje,** incluidos python y shell: la conducta de antes. Usa la plantilla si existe, y si no la cola del comando. El error sale solo sin plantilla ni cola, con el mismo texto de antes.
+
+**Los 4 tests de `tests/oraculo.rs` son la guarda.** Deben volver a verde sin cambios.
+
+## 3. `VERSION_SONDAS_SEGURIDAD`
+
+**Sube de 3 a 4.** El punto 3 de la 159 cambió la conducta de `configs-secretos`: un hallazgo que antes salía, ahora no sale. Una evidencia de Seguridad guardada con la versión 3 puede traer ese falso positivo. Con la versión 4, Root no la reusa.
+
+## 4. La Tarea 160
+
+- **Base:** la punta de `laptop/tarea-159`.
+- **Archivos:** `src/oracle/mod.rs`, `src/oracle/junit.rs` y `src/oracle/previos.rs`.
+- **Tres puntos, cada uno con su test.**
+
+Brief: `docs/builds/brief-local-160.md`.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | Leer el resultado de prueba-0g-157c | Que termine | Laptop, solo lectura | No | No |
+| 5 | La Tarea 160 | Nada; puede empezar ya | Laptop, builder | Lo que use el builder | No |
+| 6 | Armar la cadena con la 160, y su suite con podman | El paso 5 | Laptop, podman | No | No |
+| 7 | Verificar otra vez las 4 de watchexec y b8d0db4058 con su lock real | El paso 6 | Laptop, podman | No | No |
+| 8 | La mezcla de la cadena 110 a 160 | — | — | No | **Sí** |
+| 9 | Congelar la versión | Los pasos 3 y 6 | — | No | No |
+| 10 | Las doce calibraciones de oráculo con la versión congelada | El paso 9 | Colab, cuatro runtimes | No | No |
+| 11 | La pregunta de presupuesto de D3 | El paso 9 | — | No | **Sí** |
+| 12 | D3: `corre` sobre las tareas del dataset | Los pasos 7 y 11 | Laptop y API | Según la respuesta del paso 11 | No |
+| 13 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 9 | Laptop | Según la regla del final | No |
+| 14 | La validez sobre el final sellado | Los pasos 1 a 13 | Colab, notebook si usa el juez | Según el final | No |
+
+**La regla de carga.** El paso 5 compila, y los pasos 6 y 7 usan podman. Corren de a uno en la laptop.
+
+**Preguntas al usuario:** ninguna nueva.
