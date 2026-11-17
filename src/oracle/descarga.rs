@@ -149,12 +149,13 @@ const PATRONES_INFRA: [&str; 5] = [
     "spurious network error",
     "timed out",
 ];
-/// Fragmentos (en minúscula) de errores de un paquete que no existe o fue retirado.
-const PATRONES_PRODUCTO: [&str; 4] = [
+/// Fragmentos (en minúscula) de errores del producto. Cubren paquetes inexistentes, retirados o un lock que no cuadra.
+const PATRONES_PRODUCTO: [&str; 5] = [
     "no matching package",
     "failed to select a version",
     "yanked",
     "no matching distribution found",
+    "cannot update the lock file",
 ];
 /// Largo máximo de la línea útil de un error.
 const LARGO_LINEA_UTIL: usize = 300;
@@ -281,7 +282,18 @@ fn hallazgo_en(
     }
 }
 
+/// Hallazgo del producto que no instala. Un lock que no cuadra va sobre `Cargo.lock`.
 fn hallazgo_no_instala(linea: &str) -> Hallazgo {
+    // El lock no cuadra: `--locked` impide actualizarlo. Va sobre el lock, no sobre el manifiesto.
+    if linea.to_lowercase().contains("cannot update the lock file") {
+        return hallazgo(
+            ARCHIVO_LOCK,
+            0,
+            linea,
+            3,
+            format!("el producto no instala: Cargo.lock no cuadra con Cargo.toml: {linea}"),
+        );
+    }
     hallazgo(
         "Cargo.toml",
         0,
@@ -1674,6 +1686,56 @@ location searched: crates.io index";
     fn descarga_infraestructura_gana_a_producto_en_el_mismo_stderr() {
         let mezclado =
             "error: no matching package named `x` found\nCould not resolve host: index.crates.io";
+        assert!(matches!(diagnosticar(mezclado), Diagnostico::Infra(_)));
+    }
+
+    #[test]
+    fn descarga_lock_no_cuadra_con_cargo_toml_es_producto() {
+        let linea = "error: cannot update the lock file /repo/Cargo.lock because --locked was passed to prevent this";
+        assert_eq!(diagnosticar(linea), Diagnostico::Producto(linea.into()));
+    }
+
+    #[test]
+    fn descarga_hallazgo_lock_no_cuadra_va_sobre_cargo_lock() {
+        let linea = "error: cannot update the lock file /repo/Cargo.lock because --locked was passed to prevent this";
+        let h = hallazgo_no_instala(linea);
+        assert_eq!(h.dimension, Dimension::Entrega);
+        assert_eq!(h.severidad, 3);
+        assert_eq!(h.archivo, "Cargo.lock");
+        assert!(
+            h.detalle
+                .starts_with("el producto no instala: Cargo.lock no cuadra con Cargo.toml"),
+            "{}",
+            h.detalle
+        );
+    }
+
+    #[test]
+    fn descarga_paquete_inexistente_y_version_siguen_sobre_cargo_toml() {
+        for linea in [
+            "error: no matching package named `x` found",
+            "error: failed to select a version for `y`",
+        ] {
+            assert!(
+                matches!(diagnosticar(linea), Diagnostico::Producto(_)),
+                "{linea}"
+            );
+            let h = hallazgo_no_instala(linea);
+            assert_eq!(h.archivo, "Cargo.toml", "{linea}");
+            assert_eq!(h.severidad, 3, "{linea}");
+            assert_eq!(
+                h.detalle,
+                format!("el producto no instala: {linea}"),
+                "{linea}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_red_gana_a_lock_no_cuadra() {
+        let red = "error: failed to download from `https://index.crates.io`";
+        assert!(matches!(diagnosticar(red), Diagnostico::Infra(_)));
+        let mezclado = "error: cannot update the lock file /repo/Cargo.lock because --locked was passed to prevent this\nerror: failed to download from `https://index.crates.io`";
         assert!(matches!(diagnosticar(mezclado), Diagnostico::Infra(_)));
     }
 
