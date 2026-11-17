@@ -2654,7 +2654,7 @@ fn evaluar_suite(
     let previa = clasificar(&completas, &[], excluidos);
     let mut extras = Vec::new();
     if !previa.inestables.is_empty() && c.tarea.repeticiones_inestable > c.tarea.repeticiones {
-        let reintento = reintento_de(comando, dir, &previa.inestables)?;
+        let reintento = reintento_de(comando, dir, &previa.inestables, &c.tarea.lenguaje)?;
         for _ in c.tarea.repeticiones..c.tarea.repeticiones_inestable {
             // El reintento corre solo los inestables: su junit no trae la lista completa.
             match correr_una(c, &reintento, dir, xml, pytest, None, correr)? {
@@ -2758,12 +2758,21 @@ fn esperados_de_requisitos(
 }
 
 /// Comando de las corridas extra: corre solo los tests `inestables` de la suite `dir`.
-/// Usa `reintento` si existe; si no, reemplaza `dir` al final de `cmd`.
+/// Según `lenguaje`: Python usa node ids de pytest; Rust usa un filtro de nextest; otro es error.
 fn reintento_de(
     comando: &Comando,
     dir: &str,
     inestables: &[String],
+    lenguaje: &str,
 ) -> Result<String, ErrorOraculo> {
+    if lenguaje == "rust" {
+        return Ok(reintento_rust(comando, inestables));
+    }
+    if lenguaje != "python" {
+        return Err(ErrorOraculo::Tarea(format!(
+            "el reintento no tiene regla para el lenguaje {lenguaje}"
+        )));
+    }
     let lista = inestables
         .iter()
         .map(|id| comillas(&node_id(dir, id)))
@@ -2777,6 +2786,31 @@ fn reintento_de(
         None => Err(ErrorOraculo::Tarea(format!(
             "el comando no termina en {dir} y no tiene reintento: agregalo en tarea.toml"
         ))),
+    }
+}
+
+/// Comando de reintento de Rust. Con `reintento`, `{tests}` pasa a un solo filtro de nextest.
+/// Sin `reintento`, devuelve `cmd` entero: el comando ya corre sus tests.
+fn reintento_rust(comando: &Comando, inestables: &[String]) -> String {
+    match &comando.reintento {
+        Some(plantilla) => {
+            let filtro = inestables
+                .iter()
+                .map(|id| termino_nextest(id))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            plantilla.replace("{tests}", &comillas(&filtro))
+        }
+        None => comando.cmd.clone(),
+    }
+}
+
+/// Término de filtro de nextest para un id de Root `<binario>::<nombre>`.
+/// Separa en el primer `::`: lo anterior es el binario y lo demás el nombre. Sin `::`, es solo el nombre.
+fn termino_nextest(id: &str) -> String {
+    match id.split_once("::") {
+        Some((binario, nombre)) => format!("(binary_id(={binario}) & test(={nombre}))"),
+        None => format!("test(={id})"),
     }
 }
 
@@ -3819,8 +3853,13 @@ mod tests {
             cmd: "x --junitxml=/salida/oculto.xml /oraculo/oculto".into(),
             reintento: None,
         };
-        let r =
-            reintento_de(&c, "/oraculo/oculto", &["test_f::t_flaky".to_string()]).expect("deriva");
+        let r = reintento_de(
+            &c,
+            "/oraculo/oculto",
+            &["test_f::t_flaky".to_string()],
+            "python",
+        )
+        .expect("deriva");
         assert_eq!(
             r,
             "x --junitxml=/salida/oculto.xml '/oraculo/oculto/test_f.py::t_flaky'"
@@ -3834,7 +3873,7 @@ mod tests {
             reintento: Some("pytest -q {tests}".into()),
         };
         let ids = ["a::t1".to_string(), "b::t2".to_string()];
-        let r = reintento_de(&c, "/oraculo/contrato", &ids).expect("plantilla");
+        let r = reintento_de(&c, "/oraculo/contrato", &ids, "python").expect("plantilla");
         assert_eq!(
             r,
             "pytest -q '/oraculo/contrato/a.py::t1' '/oraculo/contrato/b.py::t2'"
@@ -3848,7 +3887,7 @@ mod tests {
             reintento: None,
         };
         assert!(matches!(
-            reintento_de(&c, "/oraculo/oculto", &["a::t".to_string()]),
+            reintento_de(&c, "/oraculo/oculto", &["a::t".to_string()], "python"),
             Err(ErrorOraculo::Tarea(_))
         ));
     }
@@ -3859,8 +3898,80 @@ mod tests {
             cmd: "x /oraculo/oculto".into(),
             reintento: None,
         };
-        let r = reintento_de(&c, "/oraculo/oculto", &["a::it's".to_string()]).expect("deriva");
+        let r = reintento_de(&c, "/oraculo/oculto", &["a::it's".to_string()], "python")
+            .expect("deriva");
         assert_eq!(r, "x '/oraculo/oculto/a.py::it'\\''s'");
+    }
+
+    #[test]
+    fn inestable_reintento_rust_arma_filtro_nextest() {
+        let c = Comando {
+            cmd: "cargo nextest run".into(),
+            reintento: Some("cargo nextest run -E {tests}".into()),
+        };
+        let ids = ["a::t1".to_string(), "t2".to_string()];
+        let r = reintento_de(&c, "tests", &ids, "rust").expect("filtro");
+        assert!(r.contains("test(="), "{r}");
+        assert!(r.contains(" | "), "{r}");
+        assert!(!r.contains(".py::"), "{r}");
+    }
+
+    #[test]
+    fn inestable_reintento_rust_sin_reintento_da_el_comando_entero() {
+        let c = Comando {
+            cmd: "cargo nextest run --workspace".into(),
+            reintento: None,
+        };
+        let r = reintento_de(&c, "/oraculo/oculto", &["a::t".to_string()], "rust");
+        assert_eq!(r.expect("nunca error"), "cargo nextest run --workspace");
+    }
+
+    #[test]
+    fn inestable_reintento_rust_binario_se_separa_en_primer_doble_dospuntos() {
+        let c = Comando {
+            cmd: "cargo nextest run".into(),
+            reintento: Some("cargo nextest run -E {tests}".into()),
+        };
+        let ids = ["mi_crate::mod::t".to_string()];
+        let r = reintento_de(&c, "tests", &ids, "rust").expect("filtro");
+        assert_eq!(
+            r,
+            "cargo nextest run -E '(binary_id(=mi_crate) & test(=mod::t))'"
+        );
+    }
+
+    #[test]
+    fn inestable_reintento_python_mismos_ids_con_y_sin_plantilla() {
+        let ids = ["a::t1".to_string()];
+        let lista = "'/o/d/a.py::t1'";
+        let sin = Comando {
+            cmd: "pytest -q /o/d".into(),
+            reintento: None,
+        };
+        let con = Comando {
+            cmd: "pytest -q /o/d".into(),
+            reintento: Some("pytest -q {tests}".into()),
+        };
+        assert_eq!(
+            reintento_de(&sin, "/o/d", &ids, "python").expect("deriva"),
+            format!("pytest -q {lista}")
+        );
+        assert_eq!(
+            reintento_de(&con, "/o/d", &ids, "python").expect("plantilla"),
+            format!("pytest -q {lista}")
+        );
+    }
+
+    #[test]
+    fn inestable_reintento_lenguaje_sin_regla_es_error() {
+        let c = Comando {
+            cmd: "go test ./...".into(),
+            reintento: None,
+        };
+        match reintento_de(&c, "/oraculo/oculto", &["a::t".to_string()], "go") {
+            Err(ErrorOraculo::Tarea(msg)) => assert!(msg.contains("go"), "{msg}"),
+            otro => panic!("esperaba error de tarea, salió {otro:?}"),
+        }
     }
 
     fn poner_mtime(ruta: &Path, cuando: SystemTime) {
