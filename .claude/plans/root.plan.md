@@ -13475,3 +13475,96 @@ timeout 900 colab exec -s <sesión> --timeout 600 --env CARPETA=/content --env '
 - **c) Buscar la causa primero.** Se relanza la Prueba 0g con un solo trabajo: cerca de 2 horas de runtime y 0,2 unidades. Después se decide entre a y b.
 
 Recomiendo la (a). Los tiempos no deciden ninguna detección, Eficiencia ya cumple P102 a por la memoria, y la producción mide en la laptop. La prueba chica del paso 5 corre igual, porque cuesta casi nada y aclara el cuelgue.
+
+## Vuelta del 2026-11-17 (74): P120 a, y cómo se arman las 28 tareas nuevas
+
+**Estado.**
+- **P120, respuesta del usuario: "a) Nada en Root (Recommended)".** En Colab, Eficiencia decide por `memoria_pico`, y los tiempos marcados quedan sin valor. **Queda decidido.**
+- **La prueba chica del exec anduvo.** El trabajo falso con `yes` de 120 segundos terminó con rc 0 en 146 segundos, y el `stop` anduvo. **H2 queda descartada:** `repetir-0g.py` y el exec funcionan. Salida: `colab-pruebas/p-exec-147/exec.out`.
+- **El resumen:** trabajo 0,961 núcleos, fuera 0,982, huérfanos 0 y robo 0. La peor ventana de 60 segundos dio 1,991 núcleos fuera. Los 5 procesos de fuera con más CPU suman solo 0,3 segundos.
+- La prueba costó menos de 0,01 unidades.
+
+## 1. Lo que sugiere el dato de "fuera"
+
+La CPU de fuera, cerca de 1 núcleo, no la explica ningún proceso visible, y su pico pasa la capacidad libre de la VM. Eso sugiere que `/proc/stat` del runtime cuenta CPU de procesos que el runtime no ve, como otro contenedor o la contabilidad del sandbox de Colab. P120 a ya cubre el caso, así que no abro otra búsqueda.
+
+**El cuelgue de 15,5 horas** queda atribuido a H1: el runtime se recicló, y el cliente no se enteró. El `timeout` local de cada exec ya lo cubre.
+
+## 2. El paso 7: armar las tareas del dataset
+
+**No hace falta código de Root.** `mineria/armar_s2.py` ya arma tareas de Root con scripts del orquestador. Las 28 tareas nuevas siguen el mismo patrón. El número 159 queda libre.
+
+**Cuáles se arman.** Las filas de `dataset.json` con estado ok y ficha: 31. Las 3 de S2 ya están en `ROOT_HOME`. **Se arman 28.**
+
+**Dónde se arman.** Primero en una copia, `colab-pruebas/home-dataset`, con `ROOT_HOME` apuntando ahí. Pasan al `ROOT_HOME` real solo cuando las 28 pasan su verificación. Así, una tarea mal armada no toca las calibraciones.
+
+**El script: `armar_dataset.py`.** Generaliza `armar_s2.py`, y lee las filas de `dataset.json`. Por tarea arma `oraculos/<id>/`, con `id = d-<repo corto>-<sha10>`:
+
+| Archivo | Qué lleva | De dónde sale |
+|---|---|---|
+| `bootstrap/` | El padre del commit, más `docs/SPEC.md` | `git archive <padre>`, y la ficha de la tarea |
+| `contrato/` | Vacío | Como en S2: el contrato son los tests que el repo ya tiene |
+| `oculto/` | Los tests ocultos | Ver abajo |
+| `con_tests/` | El commit, con los tests ocultos puestos | `git archive <sha>` y el paso de `poner`, como en S2 |
+| `tarea.toml` | La tarea entera | `r00t ficha tarea --spec SPEC.md --nombre <id>`, con los reemplazos de `armar_s2.py` |
+
+**Los tests ocultos, según `tests_en_linea`:**
+- **Sin tests en línea:** `oculto/` lleva los archivos de test del commit. El comando `poner` los copia a `tests/`.
+- **Con tests en línea, en un bloque nuevo:** `oculto/` lleva un `anexo-<n>.rs` por archivo, con los bloques `#[cfg(test)]` del commit. El comando `poner` los agrega al final de cada archivo, con `cat >>`. Es lo que hace `anexo` en `armar_s2.py`.
+- **Con tests en línea dentro de un módulo que ya existe:** un anexo duplicaría el módulo. `poner` aplica entonces `tests.diff` con `patch -p1 --fuzz=2`. Si el parche no entra en el repo de un builder, la tarea queda sin veredicto en esa corrida, como fijó la vuelta (69).
+
+**Los reemplazos en `tarea.toml`,** iguales a S2:
+- `imagen = "localhost/root-oraculo-rust:4"`;
+- `repeticiones = 3`;
+- el comando del contrato: nextest sobre `/repo`;
+- el comando del oculto: copia el repo, `poner`, y nextest con el filtro de los tests de la etiqueta;
+- `pruebas` con esos tests, y el último requisito con todos los tests nuevos, como fija el comentario "vuelta 98" de `armar_s2.py`;
+- `capas` de `r00t oraculo capas --repo <con_tests>`.
+
+**Tres controles del script, antes de escribir:**
+1. **El repo no es un repo del final.** La lista de exclusión es la de r4 y r5: IronCalc, BoilR, y los 4 repos viejos del final. Una fila de esos repos frena el script.
+2. **`tarea.toml` se relee con `tomllib`,** y sus comandos son los que el script armó.
+3. **La salida en pantalla da solo conteos por tarea:** cuántos tests, cuántos archivos en `oculto/` y cuántos requisitos. Nunca nombres de tests.
+
+**`depende_de_tiempo`.** Las tres tareas con ese campo llevan `repeticiones_inestable` con el mismo valor que las tareas de S2. Si `ficha tarea` no da ese campo, el script lo informa y no inventa un valor.
+
+## 3. Cómo se verifica cada tarea, sin abrir nada sellado
+
+**Ninguna tarea del dataset es sellada.** El sellado es solo de los reales del final, y sus repos quedan fuera por el control 1.
+
+**Dos evaluaciones por tarea, en podman, en la copia de `ROOT_HOME`:**
+1. **Sobre `con_tests`:** `r00t oraculo evaluar --tarea <id> --repo <con_tests> --json`. Se espera Funciona 1,0, sin error de infraestructura. Así se ve que los tests de la etiqueta pasan con el commit.
+2. **Sobre el padre:** `r00t oraculo evaluar --tarea <id> --repo <bootstrap> --json`. Se espera que el oculto no pase.
+   - En un arreglo, los tests de la etiqueta fallan al correr.
+   - En una función nueva con interfaz, los tests no compilan.
+   - En una función nueva sin interfaz, fallan al correr.
+
+**Lo que se mira del JSON:** solo el puntaje de cada dimensión, y cuántos tests del oculto pasaron y fallaron. Un script los extrae. Nunca imprime nombres de tests ni hallazgos con nombres.
+
+**Una tarea que falla la verificación** no pasa al `ROOT_HOME` real. El orquestador informa su id, cuál de las dos evaluaciones falló y su puntaje.
+
+**El costo.** Son 56 evaluaciones en podman, de 5 a 10 minutos cada una: entre 5 y 9 horas de laptop. El script reanuda: salta las tareas que ya tienen sus dos resultados. Se pausa si un builder compila.
+
+**Después,** las tareas que pasaron se copian al `ROOT_HOME` real. El orquestador lista sus ids en el plan.
+
+## 4. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | `armar_dataset.py` en la copia de `ROOT_HOME` | Nada; puede correr ya | Laptop, sin podman | No | No |
+| 5 | Las 56 evaluaciones de verificación | El paso 4 | Laptop, podman | No | No |
+| 6 | Copiar las tareas que pasan al `ROOT_HOME` real | El paso 5 | Laptop | No | No |
+| 7 | La mezcla de la cadena 110 a 158 | — | — | No | **Sí** |
+| 8 | Congelar la versión | El paso 3 | — | No | No |
+| 9 | Las doce calibraciones de oráculo con la versión congelada | El paso 8 | Colab, cuatro runtimes | No | No |
+| 10 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 8 | Laptop | Según la regla del final | No |
+| 11 | La validez sobre el final sellado | Los pasos 1 a 10 | Colab, notebook si usa el juez | Según el final | No |
+
+**Salen de la lista:** P120, la prueba chica del exec, y el paso que dependía de P120. Con la (a), Root no cambia.
+
+**La regla de carga.** El paso 5 usa podman en la laptop, y no corre con un builder ni con otra suite. Los pasos 2, 3 y 9 van en Colab.
+
+**Preguntas al usuario:** ninguna nueva.
