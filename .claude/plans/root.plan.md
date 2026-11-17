@@ -13385,3 +13385,93 @@ Brief de la 158: `docs/builds/brief-local-158.md`.
 - **c) El oráculo compara el test sin el literal:** por ejemplo, que haya un pánico, sin mirar el texto. Cambia los tests del commit, y su etiqueta deja de ser real, como en P99 c.
 
 Recomiendo la (a). Sigue la misma lógica que P99 a, y conserva los tests reales. Lo único que la ficha agrega es lo que el test ya exige ver.
+
+## Vuelta del 2026-11-17 (73): la carga de un núcleo que se repite, y una Prueba 0g que colgó
+
+**Estado.**
+- **La 158 terminó.** Las cadenas 157 y 158 pasan la suite con podman: 3934 y 3937 tests, sin fallas. La cadena 110 a 158 espera la orden de mezcla del usuario.
+- **La réplica de v155 dio sensibilidad 1 y especificidad 1** en los 3 runtimes. La carga ajena de 1 núcleo de 2 apareció en los 12 casos.
+- **La Prueba 0g con `--sin-stop` quedó a medias.**
+  - `calibrar` anduvo: rc 0, en 10823 segundos, con 3 trabajos en código 0. La carga ajena de los 3 casos dio 0,998, 1,004 y 1,013.
+  - La repetición con `repetir-0g.py` no dejó datos. El cliente `colab exec` colgó 15,5 horas, por encima de su `--timeout 10800`, y Colab recicló el runtime.
+  - Ahora cada exec lleva un `timeout` local en `prueba-0g-157.sh`.
+- **P119 a quedó aplicada.** `fuga.py` lee `literales.json`, y `metodo-fichas.md` suma la regla 13. Las dos fichas en espera se reescribieron y pasan.
+- **Las 31 tareas ok del dataset tienen ficha,** y todas pasan los dos chequeos. Tres llevan `depende_de_tiempo`.
+- **P81 está contestada:** el usuario dijo "Sí, las 3".
+
+**Un dato del guion:** un paquete abre un solo runtime, y sus trabajos corren en serie. Los 3 casos de la Prueba 0g corrieron en la misma VM.
+
+## 1. Las dos preguntas de la 158
+
+1. **¿Un valor secreto vacío pasa? Sí.** Un valor vacío no lleva ninguna clave. La regla protege valores, no nombres.
+2. **¿La guarda en una función aparte, `revisar_entorno_sin_secretos`? Sí.** Otro guion que suba a Colab la puede reusar, y así hay una sola regla.
+
+## 2. La Prueba 0g: no concluyente, y una prueba chica del camino
+
+**Lo que la carga ya muestra.** En las últimas corridas, la carga ajena de cerca de 1 núcleo apareció en 15 de 15 casos: los 12 de la réplica de v155 y los 3 de la Prueba 0g. Antes, en la v6, apareció en dos runtimes de tres. Ya no parece un accidente de una VM.
+
+**Tres hipótesis para el cuelgue de 15,5 horas:**
+- **H1. Colab recicló el runtime durante el exec, y el cliente no se enteró.** El `--timeout` de `colab exec` parece contar del lado del runtime. Si el runtime desaparece, el cliente espera una respuesta que no llega. Encaja con el reciclado que vio el orquestador.
+- **H2. `repetir-0g.py` se trabó.** Por ejemplo, el hilo del muestreo no termina, o el `Popen` espera una tubería llena.
+- **H3. El trabajo repetido no terminó.** Por ejemplo, esperó un lock del `ROOT_HOME` del runtime, o un plazo largo.
+
+**Cómo distinguirlas sin gastar otro runtime entero.** Un exec de 5 minutos en un runtime nuevo, con `repetir-0g.py` y un trabajo falso:
+
+```sh
+timeout 900 colab exec -s <sesión> --timeout 600 --env CARPETA=/content --env 'TRABAJO_CMD=[{"cmd":["sh","-c","yes > /dev/null & sleep 120; kill $!"],"entorno":{},"tarea":"falsa","dimension":"eficiencia"}]' -f repetir-0g.py
+```
+
+- **Si termina y da su resumen,** el guion y el exec andan. H2 queda descartada. El resumen debe mostrar cerca de 1 núcleo en el grupo del trabajo, por el `yes`.
+- **Si cuelga hasta el `timeout` local,** el problema está en el guion o en el exec, no en el reciclado. El orquestador lo prueba en la laptop con el mismo trabajo falso, sin Colab.
+- **H3 se ve en la salida de la primera corrida.** Si `calibrar` deja un lock en el `ROOT_HOME` del runtime, el siguiente `calibrar` lo encuentra. El orquestador busca `*.lock` en la lista de archivos de la vuelta bajada.
+- **H1 queda como la causa** si las otras dos se descartan.
+- Cuesta menos de 0,01 unidades.
+
+**¿Relanzar la repetición completa? Solo si el usuario elige buscar la causa en P120.** La repetición con 3 trabajos pide cerca de 6 horas de runtime, cerca del límite de vida de una VM.
+
+**Si se relanza, el paquete lleva un solo trabajo:** `s2-t1:eficiencia:1`. Son cerca de 1 hora de `calibrar` y 1 hora de repetición, lejos del límite. Cuesta cerca de 0,2 unidades.
+
+**Por ahora, la Prueba 0g queda anotada como no concluyente.**
+
+## 3. ¿Una corrección en Root sin conocer la causa?
+
+**Lo que ya sabemos sin la causa:**
+- La carga aparece en Colab, no en la laptop.
+- Los tiempos marcados quedan sin valor, y eso es seguro: un limpio no puede caer por un tiempo que no se usa.
+- **Eficiencia ya detecta por `memoria_pico`,** y la v6 y su réplica dieron sensibilidad y especificidad 1. La regla de la vuelta (59) ya pide que una detección venga de la memoria.
+- **La evaluación de producción corre en la laptop,** con podman. Ahí el control de carga funciona.
+
+**Lo que costaría una corrección a ciegas.** Si la causa es el robo de CPU, limitar Root a 1 núcleo esconde una carga real: el núcleo que queda también puede perder tiempo. Además, cambiar la medición obliga a repetir la v6 antes de congelar.
+
+**La decisión es del usuario,** porque fija qué mide Eficiencia en Colab. Va en P120.
+
+## 4. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | P120 | — | — | No | **Sí** |
+| 5 | La prueba chica del camino de exec | Nada; puede correr ya | Colab, CPU, 5 minutos | No | No |
+| 6 | Según P120: nada, la Tarea 159 y la v6 otra vez, o la Prueba 0g con un trabajo | Los pasos 4 y 5 | Laptop o Colab | No | No |
+| 7 | Armar las 31 tareas del dataset como tareas de Root: oráculo y ficha, sin abrir nada sellado | Nada; puede correr ya | Laptop, podman para verificar cada contrato | No | No |
+| 8 | La mezcla de la cadena 110 a 158 | — | — | No | **Sí** |
+| 9 | Congelar la versión | Los pasos 3 y 6 | — | No | No |
+| 10 | Las doce calibraciones de oráculo con la versión congelada | El paso 9 | Colab, cuatro runtimes | No | No |
+| 11 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 9 | Laptop | Según la regla del final | No |
+| 12 | La validez sobre el final sellado | Los pasos 1 a 11 | Colab, notebook si usa el juez | Según el final | No |
+
+**El paso 11 de la vuelta (72) sale.** P81 está contestada, y las 31 fichas están hechas.
+
+**La regla de carga.** El paso 7 usa podman en la laptop, y no corre con un builder. Los pasos 2, 3, 5 y 10 van en Colab.
+
+## 5. Pregunta al usuario
+
+**P120. En Colab, la carga ajena de cerca de 1 núcleo apareció en 15 de 15 casos, y no tiene causa conocida. ¿Qué hace Root?** Hoy los tiempos de esos casos quedan sin valor, y Eficiencia detecta por la memoria. En la laptop, el control funciona.
+
+- **a) Nada en Root.** En Colab, Eficiencia decide solo por `memoria_pico`, como ya pide la regla de la vuelta (59). Los tiempos marcados quedan sin valor. El plan lo anota como un límite conocido de Colab. *(recomendada)*
+- **b) Una corrección sin conocer la causa.** En modo bwrap, las corridas medidas usan 1 núcleo, y la carga ajena cuenta solo lo que pase del núcleo libre. Pide una tarea y repetir la v6 antes de congelar. Si la causa es el robo de CPU, esconde una carga real.
+- **c) Buscar la causa primero.** Se relanza la Prueba 0g con un solo trabajo: cerca de 2 horas de runtime y 0,2 unidades. Después se decide entre a y b.
+
+Recomiendo la (a). Los tiempos no deciden ninguna detección, Eficiencia ya cumple P102 a por la memoria, y la producción mide en la laptop. La prueba chica del paso 5 corre igual, porque cuesta casi nada y aclara el cuelgue.
