@@ -13568,3 +13568,95 @@ La CPU de fuera, cerca de 1 núcleo, no la explica ningún proceso visible, y su
 **La regla de carga.** El paso 5 usa podman en la laptop, y no corre con un builder ni con otra suite. Los pasos 2, 3 y 9 van en Colab.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-17 (75): las 28 tareas del dataset, y tres defectos de Root
+
+**Estado.**
+- **Los pasos 4, 5 y 6 de la vuelta (74) están hechos.** Las 28 tareas `d-*` pasan la verificación:
+  - con `con_tests`, el contrato y el oculto pasan enteros;
+  - con `bootstrap`, el oculto no pasa.
+- **Las 28 ya están en `~/.local/share/root/oraculos`.**
+- **La primera verificación dio 22 de 28.** El orquestador arregló las 6 fallas en `armar_dataset.py` y en la carpeta de cada tarea:
+  - en bytes f2cf483f13, el id traía el sufijo " - should panic" de libtest, y el filtro no elegía ningún test;
+  - en watchexec b8d0db4058, el `Cargo.lock` no cuadraba con su `Cargo.toml`, así que la tarea lleva los locks arreglados;
+  - en tres tareas de watchexec, un test del repo falla estable en el commit y en el padre, y sale del contrato;
+  - en dos tareas, el contrato tiene tests inestables, así que llevan un `reintento` con la suite entera;
+  - en ron 86bc, un `sd-bus timeout` de crun era transitorio.
+- **El costo fue de 0 USD.** Todo corrió en podman local.
+- **La Prueba 0g (prueba-0g-157c) sigue en Colab.** Su tope local corta a las 19:27, y su resultado va en la vuelta siguiente.
+
+**Una nota sobre los locks arreglados.** En watchexec b8d0db4058, la tarea ya no usa el `Cargo.lock` real del commit. Es un arreglo del entorno, no de la solución, y queda anotado en `registro.md`. Con la 159, esa tarea podría volver a su lock real y dar un hallazgo, en vez de un error.
+
+## 1. Los tres defectos de Root
+
+**1. El reintento arma ids de pytest también en Rust.**
+- **Dónde:** `src/oracle/mod.rs`, en `reintento_de` y `node_id`.
+- **Qué pasa:** `reintento_de` arma cada id con `node_id`, que da `dir/archivo.py::nombre`. Eso solo sirve para pytest.
+- **Además,** sin `reintento` en `tarea.toml`, exige que el comando termine en el directorio de la suite. Un contrato de nextest no termina así. Por eso da "tarea inválida: el comando no termina en /oraculo/contrato y no tiene reintento".
+- **Cómo lo esquiva hoy el dataset:** con un `reintento` que corre la suite entera.
+
+**2. Un lock que no cuadra sale como error de infraestructura.**
+- **Dónde:** `src/oracle/descarga.rs`. `COMANDO_VENDOR` corre `cargo vendor --locked`. La lista de diagnósticos de "el producto no instala" tiene "no matching package" y "failed to select a version", pero no el lock.
+- **Qué pasa:** `cargo vendor --locked` falla con "cannot update the lock file ... because --locked was passed". Root lo informa como infraestructura, con rc 3 y sin veredicto.
+- **Por qué está mal:** es un defecto del producto evaluado. Un usuario que corre `cargo build --locked` falla igual. Root debe dar un hallazgo, no un error propio.
+
+**3. `configs-secretos` marca un permiso de GitHub Actions como secreto.**
+- **Dónde:** `src/oracle/configs.rs`, en `clave_con_secreto` y `es_literal_secreto`, que llama `sonda_secretos_configs`.
+- **Qué pasa:** `id-token: write`, en un bloque `permissions:`, tiene una clave con el segmento "token" y un valor literal. La sonda lo marca con severidad 3.
+- **Su efecto:** 4 soluciones de referencia de watchexec salen `bloqueado`. Un evaluador que bloquea la solución correcta de su propio dataset no sirve en esas tareas.
+
+## 2. La conducta de cada arreglo
+
+**1. El reintento según el lenguaje de la tarea.**
+- **Python:** igual que hoy. `{tests}` se reemplaza por node ids de pytest. Sin `reintento`, el comando debe terminar en el directorio de la suite.
+- **Rust, con `reintento` y `{tests}`:** `{tests}` se reemplaza por una sola expresión de filtro de nextest, entre comillas simples. Cada test da `test(=<nombre>)`. Si el id de Root trae también el binario, da `(binary_id(=<binario>) & test(=<nombre>))`. Los tests se unen con `|`.
+- **El formato del id** lo fija cómo Root lee el junit de nextest hoy: el binario sale del `testsuite`, y el nombre del `testcase`. El builder lo confirma en el lector de junit y lo cita en el informe.
+- **Rust, sin `reintento`:** la corrida extra repite el comando entero. Da resultado también para los inestables, y la clasificación los toma de ahí. Cuesta más tiempo, pero nunca deja la tarea inválida.
+- **Un lenguaje sin regla** da el error de hoy, con el nombre del lenguaje.
+
+**2. El lock que no cuadra es un hallazgo del producto.**
+- "cannot update the lock file" entra a la lista de diagnósticos de "el producto no instala".
+- **El hallazgo:** Entrega, severidad 3, sobre `Cargo.lock`. El texto dice "el producto no instala: Cargo.lock no cuadra con Cargo.toml", con la línea útil del error.
+- **La severidad 3 es la misma** que ya dan los otros casos de "no instala". El producto no se puede construir con `--locked`, igual que con un paquete inexistente.
+- **La evaluación sigue** como sigue hoy con "no instala": con veredicto, sin rc 3.
+
+**3. Los permisos de GitHub Actions no son secretos.**
+- Un valor literal `read`, `write`, `none`, `read-all` o `write-all` no es un secreto, con cualquier clave. Ningún secreto real tiene esa forma.
+- La regla va en `es_literal_secreto`, y vale para YAML y TOML. Es más simple que reconocer el bloque `permissions:`, y no deja pasar un secreto real.
+- `id-token: "ghp_xxx"` sigue siendo un secreto.
+
+**Una nota para la versión congelada.** El arreglo 3 cambia la conducta de una sonda. Si Root tiene una versión de sondas, el builder la sube con la regla que ya existe. El congelamiento todavía no ocurrió, así que no hay que repetir nada ya congelado.
+
+Brief: `docs/builds/brief-local-159.md`.
+
+## 3. ¿Alcanza el dataset para el paso siguiente?
+
+**En número, sí.** Hay 31 tareas en `ROOT_HOME`: las 28 nuevas y las 3 de S2. D3 pide 20.
+
+**Para usarlas, faltan tres cosas:**
+1. **La Tarea 159.** Sin ella, 4 tareas de watchexec bloquean su propia solución de referencia. Esas 4 no sirven hasta el arreglo 3.
+2. **Verificar otra vez las 4 de watchexec con la 159,** y la de b8d0db4058 con su lock real. Son 10 evaluaciones en podman, menos de 2 horas.
+3. **El paso que usa el dataset no está en la lista.** Es D3: correr builders sobre las tareas con `corre`, y medir a Root como evaluador. Va después de congelar la versión. Una vuelta anterior estimó, para 20 tareas, 6,6 horas, 1,8 USD de API y 18,2 USD de lista por cupo. Con 31 tareas, eso crece cerca de 1,55 veces. **Ese paso va a pedir una decisión de presupuesto.** La pregunta se escribe cuando el congelamiento esté cerca, con la estimación al día.
+
+## 4. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | Leer el resultado de prueba-0g-157c | Que termine | Laptop, solo lectura | No | No |
+| 5 | La Tarea 159 | Nada; puede empezar ya | Laptop, builder | No | No |
+| 6 | Armar la cadena con la 159, y su suite con podman | El paso 5 | Laptop, podman | No | No |
+| 7 | Verificar otra vez las 4 de watchexec y b8d0db4058 con su lock real | El paso 6 | Laptop, podman | No | No |
+| 8 | La mezcla de la cadena 110 a 159 | — | — | No | **Sí** |
+| 9 | Congelar la versión | Los pasos 3 y 6 | — | No | No |
+| 10 | Las doce calibraciones de oráculo con la versión congelada | El paso 9 | Colab, cuatro runtimes | No | No |
+| 11 | La pregunta de presupuesto de D3 | El paso 9 | — | No | **Sí** |
+| 12 | D3: `corre` sobre las tareas del dataset | Los pasos 7 y 11 | Laptop y API | Según la respuesta del paso 11 | No |
+| 13 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 9 | Laptop | Según la regla del final | No |
+| 14 | La validez sobre el final sellado | Los pasos 1 a 13 | Colab, notebook si usa el juez | Según el final | No |
+
+**La regla de carga.** El paso 5 compila, y los pasos 6 y 7 usan podman. Corren de a uno en la laptop. Los pasos 2, 3 y 10 van en Colab.
+
+**Preguntas al usuario:** ninguna nueva. La de presupuesto de D3 llega antes del paso 12.
