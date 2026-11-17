@@ -13733,3 +13733,105 @@ Brief: `docs/builds/brief-local-160.md`.
 **La regla de carga.** El paso 5 compila, y los pasos 6 y 7 usan podman. Corren de a uno en la laptop.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-17 (77): cerrar la 0g, y no depender de un exec largo
+
+**Estado.**
+- **La 160 está hecha.** El builder tardó 22 minutos y costó 0,82 USD. La suite con podman de `laptop/cadena-110-160` (5b763f9) dio 3959 verdes, 0 fallas y 5 ignorados.
+- **El escape de `)` y `,` que pidió el builder no aplica.** Un nombre de test de Rust es una ruta de identificadores con `::`.
+- **verif-160 corre ahora,** sobre las 4 tareas de watchexec y b8d0db4058 con su lock real.
+- **La Prueba 0g (prueba-0g-157c) terminó** a las 19:18, con el runtime cerrado. Costó cerca de 0,4 unidades.
+  - `calibrar` dio rc 3 a los 14406 segundos: "colab superó 11072 s; su paquete de vuelta no llegó". El trabajo s2-t1 de Eficiencia quedó en código 0, y el runtime seguía vivo.
+  - El mismo trabajo, repetido en un solo exec, tardó 3043 segundos, con rc 0.
+  - El muestreo de la repetición dio: trabajo 1,189 núcleos, huérfanos 0, fuera 1,237 y robo 0,003. La peor ventana de 60 segundos dio 13,381 núcleos fuera, en una máquina de 2. Los 5 procesos de fuera con más CPU suman 14 segundos.
+
+## 1. La lectura del orquestador sobre "fuera": la acepto
+
+**El código le da la razón.** `totales`, en `repetir-0g.py`, suma `x[4]` sobre los procesos vivos de cada grupo. `x[4]` es la CPU acumulada del proceso más la de los hijos que cosechó. `muestrear` resta dos de esas sumas, y corta la diferencia en 0 con `max(…, 0)`.
+
+**Eso no conserva la CPU, por dos motivos:**
+1. **El conjunto cambia entre muestras.** Un proceso que entra a "fuera" trae toda su CPU acumulada de una vez. Pasa, por ejemplo, cuando su padre muere antes de leerlo y queda adoptado por el `init`, o cuando sale del árbol del trabajo. Una sola muestra puede sumar decenas de segundos.
+2. **El corte en 0 no devuelve nada.** Cuando ese proceso sale del grupo, la resta da negativa, y el corte la borra. El salto de antes queda.
+
+**Los números lo confirman.** El promedio de "fuera" equivale a unos 3760 segundos de CPU, contra 14 segundos con nombre. Una ventana tiene 13 núcleos en 2. Ningún proceso real da eso.
+
+**Un error mío.** En la vuelta (72) diseñé este muestreo por grupos de acumulados, sin pedir que conservara la CPU. La lectura de la vuelta (74), "CPU que el runtime no ve", también salió de este artefacto. Esa lectura queda retirada.
+
+## 2. Qué queda de la pregunta de la 0g
+
+**Después de P120 a, nada que bloquee.** Root no cambia por la carga ajena en Colab, y Eficiencia decide por la memoria. La 0g queda **cerrada**.
+
+**Si alguna vez hace falta otra medición, debe conservar la CPU:**
+1. Por intervalo, el **ocupado** sale de `/proc/stat`: la resta de los campos ocupados, sobre el reloj, en núcleos.
+2. El **trabajo** y los **huérfanos** suman, por pid, solo `utime + stime` propios. Solo cuentan los pid que están en las dos muestras. Nunca cuentan la CPU de hijos cosechados.
+3. **Fuera** es el ocupado menos el trabajo y los huérfanos. Así, los tres grupos suman siempre el ocupado.
+4. La parte de fuera con nombre sale de los mismos deltas por pid. El resto se informa como "sin atribuir", sin corte en 0.
+
+Con la Tarea 161, ese muestreo podría correr en un exec propio, mientras el trabajo corre. La 161 deja libre el kernel entre consultas.
+
+## 3. El paquete de vuelta que no llegó
+
+**Cómo espera Root hoy.**
+- `correr_runtime` corre el trabajo con un solo `ejecutar_guion`, con `--timeout 14400` y un plazo local de 14400 más 300 segundos.
+- `colab::paso` recorta ese plazo con `lim.restante()`: lo que queda de `TOPE_RUNTIME`, 4 horas desde que se pidió el runtime.
+- La preparación ya había usado cerca de 3328 segundos. Por eso el plazo real del trabajo fue de 11072 segundos.
+- Al vencer, Root da "colab superó 11072 s", y no baja la vuelta.
+
+**Dos explicaciones posibles:**
+- **A. El trabajo terminó antes, y el cliente de `colab exec` no volvió.** Es lo mismo que colgó 15,5 horas en la 157b. La repetición tardó 3043 segundos, y el primer trabajo no debería tardar cuatro veces más.
+- **B. El trabajo de verdad tardó más de 11072 segundos.** La primera corrida compila todo desde cero, con 2 núcleos, y la repetición ya tenía caché.
+
+**La A es la más probable.** Ya pasó dos veces con execs largos: en la 157b y aquí. La B pediría una primera corrida casi cuatro veces más lenta que la segunda.
+
+**Hoy no se puede decidir, porque falta un dato.** Nadie guarda cuándo terminó el trabajo dentro del runtime.
+
+**La prueba barata que lo decidiría sola,** sin Root: un exec con un guion que solo duerme 90 minutos y después imprime una línea, con `--timeout 7200`. Si el cliente no vuelve, es la A. Cuesta cerca de 0,12 unidades.
+
+**Pero hay un arreglo que sirve para las dos explicaciones.** Por eso no propongo correr esa prueba.
+
+## 4. La Tarea 161: el trabajo separado del exec
+
+**La idea: ningún exec dura más que unos segundos.**
+1. **Un exec corto lanza el trabajo separado,** con `start_new_session`, y vuelve enseguida. Imprime `ROOT_LANZADO` con el pid.
+2. **El trabajo corre bajo un guion que, al terminar, escribe un archivo de estado:** el código de salida, y la hora de inicio y de fin. Lo escribe en un temporal y lo renombra, así nunca queda a medias.
+3. **Root consulta el estado cada 60 segundos,** con un exec corto. La consulta tiene un plazo de 120 segundos, y un plazo local de 180.
+4. **Una consulta que no vuelve no corta todo.** Root la cuenta y sigue. Con 5 fallas seguidas, da "Colab no responde", con la hora de la última respuesta.
+5. **El plazo total del trabajo no cambia:** `SEG_TRABAJO_CALIBRAR`, recortado por `lim.restante()`.
+6. **Al terminar el trabajo,** Root sigue como hoy: el cierre, la bajada y la importación.
+
+**Por qué sirve para las dos explicaciones:**
+- Si era la A, ningún exec largo queda colgado.
+- Si era la B, el archivo de estado da la hora exacta del fin. El plazo vence igual, pero el error dice cuánto tardó el trabajo.
+
+**De paso, libera el kernel.** Entre consultas, otro exec puede correr, por ejemplo un muestreo.
+
+**El caso del proceso muerto.** Si el pid ya no vive y no hay archivo de estado, el trabajo murió sin escribir. Root da "el trabajo terminó sin estado", con el final de su log.
+
+**No cambia nada que fije la versión congelada.** Toca solo el transporte de Colab.
+
+Brief: `docs/builds/brief-local-161.md`.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | Leer el resultado de verif-160 | Que termine; corre ahora | Laptop, solo lectura | No | No |
+| 5 | La Tarea 161 | El paso 4, para no cargar la laptop | Laptop, builder | Lo que use el builder | No |
+| 6 | Armar la cadena con la 161, y su suite con podman | El paso 5 | Laptop, podman | No | No |
+| 7 | Una corrida corta de `colab calibrar` con la 161: `s2-t1:eficiencia:1` | El paso 6 | Colab, CPU | No | No |
+| 8 | La mezcla de la cadena 110 a 161 | — | — | No | **Sí** |
+| 9 | Congelar la versión | Los pasos 3 y 7 | — | No | No |
+| 10 | Las doce calibraciones de oráculo con la versión congelada | El paso 9 | Colab, cuatro runtimes | No | No |
+| 11 | La pregunta de presupuesto de D3 | El paso 9 | — | No | **Sí** |
+| 12 | D3: `corre` sobre las tareas del dataset | El paso 11 | Laptop y API | Según la respuesta del paso 11 | No |
+| 13 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 9 | Laptop | Según la regla del final | No |
+| 14 | La validez sobre el final sellado | Los pasos 1 a 13 | Colab, notebook si usa el juez | Según el final | No |
+
+**Por qué el paso 7 va antes de congelar.** Las doce calibraciones del paso 10 corren con `colab calibrar`. Un exec colgado las cortaría sin vuelta, y cada una tarda horas.
+
+**La regla de carga.** El paso 5 compila, y los pasos 4 y 6 usan podman. Corren de a uno en la laptop.
+
+**Preguntas al usuario:** ninguna nueva.
