@@ -2033,8 +2033,17 @@ const PAQUETE_REMOTO_IDA: &str = "/content/paquete.tar.gz";
 const VUELTA_REMOTA: &str = "/content/vuelta.tar.gz";
 /// Tiempo de la preparación del runtime, en segundos.
 const SEG_PREPARAR_CALIBRAR: u64 = 3600;
-/// Tiempo de un trabajo de calibración, en segundos. El tope del runtime lo acota.
+/// Plazo total de un trabajo de calibración, en segundos. No es el `--timeout` de un `exec`:
+/// el bucle de consultas lo usa. El tope del runtime lo acota.
 const SEG_TRABAJO_CALIBRAR: u64 = 14400;
+/// Tiempo remoto del `exec` que lanza un trabajo, en segundos. Solo lanza: no espera al trabajo.
+const SEG_LANZAR_CALIBRAR: u64 = 120;
+/// Tiempo remoto del `exec` que consulta el estado de un trabajo, en segundos.
+const SEG_CONSULTA_CALIBRAR: u64 = 120;
+/// Plazo local de cada `exec` que lanza o consulta un trabajo: su tiempo remoto más 60 s.
+const PLAZO_LOCAL_TRABAJO: Duration = Duration::from_secs(180);
+/// Pausa entre dos consultas del estado de un trabajo.
+const PAUSA_CONSULTA_CALIBRAR: Duration = Duration::from_secs(60);
 /// Tiempo del cierre que verifica y empaqueta la vuelta, en segundos.
 const SEG_CIERRE_CALIBRAR: u64 = 600;
 /// Margen que el laptop espera sobre el tiempo de un `exec` remoto.
@@ -2378,23 +2387,33 @@ fn correr_runtime<C: ColabCli>(
 
     for (indice, trabajo) in manifiesto.trabajos.iter().enumerate() {
         let (args, entorno) = trabajo_remoto(trabajo, &manifiesto.archivos);
-        // El guion se calcula antes de escribirlo: si falla, no queda `trabajo-N.py` a medias.
+        // El guion se calcula antes de escribirlo: si falla, no queda `lanzar-N.py` a medias.
         let texto = script_trabajo(indice, &args, &entorno)?;
-        let guion = colab::escribir(tmp, &format!("trabajo-{indice}.py"), &texto)?;
-        let salida = ejecutar_guion(cli, lim, sesion, SEG_TRABAJO_CALIBRAR, &guion)?;
-        if salida.codigo != 0 || colab::marcador(&salida.stdout, "ROOT_OK=").is_none() {
+        let guion = colab::escribir(
+            tmp,
+            &format!("lanzar-{indice}.py"),
+            &script_lanzar(indice, &texto),
+        )?;
+        let lanzado = ejecutar_guion_con_plazo(
+            cli,
+            lim,
+            sesion,
+            SEG_LANZAR_CALIBRAR,
+            PLAZO_LOCAL_TRABAJO,
+            &guion,
+        )?;
+        let pid = colab::marcador(&lanzado.stdout, "ROOT_LANZADO=")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|_| lanzado.codigo == 0);
+        let Some(pid) = pid else {
             return Err(ErrorOraculo::Infra(format!(
-                "el trabajo {} {} no corrió: {}",
+                "el trabajo {} {} no se lanzó: {}",
                 trabajo.tarea,
                 trabajo.dimension,
-                salida.detalle()
+                lanzado.detalle()
             )));
-        }
-        let codigo = colab::marcador(&salida.stdout, "ROOT_CODIGO=")
-            .and_then(|v| v.parse::<i32>().ok())
-            .ok_or_else(|| {
-                ErrorOraculo::Infra(format!("el trabajo {} no dio su código", trabajo.tarea))
-            })?;
+        };
+        let codigo = esperar_trabajo(cli, lim, sesion, tmp, indice, pid, trabajo)?;
         codigos.push(CodigoTrabajo {
             tarea: trabajo.tarea.clone(),
             dimension: trabajo.dimension.clone(),
@@ -2596,6 +2615,25 @@ fn ejecutar_guion<C: ColabCli>(
     segundos: u64,
     guion: &Path,
 ) -> Result<SalidaColab, ErrorOraculo> {
+    ejecutar_guion_con_plazo(
+        cli,
+        lim,
+        sesion,
+        segundos,
+        Duration::from_secs(segundos) + MARGEN_EXEC,
+        guion,
+    )
+}
+
+/// Corre un guion de Python con `exec -f`. `segundos` es el `--timeout` remoto; `plazo`, el local.
+fn ejecutar_guion_con_plazo<C: ColabCli>(
+    cli: &C,
+    lim: &colab::Limites,
+    sesion: &str,
+    segundos: u64,
+    plazo: Duration,
+    guion: &Path,
+) -> Result<SalidaColab, ErrorOraculo> {
     llamar(
         cli,
         lim,
@@ -2608,8 +2646,96 @@ fn ejecutar_guion<C: ColabCli>(
             "-f",
             &colab::ruta(guion),
         ]),
-        Duration::from_secs(segundos) + MARGEN_EXEC,
+        plazo,
     )
+}
+
+/// Estado que el guion de `trabajo` escribe al terminar. Solo se lee el código.
+#[derive(Deserialize)]
+struct EstadoTrabajo {
+    codigo: i32,
+}
+
+/// Consulta el estado de un trabajo lanzado hasta que termine. Devuelve su código de salida.
+/// Entre dos consultas espera `PAUSA_CONSULTA_CALIBRAR`. Si el plazo total vence, falla.
+fn esperar_trabajo<C: ColabCli>(
+    cli: &C,
+    lim: &colab::Limites,
+    sesion: &str,
+    tmp: &Path,
+    indice: usize,
+    pid: u32,
+    trabajo: &TrabajoManifiesto,
+) -> Result<i32, ErrorOraculo> {
+    let plazo = Duration::from_secs(SEG_TRABAJO_CALIBRAR).min(lim.restante());
+    let inicio = Instant::now();
+    let guion = colab::escribir(
+        tmp,
+        &format!("estado-{indice}.py"),
+        &script_estado(indice, pid),
+    )?;
+    loop {
+        let consulta = ejecutar_guion_con_plazo(
+            cli,
+            lim,
+            sesion,
+            SEG_CONSULTA_CALIBRAR,
+            PLAZO_LOCAL_TRABAJO,
+            &guion,
+        )?;
+        if consulta.codigo != 0 {
+            return Err(ErrorOraculo::Infra(format!(
+                "no se pudo consultar el trabajo {} {}: {}",
+                trabajo.tarea,
+                trabajo.dimension,
+                consulta.detalle()
+            )));
+        }
+        match colab::marcador(&consulta.stdout, "ROOT_ESTADO=").as_deref() {
+            Some("fin") => {
+                let linea = texto_tras(&consulta.stdout, "ROOT_ESTADO=");
+                let estado: EstadoTrabajo =
+                    serde_json::from_str(linea.lines().next().unwrap_or("")).map_err(|e| {
+                        ErrorOraculo::Infra(format!("el estado no se lee ({e}): {linea}"))
+                    })?;
+                return Ok(estado.codigo);
+            }
+            Some("corriendo") => {}
+            Some("murio") => {
+                return Err(ErrorOraculo::Infra(format!(
+                    "el trabajo terminó sin estado: {}",
+                    texto_tras(&consulta.stdout, "ROOT_ESTADO=")
+                )));
+            }
+            _ => {
+                return Err(ErrorOraculo::Infra(format!(
+                    "la consulta del trabajo {} {} no dio estado: {}",
+                    trabajo.tarea,
+                    trabajo.dimension,
+                    consulta.detalle()
+                )));
+            }
+        }
+        if inicio.elapsed() >= plazo {
+            return Err(ErrorOraculo::Infra(format!(
+                "el trabajo superó {} s",
+                plazo.as_secs()
+            )));
+        }
+        thread::sleep(PAUSA_CONSULTA_CALIBRAR);
+    }
+}
+
+/// Texto que sigue a la línea que empieza con `clave`, sin espacios en las puntas.
+fn texto_tras(stdout: &str, clave: &str) -> String {
+    stdout
+        .lines()
+        .skip_while(|l| !l.trim().starts_with(clave))
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 /// Libera el runtime con `fin`. Si una señal corta la parada, la reintenta sin señales.
@@ -2943,8 +3069,9 @@ fn revisar_entorno_sin_secretos(entorno: &BTreeMap<String, String>) -> Result<()
 }
 
 /// Script que corre un trabajo del paquete. El JSON del trabajo va como literal que `json.loads` lee.
-/// La salida del trabajo va a `trabajo-<indice>.log`. Un código distinto de cero no falla el script.
-/// Falla con `Uso` si el entorno trae una variable secreta con valor.
+/// La salida del trabajo se agrega a `trabajo-<indice>.log`. Al terminar escribe
+/// `trabajo-<indice>.estado` con `{"codigo", "inicio", "fin"}`: primero a un temporal y luego lo renombra.
+/// Un código distinto de cero no falla el script. Falla con `Uso` si el entorno trae una variable secreta con valor.
 fn script_trabajo(
     indice: usize,
     args: &[String],
@@ -2962,19 +3089,90 @@ fn script_trabajo(
         r#"import json
 import os
 import subprocess
+import time
 
 TRABAJO = json.loads({literal})
 D = "{D_REMOTO}"
 entorno = dict(os.environ)
 entorno.update(TRABAJO["entorno"])
 entorno["ROOT_HOME"] = D
-ruta_log = os.path.join(D, "trabajo-%d.log" % TRABAJO["indice"])
-with open(ruta_log, "w") as log:
+indice = TRABAJO["indice"]
+ruta_log = os.path.join(D, "trabajo-%d.log" % indice)
+ruta_estado = os.path.join(D, "trabajo-%d.estado" % indice)
+ruta_temporal = os.path.join(D, "trabajo-%d.estado.tmp" % indice)
+inicio = time.time()
+with open(ruta_log, "a") as log:
     r = subprocess.run([os.path.join(D, "r00t")] + TRABAJO["args"], cwd=D, env=entorno, stdout=log, stderr=subprocess.STDOUT)
-print("ROOT_OK=trabajo-%d" % TRABAJO["indice"])
-print("ROOT_CODIGO=%d" % r.returncode)
+fin = time.time()
+with open(ruta_temporal, "w") as temporal:
+    temporal.write(json.dumps({{"codigo": r.returncode, "inicio": inicio, "fin": fin}}) + "\n")
+os.replace(ruta_temporal, ruta_estado)
 "#
     ))
+}
+
+/// Script que escribe `trabajo-<indice>.py` en el runtime y lo lanza en segundo plano.
+/// El texto del trabajo va como literal. Imprime `ROOT_LANZADO=<pid>` y sale sin esperar al trabajo.
+fn script_lanzar(indice: usize, texto_trabajo: &str) -> String {
+    let texto = literal_python(texto_trabajo);
+    format!(
+        r#"import os
+import subprocess
+import sys
+
+D = "{D_REMOTO}"
+TEXTO = {texto}
+ruta = os.path.join(D, "trabajo-{indice}.py")
+with open(ruta, "w") as archivo:
+    archivo.write(TEXTO)
+with open(os.path.join(D, "trabajo-{indice}.log"), "w") as log:
+    proceso = subprocess.Popen([sys.executable, ruta], cwd=D, start_new_session=True, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+print("ROOT_LANZADO=%d" % proceso.pid, flush=True)
+"#
+    )
+}
+
+/// Script que dice en qué estado va un trabajo lanzado con `pid`.
+/// Si terminó, imprime `ROOT_ESTADO=fin` y en la línea siguiente su JSON.
+/// Si el proceso vive, imprime `ROOT_ESTADO=corriendo`. Si no, imprime `ROOT_ESTADO=murio` y las últimas 20 líneas del log.
+fn script_estado(indice: usize, pid: u32) -> String {
+    format!(
+        r#"import os
+
+D = "{D_REMOTO}"
+ruta_estado = os.path.join(D, "trabajo-{indice}.estado")
+ruta_log = os.path.join(D, "trabajo-{indice}.log")
+PID = {pid}
+
+
+def vive(pid):
+    try:
+        os.kill(pid, 0)
+        with open("/proc/%d/stat" % pid) as archivo:
+            estado = archivo.read().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return False
+    return estado != "Z"
+
+
+# Primero se mira si vive: un proceso que termina ya dejó su estado escrito.
+viva = vive(PID)
+if os.path.exists(ruta_estado):
+    with open(ruta_estado) as archivo:
+        print("ROOT_ESTADO=fin")
+        print(archivo.read().strip())
+elif viva:
+    print("ROOT_ESTADO=corriendo")
+else:
+    print("ROOT_ESTADO=murio")
+    try:
+        with open(ruta_log, errors="replace") as archivo:
+            lineas = archivo.readlines()
+    except OSError:
+        lineas = []
+    print("".join(lineas[-20:]), end="")
+"#
+    )
 }
 
 /// Script que une los `n` trozos, compara su SHA-256 con `sha` y, si coincide, prepara el runtime.
@@ -5321,10 +5519,13 @@ mod tests_calibrar {
                     salida(1, "", "fallo simulado")
                 };
             }
+            // `lanzar` va antes: su guion embebe el de `trabajo`.
             let stdout = if guion.contains("preparar-runtime.sh") {
                 "ROOT_OK=preparar\n".to_string()
-            } else if guion.contains("TRABAJO = json.loads") {
-                "ROOT_OK=trabajo-0\nROOT_CODIGO=0\n".to_string()
+            } else if guion.contains("Popen(") && guion.contains("start_new_session") {
+                "ROOT_LANZADO=4242\n".to_string()
+            } else if guion.contains("ROOT_ESTADO=") {
+                "ROOT_ESTADO=fin\n{\"codigo\": 0, \"inicio\": 1.0, \"fin\": 2.0}\n".to_string()
             } else {
                 let real = sha256_hex(&fs::read(&self.vuelta).unwrap_or_default());
                 let sha = self.sha_de_cierre.clone().unwrap_or(real);
@@ -5512,7 +5713,9 @@ mod tests_calibrar {
         for sesion in &sesiones {
             assert_eq!(
                 comandos_de(&llamadas, sesion),
-                ["new", "upload", "exec", "exec", "exec", "download", "stop"],
+                [
+                    "new", "upload", "exec", "exec", "exec", "exec", "download", "stop"
+                ],
                 "sesión {sesion}"
             );
             let nuevo = llamadas
@@ -5749,6 +5952,74 @@ mod tests_calibrar {
             .expect("el entorno de un trabajo no tiene secretos");
 
         assert!(guion.contains("TRABAJO = json.loads("));
+    }
+
+    /// Valores de `--timeout` de los `exec` del ciclo, en orden.
+    fn timeouts_de_exec(llamadas: &[Vec<String>]) -> Vec<String> {
+        llamadas
+            .iter()
+            .filter(|a| a.first().is_some_and(|c| c == "exec"))
+            .filter_map(|a| valor_de(a, "--timeout"))
+            .collect()
+    }
+
+    #[test]
+    fn exec_del_trabajo_usa_timeout_de_120_s_y_no_el_total() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let _resultado = correr(&cli, home.path(), &[p0], TOPE_PRUEBA);
+
+        let timeouts = timeouts_de_exec(&cli.llamadas());
+        assert!(!timeouts.iter().any(|t| t == "14400"), "{timeouts:?}");
+        let de_120 = timeouts.iter().filter(|t| t.as_str() == "120").count();
+        assert!(de_120 >= 2, "lanzar y consultar usan 120 s: {timeouts:?}");
+    }
+
+    #[test]
+    fn script_trabajo_escribe_el_estado_en_temporal_y_lo_renombra() {
+        let texto = script_trabajo(0, &[], &BTreeMap::new()).expect("guion sin secretos");
+
+        assert!(texto.contains("os.replace"), "{texto}");
+        assert!(texto.contains(".estado.tmp"), "{texto}");
+        for clave in ["\"codigo\"", "\"inicio\"", "\"fin\""] {
+            assert!(texto.contains(clave), "falta {clave}: {texto}");
+        }
+    }
+
+    #[test]
+    fn script_lanzar_abre_el_trabajo_con_sesion_nueva() {
+        let texto = script_lanzar(0, "print('hola')\n");
+
+        assert!(texto.contains("start_new_session=True"), "{texto}");
+        assert!(texto.contains("ROOT_LANZADO"), "{texto}");
+    }
+
+    #[test]
+    fn script_lanzar_escribe_el_guion_del_trabajo_en_el_runtime() {
+        let texto = script_lanzar(2, "print('hola')\n");
+
+        assert!(texto.contains("trabajo-2.py"), "{texto}");
+        assert!(
+            texto.contains(&literal_python("print('hola')\n")),
+            "{texto}"
+        );
+    }
+
+    #[test]
+    fn script_estado_responde_fin_corriendo_o_murio() {
+        let texto = script_estado(0, 4242);
+
+        for marca in [
+            "ROOT_ESTADO=fin",
+            "ROOT_ESTADO=corriendo",
+            "ROOT_ESTADO=murio",
+        ] {
+            assert!(texto.contains(marca), "falta {marca}: {texto}");
+        }
     }
 
     #[test]
