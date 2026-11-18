@@ -759,6 +759,18 @@ fn evaluar_con(
             let mut v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
             v.ambiguedades = ambiguedades.clone();
             v.commit = identidad.clone();
+            // Sin requisitos no hay módulos que nombrar: `presentes` va vacío. Sin redactor: el informe es
+            // determinista.
+            let informe = informe::informar_con(
+                &v,
+                tarea,
+                &deps.reglas,
+                deps.rubricas,
+                &BTreeSet::new(),
+                None,
+            )?;
+            v.estado = informe::estado_de(Some(&informe));
+            v.informe = Some(informe);
             return Ok(con_costo(v, &juez_config));
         }
     };
@@ -8018,6 +8030,93 @@ mod tests {
             v.hallazgos
                 .iter()
                 .any(|h| h.dimension == Dimension::Entrega)
+        );
+    }
+
+    /// Repo de Rust sin `Cargo.toml`: el `Cargo.lock` dado es lo que la descarga lee. Así el inventario no
+    /// rechaza el lock antes, y el corte es el de `preparar_rust`.
+    fn repo_rust_sin_manifiesto(base: &Path, lock: &str) -> PathBuf {
+        let repo = repo_rust(base, lock);
+        fs::remove_file(repo.join("Cargo.toml")).expect("sin Cargo.toml");
+        repo
+    }
+
+    /// Lo que todo corte de la descarga debe cumplir: informe decidido, nueve dimensiones sin veredicto con el
+    /// motivo de la descarga, y el hallazgo del corte nombrado en el informe (`marca` está en su detalle).
+    fn assert_corte_con_informe(v: &Veredicto, marca: &str) {
+        let informe = v.informe.as_ref().expect("el corte trae informe");
+        assert_eq!(
+            informe.decision,
+            Decision::SinDecision,
+            "{}",
+            informe.motivo
+        );
+        assert_eq!(v.estado, Estado::SinVeredicto);
+        assert_eq!(v.puntajes.len(), 9);
+        for p in &v.puntajes {
+            assert_eq!(p.valor, 0.0, "{:?}", p.dimension);
+            let motivo = p.sin_veredicto.as_deref().expect("sin veredicto");
+            assert!(motivo.contains("descarga"), "{motivo}");
+        }
+        assert!(
+            informe.resumen.contains(marca),
+            "el resumen nombra el corte: {}",
+            informe.resumen
+        );
+        assert!(
+            informe.riesgos.iter().any(|r| r.texto.contains(marca)),
+            "los riesgos nombran el hallazgo del corte: {:?}",
+            informe.riesgos
+        );
+    }
+
+    #[test]
+    fn oraculo_corte_lock_invalido_trae_informe_que_nombra_el_hallazgo() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust_sin_manifiesto(base.path(), LOCK_ROTO);
+        let home = base.path().join("home");
+        let v = evaluar_falso(&repo, &tarea, &home, &sin_suites, &herramientas(&[]))
+            .expect("el corte no es error de infraestructura");
+        assert!(
+            v.hallazgos
+                .iter()
+                .any(|h| h.detalle.contains("Cargo.lock inválido")),
+            "{:?}",
+            v.hallazgos
+        );
+        assert_corte_con_informe(&v, "Cargo.lock inválido");
+    }
+
+    #[test]
+    fn oraculo_corte_fuente_no_aceptada_trae_informe_que_nombra_el_hallazgo() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        // Una dependencia git por ssh: el inventario la rechaza antes de cualquier contenedor.
+        fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [dependencies]\nfoo = { git = \"ssh://git@github.com/x/y\" }\n",
+        )
+        .expect("Cargo.toml con fuente git por ssh");
+        let home = base.path().join("home");
+        let v = evaluar_falso(&repo, &tarea, &home, &sin_suites, &herramientas(&[]))
+            .expect("el corte no es error de infraestructura");
+        assert_corte_con_informe(&v, "fuente no aceptada");
+    }
+
+    #[test]
+    fn oraculo_camino_normal_trae_informe_y_estado_de_su_decision() {
+        // Guarda: el camino sin corte no cambia. Su estado sale de su informe, como antes.
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(v.estado, informe::estado_de(Some(informe)));
+        assert!(
+            !informe.motivo.contains("descarga"),
+            "el camino normal no lleva motivo de descarga: {}",
+            informe.motivo
         );
     }
 
