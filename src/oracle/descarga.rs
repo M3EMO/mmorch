@@ -467,7 +467,15 @@ pub fn preparar_con_juez(
         return Ok((Preparacion::SinVeredicto(extra), devueltas, juicio));
     }
     let (preparacion, registro) = match tarea.lenguaje.as_str() {
-        "rust" => preparar_rust(repo, tarea, home, timeout, &inv, &credenciales)?,
+        "rust" => preparar_rust(
+            repo,
+            tarea,
+            home,
+            timeout,
+            &inv,
+            &credenciales,
+            &contenedor::ejecutar,
+        )?,
         "python" => python::preparar_python(repo, tarea, home, timeout, &config.registros)?,
         _ => (
             Preparacion::Lista {
@@ -650,6 +658,7 @@ fn preparar_rust(
     timeout: Duration,
     inv: &Inventario,
     credenciales: &[Credencial],
+    correr: &dyn Fn(&Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
 ) -> Result<Paso, ErrorOraculo> {
     let mut hallazgos = Vec::new();
     let lock = repo.join(ARCHIVO_LOCK);
@@ -688,7 +697,8 @@ fn preparar_rust(
     let destino = home.join(CARPETA_CACHE).join(CARPETA_RUST).join(&hash);
     let cache_hit = destino.join(ARCHIVO_CONFIG).is_file();
     if !cache_hit
-        && let Some(linea) = descargar_vendor(repo, tarea, home, &hash, timeout, credenciales)?
+        && let Some(linea) =
+            descargar_vendor(repo, tarea, home, &hash, timeout, credenciales, correr)?
     {
         return Ok(corte(
             hallazgo_no_instala(&linea),
@@ -862,6 +872,7 @@ fn descargar_vendor(
     hash: &str,
     timeout: Duration,
     credenciales: &[Credencial],
+    correr: &dyn Fn(&Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
 ) -> Result<Option<String>, ErrorOraculo> {
     let destino = home.join(CARPETA_CACHE).join(CARPETA_RUST).join(hash);
     let parcial = parcial_de(&destino);
@@ -884,7 +895,7 @@ fn descargar_vendor(
         trabajo: None,
         secretos: secretos_de(credenciales),
     };
-    match ejecutar_descarga(&ejecucion, credenciales) {
+    match ejecutar_descarga_con(correr, &ejecucion, credenciales) {
         Ok(()) if parcial.join(ARCHIVO_CONFIG).is_file() => {
             if destino.exists() {
                 borrar_en_home(home, &destino).map_err(|e| infra("borrar la caché previa", e))?;
@@ -2213,6 +2224,47 @@ location searched: crates.io index";
             Diagnostico::Desconocido(linea) => assert_eq!(linea.chars().count(), 300),
             otro => panic!("{otro:?}"),
         }
+    }
+
+    #[test]
+    fn descarga_preparar_rust_con_no_matching_package_da_el_corte_no_instala() {
+        let repo = tempfile::tempdir().expect("repo");
+        let home = tempfile::tempdir().expect("home");
+        fs::write(
+            repo.path().join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("escribe Cargo.toml");
+        fs::write(repo.path().join(ARCHIVO_LOCK), LOCK).expect("escribe Cargo.lock");
+        let tarea = tarea_rust_minima();
+        let inv = inventario::inventariar(repo.path()).expect("inventario");
+        let llamadas = std::cell::Cell::new(0);
+        let falso = |_: &Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            llamadas.set(llamadas.get() + 1);
+            Ok(contenedor::Resultado {
+                codigo: 1,
+                stdout: String::new(),
+                stderr: "error: no matching package named `x` found".into(),
+                segundos: 0.0,
+            })
+        };
+        let (preparacion, registro) = preparar_rust(
+            repo.path(),
+            &tarea,
+            home.path(),
+            Duration::from_secs(60),
+            &inv,
+            &[],
+            &falso,
+        )
+        .expect("un corte por producto no es un error");
+        match preparacion {
+            Preparacion::SinVeredicto(hallazgos) => assert!(!hallazgos.is_empty()),
+            otro => panic!("{otro:?}"),
+        }
+        let registro = registro.expect("el corte deja un registro");
+        assert_eq!(registro.motivo, Some("no-instala"));
+        assert_eq!(llamadas.get(), 1);
     }
 
     /// Tarea de Rust mínima, cargada desde un `tarea.toml` temporal.
