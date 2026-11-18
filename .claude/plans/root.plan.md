@@ -13835,3 +13835,114 @@ Brief: `docs/builds/brief-local-161.md`.
 **La regla de carga.** El paso 5 compila, y los pasos 4 y 6 usan podman. Corren de a uno en la laptop.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-17 (78): un producto que no instala debe dar rojo, y el paso 7
+
+**Estado.**
+- **verif-160 terminó** a las 21:30, con rc 0. Las 4 tareas de watchexec pasan: con `con_tests`, el contrato y el oculto enteros, y con `bootstrap`, rojo.
+- **El estado de `con_tests` es sin veredicto.** Arquitectura y Diseño piden el juez, y la verificación corre sin clave. Es lo esperado.
+- **b8d0db4058, con su lock real,** da un hallazgo de Entrega, severidad 3, de la fuente `descarga`: "el producto no instala: error: failed to sync". Ya no es un error de infraestructura.
+- **Pero su `informe` es nulo y su estado es sin veredicto,** con el contrato y el oculto en 0 de 0.
+- **La 161 está hecha.** El builder tardó 16 minutos y costó 0,99 USD. La suite con podman de `laptop/cadena-110-161` dio 3971 verdes, 0 fallas y 5 ignorados. Su informe trae seis preguntas.
+- **El paso 7 espera al usuario.** El orquestador preparó `paso0-161.sh` y `calibrar-161.sh`.
+
+## 1. Las seis preguntas de la 161
+
+1. **La hora de inicio del error de plazo total, la de Root al lanzar.** Acepto la decisión. Con un estado `corriendo`, no existe otra.
+2. **La hora de la última respuesta en UTC, RFC 3339, y "ninguna" sin respuesta.** Acepto la decisión.
+3. **"Colab no responde" sin el motivo de la última falla.** Pido un cambio: el mensaje suma el motivo corto de la última falla, por ejemplo "plazo de 180 s" o "código 1". Sin él, cinco fallas de un guion roto se leen igual que cinco cuelgues del cliente. Va en la 162.
+4. **`lanzar-N.py` escribe `trabajo-N.py` en el runtime.** Acepto la decisión. El texto de `trabajo-N.py` sale de `script_trabajo`, que sigue pasando la guarda de secretos de la 158.
+5. **Un `fin` con JSON ilegible falla enseguida.** Acepto la decisión. El estado se escribe con un renombre, así que un JSON roto no es una carrera: es un error real.
+6. **Toda consulta sin marcador o con código distinto de 0 cuenta como falla.** Acepto la decisión, junto con el cambio de la pregunta 3.
+
+**Lo que quedó sin probar, y pido cerrar en la 162:**
+- **Los guiones `trabajo`, `lanzar` y `estado` solo se probaron por su texto.** Un error de sintaxis de Python aparecería recién en Colab, después de horas. Un test los corre con `python3`, en un temporal del test, con un comando falso. Así lo hizo la 149 con `root-medir.py`.
+- **Falta un test de la señal** que corta la espera entre consultas.
+
+## 2. El defecto de b8d0db4058
+
+**Cómo llega el fallo de descarga, en `laptop/tarea-161`:**
+1. `preparar_rust`, en `src/oracle/descarga.rs`, ve el fallo de `cargo vendor`. Devuelve `corte(hallazgo_no_instala(...), ...)`, que es `Preparacion::SinVeredicto` con el hallazgo de severidad 3.
+2. `evaluar_con`, en `src/oracle/mod.rs`, recibe `SinVeredicto` y **vuelve enseguida** con `sin_veredicto(...)`.
+3. Ese retorno **se salta `informe::informar_con`,** que en el camino normal arma el informe y fija `veredicto.estado`.
+4. Sin informe, el estado queda sin veredicto, y `informe` queda nulo.
+
+**Es un defecto.** La regla de decisión ya existe: `decidir`, en `src/oracle/informe.rs`, pone `Bloqueado` primero cuando hay un bloqueo, y un hallazgo de severidad 3 bloquea. El camino corto nunca llega a esa regla. Además, el usuario recibe un veredicto sin informe: no ve por qué.
+
+**La decisión que corresponde: `Bloqueado`,** por el hallazgo de Entrega de severidad 3.
+- Las nueve dimensiones siguen sin veredicto, porque no corrieron.
+- La regla de la Tarea 32, "primero la evidencia", dice que `Bloqueado` gana a todo. Una dimensión sin veredicto no tapa la evidencia de otra.
+- El informe se arma igual que en el camino normal, sin redactor. Nombra el hallazgo y dice que las suites no corrieron.
+
+**Vale para los tres cortes de la descarga:** "no instala", "lock inválido" y "fuente no aceptada". Los tres dan hallazgos de severidad 3.
+
+**Es una decisión técnica.** Aplica una regla que ya existe a un camino que la salteaba. No cambia qué bloquea.
+
+**No cambia las doce calibraciones.** La calibración lee los puntajes de cada dimensión, no la decisión. Las dimensiones siguen sin veredicto, como hoy.
+
+**Entra antes de congelar.** D3 y el final leen la decisión. Un producto que no instala debe dar rojo en los dos.
+
+## 3. Los guiones del paso 7
+
+**`paso0-161.sh` prueba lo que pide el paso.** Arma el binario de `laptop/cadena-110-161` en `rust:1`, y un paquete con un solo trabajo: Eficiencia de s2-t1, con `n` 1. Antes revisa que la suite de la 161 dio verde y que ningún builder usa la laptop.
+
+**`calibrar-161.sh` también, con un cambio.** Corre sobre una copia del `ROOT_HOME`, sin claves en el entorno, con un `timeout` local de 18000 segundos. Ese tope está por encima de `TOPE_RUNTIME`, así que el tope de Root corta primero.
+
+**El cambio: correrlo con `--sin-stop`.** El archivo `trabajo-0.estado` queda en el runtime, y la vuelta no lo trae. Para verlo:
+1. `calibrar` corre con `--sin-stop`.
+2. Un exec corto, con `timeout` local, lee `trabajo-0.estado`.
+3. Después, `colab stop` cierra el runtime.
+
+Ese estado trae la hora de inicio y de fin del trabajo. Con ella se sabe cuánto tardó la primera corrida de verdad. Así se cierra la duda de la vuelta (77): si tardó menos de 11072 segundos, el cuelgue de la 157c fue del cliente.
+
+**Qué mirar para dar el paso 7 por bueno:**
+1. `rc=0`, y la fila nueva de `s2-t1` Eficiencia en `home-161`.
+2. **Ningún exec largo.** El trabajo se lanzó con `ROOT_LANZADO`, y cada consulta volvió en su plazo.
+3. **El estado del trabajo:** código 0, con hora de inicio y de fin.
+4. **La duración del trabajo,** según el estado, comparada con los 11072 segundos de la 157c.
+5. El aviso de clave de la línea `grep sk-` no aparece.
+6. El costo de unidades, con el saldo antes y después.
+
+**Si falla:**
+- **"Colab no responde":** el orquestador lee el log del trabajo con un exec corto, si el runtime vive, e informa.
+- **"El trabajo terminó sin estado":** informa el final del log que trae el error.
+- **Un vencimiento del plazo total:** informa cuánto llevaba el trabajo.
+
+## 4. La Tarea 162
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Un corte de la descarga arma su informe y su decisión | `src/oracle/mod.rs`, y `src/oracle/informe.rs` si hace falta |
+| 2 | El motivo de la última falla en "Colab no responde", los guiones de Python probados con `python3`, y el test de la señal | `src/colab_calibra.rs` |
+
+- **Base:** la punta de `laptop/cadena-110-161`.
+- Los dos puntos no comparten archivos, así que corren en paralelo.
+- **Entra antes de congelar.**
+
+Brief: `docs/builds/brief-local-162.md`.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | `paso0-161.sh` | — | Laptop, el usuario | No | **Sí** |
+| 5 | `calibrar-161.sh` con `--sin-stop`, la lectura del estado y el `stop` | El paso 4 | Colab, CPU | No | No |
+| 6 | La Tarea 162 | Nada; no corre a la vez que el paso 4 | Laptop, builder | Lo que use el builder | No |
+| 7 | Armar la cadena con la 162, y su suite con podman | El paso 6 | Laptop, podman | No | No |
+| 8 | Verificar b8d0db4058 otra vez: debe dar `Bloqueado` con informe | El paso 7 | Laptop, podman | No | No |
+| 9 | La mezcla de la cadena 110 a 162 | — | — | No | **Sí** |
+| 10 | Congelar la versión | Los pasos 3, 5 y 7 | — | No | No |
+| 11 | Las doce calibraciones de oráculo con la versión congelada | El paso 10 | Colab, cuatro runtimes | No | No |
+| 12 | La pregunta de presupuesto de D3 | El paso 10 | — | No | **Sí** |
+| 13 | D3: `corre` sobre las tareas del dataset | El paso 12 | Laptop y API | Según la respuesta del paso 12 | No |
+| 14 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 10 | Laptop | Según la regla del final | No |
+| 15 | La validez sobre el final sellado | Los pasos 1 a 14 | Colab, notebook si usa el juez | Según el final | No |
+
+**La regla de carga.** Los pasos 4, 7 y 8 usan podman, y el paso 6 compila. Corren de a uno en la laptop. El paso 5 va en Colab, así que puede correr a la vez que el paso 6.
+
+**El paso 5 prueba la 161, no la 162.** El punto 2 de la 162 solo cambia un mensaje y suma tests. No hace falta repetir el paso 5 después.
+
+**Preguntas al usuario:** ninguna nueva.
