@@ -46,8 +46,38 @@ pub enum Preparacion {
         rustsec: Option<PathBuf>,
         hallazgos: Vec<Hallazgo>,
     },
-    /// La evaluación no corre: no hay veredicto, solo hallazgos.
-    SinVeredicto(Vec<Hallazgo>),
+    /// La evaluación no corre: no hay veredicto, solo hallazgos. `Corte` dice por qué se cortó.
+    SinVeredicto(Vec<Hallazgo>, Corte),
+}
+
+/// Por qué la descarga cortó la evaluación. Solo `NoInstala` y `LockInvalido` dicen que el producto no compila.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Corte {
+    /// El producto no instala: paquete inexistente o retirado.
+    NoInstala,
+    /// El `Cargo.lock` no parsea.
+    LockInvalido,
+    /// Una fuente que la política no acepta: registro, git o ruta.
+    FuenteNoAceptada,
+    /// Cualquier otro corte. No dice que el producto no compila.
+    Otro,
+}
+
+impl Corte {
+    /// Texto del corte para el motivo y el informe.
+    pub fn texto(self) -> &'static str {
+        match self {
+            Corte::NoInstala => "no instala",
+            Corte::LockInvalido => "lock inválido",
+            Corte::FuenteNoAceptada => "fuente no aceptada",
+            Corte::Otro => "otro corte",
+        }
+    }
+
+    /// Verdadero si el corte deja el producto sin compilar: el veredicto sale rojo.
+    pub fn no_compila(self) -> bool {
+        matches!(self, Corte::NoInstala | Corte::LockInvalido)
+    }
 }
 
 /// Lectura de la salida de error de un contenedor de descarga.
@@ -429,7 +459,11 @@ pub fn preparar_con_juez(
         )?;
         let mut hallazgos = hallazgos_de_rechazos(&inv.rechazos);
         hallazgos.extend(extra);
-        return Ok((Preparacion::SinVeredicto(hallazgos), Vec::new(), juicio));
+        return Ok((
+            Preparacion::SinVeredicto(hallazgos, Corte::FuenteNoAceptada),
+            Vec::new(),
+            juicio,
+        ));
     }
     // Las credenciales de los registros privados salen de `root.toml` y del entorno de Root. Solo van a
     // los contenedores de descarga de Rust: nunca a la evaluación, a Python ni a la construcción (decisión 29).
@@ -444,7 +478,11 @@ pub fn preparar_con_juez(
         // Los rechazos son todas las claves de ejecución: el hallazgo sale solo con ellas.
         let claves = rechazos_de_claves(&inv.claves_de_ejecucion);
         registrar_corte(home, tarea, "config-que-ejecuta-con-credencial", claves)?;
-        return Ok((Preparacion::SinVeredicto(hallazgos), Vec::new(), juicio));
+        return Ok((
+            Preparacion::SinVeredicto(hallazgos, Corte::FuenteNoAceptada),
+            Vec::new(),
+            juicio,
+        ));
     }
     // Las imágenes base van antes de las dependencias: sin ellas el Dockerfile no construye (Tarea 9d2).
     // Un pull que falla no corta la fase: queda en el Gate y la construcción da sin veredicto (Tarea 7i).
@@ -464,7 +502,11 @@ pub fn preparar_con_juez(
         registro.motivo = Some("imagen base: pide credenciales");
         registro.imagenes = imagenes;
         registrar(home, tarea, &registro)?;
-        return Ok((Preparacion::SinVeredicto(extra), devueltas, juicio));
+        return Ok((
+            Preparacion::SinVeredicto(extra, Corte::FuenteNoAceptada),
+            devueltas,
+            juicio,
+        ));
     }
     let (preparacion, registro) = match tarea.lenguaje.as_str() {
         "rust" => preparar_rust(
@@ -593,9 +635,9 @@ fn sumar_hallazgos(preparacion: Preparacion, extra: Vec<Hallazgo>) -> Preparacio
                 hallazgos,
             }
         }
-        Preparacion::SinVeredicto(mut hallazgos) => {
+        Preparacion::SinVeredicto(mut hallazgos, corte) => {
             hallazgos.extend(extra);
-            Preparacion::SinVeredicto(hallazgos)
+            Preparacion::SinVeredicto(hallazgos, corte)
         }
     }
 }
@@ -664,7 +706,8 @@ fn preparar_rust(
     let lock = repo.join(ARCHIVO_LOCK);
     if !lock.is_file() {
         if let Some(linea) = generar_lock(repo, tarea, home, timeout, credenciales)? {
-            return Ok(corte(
+            return Ok(corte_de(
+                Corte::NoInstala,
                 hallazgo_no_instala(&linea),
                 Registro::corte("rust", None, "no-instala"),
             ));
@@ -677,7 +720,10 @@ fn preparar_rust(
         if !rechazos.is_empty() {
             let registro = Registro::corte("rust", None, "fuente-no-aceptada");
             return Ok((
-                Preparacion::SinVeredicto(hallazgos_de_rechazos(&rechazos)),
+                Preparacion::SinVeredicto(
+                    hallazgos_de_rechazos(&rechazos),
+                    Corte::FuenteNoAceptada,
+                ),
                 Some(registro),
             ));
         }
@@ -688,7 +734,8 @@ fn preparar_rust(
     let paquetes = match analizar_lock(&texto) {
         Ok(paquetes) => paquetes,
         Err(error) => {
-            return Ok(corte(
+            return Ok(corte_de(
+                Corte::LockInvalido,
                 hallazgo_lock_invalido(&error),
                 Registro::corte("rust", Some(hash), "lock-invalido"),
             ));
@@ -700,7 +747,8 @@ fn preparar_rust(
         && let Some(linea) =
             descargar_vendor(repo, tarea, home, &hash, timeout, credenciales, correr)?
     {
-        return Ok(corte(
+        return Ok(corte_de(
+            Corte::NoInstala,
             hallazgo_no_instala(&linea),
             Registro::corte("rust", Some(hash), "no-instala"),
         ));
@@ -737,7 +785,15 @@ fn preparar_rust(
 }
 
 fn corte(hallazgo: Hallazgo, registro: Registro) -> Paso {
-    (Preparacion::SinVeredicto(vec![hallazgo]), Some(registro))
+    corte_de(Corte::Otro, hallazgo, registro)
+}
+
+/// Corte de la descarga con su tipo. `corte` lo deja en `Corte::Otro`.
+fn corte_de(tipo: Corte, hallazgo: Hallazgo, registro: Registro) -> Paso {
+    (
+        Preparacion::SinVeredicto(vec![hallazgo], tipo),
+        Some(registro),
+    )
 }
 
 /// Carpeta temporal de la descarga, dentro de `ROOT_HOME/tmp`.
@@ -2259,7 +2315,10 @@ location searched: crates.io index";
         )
         .expect("un corte por producto no es un error");
         match preparacion {
-            Preparacion::SinVeredicto(hallazgos) => assert!(!hallazgos.is_empty()),
+            Preparacion::SinVeredicto(hallazgos, corte) => {
+                assert!(!hallazgos.is_empty());
+                assert_eq!(corte, Corte::NoInstala);
+            }
             otro => panic!("{otro:?}"),
         }
         let registro = registro.expect("el corte deja un registro");
@@ -2311,7 +2370,9 @@ location searched: crates.io index";
             )
             .expect("sin error de infraestructura");
             match preparacion {
-                Preparacion::SinVeredicto(hallazgos) => assert!(!hallazgos.is_empty(), "{linea}"),
+                Preparacion::SinVeredicto(hallazgos, _) => {
+                    assert!(!hallazgos.is_empty(), "{linea}")
+                }
                 otro => panic!("{linea}: debía dar SinVeredicto, dio {otro:?}"),
             }
             assert!(imagenes.is_empty(), "{linea}: no se armó ningún contenedor");

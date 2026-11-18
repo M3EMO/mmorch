@@ -2790,7 +2790,7 @@ mod tests {
         };
         let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
         let (preparacion, registro) = resultado.expect("la descarga corre");
-        let Preparacion::SinVeredicto(hallazgos) = &preparacion else {
+        let Preparacion::SinVeredicto(hallazgos, _) = &preparacion else {
             panic!("debía dar corte sin veredicto: {preparacion:?}");
         };
         let [hallazgo] = hallazgos.as_slice() else {
@@ -2841,7 +2841,7 @@ mod tests {
         };
         let (_home, resultado) = descarga_simulada(&format!("{raw}\n"), &ejecutor);
         let (preparacion, registro) = resultado.expect("la descarga corre");
-        let Preparacion::SinVeredicto(hallazgos) = &preparacion else {
+        let Preparacion::SinVeredicto(hallazgos, _) = &preparacion else {
             panic!("debía dar corte sin veredicto: {preparacion:?}");
         };
         let [hallazgo] = hallazgos.as_slice() else {
@@ -2892,7 +2892,7 @@ mod tests {
         };
         let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
         let (preparacion, registro) = resultado.expect("la descarga corre");
-        let Preparacion::SinVeredicto(hallazgos) = &preparacion else {
+        let Preparacion::SinVeredicto(hallazgos, _) = &preparacion else {
             panic!("debía dar corte sin veredicto: {preparacion:?}");
         };
         let [hallazgo] = hallazgos.as_slice() else {
@@ -2924,7 +2924,7 @@ mod tests {
         };
         let (_home, resultado) = descarga_simulada(&format!("{raw}\n"), &ejecutor);
         let (preparacion, registro) = resultado.expect("la descarga corre");
-        let Preparacion::SinVeredicto(hallazgos) = &preparacion else {
+        let Preparacion::SinVeredicto(hallazgos, _) = &preparacion else {
             panic!("debía dar corte sin veredicto: {preparacion:?}");
         };
         let [hallazgo] = hallazgos.as_slice() else {

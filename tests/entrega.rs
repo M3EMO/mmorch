@@ -1467,7 +1467,7 @@ fn entrega_pide_credenciales_no_da_hallazgo_al_producto() {
         Some(Problema::PideCredenciales),
         "{imagenes:?}"
     );
-    let Preparacion::SinVeredicto(hallazgos) = p else {
+    let Preparacion::SinVeredicto(hallazgos, _) = p else {
         panic!("un 401 da sin veredicto de la fase: {p:?}");
     };
     assert!(

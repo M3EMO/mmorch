@@ -690,8 +690,6 @@ fn linea_sin_medir(v: &Veredicto, rubricas: &[Rubrica]) -> Option<String> {
 }
 
 /// Motivo de una dimensión sin veredicto por un corte de la descarga. `tipo` dice por qué se cortó.
-// Sin llamador fuera de tests hasta que `evaluar_con` use esta función. Quitar el allow entonces.
-#[allow(dead_code)]
 pub(super) fn motivo_de_corte(tipo: &str, detalle: &str) -> String {
     format!("descarga sin veredicto ({tipo}): {detalle}")
 }

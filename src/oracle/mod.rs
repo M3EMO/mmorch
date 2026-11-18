@@ -56,7 +56,7 @@ use contenedor::{Ejecucion, Resultado};
 use descarga::python::AVISO_NO_VERIFICADAS;
 use eficiencia::ResultadoMedida;
 use entrega::{FabricaEscenarios, FabricaReal, Podman, PodmanReal, ResultadoEntrega};
-use informe::{Redactor, RedactorMedido, RedactorProveedor};
+use informe::{Redactor, RedactorMedido, RedactorProveedor, motivo_de_corte};
 use juez::{EntradaJuez, EstadoJuez, ExtractoGuardado, JuezProveedor, ModeloJuez, ResultadoJuez};
 use junit::{Junit, ResultadoTest};
 use perfiles::herramientas::{EjecutorContenedor, EjecutorHerramienta};
@@ -754,23 +754,13 @@ fn evaluar_con(
             rustsec,
             hallazgos,
         } => (cache, rustsec, hallazgos),
-        descarga::Preparacion::SinVeredicto(hallazgos) => {
-            let motivo = motivo_de_la_descarga(&hallazgos);
+        descarga::Preparacion::SinVeredicto(hallazgos, corte) => {
+            let detalle = hallazgos.first().map_or("", |h| h.detalle.as_str());
+            let motivo = motivo_de_corte(corte.texto(), detalle);
             let mut v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
             v.ambiguedades = ambiguedades.clone();
             v.commit = identidad.clone();
-            // Sin requisitos no hay módulos que nombrar: `presentes` va vacío. Sin redactor: el informe es
-            // determinista.
-            let informe = informe::informar_con(
-                &v,
-                tarea,
-                &deps.reglas,
-                deps.rubricas,
-                &BTreeSet::new(),
-                None,
-            )?;
-            v.estado = informe::estado_de(Some(&informe));
-            v.informe = Some(informe);
+            let v = veredicto_de_corte(v, corte, tarea, &deps.reglas, deps.rubricas)?;
             return Ok(con_costo(v, &juez_config));
         }
     };
@@ -2292,12 +2282,20 @@ fn avisos_de_dependencias(hallazgos: &[Hallazgo]) -> Vec<String> {
     avisos
 }
 
-/// Motivo de una descarga sin veredicto: el detalle de su primer hallazgo, si lo hay.
-fn motivo_de_la_descarga(hallazgos: &[Hallazgo]) -> String {
-    match hallazgos.first() {
-        Some(h) => format!("descarga sin veredicto: {}", h.detalle),
-        None => "descarga sin veredicto".into(),
-    }
+/// Cierra el veredicto de un corte de la descarga: marca si el producto no compila e informa la decisión.
+/// Sin requisitos no hay módulos que nombrar: `presentes` va vacío. Sin redactor: el informe es determinista.
+fn veredicto_de_corte(
+    mut v: Veredicto,
+    corte: descarga::Corte,
+    tarea: &Tarea,
+    reglas: &ReglasDecision,
+    rubricas: &[Rubrica],
+) -> Result<Veredicto, ErrorOraculo> {
+    v.no_compila = corte.no_compila();
+    let informe = informe::informar_con(&v, tarea, reglas, rubricas, &BTreeSet::new(), None)?;
+    v.estado = informe::estado_de(Some(&informe));
+    v.informe = Some(informe);
+    Ok(v)
 }
 
 /// Carga la tarea `nombre` de `ROOT_HOME` y la evalúa con las opciones por defecto.
@@ -8013,7 +8011,7 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_descarga_sin_veredicto_deja_las_nueve_sin_veredicto() {
+    fn oraculo_corte_fuente_no_aceptada_deja_las_nueve_sin_veredicto() {
         let base = tempfile::tempdir().expect("base");
         let tarea = tarea_rust(base.path());
         let repo = repo_rust(base.path(), LOCK_ROTO);
@@ -8041,17 +8039,13 @@ mod tests {
         repo
     }
 
-    /// Lo que todo corte de la descarga debe cumplir: informe decidido, nueve dimensiones sin veredicto con el
-    /// motivo de la descarga, y el hallazgo del corte nombrado en el informe (`marca` está en su detalle).
-    fn assert_corte_con_informe(v: &Veredicto, marca: &str) {
+    /// Lo que todo corte de la descarga debe cumplir: informe con la decisión y el estado que su corte pide,
+    /// nueve dimensiones sin veredicto con el motivo de la descarga, y el hallazgo del corte nombrado en el
+    /// informe (`marca` está en su detalle).
+    fn assert_corte_con_informe(v: &Veredicto, marca: &str, decision: Decision, estado: Estado) {
         let informe = v.informe.as_ref().expect("el corte trae informe");
-        assert_eq!(
-            informe.decision,
-            Decision::SinDecision,
-            "{}",
-            informe.motivo
-        );
-        assert_eq!(v.estado, Estado::SinVeredicto);
+        assert_eq!(informe.decision, decision, "{}", informe.motivo);
+        assert_eq!(v.estado, estado);
         assert_eq!(v.puntajes.len(), 9);
         for p in &v.puntajes {
             assert_eq!(p.valor, 0.0, "{:?}", p.dimension);
@@ -8059,7 +8053,9 @@ mod tests {
             assert!(motivo.contains("descarga"), "{motivo}");
         }
         assert!(
-            informe.resumen.contains(marca),
+            informe
+                .resumen
+                .contains("Las suites no corrieron: la descarga se cortó ("),
             "el resumen nombra el corte: {}",
             informe.resumen
         );
@@ -8085,7 +8081,8 @@ mod tests {
             "{:?}",
             v.hallazgos
         );
-        assert_corte_con_informe(&v, "Cargo.lock inválido");
+        // Cambió de valor: antes daba SinDecision. Un lock que no parsea no compila, así que da NoListo y rojo.
+        assert_corte_con_informe(&v, "Cargo.lock inválido", Decision::NoListo, Estado::Rojo);
     }
 
     #[test]
@@ -8103,7 +8100,12 @@ mod tests {
         let home = base.path().join("home");
         let v = evaluar_falso(&repo, &tarea, &home, &sin_suites, &herramientas(&[]))
             .expect("el corte no es error de infraestructura");
-        assert_corte_con_informe(&v, "fuente no aceptada");
+        assert_corte_con_informe(
+            &v,
+            "fuente no aceptada",
+            Decision::SinDecision,
+            Estado::SinVeredicto,
+        );
     }
 
     #[test]
@@ -8118,6 +8120,140 @@ mod tests {
             "el camino normal no lleva motivo de descarga: {}",
             informe.motivo
         );
+    }
+
+    /// Hallazgo de entrega de un corte, con el detalle que el motivo nombra.
+    fn hallazgo_de_corte(detalle: &str) -> Hallazgo {
+        Hallazgo {
+            dimension: Dimension::Entrega,
+            severidad: 3,
+            archivo: "Cargo.lock".into(),
+            linea: 1,
+            cita: String::new(),
+            detalle: detalle.into(),
+            fuente: Fuente::Sonda(descarga::SONDA_DESCARGA.into()),
+            id: String::new(),
+            impacto: Vec::new(),
+            previo: false,
+        }
+    }
+
+    /// Veredicto de un corte, armado como `evaluar_con`: el motivo sale del corte y del primer hallazgo.
+    fn veredicto_de_corte_de_prueba(
+        base: &Path,
+        corte: descarga::Corte,
+        hallazgos: Vec<Hallazgo>,
+    ) -> Veredicto {
+        let tarea = tarea_rust(base);
+        let detalle = hallazgos.first().map_or("", |h| h.detalle.as_str());
+        let motivo = motivo_de_corte(corte.texto(), detalle);
+        let v = sin_veredicto(
+            base,
+            &tarea,
+            &BTreeMap::new(),
+            hallazgos,
+            Vec::new(),
+            Vec::new(),
+            &motivo,
+        );
+        veredicto_de_corte(v, corte, &tarea, &ReglasDecision::default(), &[])
+            .expect("informa el corte")
+    }
+
+    #[test]
+    fn corte_no_instala_da_no_listo_rojo_y_nombra_el_corte() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_de_corte_de_prueba(
+            base.path(),
+            descarga::Corte::NoInstala,
+            vec![hallazgo_de_corte("paquete `x` no existe en el índice")],
+        );
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(informe.decision, Decision::NoListo, "{}", informe.motivo);
+        assert_eq!(v.estado, Estado::Rojo);
+        assert!(
+            informe
+                .resumen
+                .contains("Las suites no corrieron: la descarga se cortó (no instala)."),
+            "{}",
+            informe.resumen
+        );
+    }
+
+    #[test]
+    fn corte_fuente_no_aceptada_da_sin_decision_con_informe() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_de_corte_de_prueba(
+            base.path(),
+            descarga::Corte::FuenteNoAceptada,
+            vec![hallazgo_de_corte("fuente no aceptada: git por ssh")],
+        );
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(
+            informe.decision,
+            Decision::SinDecision,
+            "{}",
+            informe.motivo
+        );
+        assert_eq!(v.estado, Estado::SinVeredicto);
+        assert!(
+            !v.no_compila,
+            "una fuente no aceptada no dice que no compila"
+        );
+        assert!(
+            informe
+                .resumen
+                .contains("Las suites no corrieron: la descarga se cortó (fuente no aceptada)."),
+            "{}",
+            informe.resumen
+        );
+    }
+
+    #[test]
+    fn corte_con_secreto_de_severidad_3_da_bloqueado() {
+        let base = tempfile::tempdir().expect("base");
+        let secreto = Hallazgo {
+            dimension: Dimension::Seguridad,
+            severidad: 3,
+            archivo: "src/lib.rs".into(),
+            linea: 1,
+            cita: "***".into(),
+            detalle: "secreto filtrado".into(),
+            fuente: Fuente::Sonda(juez::SONDA_GITLEAKS.into()),
+            id: String::new(),
+            impacto: Vec::new(),
+            previo: false,
+        };
+        let v = veredicto_de_corte_de_prueba(
+            base.path(),
+            descarga::Corte::NoInstala,
+            vec![hallazgo_de_corte("paquete `x` no existe"), secreto],
+        );
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(informe.decision, Decision::Bloqueado, "{}", informe.motivo);
+        assert_eq!(v.estado, Estado::Rojo);
+    }
+
+    #[test]
+    fn cortes_dejan_las_nueve_dimensiones_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        for corte in [
+            descarga::Corte::NoInstala,
+            descarga::Corte::LockInvalido,
+            descarga::Corte::FuenteNoAceptada,
+        ] {
+            let v = veredicto_de_corte_de_prueba(
+                base.path(),
+                corte,
+                vec![hallazgo_de_corte("detalle del corte")],
+            );
+            assert_eq!(v.puntajes.len(), 9, "{corte:?}");
+            for p in &v.puntajes {
+                assert_eq!(p.valor, 0.0, "{corte:?} {:?}", p.dimension);
+                let motivo = p.sin_veredicto.as_deref().expect("sin veredicto");
+                assert!(motivo.contains("descarga"), "{corte:?}: {motivo}");
+            }
+        }
     }
 
     #[test]
