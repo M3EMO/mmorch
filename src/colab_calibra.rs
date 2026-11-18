@@ -2734,12 +2734,13 @@ fn esperar_trabajo<C: ColabCli>(
     let mut ultima_buena: Option<time::OffsetDateTime> = None;
     let mut ultimo_motivo: String;
     loop {
+        let plazo_consulta = PLAZO_LOCAL_TRABAJO.min(lim.restante());
         let consulta = ejecutar_guion_con_plazo(
             cli,
             lim,
             sesion,
             SEG_CONSULTA_CALIBRAR,
-            PLAZO_LOCAL_TRABAJO,
+            plazo_consulta,
             &guion,
         );
         // El `Err` de la falla lleva solo el motivo corto. La salida entera no sale de aquí.
@@ -2748,7 +2749,7 @@ fn esperar_trabajo<C: ColabCli>(
             Err(e) if lim.vencido() => {
                 return Err(con_llevaba(e, transcurrido(lanzado, esperado)));
             }
-            Err(e) => Err(motivo_de_error(&e)),
+            Err(e) => Err(motivo_de_error(&e, plazo_consulta)),
             Ok(salida) if salida.codigo != 0 => Err(format!("código {}", salida.codigo)),
             Ok(salida) => match colab::marcador(&salida.stdout, "ROOT_ESTADO=").as_deref() {
                 Some("fin") => Ok(EstadoConsulta::Fin(texto_tras(
@@ -2831,12 +2832,12 @@ fn hora_de(ultima: Option<time::OffsetDateTime>) -> String {
         .unwrap_or_else(|| "ninguna".into())
 }
 
-/// Motivo corto de una consulta que falló: el plazo local, o la primera línea del error.
-/// El plazo lo marca `colab::paso` con el texto "colab superó N s".
-fn motivo_de_error(error: &ErrorOraculo) -> String {
+/// Motivo corto de una consulta que falló: el plazo que se le pasó, o la primera línea del error.
+/// `colab::paso` marca el plazo vencido con el texto "colab superó N s".
+fn motivo_de_error(error: &ErrorOraculo, plazo: Duration) -> String {
     match error {
         ErrorOraculo::Infra(texto) if texto.starts_with("colab superó") => {
-            format!("plazo de {} s", PLAZO_LOCAL_TRABAJO.as_secs())
+            format!("plazo de {} s", plazo.as_secs())
         }
         otro => primera_linea_corta(&otro.to_string()),
     }
@@ -7572,6 +7573,49 @@ mod tests_calibrar {
         let error = error_de_cinco_consultas(vec![Respuesta::Plazo; 5]);
 
         assert!(error.contains("último motivo: plazo de 180 s"), "{error}");
+    }
+
+    #[test]
+    fn motivo_de_plazo_usa_el_plazo_de_la_consulta() {
+        // Restante de 50 s: el plazo de la consulta es 50 s, no el fijo de 180 s.
+        let error = ErrorOraculo::Infra("colab superó 50 s".into());
+
+        assert_eq!(
+            motivo_de_error(&error, Duration::from_secs(50)),
+            "plazo de 50 s"
+        );
+    }
+
+    #[test]
+    fn el_plazo_que_marca_paso_se_lee_como_plazo_en_el_motivo() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        // El guion lleva el marcador de estado: así el `Falso` responde con `Plazo`.
+        let guion = caja.path().join("consulta.py");
+        fs::write(&guion, "print('ROOT_ESTADO=corriendo')\n").expect("guion");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_estados(vec![Respuesta::Plazo]);
+        let sin_senal = Senales::default();
+        let lim = colab::Limites {
+            cancelar: &sin_senal,
+            inicio: Instant::now(),
+            tope: TOPE_PRUEBA,
+        };
+        let plazo = Duration::from_secs(50);
+        let args = vec![
+            "exec".to_string(),
+            "-s".to_string(),
+            "sesion-prueba".to_string(),
+            "-f".to_string(),
+            colab::ruta(&guion),
+        ];
+
+        let Err(error) = colab::paso(&cli, &lim, &args, plazo) else {
+            panic!("debía dar plazo");
+        };
+        let motivo = motivo_de_error(&error, plazo);
+
+        assert!(motivo.contains("plazo"), "{motivo}");
     }
 
     #[test]
