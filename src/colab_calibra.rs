@@ -2732,6 +2732,7 @@ fn esperar_trabajo<C: ColabCli>(
     let mut esperado = Duration::ZERO;
     let mut fallas = 0;
     let mut ultima_buena: Option<time::OffsetDateTime> = None;
+    let mut ultimo_motivo: String;
     loop {
         let consulta = ejecutar_guion_con_plazo(
             cli,
@@ -2741,15 +2742,14 @@ fn esperar_trabajo<C: ColabCli>(
             PLAZO_LOCAL_TRABAJO,
             &guion,
         );
-        let respuesta = match consulta {
+        // El `Err` de la falla lleva solo el motivo corto. La salida entera no sale de aquí.
+        let respuesta: Result<EstadoConsulta, String> = match consulta {
             Err(e) if lim.cancelar.recibida().is_some() => return Err(e),
             Err(e) if lim.vencido() => {
                 return Err(con_llevaba(e, transcurrido(lanzado, esperado)));
             }
-            Err(e) => Err(e.to_string()),
-            Ok(salida) if salida.codigo != 0 => {
-                Err(format!("código {}: {}", salida.codigo, salida.detalle()))
-            }
+            Err(e) => Err(motivo_de_error(&e)),
+            Ok(salida) if salida.codigo != 0 => Err(format!("código {}", salida.codigo)),
             Ok(salida) => match colab::marcador(&salida.stdout, "ROOT_ESTADO=").as_deref() {
                 Some("fin") => Ok(EstadoConsulta::Fin(texto_tras(
                     &salida.stdout,
@@ -2762,7 +2762,8 @@ fn esperar_trabajo<C: ColabCli>(
                         texto_tras(&salida.stdout, "ROOT_ESTADO=")
                     )));
                 }
-                _ => Err(format!("sin estado: {}", salida.detalle())),
+                None => Err("sin marcador".into()),
+                Some(otro) => Err(primera_linea_corta(&format!("estado desconocido: {otro}"))),
             },
         };
         match respuesta {
@@ -2777,11 +2778,12 @@ fn esperar_trabajo<C: ColabCli>(
                 fallas = 0;
                 ultima_buena = Some(time::OffsetDateTime::now_utc());
             }
-            Err(_) => {
+            Err(motivo) => {
                 fallas += 1;
+                ultimo_motivo = motivo;
                 if fallas == FALLAS_CONSULTA_MAX {
                     return Err(ErrorOraculo::Infra(format!(
-                        "Colab no responde: {FALLAS_CONSULTA_MAX} consultas seguidas fallaron; última respuesta: {}",
+                        "Colab no responde: {FALLAS_CONSULTA_MAX} consultas seguidas fallaron; última respuesta: {}; último motivo: {ultimo_motivo}",
                         hora_de(ultima_buena)
                     )));
                 }
@@ -2827,6 +2829,29 @@ fn hora_de(ultima: Option<time::OffsetDateTime>) -> String {
                 .ok()
         })
         .unwrap_or_else(|| "ninguna".into())
+}
+
+/// Motivo corto de una consulta que falló: el plazo local, o la primera línea del error.
+/// El plazo lo marca `colab::paso` con el texto "colab superó N s".
+fn motivo_de_error(error: &ErrorOraculo) -> String {
+    match error {
+        ErrorOraculo::Infra(texto) if texto.starts_with("colab superó") => {
+            format!("plazo de {} s", PLAZO_LOCAL_TRABAJO.as_secs())
+        }
+        otro => primera_linea_corta(&otro.to_string()),
+    }
+}
+
+/// Primera línea de `texto`, sin espacios en las puntas y con como máximo 80 caracteres.
+fn primera_linea_corta(texto: &str) -> String {
+    texto
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(80)
+        .collect()
 }
 
 /// Texto que sigue a la línea que empieza con `clave`, sin espacios en las puntas.
@@ -7332,6 +7357,61 @@ mod tests_calibrar {
     }
 
     #[test]
+    fn dormir_con_senal_vuelve_al_llegar_sigterm() {
+        let senales = Senales::default();
+        senales.activar("SIGTERM");
+
+        let inicio = Instant::now();
+        dormir_con_senal(Duration::from_secs(30), &senales);
+
+        assert!(
+            inicio.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            inicio.elapsed()
+        );
+    }
+
+    #[test]
+    fn senal_durante_la_espera_corta_el_trabajo_y_libera_el_runtime() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_estados(vec![corriendo(), corriendo()]);
+        let senales = Senales::default();
+        let esperas = Mutex::new(Vec::new());
+        // La primera pausa de espera recibe SIGTERM, como si el usuario lo mandara.
+        let espera = |d: Duration| {
+            let mut registro = esperas.lock().expect("esperas");
+            if registro.is_empty() {
+                senales.activar("SIGTERM");
+            }
+            registro.push(d);
+        };
+
+        let resumen = calibrar_con_espera(
+            &cli,
+            home.path(),
+            &[p0],
+            COMMIT,
+            &senales,
+            TOPE_PRUEBA,
+            false,
+            &espera,
+        )
+        .expect("calibra");
+
+        let runtime = &resumen.runtimes[0];
+        let Err(error) = &runtime.resultado else {
+            panic!("debía fallar: {:?}", runtime.resultado);
+        };
+        assert!(error.contains("Interrumpido por SIGTERM"), "{error}");
+        let comandos = comandos_de(&cli.llamadas(), &runtime.sesion);
+        assert!(comandos.iter().any(|c| c == "stop"), "{comandos:?}");
+        assert_eq!(esperas.lock().expect("esperas").len(), 1);
+    }
+
+    #[test]
     fn murio_da_error_con_el_final_del_log() {
         let caja = tempfile::tempdir().expect("caja");
         let home = tempfile::tempdir().expect("home");
@@ -7367,6 +7447,150 @@ mod tests_calibrar {
         assert!(error.contains("Colab no responde"), "{error}");
         assert!(error.contains("5 consultas seguidas"), "{error}");
         assert!(error.contains("ninguna"), "{error}");
+    }
+
+    /// Escribe `nombre` en `caja` con `texto` y lo corre con `python3 -I`.
+    fn correr_guion_python(caja: &Path, nombre: &str, texto: &str) -> std::process::Output {
+        let guion = caja.join(nombre);
+        fs::write(&guion, texto).expect("guion");
+        Command::new("python3")
+            .arg("-I")
+            .arg(&guion)
+            .output()
+            .expect("python3")
+    }
+
+    #[test]
+    fn guiones_del_trabajo_lanzan_consultan_y_dan_fin_o_murio() {
+        if let Err(e) = Command::new("python3").arg("--version").output() {
+            eprintln!("sin python3 ({e}): se salta el test de los guiones del trabajo");
+            return;
+        }
+        let caja = tempfile::tempdir().expect("caja");
+        let d = caja.path().join("paquete");
+        fs::create_dir_all(&d).expect("carpeta D");
+        let r00t = d.join("r00t");
+        fs::write(&r00t, "#!/bin/sh\nsleep 2\nexit 3\n").expect("r00t");
+        fs::set_permissions(&r00t, fs::Permissions::from_mode(0o755)).expect("permisos");
+        // Los guiones apuntan a la carpeta de prueba, no a /content.
+        let ruta_d = d.to_str().expect("ruta");
+        let con_d = |texto: String| texto.replace(D_REMOTO, ruta_d);
+        let texto_trabajo =
+            con_d(script_trabajo(0, &[], &BTreeMap::new()).expect("texto del trabajo"));
+        let lanzar = con_d(script_lanzar(0, &texto_trabajo));
+
+        // Escenario 1: lanza, consulta mientras vive y consulta hasta el fin.
+        let inicio = Instant::now();
+        let salida = correr_guion_python(caja.path(), "lanzar-0.py", &lanzar);
+        assert!(
+            inicio.elapsed() < Duration::from_secs(2),
+            "lanzar tardó {:?}",
+            inicio.elapsed()
+        );
+        assert!(
+            salida.status.success(),
+            "{}",
+            String::from_utf8_lossy(&salida.stderr)
+        );
+        let lanzado = String::from_utf8_lossy(&salida.stdout).to_string();
+        let pid: u32 = colab::marcador(&lanzado, "ROOT_LANZADO=")
+            .expect("ROOT_LANZADO")
+            .parse()
+            .expect("pid numérico");
+
+        let estado = con_d(script_estado(0, pid));
+        let vivo = correr_guion_python(caja.path(), "estado-0.py", &estado);
+        let texto = String::from_utf8_lossy(&vivo.stdout).to_string();
+        assert_eq!(
+            colab::marcador(&texto, "ROOT_ESTADO=").as_deref(),
+            Some("corriendo"),
+            "{texto}"
+        );
+
+        let limite = Instant::now() + Duration::from_secs(10);
+        let fin = loop {
+            let salida = correr_guion_python(caja.path(), "estado-0.py", &estado);
+            let texto = String::from_utf8_lossy(&salida.stdout).to_string();
+            match colab::marcador(&texto, "ROOT_ESTADO=").as_deref() {
+                Some("fin") => break texto,
+                Some("murio") => panic!("el trabajo murió antes de dejar su estado: {texto}"),
+                _ => {}
+            }
+            assert!(
+                Instant::now() < limite,
+                "el trabajo no terminó en 10 s: {texto}"
+            );
+            thread::sleep(Duration::from_millis(200));
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&texto_tras(&fin, "ROOT_ESTADO=")).expect("json del estado");
+        assert_eq!(json["codigo"], 3, "{json}");
+        let (ini, fin_t) = (
+            json["inicio"].as_f64().expect("inicio"),
+            json["fin"].as_f64().expect("fin"),
+        );
+        assert!(fin_t >= ini, "{json}");
+
+        // Escenario 2: sin archivo de estado y con un pid ya muerto. Dice `murio` y el final del log.
+        fs::remove_file(d.join("trabajo-0.estado")).expect("quita el estado");
+        let mut hijo = Command::new("true").spawn().expect("true");
+        let muerto = hijo.id();
+        hijo.wait().expect("espera al hijo");
+        let log: String = (0..25).map(|n| format!("linea-{n}\n")).collect();
+        fs::write(d.join("trabajo-0.log"), log).expect("log");
+        let estado = con_d(script_estado(0, muerto));
+        let salida = correr_guion_python(caja.path(), "estado-0.py", &estado);
+        let texto = String::from_utf8_lossy(&salida.stdout).to_string();
+        assert_eq!(
+            colab::marcador(&texto, "ROOT_ESTADO=").as_deref(),
+            Some("murio"),
+            "{texto}"
+        );
+        assert!(texto.contains("linea-24"), "{texto}");
+        assert!(!texto.contains("linea-4\n"), "{texto}");
+    }
+
+    /// Corre un paquete con cinco respuestas `respuestas` y devuelve el error del runtime.
+    fn error_de_cinco_consultas(respuestas: Vec<Respuesta>) -> String {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_estados(respuestas);
+
+        let resumen = correr_con_espera(&cli, home.path(), &[p0], TOPE_PRUEBA, false, &|_d| {})
+            .expect("calibra");
+
+        let Err(error) = &resumen.runtimes[0].resultado else {
+            panic!("debía fallar: {:?}", resumen.runtimes[0].resultado);
+        };
+        error.clone()
+    }
+
+    #[test]
+    fn cinco_plazos_dan_el_motivo_plazo() {
+        let error = error_de_cinco_consultas(vec![Respuesta::Plazo; 5]);
+
+        assert!(error.contains("último motivo: plazo de 180 s"), "{error}");
+    }
+
+    #[test]
+    fn cinco_codigos_1_dan_el_motivo_codigo_1() {
+        let error = error_de_cinco_consultas(vec![Respuesta::Salida(1, "fallo\n".into()); 5]);
+
+        assert!(error.contains("último motivo: código 1"), "{error}");
+    }
+
+    #[test]
+    fn cinco_sin_marcador_dan_el_motivo_sin_marcador_sin_el_stdout_entero() {
+        let largo = "sin marcador\nsalida-larga-entera-que-no-debe-aparecer\n".repeat(20);
+        let error = error_de_cinco_consultas(vec![Respuesta::Salida(0, largo); 5]);
+
+        assert!(error.contains("último motivo: sin marcador"), "{error}");
+        assert!(
+            !error.contains("salida-larga-entera-que-no-debe-aparecer"),
+            "{error}"
+        );
     }
 
     #[test]
