@@ -14054,3 +14054,113 @@ Brief: `docs/builds/brief-local-162b.md`.
 - **c) Los tres cortes quedan en `SinDecision`,** ahora con informe. Root no dice rojo sin haber corrido las suites.
 
 Recomiendo la (a). Un producto que no se puede construir no está listo, y la regla de "no compila" ya lo dice. No toca lo que bloquea, y "fuente no aceptada" no queda en rojo por una política de Root.
+
+## Vuelta del 2026-11-18 (80): P121, el agente que arregla, y la Tarea 163
+
+**Estado.**
+- **La suite con podman de la cadena 110 a 162 dio verde:** 3977 pasan, 0 fallan y 5 ignorados.
+- **La 162b está hecha.** Costó 1,34 USD. Sus commits:
+  - cbfff3b: el motivo dice el plazo usado;
+  - 8cad866: un corte de la descarga sale con su informe;
+  - 93b6d9a: el informe.
+- **La suite con podman de `laptop/cadena-110-162b` corre ahora.**
+- **`calibrar-161.sh` tiene los dos cambios de la vuelta (79).** La carpeta remota sale de `ROOT_CARPETA_REMOTA`. Al final, el guion cierra las sesiones de `activo.json` que no imprimió.
+- **`paso0-161.sh` sigue esperando al usuario.**
+
+**P121, respuesta del usuario, literal:** "1 pero con intervención de un agente para solucionarlo. Si no humana".
+
+## 1. Qué dice la respuesta, y qué no
+
+**Lo que queda decidido:** la opción (a).
+- "No instala" y "lock inválido" cuentan como "no compila", y dan `NoListo`.
+- "Fuente no aceptada" queda en `SinDecision`.
+
+**Lo que agrega:** cuando el producto no instala, un agente intenta arreglarlo. Si el agente no puede, el arreglo pasa a un humano.
+
+**Hay dos lecturas, y cambian el diseño.**
+
+**Lectura 1: Root arregla una copia y sigue midiendo.**
+- Dentro de la evaluación, un agente arregla una copia del repo. Por ejemplo, corre `cargo update` sobre un lock viejo.
+- Root mide las nueve dimensiones sobre esa copia.
+- La decisión sigue en `NoListo`, porque el producto entregado no instala. El informe dice qué cambió el agente y qué midió después.
+- Si el agente no logra que instale, el informe pide a un humano.
+- **El problema:** Root mide algo distinto de lo que se entregó. Un evaluador que cambia el producto se vuelve parte del producto. Además, el agente vería el repo con el oráculo cerca, y eso arriesga los tests ocultos.
+
+**Lectura 2: Root le pide el arreglo al builder, y si no puede, a un humano.**
+- Root no toca el producto. El veredicto da `NoListo`, y el informe trae el arreglo concreto como pedido. Por ejemplo: "`Cargo.lock` no cuadra con `Cargo.toml`: corré `cargo update` y subí el lock".
+- Root, como project manager, rutea ese pedido al agente que construye. Ese agente arregla, y Root evalúa de nuevo.
+- Si el mismo corte se repite después de un número fijo de vueltas, el informe dice "pide intervención humana".
+- **Lo que cuesta:** Root no mide el resto del producto hasta que el builder arregle.
+
+**Recomiendo la lectura 2.** El evaluador no cambia lo que evalúa, y el oráculo queda lejos de un agente que escribe. Rutear trabajo a un agente es lo que Root ya hace como project manager. La pregunta va en la sección 6, como P122.
+
+## 2. Las tres preguntas de la 162b
+
+1. **¿Una costura en `descarga.rs` para probar "no instala" sin contenedor? Sí.** Es técnica. Hoy el corte que más importa no tiene test directo. La costura va en la 163, que sí puede tocar `descarga.rs`.
+2. **¿El informe dice "las suites no corrieron"? Sí.** Es técnica. "Sin medir" en las nueve dimensiones no dice por qué. Una línea en el informe del corte lo dice. Va en la 163, que sí puede tocar `informe.rs`.
+3. **P121.** Contestada, con la (a). La parte del agente espera P122.
+
+**Lo que quedó incompleto, y acepto así:**
+- **El test del plazo de 50 segundos llama a `motivo_de_error` directo.** Con un restante menor que 180 segundos, el plazo total corta antes. Está bien: el test fija la regla del motivo.
+- **`as_secs` trunca.** Un segundo menos en un mensaje no cambia nada.
+- **El test viejo de `LOCK_ROTO` da "fuente no aceptada", no "lock inválido".** La 163 lo corrige: el test debe probar el corte que dice su nombre.
+
+## 3. La Tarea 163: lo que no depende de P122
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | "No instala" y "lock inválido" marcan `no_compila`, y dan `NoListo`. "Fuente no aceptada" sigue en `SinDecision` | `src/oracle/descarga.rs`, `src/oracle/mod.rs` |
+| 2 | Una costura para probar "no instala" sin contenedor | `src/oracle/descarga.rs` |
+| 3 | El informe de un corte dice que las suites no corrieron | `src/oracle/informe.rs` |
+
+**Cómo sabe el camino del corte qué corte es.** Hoy `Preparacion::SinVeredicto` solo lleva los hallazgos. `descarga.rs` ya anota el motivo en `Registro::corte`: "no-instala", "lock-invalido" o "fuente-no-aceptada". La 163 suma ese tipo de corte a `Preparacion::SinVeredicto`. Es un enum interno, sin cambio de esquema.
+
+**La decisión sale de las reglas de siempre.** Con `no_compila`, `no_listo` da `NoListo`. Si además hay un secreto, `bloqueos` da `Bloqueado`, como hoy. No se suma ninguna regla.
+
+**Entra antes de congelar.**
+
+- **Base:** la punta de `laptop/tarea-162b`.
+- **Arranca cuando termine la suite de la cadena 162b.**
+
+Brief: `docs/builds/brief-local-163.md`.
+
+**La parte del agente va en una tarea aparte,** después de P122. Con la lectura 2 tendría tres piezas:
+- el pedido concreto de arreglo en el informe;
+- el límite de vueltas con el mismo corte;
+- el aviso de "pide intervención humana".
+
+Antes de escribirla, hay que leer cómo `corre` lleva el informe al builder.
+
+## 4. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | `paso0-161.sh` | — | Laptop, el usuario | No | **Sí** |
+| 5 | `calibrar-161.sh` | El paso 4 | Colab, CPU | No | No |
+| 6 | La suite con podman de la cadena 162b | Nada; corre ahora | Laptop, podman | No | No |
+| 7 | La Tarea 163 | El paso 6 | Laptop, builder | Lo que use el builder | No |
+| 8 | P122 | — | — | No | **Sí** |
+| 9 | La tarea del agente que arregla, según P122 | Los pasos 7 y 8 | Laptop, builder | Lo que use el builder | No |
+| 10 | Armar la cadena, y su suite con podman | El paso 9 | Laptop, podman | No | No |
+| 11 | Verificar b8d0db4058 otra vez: debe dar `NoListo`, con informe | El paso 10 | Laptop, podman | No | No |
+| 12 | La mezcla de la cadena | — | — | No | **Sí** |
+| 13 | Congelar la versión | Los pasos 3, 5 y 10 | — | No | No |
+| 14 | Las doce calibraciones de oráculo con la versión congelada | El paso 13 | Colab, cuatro runtimes | No | No |
+| 15 | La pregunta de presupuesto de D3 | El paso 13 | — | No | **Sí** |
+| 16 | D3: `corre` sobre las tareas del dataset | El paso 15 | Laptop y API | Según la respuesta del paso 15 | No |
+| 17 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 13 | Laptop | Según la regla del final | No |
+| 18 | La validez sobre el final sellado | Los pasos 1 a 17 | Colab, notebook si usa el juez | Según el final | No |
+
+**La regla de carga.** Los pasos 4, 6, 10 y 11 usan podman, y los pasos 7 y 9 compilan. Corren de a uno en la laptop.
+
+## 5. Pregunta al usuario
+
+**P122. Cuando el producto no instala, ¿dónde trabaja el agente que lo arregla?** Con P121 (a), Root da `NoListo`. Falta decidir qué hace el agente.
+
+- **a) El agente es el builder.** Root no toca el producto. El informe trae el arreglo concreto, por ejemplo "corré `cargo update` y subí el lock", y Root se lo pasa al agente que construye. Si el mismo corte vuelve después de un número fijo de vueltas, el informe pide intervención humana. *(recomendada)*
+- **b) El agente trabaja dentro de la evaluación.** Arregla una copia del repo y Root mide sobre ella. La decisión sigue en `NoListo`, y el informe dice qué cambió. Si no logra que instale, el informe pide a un humano.
+
+Recomiendo la (a). El evaluador no cambia lo que evalúa, y ningún agente que escribe código trabaja cerca de los tests ocultos.
