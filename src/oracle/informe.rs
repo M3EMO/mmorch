@@ -644,7 +644,7 @@ fn sin_cumplir(e: &EstadoRequisito) -> bool {
 }
 
 /// Resumen determinista: una frase por disparo, con sus ids. Sin disparos, dice qué cumple.
-/// Al final suma la línea de dimensiones sin medir, la de inestables y la de eficiencia, si hay. En ese orden.
+/// Al final suma la línea de dimensiones sin medir, la de suites no corridas, la de inestables y la de eficiencia, si hay. En ese orden.
 fn resumen(v: &Veredicto, rubricas: &[Rubrica], disparos: &[Disparo]) -> String {
     let base = if disparos.is_empty() {
         let cumplen: Vec<&str> = v
@@ -664,6 +664,7 @@ fn resumen(v: &Veredicto, rubricas: &[Rubrica], disparos: &[Disparo]) -> String 
     };
     let lineas: Vec<String> = [
         linea_sin_medir(v, rubricas),
+        linea_suites_no_corrieron(v),
         linea_inestable(v, rubricas),
         linea_de_eficiencia(v),
     ]
@@ -686,6 +687,28 @@ fn linea_sin_medir(v: &Veredicto, rubricas: &[Rubrica]) -> Option<String> {
         .map(|p| nombre_dimension(p.dimension))
         .collect();
     (!nombres.is_empty()).then(|| format!("Sin medir: {}.", unir(&nombres)))
+}
+
+/// Motivo de una dimensión sin veredicto por un corte de la descarga. `tipo` dice por qué se cortó.
+// Sin llamador fuera de tests hasta que `evaluar_con` use esta función. Quitar el allow entonces.
+#[allow(dead_code)]
+pub(super) fn motivo_de_corte(tipo: &str, detalle: &str) -> String {
+    format!("descarga sin veredicto ({tipo}): {detalle}")
+}
+
+/// Extrae `tipo` de un motivo con el formato de `motivo_de_corte`. Devuelve `None` si el motivo no lo tiene.
+fn tipo_de_corte(motivo: &str) -> Option<&str> {
+    let resto = motivo.strip_prefix("descarga sin veredicto (")?;
+    let (tipo, _) = resto.split_once("): ")?;
+    Some(tipo)
+}
+
+/// Línea que dice que las suites no corrieron por un corte. Usa el primer `sin_veredicto` de corte en `puntajes`.
+fn linea_suites_no_corrieron(v: &Veredicto) -> Option<String> {
+    v.puntajes
+        .iter()
+        .find_map(|p| p.sin_veredicto.as_deref().and_then(tipo_de_corte))
+        .map(|tipo| format!("Las suites no corrieron: la descarga se cortó ({tipo})."))
 }
 
 /// Línea con las dimensiones inestables en esta tarea que cuentan como medida, en el orden de `puntajes`.
@@ -2826,6 +2849,33 @@ modulos = ["config"]
         let i = informe_de(&v);
         assert!(
             i.resumen.contains("Sin medir: Arquitectura y Diseño."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_de_un_corte_no_instala_dice_que_las_suites_no_corrieron() {
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Diseno,
+            &motivo_de_corte("no instala", "x"),
+        );
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .contains("Las suites no corrieron: la descarga se cortó (no instala)."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_normal_no_dice_que_las_suites_no_corrieron() {
+        let i = informe_de(&ecc());
+        assert!(
+            !i.resumen.contains("Las suites no corrieron"),
             "{}",
             i.resumen
         );
