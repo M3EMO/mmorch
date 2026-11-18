@@ -2044,6 +2044,8 @@ const SEG_CONSULTA_CALIBRAR: u64 = 120;
 const PLAZO_LOCAL_TRABAJO: Duration = Duration::from_secs(180);
 /// Pausa entre dos consultas del estado de un trabajo.
 const PAUSA_CONSULTA_CALIBRAR: Duration = Duration::from_secs(60);
+/// Consultas seguidas que fallan antes de que el trabajo falle.
+const FALLAS_CONSULTA_MAX: u32 = 5;
 /// Tiempo del cierre que verifica y empaqueta la vuelta, en segundos.
 const SEG_CIERRE_CALIBRAR: u64 = 600;
 /// Margen que el laptop espera sobre el tiempo de un `exec` remoto.
@@ -2171,6 +2173,41 @@ pub fn calibrar_con(
     tope: Duration,
     sin_stop: bool,
 ) -> Result<ResumenCalibrar, ErrorOraculo> {
+    let espera = |d: Duration| dormir_con_senal(d, senales);
+    calibrar_con_espera(
+        cli,
+        home,
+        paquetes,
+        commit_laptop,
+        senales,
+        tope,
+        sin_stop,
+        &espera,
+    )
+}
+
+/// Duerme `d` en tajadas de como máximo 1 s. Corta antes si llega una señal.
+fn dormir_con_senal(d: Duration, senales: &Senales) {
+    let mut restante = d;
+    while !restante.is_zero() && senales.recibida().is_none() {
+        let tajada = restante.min(Duration::from_secs(1));
+        thread::sleep(tajada);
+        restante -= tajada;
+    }
+}
+
+/// Igual que `calibrar_con`, pero las pausas de espera pasan por `espera`. Los tests la inyectan.
+#[allow(clippy::too_many_arguments)]
+fn calibrar_con_espera(
+    cli: &(impl ColabCli + Sync),
+    home: &Path,
+    paquetes: &[PathBuf],
+    commit_laptop: &str,
+    senales: &Senales,
+    tope: Duration,
+    sin_stop: bool,
+    espera: &(dyn Fn(Duration) + Sync),
+) -> Result<ResumenCalibrar, ErrorOraculo> {
     colab::liberar_anotado(cli, home)?;
     let importacion = Mutex::new(());
     let runtimes = thread::scope(|s| {
@@ -2190,6 +2227,7 @@ pub fn calibrar_con(
                         tope,
                         importacion,
                         sin_stop,
+                        espera,
                     )
                 });
                 (paquete, hilo)
@@ -2233,6 +2271,7 @@ fn ciclo_de_runtime<C: ColabCli + Sync>(
     tope: Duration,
     importacion: &Mutex<()>,
     sin_stop: bool,
+    espera: &(dyn Fn(Duration) + Sync),
 ) -> ResultadoRuntime {
     let paquete = match std::path::absolute(paquete) {
         Ok(absoluto) => absoluto,
@@ -2296,6 +2335,7 @@ fn ciclo_de_runtime<C: ColabCli + Sync>(
         &tmp,
         &manifiesto,
         &mut codigos,
+        espera,
     );
     // Con `sin_stop` el runtime queda abierto: no se libera y la parada no cuenta como fallida.
     let liberado = if sin_stop {
@@ -2367,6 +2407,7 @@ fn correr_runtime<C: ColabCli>(
     tmp: &Path,
     manifiesto: &Manifiesto,
     codigos: &mut Vec<CodigoTrabajo>,
+    espera: &(dyn Fn(Duration) + Sync),
 ) -> Result<PathBuf, ErrorOraculo> {
     pedir_runtime(cli, lim, home, sesion)?;
 
@@ -2394,6 +2435,7 @@ fn correr_runtime<C: ColabCli>(
             &format!("lanzar-{indice}.py"),
             &script_lanzar(indice, &texto),
         )?;
+        let lanzado_en = Instant::now();
         let lanzado = ejecutar_guion_con_plazo(
             cli,
             lim,
@@ -2413,7 +2455,7 @@ fn correr_runtime<C: ColabCli>(
                 lanzado.detalle()
             )));
         };
-        let codigo = esperar_trabajo(cli, lim, sesion, tmp, indice, pid, trabajo)?;
+        let codigo = esperar_trabajo(cli, lim, sesion, tmp, indice, pid, lanzado_en, espera)?;
         codigos.push(CodigoTrabajo {
             tarea: trabajo.tarea.clone(),
             dimension: trabajo.dimension.clone(),
@@ -2656,8 +2698,21 @@ struct EstadoTrabajo {
     codigo: i32,
 }
 
+/// Respuesta buena de una consulta de estado. Las que fallan no llegan aquí.
+enum EstadoConsulta {
+    /// El trabajo terminó. Trae el JSON de su estado.
+    Fin(String),
+    /// El trabajo sigue vivo.
+    Corriendo,
+}
+
 /// Consulta el estado de un trabajo lanzado hasta que termine. Devuelve su código de salida.
-/// Entre dos consultas espera `PAUSA_CONSULTA_CALIBRAR`. Si el plazo total vence, falla.
+///
+/// Una consulta que falla cuenta como falla: error de la CLI, código distinto de cero o salida
+/// sin marcador. Tras `FALLAS_CONSULTA_MAX` fallas seguidas, falla. Una respuesta buena pone la
+/// cuenta en cero. Entre dos consultas espera con `espera`. El plazo total usa `transcurrido`.
+/// Tope y señal cortan en cualquier momento.
+#[allow(clippy::too_many_arguments)]
 fn esperar_trabajo<C: ColabCli>(
     cli: &C,
     lim: &colab::Limites,
@@ -2665,15 +2720,18 @@ fn esperar_trabajo<C: ColabCli>(
     tmp: &Path,
     indice: usize,
     pid: u32,
-    trabajo: &TrabajoManifiesto,
+    lanzado: Instant,
+    espera: &(dyn Fn(Duration) + Sync),
 ) -> Result<i32, ErrorOraculo> {
     let plazo = Duration::from_secs(SEG_TRABAJO_CALIBRAR).min(lim.restante());
-    let inicio = Instant::now();
     let guion = colab::escribir(
         tmp,
         &format!("estado-{indice}.py"),
         &script_estado(indice, pid),
     )?;
+    let mut esperado = Duration::ZERO;
+    let mut fallas = 0;
+    let mut ultima_buena: Option<time::OffsetDateTime> = None;
     loop {
         let consulta = ejecutar_guion_con_plazo(
             cli,
@@ -2682,48 +2740,93 @@ fn esperar_trabajo<C: ColabCli>(
             SEG_CONSULTA_CALIBRAR,
             PLAZO_LOCAL_TRABAJO,
             &guion,
-        )?;
-        if consulta.codigo != 0 {
-            return Err(ErrorOraculo::Infra(format!(
-                "no se pudo consultar el trabajo {} {}: {}",
-                trabajo.tarea,
-                trabajo.dimension,
-                consulta.detalle()
-            )));
-        }
-        match colab::marcador(&consulta.stdout, "ROOT_ESTADO=").as_deref() {
-            Some("fin") => {
-                let linea = texto_tras(&consulta.stdout, "ROOT_ESTADO=");
-                let estado: EstadoTrabajo =
-                    serde_json::from_str(linea.lines().next().unwrap_or("")).map_err(|e| {
-                        ErrorOraculo::Infra(format!("el estado no se lee ({e}): {linea}"))
+        );
+        let respuesta = match consulta {
+            Err(e) if lim.cancelar.recibida().is_some() => return Err(e),
+            Err(e) if lim.vencido() => {
+                return Err(con_llevaba(e, transcurrido(lanzado, esperado)));
+            }
+            Err(e) => Err(e.to_string()),
+            Ok(salida) if salida.codigo != 0 => {
+                Err(format!("código {}: {}", salida.codigo, salida.detalle()))
+            }
+            Ok(salida) => match colab::marcador(&salida.stdout, "ROOT_ESTADO=").as_deref() {
+                Some("fin") => Ok(EstadoConsulta::Fin(texto_tras(
+                    &salida.stdout,
+                    "ROOT_ESTADO=",
+                ))),
+                Some("corriendo") => Ok(EstadoConsulta::Corriendo),
+                Some("murio") => {
+                    return Err(ErrorOraculo::Infra(format!(
+                        "el trabajo terminó sin estado: {}",
+                        texto_tras(&salida.stdout, "ROOT_ESTADO=")
+                    )));
+                }
+                _ => Err(format!("sin estado: {}", salida.detalle())),
+            },
+        };
+        match respuesta {
+            Ok(EstadoConsulta::Fin(json)) => {
+                let estado: EstadoTrabajo = serde_json::from_str(json.lines().next().unwrap_or(""))
+                    .map_err(|e| {
+                        ErrorOraculo::Infra(format!("el estado no se lee ({e}): {json}"))
                     })?;
                 return Ok(estado.codigo);
             }
-            Some("corriendo") => {}
-            Some("murio") => {
-                return Err(ErrorOraculo::Infra(format!(
-                    "el trabajo terminó sin estado: {}",
-                    texto_tras(&consulta.stdout, "ROOT_ESTADO=")
-                )));
+            Ok(EstadoConsulta::Corriendo) => {
+                fallas = 0;
+                ultima_buena = Some(time::OffsetDateTime::now_utc());
             }
-            _ => {
-                return Err(ErrorOraculo::Infra(format!(
-                    "la consulta del trabajo {} {} no dio estado: {}",
-                    trabajo.tarea,
-                    trabajo.dimension,
-                    consulta.detalle()
-                )));
+            Err(_) => {
+                fallas += 1;
+                if fallas == FALLAS_CONSULTA_MAX {
+                    return Err(ErrorOraculo::Infra(format!(
+                        "Colab no responde: {FALLAS_CONSULTA_MAX} consultas seguidas fallaron; última respuesta: {}",
+                        hora_de(ultima_buena)
+                    )));
+                }
             }
         }
-        if inicio.elapsed() >= plazo {
+        let llevaba = transcurrido(lanzado, esperado);
+        if llevaba >= plazo {
             return Err(ErrorOraculo::Infra(format!(
-                "el trabajo superó {} s",
-                plazo.as_secs()
+                "el trabajo superó {} s; llevaba {} s desde su inicio",
+                plazo.as_secs(),
+                llevaba.as_secs()
             )));
         }
-        thread::sleep(PAUSA_CONSULTA_CALIBRAR);
+        espera(PAUSA_CONSULTA_CALIBRAR);
+        esperado += PAUSA_CONSULTA_CALIBRAR;
+        if let Some(senal) = lim.cancelar.recibida() {
+            return Err(ErrorOraculo::Colab(format!("Interrumpido por {senal}")));
+        }
     }
+}
+
+/// Tiempo que lleva un trabajo desde su lanzamiento. Toma el mayor entre el reloj real y lo que
+/// sumaron las esperas. Una espera inyectada puede no dormir: el plazo debe correr igual.
+fn transcurrido(lanzado: Instant, esperado: Duration) -> Duration {
+    lanzado.elapsed().max(esperado)
+}
+
+/// Agrega a `error` cuánto llevaba el trabajo. Mantiene la variante del error.
+fn con_llevaba(error: ErrorOraculo, llevaba: Duration) -> ErrorOraculo {
+    let cola = format!("; el trabajo llevaba {} s", llevaba.as_secs());
+    match error {
+        ErrorOraculo::Colab(texto) => ErrorOraculo::Colab(texto + &cola),
+        ErrorOraculo::Infra(texto) => ErrorOraculo::Infra(texto + &cola),
+        otro => ErrorOraculo::Infra(format!("{otro}{cola}")),
+    }
+}
+
+/// Hora UTC de la última respuesta buena, en RFC 3339. Sin respuesta buena: "ninguna".
+fn hora_de(ultima: Option<time::OffsetDateTime>) -> String {
+    ultima
+        .and_then(|hora| {
+            hora.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .unwrap_or_else(|| "ninguna".into())
 }
 
 /// Texto que sigue a la línea que empieza con `clave`, sin espacios en las puntas.
@@ -5365,6 +5468,7 @@ mod tests_calibrar {
     use super::tests::Escenario;
     use super::*;
     use crate::oracle::colab::Espera;
+    use std::collections::VecDeque;
     use std::sync::{Condvar, Mutex};
     use std::time::Instant;
 
@@ -5430,6 +5534,28 @@ mod tests_calibrar {
         upload_falla_en: Option<String>,
         /// Si la falla de `exec` escribe su texto en stdout, no en stderr.
         falla_en_stdout: bool,
+        /// Respuestas de las consultas de estado, en orden. Vacía: `fin` con código 0.
+        estados: Mutex<VecDeque<Respuesta>>,
+    }
+
+    /// Lo que el `Falso` responde a una consulta de estado.
+    #[derive(Clone)]
+    enum Respuesta {
+        /// Código de salida y stdout del `exec`.
+        Salida(i32, String),
+        /// La CLI no terminó en su plazo.
+        Plazo,
+    }
+
+    fn corriendo() -> Respuesta {
+        Respuesta::Salida(0, "ROOT_ESTADO=corriendo\n".into())
+    }
+
+    fn fin() -> Respuesta {
+        Respuesta::Salida(
+            0,
+            "ROOT_ESTADO=fin\n{\"codigo\": 0, \"inicio\": 1.0, \"fin\": 2.0}\n".into(),
+        )
     }
 
     impl Falso {
@@ -5446,7 +5572,22 @@ mod tests_calibrar {
                 sha_de_cierre: None,
                 upload_falla_en: None,
                 falla_en_stdout: false,
+                estados: Mutex::new(VecDeque::new()),
             }
+        }
+
+        fn con_estados(self, estados: Vec<Respuesta>) -> Self {
+            *self.estados.lock().expect("estados") = estados.into();
+            self
+        }
+
+        /// Siguiente respuesta de la cola, si el `exec` es una consulta de estado.
+        fn estado_en_cola(&self, args: &[String]) -> Option<Respuesta> {
+            let guion = fs::read_to_string(args.last()?).ok()?;
+            if !guion.contains("ROOT_ESTADO=") {
+                return None;
+            }
+            self.estados.lock().expect("estados").pop_front()
         }
 
         fn con_falla_upload(mut self, sufijo: &str) -> Self {
@@ -5544,7 +5685,11 @@ mod tests_calibrar {
         ) -> Result<Espera, ErrorOraculo> {
             self.llamadas.lock().expect("llamadas").push(args.to_vec());
             let salida = match args.first().map(String::as_str) {
-                Some("exec") => self.exec(args),
+                Some("exec") => match self.estado_en_cola(args) {
+                    Some(Respuesta::Plazo) => return Ok(Espera::Plazo),
+                    Some(Respuesta::Salida(codigo, stdout)) => salida(codigo, &stdout, ""),
+                    None => self.exec(args),
+                },
                 Some("download") => {
                     let destino = args.last().expect("destino");
                     fs::copy(&self.vuelta, destino).expect("copia la vuelta");
@@ -6694,6 +6839,7 @@ mod tests_calibrar {
             &tmp,
             &manifiesto,
             &mut codigos,
+            &|_d| {},
         )
     }
 
@@ -7138,5 +7284,179 @@ mod tests_calibrar {
         );
         assert!(runtime.abierto.is_none(), "{:?}", runtime.abierto);
         assert!(lineas_runtime_abierto(runtime).is_empty());
+    }
+
+    /// Corre `paquetes` con la espera inyectada `espera`.
+    fn correr_con_espera(
+        cli: &Falso,
+        home: &Path,
+        paquetes: &[PathBuf],
+        tope: Duration,
+        sin_stop: bool,
+        espera: &(dyn Fn(Duration) + Sync),
+    ) -> Result<ResumenCalibrar, ErrorOraculo> {
+        calibrar_con_espera(
+            cli,
+            home,
+            paquetes,
+            COMMIT,
+            &Senales::default(),
+            tope,
+            sin_stop,
+            espera,
+        )
+    }
+
+    #[test]
+    fn corriendo_dos_veces_espera_dos_minutos_y_importa_la_vuelta() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_estados(vec![corriendo(), corriendo()]);
+        let esperas = Mutex::new(Vec::new());
+        let espera = |d: Duration| esperas.lock().expect("esperas").push(d);
+
+        let resumen = correr_con_espera(&cli, home.path(), &[p0], TOPE_PRUEBA, false, &espera)
+            .expect("calibra");
+
+        assert!(
+            resumen.runtimes[0].resultado.is_ok(),
+            "{:?}",
+            resumen.runtimes[0].resultado
+        );
+        assert_eq!(
+            *esperas.lock().expect("esperas"),
+            vec![Duration::from_secs(60); 2]
+        );
+    }
+
+    #[test]
+    fn murio_da_error_con_el_final_del_log() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let murio = Respuesta::Salida(0, "ROOT_ESTADO=murio\nlinea-final-falsa\n".into());
+        let cli = Falso::nuevo(home.path(), &vuelta).con_estados(vec![murio]);
+
+        let resumen = correr_con_espera(&cli, home.path(), &[p0], TOPE_PRUEBA, false, &|_d| {})
+            .expect("calibra");
+
+        let Err(error) = &resumen.runtimes[0].resultado else {
+            panic!("debía fallar: {:?}", resumen.runtimes[0].resultado);
+        };
+        assert!(error.contains("linea-final-falsa"), "{error}");
+        assert!(error.contains("terminó sin estado"), "{error}");
+    }
+
+    #[test]
+    fn cinco_consultas_sin_respuesta_dan_colab_no_responde() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_estados(vec![Respuesta::Plazo; 5]);
+
+        let resumen = correr_con_espera(&cli, home.path(), &[p0], TOPE_PRUEBA, false, &|_d| {})
+            .expect("calibra");
+
+        let Err(error) = &resumen.runtimes[0].resultado else {
+            panic!("debía fallar: {:?}", resumen.runtimes[0].resultado);
+        };
+        assert!(error.contains("Colab no responde"), "{error}");
+        assert!(error.contains("5 consultas seguidas"), "{error}");
+        assert!(error.contains("ninguna"), "{error}");
+    }
+
+    #[test]
+    fn cuatro_fallas_de_consulta_y_luego_fin_terminan_bien() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        // Cuatro fallas de tipo distinto: plazo, código 1, salida sin marcador y otro plazo.
+        let cli = Falso::nuevo(home.path(), &vuelta).con_estados(vec![
+            Respuesta::Plazo,
+            Respuesta::Salida(1, "".into()),
+            Respuesta::Salida(0, "sin marcador\n".into()),
+            Respuesta::Plazo,
+            fin(),
+        ]);
+        let esperas = Mutex::new(Vec::new());
+        let espera = |d: Duration| esperas.lock().expect("esperas").push(d);
+
+        let resumen = correr_con_espera(&cli, home.path(), &[p0], TOPE_PRUEBA, false, &espera)
+            .expect("calibra");
+
+        assert!(
+            resumen.runtimes[0].resultado.is_ok(),
+            "{:?}",
+            resumen.runtimes[0].resultado
+        );
+        assert_eq!(esperas.lock().expect("esperas").len(), 4);
+    }
+
+    #[test]
+    fn plazo_vencido_dice_cuanto_llevaba_el_trabajo() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        // Ninguna consulta termina el trabajo: el plazo de 600 s vence tras diez esperas.
+        let cli = Falso::nuevo(home.path(), &vuelta).con_estados(vec![corriendo(); 15]);
+
+        let resumen = correr_con_espera(&cli, home.path(), &[p0], TOPE_PRUEBA, false, &|_d| {})
+            .expect("calibra");
+
+        let Err(error) = &resumen.runtimes[0].resultado else {
+            panic!("debía fallar: {:?}", resumen.runtimes[0].resultado);
+        };
+        assert!(error.contains("superó"), "{error}");
+        assert!(error.contains("llevaba"), "{error}");
+        assert!(error.contains("desde su inicio"), "{error}");
+    }
+
+    #[test]
+    fn sin_stop_por_el_transporte_nuevo_deja_las_tres_lineas() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_estados(vec![corriendo(), fin()]);
+
+        let resumen = correr_con_espera(&cli, home.path(), &[p0], TOPE_PRUEBA, true, &|_d| {})
+            .expect("calibra");
+
+        let runtime = &resumen.runtimes[0];
+        assert!(runtime.resultado.is_ok(), "{:?}", runtime.resultado);
+        let lineas = lineas_runtime_abierto(runtime);
+        assert_eq!(lineas.len(), 4, "{lineas:?}");
+        assert!(lineas[0].starts_with("ROOT_SESION_ABIERTA="), "{lineas:?}");
+        assert!(lineas[1].starts_with("ROOT_CARPETA_REMOTA="), "{lineas:?}");
+        assert!(lineas[2].starts_with("ROOT_TRABAJO_CMD="), "{lineas:?}");
+        let comandos = comandos_de(&cli.llamadas(), &runtime.sesion);
+        assert!(!comandos.iter().any(|c| c == "stop"), "{comandos:?}");
+    }
+
+    #[test]
+    fn sin_la_bandera_el_transporte_nuevo_termina_en_stop() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_estados(vec![corriendo(), fin()]);
+
+        let resumen = correr_con_espera(&cli, home.path(), &[p0], TOPE_PRUEBA, false, &|_d| {})
+            .expect("calibra");
+
+        let runtime = &resumen.runtimes[0];
+        let comandos = comandos_de(&cli.llamadas(), &runtime.sesion);
+        assert_eq!(
+            comandos.last().map(String::as_str),
+            Some("stop"),
+            "{comandos:?}"
+        );
+        assert!(runtime.abierto.is_none(), "{:?}", runtime.abierto);
     }
 }
