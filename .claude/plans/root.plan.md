@@ -13946,3 +13946,111 @@ Brief: `docs/builds/brief-local-162.md`.
 **El paso 5 prueba la 161, no la 162.** El punto 2 de la 162 solo cambia un mensaje y suma tests. No hace falta repetir el paso 5 después.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-17 (79): qué hace Root cuando un producto no instala
+
+**Estado.**
+- **La 162 quedó a medias.** El builder tardó 14 minutos y costó 0,61 USD. El punto 2 está hecho (5534d9d), y el informe está en 6c345ed. La suite sin podman da 3977 verdes y 0 fallas.
+- **El punto 1 se detuvo, como manda el brief.** `bloqueos`, en `src/oracle/informe.rs`, solo cuenta hallazgos de Seguridad. El corte de la descarga da un hallazgo de Entrega con severidad 3. Con el informe armado, `decidir` daría `SinDecision`, no `Bloqueado`.
+- **La suite con podman de `laptop/cadena-110-162` corre ahora.**
+- **`calibrar-161.sh` ya usa `--sin-stop`.** `estado-161.py` lee `trabajo-N.estado`, y después el guion cierra con `colab stop`.
+- **`paso0-161.sh` sigue esperando al usuario.**
+
+**Un error mío.** En la vuelta (78) escribí que "un hallazgo de severidad 3 bloquea". Es falso. `bloqueos` cuenta tres cosas:
+- un requisito de peso 3 en nivel 0;
+- un hallazgo **de Seguridad** con severidad 3;
+- un ítem de rúbrica con `bloquea = true` en nivel 0.
+
+Leí `decidir` y no leí `bloqueos`. El builder hizo bien en detenerse.
+
+## 1. Las cuatro preguntas de la 162
+
+**1. ¿Cómo bloquea un hallazgo de Entrega de severidad 3? Toca una regla del usuario.**
+- Lo que bloquea lo fijó el usuario con P56 y P58: las decisiones 48 y 49 del plan, con la regla "primero la evidencia".
+- Sumar Entrega a `bloqueos`, que es la opción (a) del builder, cambia esa regla.
+- Mover el hallazgo de la descarga a Seguridad, que es la opción (b), dice algo falso: un producto que no instala no es un problema de seguridad.
+- **Va al usuario, como P121.** No la respondo.
+
+**2. ¿Se arma el informe del corte aunque la decisión sea `SinDecision`? Sí. Es técnica.**
+- Un veredicto sin informe no le dice al usuario por qué. Armar el informe no cambia ninguna regla.
+- La decisión sale de `decidir`, tal como está hoy. Mientras P121 no esté contestada, los cortes dan `SinDecision` con informe.
+
+**3. El motivo dice siempre "plazo de 180 s". Pido un cambio.** El plazo real puede ser más corto, porque `lim.restante()` lo recorta. El motivo debe decir el plazo usado: el menor entre `PLAZO_LOCAL_TRABAJO` y `lim.restante()`. Se calcula en `colab_calibra.rs`, sin tocar `colab.rs`.
+
+**4. `motivo_de_error` detecta el plazo por el texto "colab superó". Acepto la decisión, con una guarda.** Un error tipado pide tocar `oracle/colab.rs`. Pero un test debe fijar el texto: llama a `colab::paso` con el `ColabCli` falso, deja vencer el plazo, y comprueba que el motivo diga "plazo". Si alguien cambia el texto, ese test falla.
+
+## 2. P121, en pocas palabras
+
+Hoy hay tres cortes de la descarga, y los tres dan un hallazgo de Entrega con severidad 3:
+- **"no instala":** falta un paquete, o `cargo` no puede resolver las dependencias;
+- **"lock inválido":** el `Cargo.lock` no se puede leer;
+- **"fuente no aceptada":** Root rechaza una fuente de dependencias por su política: el `Cargo.lock` pide un origen que las reglas de fuentes no aceptan.
+
+**Hay una regla que ya existe y sirve para los dos primeros.** `no_listo` da `NoListo` cuando el veredicto trae `no_compila`. Lo fijó el usuario con P58. Un producto que no instala tampoco se puede compilar. Si el corte marca `no_compila`, la regla de siempre da rojo, sin regla nueva.
+
+**Un matiz.** Un lock que no cuadra falla con `--locked`. Sin `--locked`, `cargo` lo actualiza y compila. Root evalúa con `--locked` porque pide builds reproducibles. Entonces, para Root, ese producto no compila.
+
+**"Fuente no aceptada" es distinto.** Root se niega a bajar algo por su política. El producto podría compilar en otro lado. Eso no es evidencia de que no compile.
+
+La pregunta está en la sección 6.
+
+## 3. Los guiones del paso 7
+
+**`calibrar-161.sh` hace lo que pide el paso.**
+- Corre `calibrar` con `--sin-stop`.
+- Por cada `ROOT_SESION_ABIERTA`, corre `estado-161.py` en un exec corto, y después `colab stop`. Los dos llevan `timeout` local.
+- Oculta los tokens de la salida, y avisa si aparece algo con forma de clave.
+
+**`estado-161.py` está bien.** Imprime solo el JSON de cada estado, que trae el código y las horas, y el tamaño de cada log. No imprime nombres de tests ni el contenido de los logs.
+
+**Dos cambios chicos:**
+1. **Un runtime puede quedar abierto sin su línea.** Si el `timeout 18000` mata a `calibrar` antes de que imprima `ROOT_SESION_ABIERTA`, el bucle no ve ninguna sesión, y nadie la cierra. Al final, el guion lee las sesiones de `home-161/colab/activo.json` y cierra las que siguen ahí.
+2. **La carpeta remota está fija** en `/content/root-paquete`. Conviene pasarla desde `ROOT_CARPETA_REMOTA`, con `--env CARPETA=...`, como hace `repetir-0g.py`. Hoy coinciden, pero así no dependen de un literal repetido.
+
+## 4. La Tarea 162b
+
+**Lo técnico puede seguir sin el usuario.**
+
+| Punto | Qué | Archivo |
+|---|---|---|
+| 1 | El camino del corte arma su informe, y su decisión sale de `decidir` como está hoy | `src/oracle/mod.rs` |
+| 2 | El motivo dice el plazo real, y un test fija el texto "colab superó" | `src/colab_calibra.rs` |
+
+- **Base:** la punta de `laptop/tarea-162`.
+- **Después de P121 viene otra tarea chica,** según la respuesta. Por ejemplo, con la (a), el corte marca `no_compila`.
+
+Brief: `docs/builds/brief-local-162b.md`.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | `paso0-161.sh` | — | Laptop, el usuario | No | **Sí** |
+| 5 | `calibrar-161.sh`, con los dos cambios de la sección 3 | El paso 4 | Colab, CPU | No | No |
+| 6 | P121 | — | — | No | **Sí** |
+| 7 | La Tarea 162b | La suite de la cadena 162 | Laptop, builder | Lo que use el builder | No |
+| 8 | La tarea de P121 | Los pasos 6 y 7 | Laptop, builder | Lo que use el builder | No |
+| 9 | Armar la cadena, y su suite con podman | El paso 8 | Laptop, podman | No | No |
+| 10 | Verificar b8d0db4058 otra vez, con la decisión de P121 y su informe | El paso 9 | Laptop, podman | No | No |
+| 11 | La mezcla de la cadena | — | — | No | **Sí** |
+| 12 | Congelar la versión | Los pasos 3, 5 y 9 | — | No | No |
+| 13 | Las doce calibraciones de oráculo con la versión congelada | El paso 12 | Colab, cuatro runtimes | No | No |
+| 14 | La pregunta de presupuesto de D3 | El paso 12 | — | No | **Sí** |
+| 15 | D3: `corre` sobre las tareas del dataset | El paso 14 | Laptop y API | Según la respuesta del paso 14 | No |
+| 16 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 12 | Laptop | Según la regla del final | No |
+| 17 | La validez sobre el final sellado | Los pasos 1 a 16 | Colab, notebook si usa el juez | Según el final | No |
+
+**La regla de carga.** Los pasos 4, 9 y 10 usan podman, y los pasos 7 y 8 compilan. Corren de a uno en la laptop.
+
+## 6. Pregunta al usuario
+
+**P121. ¿Qué decide Root cuando el producto evaluado no instala?** Hoy da `SinDecision`: sin veredicto, como si Root no hubiera podido medir. Las reglas de bloqueo las fijaste en P56 y P58, y solo cuentan Seguridad. El hallazgo de la descarga es de Entrega, con severidad 3.
+
+- **a) "No instala" y "lock inválido" cuentan como "no compila".** La regla que ya existe da `NoListo`, en rojo. "Fuente no aceptada" queda en `SinDecision`, porque es una negativa de Root, no una prueba de que el producto falle. No suma ninguna regla de bloqueo. *(recomendada)*
+- **b) Un hallazgo de Entrega con severidad 3 de la descarga bloquea.** Los tres cortes dan `Bloqueado`, en rojo. Suma una regla a las de P56 y P58.
+- **c) Los tres cortes quedan en `SinDecision`,** ahora con informe. Root no dice rojo sin haber corrido las suites.
+
+Recomiendo la (a). Un producto que no se puede construir no está listo, y la regla de "no compila" ya lo dice. No toca lo que bloquea, y "fuente no aceptada" no queda en rojo por una política de Root.
