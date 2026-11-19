@@ -14856,3 +14856,144 @@ La pregunta está en la sección 6, como P123.
 - **c) Todavía no.** El congelamiento, P107 a y las doce calibraciones esperan.
 
 Recomiendo la (a). Cada tarea de la 110 a la 166 pasó su revisión, y la suite está en verde. Un PR deja todo a la vista con el mismo costo.
+
+## Vuelta del 2026-11-19 (88): el congelamiento, y las recetas de lo que sigue
+
+**Estado.**
+- **P123, respuesta del usuario: la (a), con PR.** El PR M3EMO/mmorch#2 se mezcló en 2020ecc, con el título "Root: mezcla de las Tareas 110 a 166 (#2)".
+  - El árbol de 2020ecc, 84d0862, es idéntico al que el orquestador probó en local. Su suite con podman dio 4046 verdes, 0 fallas y 5 ignorados.
+  - El CI del PR pasó.
+- **El binario congelado se compiló desde 2020ecc:** `~/.cache/root-wt/colab-pruebas/congelado-2020ecc/r00t`, con SHA-256 `7718f4c957db92057240a3a1a97bfd062c27de7b45ac4d542e881a679c5bda1f`.
+- **El usuario todavía no corrió el paso 0 del juez** de P107 a.
+
+## 1. El congelamiento
+
+**La versión congelada:**
+- **Commit:** 2020ecc, en `claude/root-e7813e`. Su árbol es 84d0862.
+- **Binario:** `congelado-2020ecc/r00t`, SHA-256 `7718f4c957db92057240a3a1a97bfd062c27de7b45ac4d542e881a679c5bda1f`.
+- **Imagen del oráculo:** `localhost/root-oraculo-rust:4`, la imagen local. El orquestador anota su id en `registro.md`, con `podman image inspect`.
+
+**Lo que queda fijo hasta la validez:**
+- las rúbricas;
+- el prompt del juez, que fija la huella de las dimensiones con juez;
+- la versión de las sondas: `VERSION_SONDAS_SEGURIDAD` vale 4 desde la 160;
+- las versiones de `versiones.env`: Rust 1.99.1 y las herramientas;
+- los `tarea.toml` de las tareas que se calibran. Su `tarea_hash` entra en cada fila.
+
+**Toda medición siguiente usa este binario:** P107 a, las doce calibraciones, D3, el final y la validez.
+
+**Si algo de esa lista tiene que cambiar,** es una versión nueva, con otro congelamiento. Eso se decide aparte, con sus costos a la vista.
+
+## 2. El estado de cada dimensión, con el binario congelado
+
+**Cómo se ve.** Root no tiene un comando que solo muestre el estado. `calibrada` se calcula en cada evaluación, por dimensión. Una fila cuenta si su `tarea_hash` es el del `tarea.toml` actual y su huella es la de la dimensión. Así lo dice `Version::calibrada`, en `src/oracle/calibra.rs`.
+
+**La receta:** una evaluación del repo bueno de s2-t1, sin claves, sobre una copia del `ROOT_HOME` real. La copia evita que la evaluación escriba evidencia en el real. Usa podman en la laptop.
+
+```sh
+P=~/.cache/root-wt/colab-pruebas; R=$P/congelado-2020ecc/r00t
+cp -a --reflink=auto ~/.local/share/root $P/home-estado-2020ecc
+env -u DEEPSEEK_API_KEY -u ANTHROPIC_API_KEY ROOT_HOME=$P/home-estado-2020ecc \
+  $R oraculo evaluar --tarea s2-t1 --repo ~/.cache/root-wt/mineria/s2/rep/t1-ref --json > $P/estado-2020ecc.json
+python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])); [print(p["dimension"], p.get("calibrada")) for p in v["puntajes"]]' $P/estado-2020ecc.json
+```
+
+**Lo que se espera en cada dimensión:**
+
+| Dimensión | Se espera | Por qué |
+|---|---|---|
+| Eficiencia | **Calibrada** | Las filas de la v6 tienen la huella y el `tarea_hash` actuales. Ninguna tarea posterior a la 155 cambió su medición |
+| Seguridad | Sin calibrar | La versión de sus sondas subió a 4 en la 160, y sus filas viejas tienen otra huella |
+| Funciona, Completitud y Pruebas | Calibradas o sin calibrar | Depende de si cambió su huella o el `tarea_hash` desde sus filas. Las doce las calibran otra vez, así que no frena nada |
+| Diseño, Arquitectura y Estructura | Sin calibrar | Esperan P107 a. Sin clave, el juez no corre |
+| Entrega | Sin calibrar | Ninguna tarea calibrada tiene `[entrega]` |
+
+**Si Eficiencia sale sin calibrar,** se repite la v6 con el binario congelado:
+1. Tres paquetes, uno por tarea, con `colab empaquetar --trabajos s2-tN:eficiencia --n 4 --semilla 42`, el binario congelado y `--raiz-root` en 2020ecc.
+2. `colab calibrar` con los tres paquetes. Abre tres runtimes de CPU, en paralelo.
+3. Cuesta cerca de 0,5 unidades y 2 horas, sin API.
+4. El orquestador lee la fila nueva igual que en la vuelta (68).
+
+**Qué hace el orquestador si otra cosa no sale como se espera:**
+- **Eficiencia sin calibrar, con filas de la v6 que no cuentan:** mira por qué. Puede ser la huella o el `tarea_hash`. Lo anota y repite la v6.
+- **Una dimensión con juez calibrada:** es raro, porque nadie corrió P107 a. Lo informa antes de seguir.
+
+## 3. El paso 0 del juez: hace falta un guion nuevo
+
+**`paso0-juez.sh` no sirve tal como está:**
+1. **Usa el binario de la cadena 155,** `v155/r00t`, y no el congelado. P107 a mediría otra versión.
+2. **Su `--raiz-root` apunta a `reparto/wt`** sin fijar el commit. `tools/colab`, con `notebook-juez.py` y `preparar-runtime.sh`, saldría del commit que ese worktree tenga. Hoy está en 5efb613.
+3. **Espera a una unidad `v6-colab`** que ya no existe.
+
+**Escribí `colab-pruebas/paso0-juez-2020ecc.sh`, sin correrlo.** Lo corre el usuario, porque lee la imagen local con podman.
+1. Revisa que el SHA-256 del binario sea el congelado. Si no, frena.
+2. Revisa que ningún builder ni suite use la laptop.
+3. Lleva `reparto/wt` a 2020ecc, y comprueba que quedó ahí.
+4. Arma los mismos trabajos de `paso0-juez.sh`: diseño de s2-t1 con n=2, y arquitectura, diseño y estructura de s2-t1 a s2-t3 con n=12.
+5. Corre `colab empaquetar --juez` sin claves en el entorno. Deja el paquete en `congelado-2020ecc/p-juez-2020ecc.tar.gz`.
+6. Imprime el tamaño, el SHA-256, y el paso siguiente: arrastrar el paquete a `root-colab` en Drive.
+
+**La salida trae dos líneas que el orquestador revisa antes del notebook:**
+- **"gasto de S2":** el orquestador la compara con su propia suma. Si difieren en más de 0,05 USD, informa y no sigue, como pide la vuelta (65).
+- **`ROOT_SHA_PAQUETE`:** va a la CELDA 1 del notebook, junto con el nombre del paquete.
+
+## 4. Las doce calibraciones de oráculo en Colab
+
+**Qué son.** Seguridad, Funciona, Completitud y Pruebas, en s2-t1, s2-t2 y s2-t3. Son 12 trabajos, con `n=4` y semilla 42, como las calibraciones de oráculo que ya cumplieron P102 a.
+
+**Los paquetes: 12, uno por trabajo.**
+- Con la 161, cada trabajo corre aparte del exec. Pero la vuelta se arma al final del runtime. Si un runtime pasa su tope de 4 horas, todo lo que corrió ahí se pierde.
+- Las filas de calibración no guardan la duración total, así que no hay un dato para repartir trabajos con margen.
+- **Un trabajo por paquete limita la pérdida a un trabajo.** El costo extra es la preparación de cada runtime: unos 10 minutos.
+
+**El armado, uno por trabajo,** con el binario congelado y `reparto/wt` en 2020ecc:
+
+```sh
+P=~/.cache/root-wt/colab-pruebas; C=$P/congelado-2020ecc; R=$C/r00t; S2=~/.cache/root-wt/mineria/s2/rep
+for t in 1 2 3; do for d in seguridad funciona completitud pruebas; do
+  env -u DEEPSEEK_API_KEY -u ANTHROPIC_API_KEY $R colab empaquetar --binario $R --trabajos "s2-t$t:$d" \
+    --n 4 --semilla 42 --repo "s2-t$t=$S2/t$t-ref" --rustup-sha256 <sha de rustup-init> \
+    --salida $C/p-$d-t$t.tar.gz --raiz-root ~/.cache/root-wt/reparto/wt
+done; done
+```
+
+Lee la imagen con podman, así que lo corre el usuario, como los pasos 0 anteriores. Va en el mismo guion del paso 0, o en uno hermano.
+
+**La corrida: tandas de 4 paquetes,** cada una con su `colab calibrar`, sobre una copia del `ROOT_HOME` real:
+- **Tanda 1:** los tres de Pruebas, que son los más largos, y Seguridad de s2-t1.
+- **Tanda 2:** Seguridad de s2-t2 y s2-t3, y Funciona de s2-t1 y s2-t2.
+- **Tanda 3:** Funciona de s2-t3, y Completitud de s2-t1 a s2-t3.
+
+Cada tanda abre 4 runtimes de CPU a la vez. La siguiente arranca cuando termina la anterior.
+
+**Después de cada tanda,** el orquestador revisa las filas importadas en la copia, con las reglas de P102 a para dimensiones de oráculo. Si todo está bien, las importa al `ROOT_HOME` real con `colab importar`.
+
+**El costo:**
+- **API:** 0. Ninguna de estas cuatro dimensiones usa el juez.
+- **Unidades:** cerca de 12 trabajos, de 30 a 90 minutos cada uno con la preparación. A 0,08 unidades por hora, da de 0,5 a 1,5 unidades.
+- **Tiempo:** de 4 a 6 horas en total, en tres tandas.
+
+**En paralelo con P107 a.** P107 a corre en el runtime del notebook, que es otro. Con una tanda de 4 en curso, hay 5 runtimes a la vez. Si la cuenta no deja abrir el quinto, el orquestador espera a que termine la tanda. **No hace falta una pregunta al usuario:** los dos caminos están dentro de los topes que ya decidió, 50 unidades de Colab y 25 USD de S2.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | Anotar el id de la imagen en `registro.md` | — | Laptop | No | No |
+| 2 | El estado de cada dimensión con el binario congelado | Nada | Laptop, podman | No | No |
+| 3 | La v6 otra vez, solo si Eficiencia sale sin calibrar | El paso 2 | Colab, tres runtimes | No | No |
+| 4 | `paso0-juez-2020ecc.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 5 | La etapa 1 de P107 a | El paso 4 | Colab, notebook | Cerca de 0,35 USD | No |
+| 6 | Las cinco etapas de P107 a | El paso 5 | Colab, notebook | Cerca de 18 USD | No |
+| 7 | Armar los 12 paquetes de las doce calibraciones | — | Laptop y el usuario | No | **Sí** |
+| 8 | Las doce calibraciones, en tres tandas de 4 | El paso 7 | Colab, CPU | No. De 0,5 a 1,5 unidades | No |
+| 9 | La pregunta de presupuesto de D3: cupo y tiempo | El paso 8 | — | No | **Sí** |
+| 10 | D3: `corre` sobre las tareas del dataset | El paso 9 | Laptop, podman | Casi nada. Cerca de 31 USD de lista por cupo por pasada | No |
+| 11 | P98 c: abrir el final, con 16 reales y el tope de P115 a | Los pasos 6 y 8 | Laptop | Según la regla del final | No |
+| 12 | La validez sobre el final sellado | Los pasos 1 a 11 | Colab, notebook si usa el juez | Según el final | No |
+
+**Los pasos 4 y 7 los puede hacer el usuario juntos,** en una sola sesión: los dos leen la imagen con podman.
+
+**La regla de carga.** Los pasos 2, 4, 7 y 10 usan podman en la laptop, de a uno. Los pasos 3, 5, 6 y 8 van en Colab.
+
+**Preguntas al usuario:** ninguna nueva.
