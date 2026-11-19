@@ -8037,7 +8037,15 @@ mod tests {
     fn oraculo_corte_fuente_no_aceptada_deja_las_nueve_sin_veredicto() {
         let base = tempfile::tempdir().expect("base");
         let tarea = tarea_rust(base.path());
-        let repo = repo_rust(base.path(), LOCK_ROTO);
+        // Cambió de valor: antes usaba `LOCK_ROTO`, y el corte era el del lock. Ahora la fuente no aceptada es
+        // una dependencia git por ssh, con un lock sano.
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [dependencies]\nfoo = { git = \"ssh://git@github.com/x/y\" }\n",
+        )
+        .expect("Cargo.toml con fuente git por ssh");
         let home = base.path().join("home");
         let v = evaluar_falso(&repo, &tarea, &home, &sin_suites, &herramientas(&[]))
             .expect("la descarga sin veredicto no es error de infraestructura");
@@ -8105,6 +8113,25 @@ mod tests {
             v.hallazgos
         );
         // Cambió de valor: antes daba SinDecision. Un lock que no parsea no compila, así que da NoListo y rojo.
+        assert_corte_con_informe(&v, "Cargo.lock inválido", Decision::NoListo, Estado::Rojo);
+    }
+
+    #[test]
+    fn oraculo_corte_lock_roto_con_manifiesto_da_lock_invalido_y_no_listo() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        // Con `Cargo.toml` sano: el lock roto lo ve `preparar_rust` y no el inventario.
+        let repo = repo_rust(base.path(), LOCK_ROTO);
+        let home = base.path().join("home");
+        let v = evaluar_falso(&repo, &tarea, &home, &sin_suites, &herramientas(&[]))
+            .expect("el corte no es error de infraestructura");
+        assert!(
+            v.hallazgos
+                .iter()
+                .any(|h| h.detalle.contains("Cargo.lock inválido")),
+            "{:?}",
+            v.hallazgos
+        );
         assert_corte_con_informe(&v, "Cargo.lock inválido", Decision::NoListo, Estado::Rojo);
     }
 

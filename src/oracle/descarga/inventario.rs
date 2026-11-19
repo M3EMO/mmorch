@@ -1005,19 +1005,10 @@ fn inventariar_cargo(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOracu
     let Some(raiz) = manifiesto(ARCHIVO_CARGO, "", &texto_raiz, inv) else {
         return Ok(());
     };
+    // Un lock ilegible no se rechaza aquí: `preparar_rust` lo da como NoListo con su arreglo.
+    // Sin paquetes, las fuentes de los `Cargo.toml` se revisan igual.
     let paquetes = match leer_opcional(&repo.join(ARCHIVO_LOCK))? {
-        Some(texto) => match analizar_lock(&texto) {
-            Ok(paquetes) => paquetes,
-            Err(e) => {
-                inv.rechazos.push(Rechazo {
-                    motivo: redactar(&format!("Cargo.lock inválido: {e}")),
-                    archivo: ARCHIVO_LOCK.into(),
-                    linea: 0,
-                    cita: String::new(),
-                });
-                Vec::new()
-            }
-        },
+        Some(texto) => analizar_lock(&texto).unwrap_or_default(),
         None => Vec::new(),
     };
     // El lock fija el commit de cada fuente git: ese commit reemplaza a la rama o al tag.
@@ -2360,6 +2351,35 @@ source = \"git+https://u:p@host/x?rev=1#aaaa\"\n";
         assert_eq!(inv.rechazos[0].linea, 6);
         let json = serde_json::to_string(&inv).expect("serializa");
         assert!(!json.contains("u:p@"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_lock_roto_no_da_rechazo_de_lock_invalido() {
+        // Un lock ilegible lo da `preparar_rust` como NoListo. El inventario no lo rechaza antes.
+        let lock = "version = 4\n[[package\n";
+        let inv = inventario_de(&[("Cargo.toml", &manifiesto("")), ("Cargo.lock", lock)]);
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+    }
+
+    #[test]
+    fn descarga_inventario_lock_roto_conserva_rechazo_de_fuente_y_aviso_sin_rev() {
+        // Guarda: quitar el rechazo del lock no quita los de las fuentes de Cargo.toml.
+        let texto = manifiesto(
+            "ssh = { git = \"ssh://git@github.com/x/y\" }\n\
+             sin_rev = { git = \"https://github.com/x/z\" }\n",
+        );
+        let inv = inventario_de(&[
+            ("Cargo.toml", &texto),
+            ("Cargo.lock", "version = 4\n[[package\n"),
+        ]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert_eq!(inv.rechazos[0].archivo, "Cargo.toml");
+        assert!(!inv.rechazos[0].motivo.contains("Cargo.lock"), "{inv:?}");
+        assert_eq!(inv.sin_commit.len(), 1, "{inv:?}");
+        assert!(
+            inv.sin_commit[0].detalle.contains("sin commit fijo"),
+            "{inv:?}"
+        );
     }
 
     #[test]
