@@ -14164,3 +14164,98 @@ Antes de escribirla, hay que leer cómo `corre` lleva el informe al builder.
 - **b) El agente trabaja dentro de la evaluación.** Arregla una copia del repo y Root mide sobre ella. La decisión sigue en `NoListo`, y el informe dice qué cambió. Si no logra que instale, el informe pide a un humano.
 
 Recomiendo la (a). El evaluador no cambia lo que evalúa, y ningún agente que escribe código trabaja cerca de los tests ocultos.
+
+## Vuelta del 2026-11-18 (81): la vuelta de instalación
+
+**Estado.**
+- **La suite con podman de la cadena 110 a 162b dio verde:** 3982 pasan, 0 fallan y 5 ignorados.
+- **La 163 está hecha.** El builder tardó 18 minutos y costó 1,02 USD. Commits a3c9ecf, a0f834e, 63f6812 y a88e0fb. Sin podman da 3989 verdes y 0 fallas.
+- **La suite con podman de `laptop/cadena-110-163` corre ahora.** Después se arma el binario release de la 163, para verificar b8d0db4058.
+- **El informe de la 163 trae cuatro preguntas.** Además, el builder no corrió `calibra.rs`. `rompe_la_compilacion` lee `no_compila`, y un corte ahora puede marcarlo.
+- **`paso0-161.sh` sigue esperando al usuario.**
+
+**P122, respuesta del usuario, literal:** "a) El agente es el builder (Recommended)".
+
+## 1. El diseño: P121 a más P122 a
+
+**Lo que ya existe y sirve de molde.** `corre` construye, evalúa y guarda una fila. Si la evaluación marca una regresión de Eficiencia, `regresiones_de_vuelta` pide una vuelta más. `correr_vuelta_eficiencia` relanza el último rol con un prompt que trae las regresiones. Después, Root evalúa otra vez. La fila guarda esa vuelta en `vuelta_eficiencia`.
+
+**La vuelta de instalación copia ese molde.**
+1. **Cuándo corre:** la evaluación es un corte "no instala" o "lock inválido", y todos los roles terminaron con código 0. Con "fuente no aceptada" no corre, porque es una política de Root y el builder no la puede cambiar.
+2. **Qué recibe el builder:** el último rol se relanza con un prompt que trae el hallazgo de la descarga y su arreglo concreto. No trae nada del oráculo: el hallazgo de la descarga no nombra tests.
+3. **Cuántas vueltas:** hasta 2. La primera es para el arreglo. La segunda cubre un arreglo a medias, por ejemplo un lock que cuadra pero pide otra versión.
+4. **Después de cada vuelta,** Root evalúa otra vez. Si el producto instala, la corrida sigue como siempre: la nueva evaluación puede pedir la vuelta de Eficiencia.
+5. **Si después de 2 vueltas sigue sin instalar,** la decisión queda en `NoListo`. El veredicto suma el aviso "pide intervención humana", con el hallazgo.
+
+**El arreglo concreto, según el corte.** Va en el texto del hallazgo de la descarga, así lo ve el usuario y lo ve el builder:
+
+| Lo que dice `cargo` | El arreglo que trae el hallazgo |
+|---|---|
+| "cannot update the lock file" | "`Cargo.lock` no cuadra con `Cargo.toml`: corré `cargo update --workspace` y subí el lock" |
+| "no matching package" o "failed to select a version" | "una dependencia de `Cargo.toml` no existe, o no tiene esa versión: corregí `Cargo.toml`" |
+| un `Cargo.lock` que no se puede leer | "`Cargo.lock` no se puede leer: regeneralo con `cargo generate-lockfile` y subilo" |
+| cualquier otro fallo de `cargo vendor` | "`cargo vendor` falló: revisá `Cargo.toml` y `Cargo.lock`", con la línea útil |
+
+**Cómo queda en la fila y en el veredicto.**
+- **La fila suma `vuelta_instalacion`,** opcional, como `vuelta_eficiencia`. Guarda cuántas vueltas corrieron, si el producto terminó instalando, el motivo si una vuelta no corrió, y `pide_humano`.
+- **El veredicto final es el de la última evaluación.** Si el producto instaló, es un veredicto normal. Si no, es el corte con `NoListo`.
+- **El aviso "pide intervención humana"** va en `Veredicto.avisos`, con el número de vueltas y el hallazgo. Root no inventa ninguna decisión nueva.
+
+**¿Toca la versión congelada? No.** La versión congelada fija las rúbricas, el prompt del juez y la versión de las sondas. Esta tarea toca `corre`, el texto de un hallazgo de la descarga, y una regla de la calibración que no cambia ninguna detección.
+
+**Entra antes de congelar.** D3 corre con `corre`. Si la vuelta de instalación entra después de D3, D3 mide otro Root.
+
+## 2. Las preguntas de la 163
+
+1. **¿El "no instala" de Python da `NoListo`, como el de Rust? Sí.** Es técnica: aplica P121 a al otro lenguaje. El usuario no separó lenguajes. Los cortes de `python.rs` pasan a tener su tipo: "no instala" cuando pip no resuelve una dependencia, y "fuente no aceptada" cuando una regla de fuentes la rechaza. `Otro` queda solo para lo que no es ninguno de los dos. Va en la 164.
+2. **"(otro corte)" es vago.** Lo resuelve el punto 1. Con los tipos de Python, casi ningún corte queda en `Otro`.
+3. **Los cortes por política como "fuente no aceptada".** Acepto la decisión. Una configuración que ejecuta con credencial, o una imagen base que pide credenciales, son negativas de Root.
+4. **El informe lee el tipo del corte desde el texto del motivo.** Acepto la decisión. `motivo_de_corte` fija el formato en un solo lugar. La 164 suma un test de ida y vuelta: el texto que arma `motivo_de_corte` debe dar el mismo tipo al leerlo.
+
+**La de `calibra.rs`: sí afecta, y se corrige.**
+- `rompe_la_compilacion` compara `no_compila` del caso contra la base. Un caso con `no_compila` nuevo cuenta como "rompe la compilación".
+- Una calibración de Seguridad puede inyectar una dependencia en `Cargo.toml`. Si esa dependencia no se puede bajar, el caso es un corte. Antes, ese caso quedaba sin veredicto. Desde la 163, contaría como "rompe la compilación", porque el corte marca `no_compila`.
+- **Un corte no lo causa el código inyectado.** La 164 hace que `rompe_la_compilacion` no cuente un `no_compila` que viene de un corte de la descarga. El caso vuelve a quedar sin veredicto, como antes.
+- **Las doce calibraciones dependen de esto.** Por eso la 164 entra antes de congelar.
+
+## 3. La Tarea 164
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | La vuelta de instalación en `corre`, y `vuelta_instalacion` en la fila | `src/corre/corrida.rs`, `src/tipos.rs` |
+| 2 | El arreglo concreto en el hallazgo, y los tipos de corte de Python | `src/oracle/descarga.rs`, `src/oracle/descarga/python.rs` |
+| 3 | `rompe_la_compilacion` no cuenta un corte, y el test de ida y vuelta del motivo | `src/oracle/calibra.rs`, `src/oracle/mod.rs` |
+
+- **Base:** la punta de `laptop/tarea-163`.
+- **Los tres puntos no comparten archivos.** Corren en paralelo.
+- **Arranca cuando termine la suite de la cadena 163,** y la verificación de b8d0db4058.
+
+Brief: `docs/builds/brief-local-164.md`.
+
+## 4. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | `paso0-161.sh` | — | Laptop, el usuario | No | **Sí** |
+| 5 | `calibrar-161.sh` | El paso 4 | Colab, CPU | No | No |
+| 6 | La suite con podman de la cadena 163 | Nada; corre ahora | Laptop, podman | No | No |
+| 7 | Verificar b8d0db4058 con el binario de la 163: debe dar `NoListo`, con informe | El paso 6 | Laptop, podman | No | No |
+| 8 | La Tarea 164 | El paso 7 | Laptop, builder | Lo que use el builder | No |
+| 9 | Armar la cadena con la 164, y su suite con podman | El paso 8 | Laptop, podman | No | No |
+| 10 | Una corrida de `corre` sobre b8d0db4058 con su lock real: el builder debe arreglar el lock en la vuelta de instalación | El paso 9 | Laptop, podman y builder | Cerca de 0,1 USD, más el cupo de una corrida | No |
+| 11 | La mezcla de la cadena 110 a 164 | — | — | No | **Sí** |
+| 12 | Congelar la versión | Los pasos 3, 5 y 9 | — | No | No |
+| 13 | Las doce calibraciones de oráculo con la versión congelada | El paso 12 | Colab, cuatro runtimes | No | No |
+| 14 | La pregunta de presupuesto de D3 | El paso 12 | — | No | **Sí** |
+| 15 | D3: `corre` sobre las tareas del dataset | El paso 14 | Laptop y API | Según la respuesta del paso 14 | No |
+| 16 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 12 | Laptop | Según la regla del final | No |
+| 17 | La validez sobre el final sellado | Los pasos 1 a 16 | Colab, notebook si usa el juez | Según el final | No |
+
+**El paso 10 es la prueba de punta a punta de P121 y P122.** b8d0db4058 ya trae un lock que no cuadra. Una corrida real muestra si el builder lo arregla en la vuelta, y si la fila lo cuenta. Cuesta una corrida de builder: por la estimación de D3, cerca de 0,1 USD de API y el cupo de una corrida.
+
+**La regla de carga.** Los pasos 4, 6, 7, 9 y 10 usan podman, y el paso 8 compila. Corren de a uno en la laptop.
+
+**Preguntas al usuario:** ninguna nueva.
