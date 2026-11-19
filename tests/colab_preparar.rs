@@ -2,6 +2,7 @@
 //! Ningún test instala nada ni toca red. Los temporales van en `tempfile`, que usa el TMPDIR de test-seguro.
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -433,7 +434,9 @@ fn preparar_termina_llamando_a_verificar() {
     for esperado in [
         "verificar-versiones.sh",
         "set -euo pipefail",
-        "apt-get install -y bubblewrap",
+        "install -y bubblewrap",
+        "Acquire::Retries=5",
+        "Acquire::http::Timeout=30",
         "/usr/local/rustup",
         "/usr/local/cargo",
         "--profile minimal",
@@ -532,4 +535,163 @@ fn rustup_home_del_entorno_se_conserva() {
         Some("/otro"),
         "el guion debe conservar RUSTUP_HOME del entorno"
     );
+}
+
+/// Ruta absoluta de un programa, buscada en el PATH de este proceso de test.
+fn ruta_de(nombre: &str) -> PathBuf {
+    std::env::var_os("PATH")
+        .and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|carpeta| carpeta.join(nombre))
+                .find(|ruta| ruta.is_file())
+        })
+        .unwrap_or_else(|| panic!("falta {nombre} en el PATH"))
+}
+
+/// `apt-get` falso que anota cada llamada en REGISTRO. Cuenta los `update` en CONTADOR.
+/// Los primeros FALLOS `update` salen con código 100. El resto sale 0.
+const APT_FALSO: &str = r#"#!/bin/sh
+echo "$*" >> 'REGISTRO'
+case " $* " in
+  *" update "*)
+    n=0
+    if [ -f 'CONTADOR' ]; then read n < 'CONTADOR'; fi
+    n=$((n + 1))
+    echo $n > 'CONTADOR'
+    if [ $n -le FALLOS ]; then exit 100; fi
+    ;;
+esac
+exit 0
+"#;
+
+/// Falsos para `instalar_bubblewrap`: un `sleep` real y el `apt-get` de `APT_FALSO`. Sin `bwrap`.
+struct EscenarioApt {
+    _raiz: tempfile::TempDir,
+    falsos: PathBuf,
+    registro: PathBuf,
+}
+
+fn escenario_apt(fallos_de_update: u32) -> EscenarioApt {
+    let raiz = tempfile::tempdir().expect("raíz temporal");
+    let falsos = raiz.path().join("falsos");
+    let registro = raiz.path().join("apt.txt");
+    let contador = raiz.path().join("update.txt");
+    fs::create_dir_all(&falsos).expect("crea falsos");
+    symlink(ruta_de("sleep"), falsos.join("sleep")).expect("enlaza sleep");
+    let guion = APT_FALSO
+        .replace("REGISTRO", &registro.display().to_string())
+        .replace("CONTADOR", &contador.display().to_string())
+        .replace("FALLOS", &fallos_de_update.to_string());
+    escribir_ejecutable(&falsos.join("apt-get"), &guion);
+    EscenarioApt {
+        _raiz: raiz,
+        falsos,
+        registro,
+    }
+}
+
+/// Una entrada por llamada a apt-get, con sus argumentos. Vacía si nunca se llamó.
+fn llamadas_apt(e: &EscenarioApt) -> Vec<String> {
+    fs::read_to_string(&e.registro)
+        .map(|texto| texto.lines().map(String::from).collect())
+        .unwrap_or_default()
+}
+
+fn es_update(llamada: &str) -> bool {
+    llamada.split_whitespace().any(|p| p == "update")
+}
+
+/// Corre `paso bubblewrap instalar_bubblewrap` desde el guion, con `falsos` como único PATH.
+fn paso_bubblewrap(falsos: &Path) -> Output {
+    Command::new(ruta_de("bash"))
+        .arg("-c")
+        .arg("source \"$1\"; paso bubblewrap instalar_bubblewrap")
+        .arg("bash")
+        .arg(PREPARAR)
+        .env("PATH", falsos)
+        .env("ROOT_APT_ESPERA", "0")
+        .output()
+        .expect("lanza bash")
+}
+
+#[test]
+fn bubblewrap_reintenta_el_par_entero_hasta_andar() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea bubblewrap_reintenta_el_par_entero_hasta_andar");
+        return;
+    }
+    let e = escenario_apt(2);
+    let salida = paso_bubblewrap(&e.falsos);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let llamadas = llamadas_apt(&e);
+    let updates = llamadas.iter().filter(|l| es_update(l)).count();
+    assert_eq!(updates, 3, "update debe correr 3 veces: {llamadas:?}");
+    for llamada in &llamadas {
+        assert!(
+            llamada.contains("Acquire::Retries=5") && llamada.contains("Acquire::http::Timeout=30"),
+            "falta la opción de reintento en: {llamada}"
+        );
+    }
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(
+        texto.contains("intento 1"),
+        "falta la línea del intento 1: {texto}"
+    );
+    assert!(
+        texto.contains("intento 2"),
+        "falta la línea del intento 2: {texto}"
+    );
+}
+
+#[test]
+fn bwrap_presente_no_llama_a_apt_get() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea bwrap_presente_no_llama_a_apt_get");
+        return;
+    }
+    let e = escenario_apt(0);
+    escribir_ejecutable(&e.falsos.join("bwrap"), "#!/bin/sh\necho 'bwrap 0.9.0'\n");
+    let salida = paso_bubblewrap(&e.falsos);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert!(
+        llamadas_apt(&e).is_empty(),
+        "no debe llamar a apt-get: {:?}",
+        llamadas_apt(&e)
+    );
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(
+        texto.contains("bubblewrap ya está instalado: no se llama a apt-get"),
+        "falta la línea de bwrap presente: {texto}"
+    );
+}
+
+#[test]
+fn apt_que_siempre_falla_sale_con_su_codigo_tras_3_intentos() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea apt_que_siempre_falla_sale_con_su_codigo_tras_3_intentos");
+        return;
+    }
+    let e = escenario_apt(999);
+    let salida = paso_bubblewrap(&e.falsos);
+    assert!(!salida.status.success(), "debe salir distinto de 0");
+    assert_eq!(
+        salida.status.code(),
+        Some(100),
+        "debe salir con el código de apt-get"
+    );
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(
+        texto.contains("3 intentos"),
+        "falta el aviso de 3 intentos: {texto}"
+    );
+    let updates = llamadas_apt(&e).iter().filter(|l| es_update(l)).count();
+    assert_eq!(updates, 3, "update debe correr exactamente 3 veces");
 }

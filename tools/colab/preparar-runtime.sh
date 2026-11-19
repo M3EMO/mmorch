@@ -53,10 +53,32 @@ clave() {
     grep -m1 "^$1=" "$archivo" | cut -d= -f2- || true
 }
 
-# Paso 1: instala bubblewrap.
+# Paso 1: instala bubblewrap. Si bwrap ya existe, no llama a apt-get.
+# El par update + install se reintenta entero hasta INTENTOS_APT veces.
+# ROOT_APT_ESPERA son los segundos entre intentos (30 por omisión). Los tests usan 0.
+INTENTOS_APT=3
+APT_OPCIONES=(-o Acquire::Retries=5 -o Acquire::http::Timeout=30)
+
 instalar_bubblewrap() {
-    apt-get update -qq
-    apt-get install -y bubblewrap
+    if command -v bwrap >/dev/null 2>&1; then
+        echo "bubblewrap ya está instalado: no se llama a apt-get"
+        return 0
+    fi
+    local intento codigo=0
+    for ((intento = 1; intento <= INTENTOS_APT; intento++)); do
+        codigo=0
+        { apt-get "${APT_OPCIONES[@]}" update -qq &&
+            apt-get "${APT_OPCIONES[@]}" install -y bubblewrap; } || codigo=$?
+        if [ "$codigo" -eq 0 ]; then
+            return 0
+        fi
+        if [ "$intento" -lt "$INTENTOS_APT" ]; then
+            echo "intento $intento de apt-get falló (código $codigo): se reintenta en ${ROOT_APT_ESPERA:-30} s"
+            sleep "${ROOT_APT_ESPERA:-30}"
+        fi
+    done
+    echo "mal bubblewrap: apt-get falló después de $INTENTOS_APT intentos (código $codigo)"
+    exit "$codigo"
 }
 
 # Paso 2: baja rustup-init, verifica su SHA-256 y instala Rust con clippy.
@@ -108,31 +130,38 @@ llamar_verificar() {
     fi
 }
 
-carpeta="${1:-}"
-if [ -z "$carpeta" ]; then
-    echo "mal preparar-runtime.sh: falta la carpeta del paquete"
-    exit 1
-fi
-
-archivo="$carpeta/versiones.env"
-if [ ! -f "$archivo" ]; then
-    echo "mal preparar-runtime.sh: falta $archivo"
-    exit 1
-fi
-
-for clave_requerida in RUST_VERSION RUSTUP_SHA256 HERRAMIENTAS_SHA256; do
-    if [ -z "$(clave "$clave_requerida")" ]; then
-        echo "mal versiones.env: falta la clave $clave_requerida"
+# Cuerpo principal. Corre solo si el script se ejecuta directo. Con `source` solo se definen las funciones.
+principal() {
+    carpeta="${1:-}"
+    if [ -z "$carpeta" ]; then
+        echo "mal preparar-runtime.sh: falta la carpeta del paquete"
         exit 1
     fi
-done
 
-RUST_VERSION="$(clave RUST_VERSION)"
-RUSTUP_SHA256="$(clave RUSTUP_SHA256)"
+    archivo="$carpeta/versiones.env"
+    if [ ! -f "$archivo" ]; then
+        echo "mal preparar-runtime.sh: falta $archivo"
+        exit 1
+    fi
 
-paso bubblewrap instalar_bubblewrap
-paso rust instalar_rust
-paso herramientas instalar_herramientas
-paso nextest escribir_nextest
-paso carpetas crear_carpetas
-paso verificar llamar_verificar
+    for clave_requerida in RUST_VERSION RUSTUP_SHA256 HERRAMIENTAS_SHA256; do
+        if [ -z "$(clave "$clave_requerida")" ]; then
+            echo "mal versiones.env: falta la clave $clave_requerida"
+            exit 1
+        fi
+    done
+
+    RUST_VERSION="$(clave RUST_VERSION)"
+    RUSTUP_SHA256="$(clave RUSTUP_SHA256)"
+
+    paso bubblewrap instalar_bubblewrap
+    paso rust instalar_rust
+    paso herramientas instalar_herramientas
+    paso nextest escribir_nextest
+    paso carpetas crear_carpetas
+    paso verificar llamar_verificar
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    principal "$@"
+fi
