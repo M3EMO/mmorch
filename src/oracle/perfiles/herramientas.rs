@@ -35,6 +35,11 @@ pub struct SalidaHerramienta {
 pub trait EjecutorHerramienta {
     fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo>;
 
+    /// Ejecuta `cmd` con `salida` montada en `/salida`. Por defecto ignora `salida` y llama a `ejecutar`.
+    fn ejecutar_en(&self, cmd: &str, _salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+        self.ejecutar(cmd)
+    }
+
     /// Verdadero si la base de RustSec va montada en `/rustsec`.
     fn tiene_rustsec(&self) -> bool {
         false
@@ -89,12 +94,17 @@ impl EjecutorHerramienta for EjecutorContenedor {
     fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
         let salida = carpeta_de_salida(&self.home.join("tmp"))
             .map_err(|e| ErrorOraculo::Infra(format!("carpeta de salida: {e}")))?;
-        let resultado = contenedor::ejecutar(&self.ejecucion(cmd, salida.path()))?;
+        self.ejecutar_en(cmd, salida.path())
+    }
+
+    /// No crea ni borra `salida`: la carpeta es de quien llama.
+    fn ejecutar_en(&self, cmd: &str, salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+        let resultado = contenedor::ejecutar(&self.ejecucion(cmd, salida))?;
         Ok(SalidaHerramienta {
             codigo: resultado.codigo,
             stdout: resultado.stdout,
             stderr: resultado.stderr,
-            archivos: leer_salida(salida.path())?,
+            archivos: leer_salida(salida)?,
         })
     }
 
@@ -554,7 +564,7 @@ pub(crate) fn con_cola(base: String, stderr: &str) -> String {
 
 /// Carpeta de `/salida` dentro de `tmp` (`ROOT_HOME/tmp`). `tempdir_in` la crea con modo 0700: ningún otro
 /// usuario local la escribe (M16). Un contenedor con otro uid no la escribe si la imagen no corre como root.
-fn carpeta_de_salida(tmp: &Path) -> std::io::Result<tempfile::TempDir> {
+pub(crate) fn carpeta_de_salida(tmp: &Path) -> std::io::Result<tempfile::TempDir> {
     fs::create_dir_all(tmp)?;
     let salida = tempfile::Builder::new().prefix("sondas-").tempdir_in(tmp)?;
     // Explícito: no depende del modo por defecto de `tempfile`.
@@ -724,6 +734,12 @@ fn cierre_de_build(reporte: &str) -> Option<bool> {
         .and_then(|v| v["success"].as_bool())
 }
 
+/// Motivo de Eficiencia cuando la tarea no define `[eficiencia]`: la tarea no pide la dimensión.
+pub const MOTIVO_SIN_EFICIENCIA: &str = "la tarea no define [eficiencia]";
+
+/// Motivo de Eficiencia en Rust sin `[eficiencia]` y sin `bootstrap/`: no hay estado inicial contra el que medir.
+pub const MOTIVO_SIN_ESTADO_INICIAL: &str = "sin estado inicial";
+
 /// Eficiencia: corre `eficiencia.cmd` del oráculo. Por debajo del piso, un hallazgo de severidad 3.
 pub fn eficiencia(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda {
     let d = Dimension::Eficiencia;
@@ -731,7 +747,7 @@ pub fn eficiencia(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda
         return ResultadoSonda {
             dimension: d,
             valor: None,
-            motivo: Some("la tarea no define [eficiencia]".into()),
+            motivo: Some(MOTIVO_SIN_EFICIENCIA.into()),
             hallazgos: Vec::new(),
         };
     };
@@ -1624,6 +1640,28 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(modo, 0o700, "la salida no se abre a otros usuarios");
+    }
+
+    #[test]
+    fn ejecutar_en_por_defecto_llama_a_ejecutar_sin_usar_la_carpeta() {
+        /// Ejecutor que solo implementa `ejecutar`: el `ejecutar_en` por defecto debe llamarlo.
+        struct SoloEjecutar {
+            cmds: RefCell<Vec<String>>,
+        }
+        impl EjecutorHerramienta for SoloEjecutar {
+            fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+                self.cmds.borrow_mut().push(cmd.to_string());
+                Ok(salida(0, "ok"))
+            }
+        }
+        let ej = SoloEjecutar {
+            cmds: RefCell::new(Vec::new()),
+        };
+        let r = ej
+            .ejecutar_en("echo hola", Path::new("/carpeta/que/no/existe"))
+            .expect("ejecuta");
+        assert_eq!(r.stdout, "ok");
+        assert_eq!(ej.cmds.borrow().as_slice(), ["echo hola"]);
     }
 
     /// Exclusiones de la copia del repo: los tres archivos de config y `target/` no entran al escaneo.

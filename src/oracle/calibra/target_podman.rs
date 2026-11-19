@@ -3,7 +3,9 @@
 //! apuntando a `/salida/target`, como las suites de producción.
 
 use std::fs;
-use std::time::Instant;
+use std::path::Path;
+use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 use super::defectos::{IMAGEN_HERRAMIENTAS, JUNIT_PY, evaluar_copia_con, tarea_en};
 use super::inyectar::pruebas::copia_fixture;
@@ -14,7 +16,7 @@ use crate::tipos::{Conteo, Dimension, Puntaje, Veredicto};
 
 /// Oculto que compila con el `target` de `/salida`. Sin esto, cargo compilaría en `/tmp/ws/target` y el reuso no
 /// tendría efecto.
-const COMANDO_OCULTO_CON_TARGET: &str = "cp -r /repo /tmp/ws && cd /tmp/ws && CARGO_TARGET_DIR=/salida/target cargo test --no-fail-fast --lib --tests 2>&1 | python3 /oraculo/oculto/junit.py > /salida/oculto.xml";
+const COMANDO_OCULTO_CON_TARGET: &str = "cp -a /repo /tmp/ws && cd /tmp/ws && CARGO_TARGET_DIR=/salida/target cargo test --no-fail-fast --lib --tests 2>&1 | python3 /oraculo/oculto/junit.py > /salida/oculto.xml";
 
 /// Cambio de fuente que mueve el mtime y no cambia el comportamiento del fixture.
 const CAMBIO_SIN_EFECTO: &str = "\n// cambio de mtime sin efecto (Tarea 59)\n";
@@ -51,6 +53,15 @@ fn medido_de_completitud(v: &Veredicto) -> (Vec<Puntaje>, Conteo, Vec<String>, V
         v.ocultos_fallidos.clone(),
         v.inestables.clone(),
     )
+}
+
+/// El oculto con `target` copia el repo con `cp -a`. Así conserva los atributos y el `target` reusado.
+#[test]
+fn comando_oculto_con_target_no_usa_cp_r() {
+    assert!(
+        !COMANDO_OCULTO_CON_TARGET.contains("cp -r"),
+        "{COMANDO_OCULTO_CON_TARGET}"
+    );
 }
 
 #[test]
@@ -140,5 +151,112 @@ fn target_podman_reusado_da_la_misma_completitud_que_en_frio() {
         medido_de_completitud(&reusado),
         medido_de_completitud(&frio),
         "Completitud reusada y en frío deben coincidir"
+    );
+}
+
+/// Corre `cargo test --offline` en `copia`, con `target` como `CARGO_TARGET_DIR`.
+/// Quita las variables `CARGO_PROFILE_*` heredadas. Con `sin_debuginfo`, pone `debug=0` en dev y test.
+fn correr_cargo_test(copia: &Path, target: &Path, sin_debuginfo: bool) -> (Output, Duration) {
+    let mut orden = Command::new("cargo");
+    orden
+        .args(["test", "--offline"])
+        .current_dir(copia)
+        .env("CARGO_TARGET_DIR", target);
+    for (clave, _) in std::env::vars() {
+        if clave.starts_with("CARGO_PROFILE_") {
+            orden.env_remove(&clave);
+        }
+    }
+    if sin_debuginfo {
+        orden
+            .env("CARGO_PROFILE_DEV_DEBUG", "0")
+            .env("CARGO_PROFILE_TEST_DEBUG", "0");
+    }
+    let inicio = Instant::now();
+    let salida = orden.output().expect("lanza cargo test");
+    (salida, inicio.elapsed())
+}
+
+/// Líneas `test <nombre> ... <estado>` de la salida de cargo, ordenadas.
+fn tests_de_la_salida(stdout: &[u8]) -> Vec<String> {
+    let texto = String::from_utf8_lossy(stdout);
+    let mut lineas: Vec<String> = texto
+        .lines()
+        .filter_map(|linea| linea.strip_prefix("test "))
+        .filter(|resto| resto.contains(" ... "))
+        .map(str::to_string)
+        .collect();
+    lineas.sort();
+    lineas
+}
+
+/// Suma los bytes de los archivos de `ruta`, de forma recursiva. Una carpeta inexistente suma cero.
+fn tamano_en_bytes(ruta: &Path) -> u64 {
+    if !ruta.is_dir() {
+        return 0;
+    }
+    let mut total = 0;
+    for entrada in fs::read_dir(ruta).expect("lee la carpeta") {
+        let entrada = entrada.expect("entrada");
+        if entrada.file_type().expect("tipo").is_dir() {
+            total += tamano_en_bytes(&entrada.path());
+        } else {
+            total += entrada.metadata().expect("metadatos").len();
+        }
+    }
+    total
+}
+
+/// Mide el perfil sin debuginfo: mismos tests, distinto tiempo y tamaño de `target`.
+/// Corre a mano: compila en el host, sin podman.
+#[test]
+#[ignore = "mide compilación en el host; correr a mano"]
+fn perfil_sin_debuginfo_da_los_mismos_tests_y_mide_la_ganancia() {
+    // Lado A: perfil por defecto. Su `target` vive en otra carpeta temporal que la copia.
+    let copia_a = copia_fixture();
+    let temporal_a = tempfile::tempdir().expect("carpeta del target A");
+    let target_a = temporal_a.path().join("target");
+    let (salida_a, tiempo_a) = correr_cargo_test(copia_a.path(), &target_a, false);
+
+    // Lado B: otra copia y otro `target`, con debuginfo apagada.
+    let copia_b = copia_fixture();
+    let temporal_b = tempfile::tempdir().expect("carpeta del target B");
+    let target_b = temporal_b.path().join("target");
+    let (salida_b, tiempo_b) = correr_cargo_test(copia_b.path(), &target_b, true);
+
+    eprintln!(
+        "perfil_sin_debuginfo tiempo A (perfil por defecto): {:.2} s",
+        tiempo_a.as_secs_f64()
+    );
+    eprintln!(
+        "perfil_sin_debuginfo tiempo B (debug=0): {:.2} s",
+        tiempo_b.as_secs_f64()
+    );
+    eprintln!(
+        "perfil_sin_debuginfo tamaño A: {} bytes",
+        tamano_en_bytes(&target_a)
+    );
+    eprintln!(
+        "perfil_sin_debuginfo tamaño B: {} bytes",
+        tamano_en_bytes(&target_b)
+    );
+
+    assert!(
+        salida_a.status.success(),
+        "lado A falló:\n{}",
+        String::from_utf8_lossy(&salida_a.stderr)
+    );
+    assert!(
+        salida_b.status.success(),
+        "lado B falló:\n{}",
+        String::from_utf8_lossy(&salida_b.stderr)
+    );
+    let tests_a = tests_de_la_salida(&salida_a.stdout);
+    let tests_b = tests_de_la_salida(&salida_b.stdout);
+    assert!(!tests_a.is_empty(), "el lado A no lista tests");
+    assert!(!tests_b.is_empty(), "el lado B no lista tests");
+    assert_eq!(
+        tests_a, tests_b,
+        "el perfil sin debuginfo cambia los tests o sus estados"
     );
 }

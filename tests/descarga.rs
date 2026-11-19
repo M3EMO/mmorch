@@ -391,7 +391,7 @@ fn descarga_dependencia_inexistente_sin_lock_da_no_instala() {
 
     let v = evaluar_con(home.path(), &repo, &tarea);
 
-    assert_eq!(v.estado, Estado::SinVeredicto);
+    assert_eq!(v.estado, Estado::Rojo);
     assert_eq!(v.contrato, Conteo::default());
     assert!(
         v.hallazgos
@@ -771,7 +771,7 @@ fn descarga_extra_index_url_deja_hallazgo_severidad_1_en_gate_y_en_preparar() {
     let preparacion = descarga::preparar(repo.path(), &tarea, home.path(), LIMITE)
         .expect("el rechazo local no usa la red");
 
-    let descarga::Preparacion::SinVeredicto(hallazgos) = preparacion else {
+    let descarga::Preparacion::SinVeredicto(hallazgos, _) = preparacion else {
         panic!("el rechazo de ssh corta la evaluación: {preparacion:?}");
     };
     let mezcla = hallazgos
@@ -820,7 +820,7 @@ fn descarga_sin_extra_index_url_no_deja_hallazgo_de_mezcla() {
     let preparacion = descarga::preparar(repo.path(), &tarea, home.path(), LIMITE)
         .expect("el rechazo local no usa la red");
 
-    let descarga::Preparacion::SinVeredicto(hallazgos) = preparacion else {
+    let descarga::Preparacion::SinVeredicto(hallazgos, _) = preparacion else {
         panic!("el rechazo de ssh corta la evaluación: {preparacion:?}");
     };
     assert!(
@@ -1060,7 +1060,7 @@ fn descarga_python_git_sin_commit_o_con_tag_es_rechazo_sin_red() {
         );
         let preparacion = descarga::preparar(repo.path(), &tarea, home.path(), LIMITE)
             .expect("el rechazo no usa la red");
-        let descarga::Preparacion::SinVeredicto(hallazgos) = preparacion else {
+        let descarga::Preparacion::SinVeredicto(hallazgos, _) = preparacion else {
             panic!("`{linea}` debe cortar la evaluación: {preparacion:?}");
         };
         assert!(
@@ -1487,7 +1487,7 @@ fn descarga_corte_por_fuente_no_aceptada_deja_gate_con_rechazos_sin_valores() {
         .expect("el rechazo no usa la red");
 
     assert!(
-        matches!(preparacion, Preparacion::SinVeredicto(_)),
+        matches!(preparacion, Preparacion::SinVeredicto(_, _)),
         "{preparacion:?}"
     );
     let corte = gates_de_corte(home.path(), "fuente-no-aceptada");
@@ -1539,7 +1539,7 @@ fn descarga_corte_por_config_con_credencial_deja_gate_sin_el_valor() {
     let preparacion = preparacion.expect("el corte no usa la red");
 
     assert!(
-        matches!(preparacion, Preparacion::SinVeredicto(_)),
+        matches!(preparacion, Preparacion::SinVeredicto(_, _)),
         "{preparacion:?}"
     );
     let corte = gates_de_corte(home.path(), "config-que-ejecuta-con-credencial");
@@ -1608,7 +1608,7 @@ fn descarga_c2_de_punta_a_punta_el_proveedor_de_credenciales_no_se_ejecuta() {
         .expect("el corte no usa la red");
 
     assert!(
-        matches!(preparacion, Preparacion::SinVeredicto(_)),
+        matches!(preparacion, Preparacion::SinVeredicto(_, _)),
         "{preparacion:?}"
     );
     assert!(!marca_host.exists(), "el proveedor corrió en el host");

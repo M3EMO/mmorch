@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::configs::{instrucciones, palabra_clave, parsear_from};
-use super::contenedor::{self, Ejecucion, SalidaPodman};
+use super::contenedor::{self, Backend, Ejecucion, SalidaPodman, backend_actual};
 use super::entrega::{Eleccion, PodmanReal, dockerfiles_del_repo, elegir_dockerfile};
 use super::juez::ModeloJuez;
 use super::tarea::Tarea;
@@ -46,8 +46,38 @@ pub enum Preparacion {
         rustsec: Option<PathBuf>,
         hallazgos: Vec<Hallazgo>,
     },
-    /// La evaluación no corre: no hay veredicto, solo hallazgos.
-    SinVeredicto(Vec<Hallazgo>),
+    /// La evaluación no corre: no hay veredicto, solo hallazgos. `Corte` dice por qué se cortó.
+    SinVeredicto(Vec<Hallazgo>, Corte),
+}
+
+/// Por qué la descarga cortó la evaluación. Solo `NoInstala` y `LockInvalido` dicen que el producto no compila.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Corte {
+    /// El producto no instala: paquete inexistente o retirado.
+    NoInstala,
+    /// El `Cargo.lock` no parsea.
+    LockInvalido,
+    /// Una fuente que la política no acepta: registro, git o ruta.
+    FuenteNoAceptada,
+    /// Cualquier otro corte. No dice que el producto no compila.
+    Otro,
+}
+
+impl Corte {
+    /// Texto del corte para el motivo y el informe.
+    pub fn texto(self) -> &'static str {
+        match self {
+            Corte::NoInstala => "no instala",
+            Corte::LockInvalido => "lock inválido",
+            Corte::FuenteNoAceptada => "fuente no aceptada",
+            Corte::Otro => "otro corte",
+        }
+    }
+
+    /// Verdadero si el corte deja el producto sin compilar: el veredicto sale rojo.
+    pub fn no_compila(self) -> bool {
+        matches!(self, Corte::NoInstala | Corte::LockInvalido)
+    }
 }
 
 /// Lectura de la salida de error de un contenedor de descarga.
@@ -138,7 +168,7 @@ const CARGO_HOME_DESCARGA: &str = "/tmp/cargo-dl";
 const COMANDO_VENDOR: &str =
     "cd /repo && cargo vendor --locked --versioned-dirs /cache/vendor > /cache/config.toml";
 // La copia `/tmp/w` trae `.cargo/` del repo: el lock sale con el mismo config que la descarga.
-const COMANDO_LOCK: &str = "mkdir -p /tmp/w && cp -r /repo/. /tmp/w/ && cd /tmp/w && cargo generate-lockfile && cp /tmp/w/Cargo.lock /salida/Cargo.lock";
+const COMANDO_LOCK: &str = "mkdir -p /tmp/w && cp -a /repo/. /tmp/w/ && cd /tmp/w && cargo generate-lockfile && cp /tmp/w/Cargo.lock /salida/Cargo.lock";
 const URL_RUSTSEC: &str = "https://github.com/RustSec/advisory-db";
 const CADUCIDAD_RUSTSEC: Duration = Duration::from_secs(24 * 3600);
 /// Fragmentos (en minúscula) de errores de red o de registro caído.
@@ -149,12 +179,13 @@ const PATRONES_INFRA: [&str; 5] = [
     "spurious network error",
     "timed out",
 ];
-/// Fragmentos (en minúscula) de errores de un paquete que no existe o fue retirado.
-const PATRONES_PRODUCTO: [&str; 4] = [
+/// Fragmentos (en minúscula) de errores del producto. Cubren paquetes inexistentes, retirados o un lock que no cuadra.
+const PATRONES_PRODUCTO: [&str; 5] = [
     "no matching package",
     "failed to select a version",
     "yanked",
     "no matching distribution found",
+    "cannot update the lock file",
 ];
 /// Largo máximo de la línea útil de un error.
 const LARGO_LINEA_UTIL: usize = 300;
@@ -281,13 +312,42 @@ fn hallazgo_en(
     }
 }
 
+/// Hallazgo del producto que no instala. Un lock que no cuadra va sobre `Cargo.lock`. Cada caso dice cómo arreglarlo.
 fn hallazgo_no_instala(linea: &str) -> Hallazgo {
+    let minuscula = linea.to_lowercase();
+    // El lock no cuadra: `--locked` impide actualizarlo. Va sobre el lock, no sobre el manifiesto.
+    if minuscula.contains("cannot update the lock file") {
+        return hallazgo(
+            ARCHIVO_LOCK,
+            0,
+            linea,
+            3,
+            format!(
+                "el producto no instala: Cargo.lock no cuadra con Cargo.toml: {linea}. Arreglo: `Cargo.lock` no cuadra con `Cargo.toml`: corré `cargo update --workspace` y subí el lock"
+            ),
+        );
+    }
+    // Una dependencia sin esa versión o sin paquete: el error está en el manifiesto.
+    if minuscula.contains("no matching package") || minuscula.contains("failed to select a version")
+    {
+        return hallazgo(
+            "Cargo.toml",
+            0,
+            linea,
+            3,
+            format!(
+                "el producto no instala: {linea}. Arreglo: una dependencia de `Cargo.toml` no existe, o no tiene esa versión: corregí `Cargo.toml`"
+            ),
+        );
+    }
     hallazgo(
         "Cargo.toml",
         0,
         linea,
         3,
-        format!("el producto no instala: {linea}"),
+        format!(
+            "el producto no instala: {linea}. Arreglo: `cargo vendor` falló: revisá `Cargo.toml` y `Cargo.lock`"
+        ),
     )
 }
 
@@ -307,7 +367,9 @@ fn hallazgo_lock_invalido(error: &str) -> Hallazgo {
         0,
         "",
         3,
-        format!("Cargo.lock inválido: {error}"),
+        format!(
+            "Cargo.lock inválido: {error}. Arreglo: `Cargo.lock` no se puede leer: regeneralo con `cargo generate-lockfile` y subilo"
+        ),
     )
 }
 
@@ -417,7 +479,11 @@ pub fn preparar_con_juez(
         )?;
         let mut hallazgos = hallazgos_de_rechazos(&inv.rechazos);
         hallazgos.extend(extra);
-        return Ok((Preparacion::SinVeredicto(hallazgos), Vec::new(), juicio));
+        return Ok((
+            Preparacion::SinVeredicto(hallazgos, Corte::FuenteNoAceptada),
+            Vec::new(),
+            juicio,
+        ));
     }
     // Las credenciales de los registros privados salen de `root.toml` y del entorno de Root. Solo van a
     // los contenedores de descarga de Rust: nunca a la evaluación, a Python ni a la construcción (decisión 29).
@@ -432,7 +498,11 @@ pub fn preparar_con_juez(
         // Los rechazos son todas las claves de ejecución: el hallazgo sale solo con ellas.
         let claves = rechazos_de_claves(&inv.claves_de_ejecucion);
         registrar_corte(home, tarea, "config-que-ejecuta-con-credencial", claves)?;
-        return Ok((Preparacion::SinVeredicto(hallazgos), Vec::new(), juicio));
+        return Ok((
+            Preparacion::SinVeredicto(hallazgos, Corte::FuenteNoAceptada),
+            Vec::new(),
+            juicio,
+        ));
     }
     // Las imágenes base van antes de las dependencias: sin ellas el Dockerfile no construye (Tarea 9d2).
     // Un pull que falla no corta la fase: queda en el Gate y la construcción da sin veredicto (Tarea 7i).
@@ -452,10 +522,22 @@ pub fn preparar_con_juez(
         registro.motivo = Some("imagen base: pide credenciales");
         registro.imagenes = imagenes;
         registrar(home, tarea, &registro)?;
-        return Ok((Preparacion::SinVeredicto(extra), devueltas, juicio));
+        return Ok((
+            Preparacion::SinVeredicto(extra, Corte::FuenteNoAceptada),
+            devueltas,
+            juicio,
+        ));
     }
     let (preparacion, registro) = match tarea.lenguaje.as_str() {
-        "rust" => preparar_rust(repo, tarea, home, timeout, &inv, &credenciales)?,
+        "rust" => preparar_rust(
+            repo,
+            tarea,
+            home,
+            timeout,
+            &inv,
+            &credenciales,
+            &contenedor::ejecutar,
+        )?,
         "python" => python::preparar_python(repo, tarea, home, timeout, &config.registros)?,
         _ => (
             Preparacion::Lista {
@@ -573,9 +655,9 @@ fn sumar_hallazgos(preparacion: Preparacion, extra: Vec<Hallazgo>) -> Preparacio
                 hallazgos,
             }
         }
-        Preparacion::SinVeredicto(mut hallazgos) => {
+        Preparacion::SinVeredicto(mut hallazgos, corte) => {
             hallazgos.extend(extra);
-            Preparacion::SinVeredicto(hallazgos)
+            Preparacion::SinVeredicto(hallazgos, corte)
         }
     }
 }
@@ -638,12 +720,14 @@ fn preparar_rust(
     timeout: Duration,
     inv: &Inventario,
     credenciales: &[Credencial],
+    correr: &dyn Fn(&Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
 ) -> Result<Paso, ErrorOraculo> {
     let mut hallazgos = Vec::new();
     let lock = repo.join(ARCHIVO_LOCK);
     if !lock.is_file() {
         if let Some(linea) = generar_lock(repo, tarea, home, timeout, credenciales)? {
-            return Ok(corte(
+            return Ok(corte_de(
+                Corte::NoInstala,
                 hallazgo_no_instala(&linea),
                 Registro::corte("rust", None, "no-instala"),
             ));
@@ -656,7 +740,10 @@ fn preparar_rust(
         if !rechazos.is_empty() {
             let registro = Registro::corte("rust", None, "fuente-no-aceptada");
             return Ok((
-                Preparacion::SinVeredicto(hallazgos_de_rechazos(&rechazos)),
+                Preparacion::SinVeredicto(
+                    hallazgos_de_rechazos(&rechazos),
+                    Corte::FuenteNoAceptada,
+                ),
                 Some(registro),
             ));
         }
@@ -667,7 +754,8 @@ fn preparar_rust(
     let paquetes = match analizar_lock(&texto) {
         Ok(paquetes) => paquetes,
         Err(error) => {
-            return Ok(corte(
+            return Ok(corte_de(
+                Corte::LockInvalido,
                 hallazgo_lock_invalido(&error),
                 Registro::corte("rust", Some(hash), "lock-invalido"),
             ));
@@ -676,9 +764,11 @@ fn preparar_rust(
     let destino = home.join(CARPETA_CACHE).join(CARPETA_RUST).join(&hash);
     let cache_hit = destino.join(ARCHIVO_CONFIG).is_file();
     if !cache_hit
-        && let Some(linea) = descargar_vendor(repo, tarea, home, &hash, timeout, credenciales)?
+        && let Some(linea) =
+            descargar_vendor(repo, tarea, home, &hash, timeout, credenciales, correr)?
     {
-        return Ok(corte(
+        return Ok(corte_de(
+            Corte::NoInstala,
             hallazgo_no_instala(&linea),
             Registro::corte("rust", Some(hash), "no-instala"),
         ));
@@ -714,8 +804,12 @@ fn preparar_rust(
     Ok((preparacion, Some(registro)))
 }
 
-fn corte(hallazgo: Hallazgo, registro: Registro) -> Paso {
-    (Preparacion::SinVeredicto(vec![hallazgo]), Some(registro))
+/// Corte de la descarga con su tipo.
+fn corte_de(tipo: Corte, hallazgo: Hallazgo, registro: Registro) -> Paso {
+    (
+        Preparacion::SinVeredicto(vec![hallazgo], tipo),
+        Some(registro),
+    )
 }
 
 /// Carpeta temporal de la descarga, dentro de `ROOT_HOME/tmp`.
@@ -751,9 +845,10 @@ fn ejecutar_descarga_con(
         Err(ErrorOraculo::Infra(m)) => Err(Diagnostico::Infra(m)),
         Err(ErrorOraculo::PlazoVencido {
             segundos,
+            motor,
             contenedor,
         }) => Err(Diagnostico::Infra(format!(
-            "timeout tras {segundos} s; contenedor {contenedor} eliminado"
+            "timeout tras {segundos} s; {motor} {contenedor} eliminado"
         ))),
         Err(otro) => Err(Diagnostico::Desconocido(otro.to_string())),
         Ok(resultado) if resultado.codigo == 0 => Ok(()),
@@ -849,6 +944,7 @@ fn descargar_vendor(
     hash: &str,
     timeout: Duration,
     credenciales: &[Credencial],
+    correr: &dyn Fn(&Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
 ) -> Result<Option<String>, ErrorOraculo> {
     let destino = home.join(CARPETA_CACHE).join(CARPETA_RUST).join(hash);
     let parcial = parcial_de(&destino);
@@ -871,7 +967,7 @@ fn descargar_vendor(
         trabajo: None,
         secretos: secretos_de(credenciales),
     };
-    match ejecutar_descarga(&ejecucion, credenciales) {
+    match ejecutar_descarga_con(correr, &ejecucion, credenciales) {
         Ok(()) if parcial.join(ARCHIVO_CONFIG).is_file() => {
             if destino.exists() {
                 borrar_en_home(home, &destino).map_err(|e| infra("borrar la caché previa", e))?;
@@ -1299,9 +1395,24 @@ pub(crate) fn leer_cola<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle<Ve
     })
 }
 
-/// Corre `podman` con `args` y espera hasta `plazo`. Guarda solo la cola de cada salida.
-/// Si vence, mata el proceso y da `Infra`. Si lo mata una señal, también da `Infra`.
+/// Corre `podman` con `args` y espera hasta `plazo`. El motor sale de `ROOT_CONTENEDOR_MODO`.
 fn correr_podman_acotado(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+    correr_podman_acotado_con(backend_actual(), args, plazo)
+}
+
+/// Igual que `correr_podman_acotado`, con el motor pasado por quien llama. En bwrap da `Infra` sin lanzar
+/// nada: la caché de dependencias viene en el paquete. Con podman guarda solo la cola de cada salida.
+/// Si vence, mata el proceso y da `Infra`. Si lo mata una señal, también da `Infra`.
+fn correr_podman_acotado_con(
+    backend: Backend,
+    args: &[&str],
+    plazo: Duration,
+) -> Result<SalidaPodman, ErrorOraculo> {
+    if backend == Backend::Bwrap {
+        return Err(ErrorOraculo::Infra(
+            "en modo bwrap, la caché de dependencias viene en el paquete".into(),
+        ));
+    }
     let mut hijo = Command::new("podman")
         .args(args)
         .stdout(Stdio::piped())
@@ -1662,6 +1773,114 @@ location searched: crates.io index";
     }
 
     #[test]
+    fn descarga_lock_no_cuadra_con_cargo_toml_es_producto() {
+        let linea = "error: cannot update the lock file /repo/Cargo.lock because --locked was passed to prevent this";
+        assert_eq!(diagnosticar(linea), Diagnostico::Producto(linea.into()));
+    }
+
+    #[test]
+    fn descarga_hallazgo_lock_no_cuadra_va_sobre_cargo_lock() {
+        let linea = "error: cannot update the lock file /repo/Cargo.lock because --locked was passed to prevent this";
+        let h = hallazgo_no_instala(linea);
+        assert_eq!(h.dimension, Dimension::Entrega);
+        assert_eq!(h.severidad, 3);
+        assert_eq!(h.archivo, "Cargo.lock");
+        assert!(
+            h.detalle
+                .starts_with("el producto no instala: Cargo.lock no cuadra con Cargo.toml"),
+            "{}",
+            h.detalle
+        );
+    }
+
+    #[test]
+    fn descarga_paquete_inexistente_y_version_siguen_sobre_cargo_toml() {
+        for linea in [
+            "error: no matching package named `x` found",
+            "error: failed to select a version for `y`",
+        ] {
+            assert!(
+                matches!(diagnosticar(linea), Diagnostico::Producto(_)),
+                "{linea}"
+            );
+            let h = hallazgo_no_instala(linea);
+            assert_eq!(h.archivo, "Cargo.toml", "{linea}");
+            assert_eq!(h.severidad, 3, "{linea}");
+            assert!(
+                h.detalle
+                    .starts_with(&format!("el producto no instala: {linea}")),
+                "{}",
+                h.detalle
+            );
+            assert!(h.detalle.contains("corregí `Cargo.toml`"), "{}", h.detalle);
+        }
+    }
+
+    #[test]
+    fn descarga_hallazgo_lock_no_cuadra_dice_como_arreglar() {
+        let linea = "error: cannot update the lock file /repo/Cargo.lock because --locked was passed to prevent this";
+        let h = hallazgo_no_instala(linea);
+        assert!(
+            h.detalle.contains("corré `cargo update --workspace`"),
+            "{}",
+            h.detalle
+        );
+        assert!(h.detalle.contains(linea), "{}", h.detalle);
+    }
+
+    #[test]
+    fn descarga_hallazgo_sin_paquete_dice_como_arreglar() {
+        let linea = "error: no matching package named `x` found";
+        let h = hallazgo_no_instala(linea);
+        assert!(h.detalle.contains("corregí `Cargo.toml`"), "{}", h.detalle);
+        assert!(h.detalle.contains(linea), "{}", h.detalle);
+    }
+
+    #[test]
+    fn descarga_hallazgo_version_sin_seleccion_dice_como_arreglar() {
+        let linea = "error: failed to select a version for `y`";
+        let h = hallazgo_no_instala(linea);
+        assert!(h.detalle.contains("corregí `Cargo.toml`"), "{}", h.detalle);
+        assert!(h.detalle.contains(linea), "{}", h.detalle);
+    }
+
+    #[test]
+    fn descarga_hallazgo_generico_dice_como_arreglar() {
+        let linea = "error: algo raro al vendorizar";
+        let h = hallazgo_no_instala(linea);
+        assert!(
+            h.detalle.contains("revisá `Cargo.toml` y `Cargo.lock`"),
+            "{}",
+            h.detalle
+        );
+        assert!(h.detalle.contains(linea), "{}", h.detalle);
+    }
+
+    #[test]
+    fn descarga_hallazgo_lock_invalido_dice_como_arreglar() {
+        let h = hallazgo_lock_invalido("expected a table at line 3");
+        assert_eq!(h.archivo, "Cargo.lock");
+        assert!(
+            h.detalle.contains("cargo generate-lockfile"),
+            "{}",
+            h.detalle
+        );
+        assert!(
+            h.detalle.contains("expected a table at line 3"),
+            "{}",
+            h.detalle
+        );
+    }
+
+    #[test]
+    fn descarga_red_gana_a_lock_no_cuadra() {
+        let red = "error: failed to download from `https://index.crates.io`";
+        assert!(matches!(diagnosticar(red), Diagnostico::Infra(_)));
+        let mezclado = "error: cannot update the lock file /repo/Cargo.lock because --locked was passed to prevent this\nerror: failed to download from `https://index.crates.io`";
+        assert!(matches!(diagnosticar(mezclado), Diagnostico::Infra(_)));
+    }
+
+    #[test]
     fn descarga_clasifica_error_sin_patron_como_desconocido() {
         assert!(matches!(
             diagnosticar("error: algo raro"),
@@ -1994,10 +2213,24 @@ location searched: crates.io index";
         );
     }
 
+    /// La copia del lock usa `cp -a`: conserva los atributos y trae `.cargo/`.
+    #[test]
+    fn comando_lock_no_usa_cp_r() {
+        assert!(!COMANDO_LOCK.contains("cp -r"), "{COMANDO_LOCK}");
+    }
+
+    #[test]
+    fn comando_lock_copia_repo_con_cp_a() {
+        assert!(
+            COMANDO_LOCK.contains("cp -a /repo/. /tmp/w/"),
+            "{COMANDO_LOCK}"
+        );
+    }
+
     #[test]
     fn descarga_comando_lock_genera_en_la_copia_del_repo_con_su_config() {
         assert!(
-            COMANDO_LOCK.contains("cp -r /repo/. /tmp/w/"),
+            COMANDO_LOCK.contains("cp -a /repo/. /tmp/w/"),
             "{COMANDO_LOCK}"
         );
         assert!(
@@ -2123,6 +2356,50 @@ location searched: crates.io index";
         }
     }
 
+    #[test]
+    fn descarga_preparar_rust_con_no_matching_package_da_el_corte_no_instala() {
+        let repo = tempfile::tempdir().expect("repo");
+        let home = tempfile::tempdir().expect("home");
+        fs::write(
+            repo.path().join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("escribe Cargo.toml");
+        fs::write(repo.path().join(ARCHIVO_LOCK), LOCK).expect("escribe Cargo.lock");
+        let tarea = tarea_rust_minima();
+        let inv = inventario::inventariar(repo.path()).expect("inventario");
+        let llamadas = std::cell::Cell::new(0);
+        let falso = |_: &Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            llamadas.set(llamadas.get() + 1);
+            Ok(contenedor::Resultado {
+                codigo: 1,
+                stdout: String::new(),
+                stderr: "error: no matching package named `x` found".into(),
+                segundos: 0.0,
+            })
+        };
+        let (preparacion, registro) = preparar_rust(
+            repo.path(),
+            &tarea,
+            home.path(),
+            Duration::from_secs(60),
+            &inv,
+            &[],
+            &falso,
+        )
+        .expect("un corte por producto no es un error");
+        match preparacion {
+            Preparacion::SinVeredicto(hallazgos, corte) => {
+                assert!(!hallazgos.is_empty());
+                assert_eq!(corte, Corte::NoInstala);
+            }
+            otro => panic!("{otro:?}"),
+        }
+        let registro = registro.expect("el corte deja un registro");
+        assert_eq!(registro.motivo, Some("no-instala"));
+        assert_eq!(llamadas.get(), 1);
+    }
+
     /// Tarea de Rust mínima, cargada desde un `tarea.toml` temporal.
     fn tarea_rust_minima() -> Tarea {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -2167,7 +2444,9 @@ location searched: crates.io index";
             )
             .expect("sin error de infraestructura");
             match preparacion {
-                Preparacion::SinVeredicto(hallazgos) => assert!(!hallazgos.is_empty(), "{linea}"),
+                Preparacion::SinVeredicto(hallazgos, _) => {
+                    assert!(!hallazgos.is_empty(), "{linea}")
+                }
                 otro => panic!("{linea}: debía dar SinVeredicto, dio {otro:?}"),
             }
             assert!(imagenes.is_empty(), "{linea}: no se armó ningún contenedor");
@@ -2298,10 +2577,28 @@ source = \"git+http://host/x?rev=1#abc1234\"\n";
     }
 
     #[test]
+    fn descarga_plazo_vencido_de_bwrap_nombra_el_proceso() {
+        let falso = |_: &Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            Err(ErrorOraculo::PlazoVencido {
+                segundos: 600.0,
+                motor: "proceso bwrap",
+                contenedor: "1234".into(),
+            })
+        };
+        let diagnostico = ejecutar_descarga_con(&falso, &ejecucion(), &[])
+            .expect_err("un plazo vencido es un fallo de descarga");
+        assert_eq!(
+            diagnostico,
+            Diagnostico::Infra("timeout tras 600 s; proceso bwrap 1234 eliminado".into())
+        );
+    }
+
+    #[test]
     fn descarga_plazo_vencido_da_infra_con_el_mensaje_de_timeout() {
         let falso = |_: &Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
             Err(ErrorOraculo::PlazoVencido {
                 segundos: 600.0,
+                motor: "contenedor",
                 contenedor: "root-x".into(),
             })
         };
@@ -2316,6 +2613,24 @@ source = \"git+http://host/x?rev=1#abc1234\"\n";
                 assert_eq!(
                     m,
                     "infraestructura: timeout tras 600 s; contenedor root-x eliminado"
+                );
+            }
+            otro => panic!("debe ser Infra, es {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn bwrap_descarga_correr_podman_acotado_en_bwrap_da_infra_sin_lanzar_podman() {
+        // Sin podman no hay pull ni inspect. El error exacto prueba que no se lanzó nada.
+        match correr_podman_acotado_con(
+            Backend::Bwrap,
+            &["image", "exists", "x"],
+            Duration::from_secs(1),
+        ) {
+            Err(ErrorOraculo::Infra(motivo)) => {
+                assert!(
+                    motivo.contains("la caché de dependencias viene en el paquete"),
+                    "{motivo}"
                 );
             }
             otro => panic!("debe ser Infra, es {otro:?}"),

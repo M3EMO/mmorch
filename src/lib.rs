@@ -19,7 +19,10 @@ pub mod route;
 pub mod tipos;
 pub mod track;
 
+mod colab_calibra;
 mod limpieza;
+#[cfg(test)]
+mod prueba_ejecutable;
 
 pub use cli::Cli;
 pub use error::Error;
@@ -29,8 +32,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use cli::{
-    Comando, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion, ProveedorJuez, TrackAccion,
-    ViaRegistro,
+    ColabAccion, Comando, CorreAccion, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion,
+    ProveedorJuez, TrackAccion, ViaRegistro,
 };
 use ficha::{ContextoRevision, ErrorFicha, JuezProveedor, Revision};
 use oracle::tarea::Tarea;
@@ -201,8 +204,13 @@ fn oraculo_calibrar(
     let fila = calibrada.fila;
     if json {
         println!("{}", serde_json::to_string_pretty(&fila)?);
-    } else if let Some(motivo) = fila.inestable.as_ref().or(fila.no_aplica.as_ref()) {
-        println!("{}/{}: {motivo}", fila.tarea, fila.dimension.clave());
+    } else if let Some(linea) = linea_sin_medir(&fila) {
+        println!("{linea}");
+        if fila.base_sin_veredicto.is_some()
+            && let Some(ruta) = &calibrada.casos
+        {
+            println!("casos: {}", ruta.display());
+        }
     } else {
         println!(
             "{}/{}: sensibilidad {}, {}, {}, {}, exactitud {}, casos {} (defectos {}, limpios {}, no aplicables {}, reemplazos {})",
@@ -219,11 +227,31 @@ fn oraculo_calibrar(
             fila.no_aplicable,
             fila.reemplazos
         );
+        let calibraciones = oracle::calibra::Calibraciones::cargar(&home)?;
+        let version = calibraciones.version_en(
+            &home,
+            &fila.tarea,
+            fila.tarea_hash.as_deref().unwrap_or_default(),
+            fila.dimension,
+        );
+        let juez = oracle::calibra::tiene_items_de_juez(fila.dimension);
+        println!("{}", texto_version(&version, juez));
         if let Some(ruta) = &calibrada.casos {
             println!("casos: {}", ruta.display());
         }
     }
     Ok(0)
+}
+
+/// Línea humana de una fila que no mide la dimensión. `None` si la fila está medida.
+/// Precedencia: `base_sin_veredicto`, luego `inestable`, luego `no_aplica`.
+fn linea_sin_medir(fila: &oracle::calibra::Fila) -> Option<String> {
+    let (tarea, dimension) = (&fila.tarea, fila.dimension.clave());
+    if let Some(motivo) = &fila.base_sin_veredicto {
+        return Some(format!("{tarea}/{dimension}: base sin veredicto: {motivo}"));
+    }
+    let motivo = fila.inestable.as_ref().or(fila.no_aplica.as_ref())?;
+    Some(format!("{tarea}/{dimension}: {motivo}"))
 }
 
 /// Una línea `aviso: <texto>` por aviso, en el mismo orden.
@@ -237,6 +265,59 @@ fn lineas_de_avisos(avisos: &[String]) -> Vec<String> {
 /// Una métrica con dos decimales, o `sin medir` si no tiene casos de una clase.
 fn medida(valor: Option<f32>) -> String {
     valor.map_or_else(|| "sin medir".to_string(), |v| format!("{v:.2}"))
+}
+
+/// Casos acertados más que faltan para que la cota de Wilson de `aciertos` de `total` llegue a la cota mínima.
+/// Cada caso nuevo es un acierto. Da 0 si la cota ya llega.
+fn casos_que_faltan(aciertos: u32, total: u32) -> u32 {
+    (0..)
+        .find(|k| {
+            oracle::calibra::wilson_inferior(aciertos + k, total + k)
+                >= oracle::calibra::COTA_WILSON_MINIMA
+        })
+        .unwrap_or(0)
+}
+
+/// Una clase de la versión: su cota de Wilson y, si no llega a la cota mínima, los casos que faltan.
+fn texto_cota(nombre: &str, aciertos: u32, total: u32) -> String {
+    let cota = oracle::calibra::wilson_inferior(aciertos, total);
+    let faltan = casos_que_faltan(aciertos, total);
+    if faltan == 0 {
+        return format!("{nombre} Wilson {cota:.2}");
+    }
+    format!(
+        "{nombre} Wilson {cota:.2} (faltan {faltan} casos sin fallos para {})",
+        oracle::calibra::COTA_WILSON_MINIMA
+    )
+}
+
+/// Texto de la versión de Root para `calibrar`. Un juez muestra la cota de Wilson de sensibilidad y de
+/// especificidad con los casos que faltan. Un oráculo muestra si hay un defecto detectado y si los limpios dieron bien.
+fn texto_version(version: &oracle::calibra::Version, juez: bool) -> String {
+    if juez {
+        return format!(
+            "versión: {}, {}",
+            texto_cota("sensibilidad", version.detectados, version.defectos),
+            texto_cota(
+                "especificidad",
+                version.limpios_bien,
+                version.limpios_con_veredicto
+            )
+        );
+    }
+    let defectos = match version.detectados {
+        0 => "sin defecto detectado".to_string(),
+        1 => "1 defecto detectado".to_string(),
+        n => format!("{n} defectos detectados"),
+    };
+    let mal =
+        version.limpios_con_veredicto - version.limpios_bien.min(version.limpios_con_veredicto);
+    let limpios = match mal {
+        0 => "limpios bien".to_string(),
+        1 => "1 limpio mal".to_string(),
+        n => format!("{n} limpios mal"),
+    };
+    format!("versión: {defectos}, {limpios}")
 }
 
 /// `oraculo validar`: mide la validez del juicio de Root y escribe `casos/validez.json` (Tarea 12b). Con
@@ -541,6 +622,179 @@ fn oraculo_liberar(json: bool, home: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// `colab empaquetar`: arma el paquete para Colab e imprime dónde quedó.
+/// `n` y `semilla` llegan de la CLI, con sus valores por defecto. Siempre va por `empaquetar_cli_con`.
+fn colab_empaquetar(
+    json: bool,
+    pedido: colab_calibra::PedidoEmpaquetar,
+    n: u32,
+    semilla: u64,
+) -> Result<(), Error> {
+    colab_empaquetar_con(json, pedido, n, semilla, &colab_calibra::empaquetar_cli_con)
+}
+
+/// Igual que `colab_empaquetar`, pero la función que arma el paquete se inyecta para testear.
+fn colab_empaquetar_con(
+    json: bool,
+    pedido: colab_calibra::PedidoEmpaquetar,
+    n: u32,
+    semilla: u64,
+    armar: &dyn Fn(
+        colab_calibra::PedidoEmpaquetar,
+        u32,
+        u64,
+    ) -> Result<colab_calibra::Resumen, oracle::ErrorOraculo>,
+) -> Result<(), Error> {
+    let resumen = armar(pedido, n, semilla)?;
+    let salida = resumen.salida.display().to_string();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "salida": salida,
+                "archivos": resumen.archivos,
+                "trabajos": resumen.trabajos,
+                "sha256": resumen.sha256,
+            })
+        );
+    } else {
+        println!("{salida}: {} archivos", resumen.archivos);
+        println!("{}", linea_sha(&resumen));
+    }
+    Ok(())
+}
+
+/// Línea que `colab empaquetar` imprime con el SHA-256 del tar.
+fn linea_sha(resumen: &colab_calibra::Resumen) -> String {
+    format!("ROOT_SHA_PAQUETE={}", resumen.sha256)
+}
+
+/// `colab calibrar`: corre cada paquete en su runtime, importa cada vuelta e imprime el resumen de todos.
+/// Si algún runtime falla, el comando sale con error después de imprimir todo.
+fn colab_calibrar(
+    json: bool,
+    paquetes: Vec<PathBuf>,
+    raiz_root: Option<PathBuf>,
+    sin_stop: bool,
+) -> Result<(), Error> {
+    let resumen = colab_calibra::calibrar_cli(paquetes, raiz_root, sin_stop)?;
+    let fallidos = resumen
+        .runtimes
+        .iter()
+        .filter(|r| r.resultado.is_err())
+        .count();
+    if json {
+        let runtimes: Vec<serde_json::Value> =
+            resumen.runtimes.iter().map(runtime_a_json).collect();
+        println!(
+            "{}",
+            serde_json::json!({"runtimes": runtimes, "fallidos": fallidos})
+        );
+    } else {
+        for runtime in &resumen.runtimes {
+            imprimir_runtime(runtime);
+        }
+    }
+    if fallidos > 0 {
+        return Err(oracle::ErrorOraculo::Colab(format!(
+            "{fallidos} de {} runtimes fallaron",
+            resumen.runtimes.len()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Un runtime como objeto JSON: su paquete, su sesión, si terminó bien y su resumen o su error.
+fn runtime_a_json(runtime: &colab_calibra::ResultadoRuntime) -> serde_json::Value {
+    let (resumen, error) = match &runtime.resultado {
+        Ok(resumen) => (
+            serde_json::to_value(resumen).unwrap_or(serde_json::Value::Null),
+            serde_json::Value::Null,
+        ),
+        Err(motivo) => (serde_json::Value::Null, serde_json::json!(motivo)),
+    };
+    serde_json::json!({
+        "paquete": runtime.paquete.display().to_string(),
+        "sesion": runtime.sesion,
+        "ok": runtime.resultado.is_ok(),
+        "resumen": resumen,
+        "error": error,
+        "codigos_de_trabajos": runtime.codigos_de_trabajos,
+        "abierto": runtime.abierto.as_ref().map(|a| serde_json::json!({
+            "sesion": a.sesion,
+            "carpeta": a.carpeta,
+            "trabajo_cmd": a.trabajo_cmd,
+        })),
+    })
+}
+
+/// Texto de un runtime: la importación o el motivo del fallo, y el código de cada trabajo.
+fn imprimir_runtime(runtime: &colab_calibra::ResultadoRuntime) {
+    println!("{} ({})", runtime.paquete.display(), runtime.sesion);
+    match &runtime.resultado {
+        Ok(resumen) => {
+            println!(
+                "  entraron {} filas; no entraron {}",
+                resumen.entraron,
+                resumen.rechazadas.len()
+            );
+            for rechazada in &resumen.rechazadas {
+                println!(
+                    "  no entra {} {}: {}",
+                    rechazada.tarea, rechazada.dimension, rechazada.motivo
+                );
+            }
+            println!("  casos copiados: {}", resumen.casos_copiados);
+            if let Some(respaldo) = &resumen.respaldo {
+                println!("  respaldo: {}", respaldo.display());
+            }
+            for aviso in &resumen.avisos {
+                println!("  {aviso}");
+            }
+        }
+        Err(motivo) => println!("  falló: {motivo}"),
+    }
+    for codigo in &runtime.codigos_de_trabajos {
+        println!(
+            "  trabajo {} {}: código {}",
+            codigo.tarea, codigo.dimension, codigo.codigo
+        );
+    }
+    // Sin sangría: las líneas ROOT_ se copian y se buscan con grep.
+    for linea in colab_calibra::lineas_runtime_abierto(runtime) {
+        println!("{linea}");
+    }
+}
+
+/// `colab importar`: revisa el paquete de vuelta de Colab, importa lo que pasa e imprime el resumen.
+fn colab_importar(json: bool, pedido: colab_calibra::PedidoImportar) -> Result<(), Error> {
+    let resumen = colab_calibra::importar_cli(pedido)?;
+    if json {
+        println!("{}", serde_json::to_string(&resumen)?);
+        return Ok(());
+    }
+    println!(
+        "entraron {} filas; no entraron {}",
+        resumen.entraron,
+        resumen.rechazadas.len()
+    );
+    for rechazada in &resumen.rechazadas {
+        println!(
+            "no entra {} {}: {}",
+            rechazada.tarea, rechazada.dimension, rechazada.motivo
+        );
+    }
+    println!("casos copiados: {}", resumen.casos_copiados);
+    if let Some(respaldo) = &resumen.respaldo {
+        println!("respaldo: {}", respaldo.display());
+    }
+    for aviso in &resumen.avisos {
+        println!("{aviso}");
+    }
+    Ok(())
+}
+
 /// `oraculo pendientes`: arma el paquete de los tests pendientes, o importa el junit de Colab.
 fn oraculo_pendientes(
     json: bool,
@@ -765,12 +1019,72 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
             *liberar,
             *vigilar,
         ),
+        Comando::Colab {
+            accion:
+                ColabAccion::Empaquetar {
+                    binario,
+                    trabajos,
+                    repo,
+                    rustup_sha256,
+                    salida,
+                    raiz_root,
+                    n,
+                    semilla,
+                    juez,
+                },
+        } => colab_empaquetar(
+            cli.json,
+            colab_calibra::PedidoEmpaquetar {
+                binario: binario.clone(),
+                trabajos: trabajos.clone(),
+                repos: repo.clone(),
+                rustup_sha256: rustup_sha256.clone(),
+                salida: salida.clone(),
+                raiz_root: raiz_root.clone(),
+                juez: *juez,
+            },
+            *n,
+            *semilla,
+        ),
+        Comando::Colab {
+            accion:
+                ColabAccion::Importar {
+                    archivo,
+                    raiz_root,
+                    sha,
+                    ida,
+                },
+        } => colab_importar(
+            cli.json,
+            colab_calibra::PedidoImportar {
+                archivo: archivo.clone(),
+                raiz_root: raiz_root.clone(),
+                sha: sha.clone(),
+                ida: ida.clone(),
+            },
+        ),
+        Comando::Colab {
+            accion:
+                ColabAccion::Calibrar {
+                    paquete,
+                    raiz_root,
+                    sin_stop,
+                },
+        } => colab_calibrar(cli.json, paquete.clone(), raiz_root.clone(), *sin_stop),
         Comando::Observa { accion } => observa(cli.json, accion),
         Comando::Corre {
-            tarea,
-            config,
+            accion: Some(CorreAccion::RevisarLectura { tarea, transcript }),
+            ..
+        } => revisar_lectura_accion(cli.json, tarea, transcript),
+        Comando::Corre {
+            tarea: Some(tarea),
+            config: Some(config),
             reanuda,
+            accion: None,
         } => corre_accion(cli.json, tarea, config, reanuda.as_deref()),
+        Comando::Corre { .. } => Err(Error::Uso(
+            "corre exige --tarea y --config, o el subcomando revisar-lectura".into(),
+        )),
         Comando::Track { accion } => track_accion(cli.json, accion),
         Comando::Aprende { replay } => aprende_accion(cli.json, *replay),
         Comando::ImportarExterno { desde } => {
@@ -1070,6 +1384,78 @@ fn corre_accion(json: bool, tarea: &str, config: &str, reanuda: Option<&str>) ->
     Ok(())
 }
 
+/// `corre revisar-lectura`: cuenta las lecturas del oráculo en el transcript. Solo imprime conteos.
+fn revisar_lectura_accion(json: bool, tarea: &str, transcript: &Path) -> Result<(), Error> {
+    let home_usuario = std::env::var_os("HOME").map(PathBuf::from);
+    let conteo = revisar_lectura(
+        &config::root_home(),
+        home_usuario.as_deref(),
+        tarea,
+        transcript,
+    )?;
+    if json {
+        let objeto = json_revision_lectura(tarea, &conteo);
+        println!("{}", serde_json::to_string_pretty(&objeto)?);
+    } else {
+        println!("{}", texto_revision_lectura(tarea, &conteo));
+    }
+    Ok(())
+}
+
+/// Cuenta las lecturas del oráculo de `tarea` en `transcript`, con `home` como ROOT_HOME. Es error de
+/// uso si el transcript no existe o si la tarea no tiene `oraculos/<tarea>/oculto/`. No escribe nada.
+fn revisar_lectura(
+    home: &Path,
+    home_usuario: Option<&Path>,
+    tarea: &str,
+    transcript: &Path,
+) -> Result<observe::transcript::ConteoLecturas, Error> {
+    oracle::pendientes::nombre_de_tarea_valido(tarea).map_err(Error::Uso)?;
+    if !transcript.is_file() {
+        return Err(Error::Uso(format!(
+            "no existe el transcript: {}",
+            transcript.display()
+        )));
+    }
+    let oculto = home.join("oraculos").join(tarea).join("oculto");
+    if !oculto.is_dir() {
+        return Err(Error::Uso(format!(
+            "la tarea {tarea} no tiene oráculo oculto: falta {}",
+            oculto.display()
+        )));
+    }
+    let huellas = observe::transcript::HuellasOraculo::armar(home, home_usuario, tarea)?;
+    Ok(observe::transcript::contar_lecturas(transcript, &huellas)?)
+}
+
+/// Texto de `revisar-lectura`: los conteos y una línea de veredicto. Nunca la cita ni la huella.
+fn texto_revision_lectura(tarea: &str, conteo: &observe::transcript::ConteoLecturas) -> String {
+    let cuenta = format!(
+        "tarea {tarea}: huella {}, nombre {}, ruta {}",
+        conteo.huella, conteo.nombre, conteo.ruta
+    );
+    let veredicto = if conteo.marcado() {
+        "marcado"
+    } else {
+        "sin marcas"
+    };
+    format!("{cuenta}\n{veredicto}")
+}
+
+/// JSON de `revisar-lectura`: solo conteos y el veredicto.
+fn json_revision_lectura(
+    tarea: &str,
+    conteo: &observe::transcript::ConteoLecturas,
+) -> serde_json::Value {
+    serde_json::json!({
+        "tarea": tarea,
+        "huella": conteo.huella,
+        "nombre": conteo.nombre,
+        "ruta": conteo.ruta,
+        "marcado": conteo.marcado(),
+    })
+}
+
 /// Subcomandos `observa`: registran eventos y muestran el resumen de una corrida.
 fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
     match accion {
@@ -1208,6 +1594,114 @@ fn imprimir_registrados(json: bool, cuantos: usize) {
 mod tests {
     use super::*;
     use clap::Parser;
+    use serde_json::json;
+
+    fn version_de(
+        defectos: u32,
+        detectados: u32,
+        limpios: u32,
+        bien: u32,
+    ) -> oracle::calibra::Version {
+        oracle::calibra::Version {
+            defectos,
+            detectados,
+            limpios_con_veredicto: limpios,
+            limpios_bien: bien,
+            limpios,
+            limpios_sin_veredicto: 0,
+            defectos_sin_veredicto: 0,
+            tareas: vec!["t".into()],
+        }
+    }
+
+    fn fila_sin_medir(tarea: &str, dimension: &str) -> oracle::calibra::Fila {
+        serde_json::from_value(serde_json::json!({
+            "tarea": tarea,
+            "dimension": dimension,
+            "n": 0,
+            "semilla": 1,
+            "ts": 1.0
+        }))
+        .expect("fila mínima")
+    }
+
+    #[test]
+    fn linea_sin_medir_base_sin_veredicto_dice_el_motivo() {
+        let motivo =
+            "juicio 1 de la base sin veredicto: cobertura 6 de 10 de peso, menor que dos tercios";
+        let fila = oracle::calibra::Fila {
+            base_sin_veredicto: Some(motivo.into()),
+            ..fila_sin_medir("s2-t1", "arquitectura")
+        };
+        assert_eq!(
+            linea_sin_medir(&fila),
+            Some(format!("s2-t1/arquitectura: base sin veredicto: {motivo}"))
+        );
+    }
+
+    #[test]
+    fn linea_sin_medir_inestable_usa_el_formato_de_siempre() {
+        let fila = oracle::calibra::Fila {
+            inestable: Some("ítems variaron".into()),
+            ..fila_sin_medir("s2-t1", "arquitectura")
+        };
+        assert_eq!(
+            linea_sin_medir(&fila),
+            Some("s2-t1/arquitectura: ítems variaron".to_string())
+        );
+    }
+
+    #[test]
+    fn linea_sin_medir_no_aplica_usa_el_formato_de_siempre() {
+        let fila = oracle::calibra::Fila {
+            no_aplica: Some("sin Dockerfile".into()),
+            ..fila_sin_medir("s2-t1", "arquitectura")
+        };
+        assert_eq!(
+            linea_sin_medir(&fila),
+            Some("s2-t1/arquitectura: sin Dockerfile".to_string())
+        );
+    }
+
+    #[test]
+    fn linea_sin_medir_fila_medida_da_none() {
+        let fila = fila_sin_medir("s2-t1", "arquitectura");
+        assert_eq!(linea_sin_medir(&fila), None);
+    }
+
+    #[test]
+    fn texto_version_de_juez_con_cinco_de_cinco_dice_la_cota_y_los_casos_que_faltan() {
+        let texto = texto_version(&version_de(5, 5, 5, 5), true);
+        assert!(texto.contains("sensibilidad Wilson 0.57"), "{texto}");
+        assert!(texto.contains("especificidad Wilson 0.57"), "{texto}");
+        assert!(
+            texto.contains("faltan 11 casos sin fallos para 0.8"),
+            "{texto}"
+        );
+    }
+
+    #[test]
+    fn texto_version_de_juez_que_ya_llega_no_pide_casos() {
+        let texto = texto_version(&version_de(16, 16, 16, 16), true);
+        assert!(texto.contains("sensibilidad Wilson 0.81"), "{texto}");
+        assert!(!texto.contains("faltan"), "{texto}");
+    }
+
+    #[test]
+    fn texto_version_de_oraculo_dice_defecto_detectado_y_limpios_bien() {
+        let texto = texto_version(&version_de(1, 1, 3, 3), false);
+        assert!(
+            texto.contains("1 defecto detectado, limpios bien"),
+            "{texto}"
+        );
+    }
+
+    #[test]
+    fn texto_version_de_oraculo_sin_defecto_o_con_limpio_mal_lo_dice() {
+        let texto = texto_version(&version_de(2, 0, 3, 2), false);
+        assert!(texto.contains("sin defecto detectado"), "{texto}");
+        assert!(texto.contains("1 limpio mal"), "{texto}");
+    }
 
     #[test]
     fn lineas_de_avisos_escribe_una_linea_por_aviso_en_orden() {
@@ -1318,5 +1812,228 @@ mod tests {
         });
         let resumen = resumen_auditoria(&valor);
         assert!(!resumen.contains("encontrados"), "resumen: {resumen}");
+    }
+
+    /// Pedido mínimo de `colab empaquetar` para los tests de `colab_empaquetar_con`.
+    fn pedido_empaquetar() -> colab_calibra::PedidoEmpaquetar {
+        colab_calibra::PedidoEmpaquetar {
+            binario: PathBuf::from("b"),
+            trabajos: vec!["t:d".into()],
+            repos: vec!["t=r".into()],
+            rustup_sha256: "0".repeat(64),
+            salida: PathBuf::from("s.tar.gz"),
+            raiz_root: None,
+            juez: false,
+        }
+    }
+
+    #[test]
+    fn linea_sha_da_la_linea_del_sha_del_paquete() {
+        let resumen = colab_calibra::Resumen {
+            salida: PathBuf::from("s.tar.gz"),
+            archivos: 1,
+            trabajos: 1,
+            sha256: "ab12".into(),
+        };
+        assert_eq!(linea_sha(&resumen), "ROOT_SHA_PAQUETE=ab12");
+    }
+
+    #[test]
+    fn colab_empaquetar_pasa_n_y_semilla_a_la_funcion() {
+        let recibidos = std::cell::RefCell::new(Vec::new());
+        let registrar = |_pedido: colab_calibra::PedidoEmpaquetar, n: u32, semilla: u64| {
+            recibidos.borrow_mut().push((n, semilla));
+            Ok(colab_calibra::Resumen {
+                salida: PathBuf::from("s.tar.gz"),
+                archivos: 1,
+                trabajos: 1,
+                sha256: String::new(),
+            })
+        };
+        colab_empaquetar_con(false, pedido_empaquetar(), 8, 7, &registrar)
+            .expect("empaquetar con n y semilla explícitos");
+        assert_eq!(*recibidos.borrow(), vec![(8, 7)]);
+    }
+
+    #[test]
+    fn colab_empaquetar_con_defectos_pasa_4_y_42() {
+        let recibidos = std::cell::RefCell::new(Vec::new());
+        let registrar = |_pedido: colab_calibra::PedidoEmpaquetar, n: u32, semilla: u64| {
+            recibidos.borrow_mut().push((n, semilla));
+            Ok(colab_calibra::Resumen {
+                salida: PathBuf::from("s.tar.gz"),
+                archivos: 1,
+                trabajos: 1,
+                sha256: String::new(),
+            })
+        };
+        colab_empaquetar_con(
+            false,
+            pedido_empaquetar(),
+            colab_calibra::N_POR_DEFECTO,
+            colab_calibra::SEMILLA_POR_DEFECTO,
+            &registrar,
+        )
+        .expect("empaquetar con defectos");
+        assert_eq!(*recibidos.borrow(), vec![(4, 42)]);
+    }
+
+    #[test]
+    fn colab_empaquetar_sin_banderas_pasa_4_y_42_desde_la_cli() {
+        // Parsea la CLI sin `--n` ni `--semilla` y sigue los valores hasta el armador.
+        let args: Vec<String> = [
+            "r00t",
+            "colab",
+            "empaquetar",
+            "--binario",
+            "b",
+            "--trabajos",
+            "t:d",
+            "--repo",
+            "t=r",
+            "--rustup-sha256",
+            &"0".repeat(64),
+            "--salida",
+            "s.tar.gz",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let cli = Cli::try_parse_from(args).expect("colab empaquetar sin banderas parsea");
+        let (n, semilla) = match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { n, semilla, .. },
+            } => (n, semilla),
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        };
+        let recibidos = std::cell::RefCell::new(Vec::new());
+        let registrar = |_pedido: colab_calibra::PedidoEmpaquetar, n: u32, semilla: u64| {
+            recibidos.borrow_mut().push((n, semilla));
+            Ok(colab_calibra::Resumen {
+                salida: PathBuf::from("s.tar.gz"),
+                archivos: 1,
+                trabajos: 1,
+                sha256: String::new(),
+            })
+        };
+        colab_empaquetar_con(false, pedido_empaquetar(), n, semilla, &registrar)
+            .expect("empaquetar sin banderas");
+        assert_eq!(*recibidos.borrow(), vec![(4, 42)]);
+    }
+
+    /// Línea única del oráculo oculto. Nunca debe salir en la salida de `revisar-lectura`.
+    const LINEA_OCULTA_LIB: &str = "assert sincronizar(tmp, \"clave-secreta-42\") == [1, 2, 3]";
+
+    /// `ROOT_HOME` de prueba con `oraculos/x/oculto/t.py` que trae `LINEA_OCULTA_LIB`.
+    fn raiz_con_oculto_lib(tmp: &tempfile::TempDir) -> PathBuf {
+        let root = tmp.path().canonicalize().expect("canónica").join("root");
+        let oculto = root.join("oraculos/x/oculto");
+        fs::create_dir_all(&oculto).expect("carpeta oculta");
+        fs::write(
+            oculto.join("t.py"),
+            format!("def test_indice(tmp):\n    {LINEA_OCULTA_LIB}\n"),
+        )
+        .expect("escribe el oculto");
+        root
+    }
+
+    /// Transcript con una llamada `Bash` cuya salida es `salida`. Devuelve su ruta.
+    fn transcript_revision(tmp: &tempfile::TempDir, salida: &str) -> PathBuf {
+        let ruta = tmp.path().join("transcript.jsonl");
+        let llamada = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r1", "name": "Bash", "input": {"command": "cat oculto"}}]}});
+        let resultado = json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "r1", "content": salida}]}});
+        fs::write(&ruta, format!("{llamada}\n{resultado}\n")).expect("escribe el transcript");
+        ruta
+    }
+
+    /// Lista (ruta, bytes) de todos los archivos bajo `raiz`, ordenada.
+    fn archivos_con_bytes(raiz: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn recorre(dir: &Path, salida: &mut Vec<(PathBuf, Vec<u8>)>) {
+            for entrada in fs::read_dir(dir).expect("lee la carpeta") {
+                let ruta = entrada.expect("entrada").path();
+                if ruta.is_dir() {
+                    recorre(&ruta, salida);
+                } else {
+                    let bytes = fs::read(&ruta).expect("lee el archivo");
+                    salida.push((ruta, bytes));
+                }
+            }
+        }
+        let mut salida = Vec::new();
+        recorre(raiz, &mut salida);
+        salida.sort();
+        salida
+    }
+
+    #[test]
+    fn revisar_lectura_con_huella_real_da_una_lectura_y_no_imprime_la_linea() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = raiz_con_oculto_lib(&tmp);
+        let ruta = transcript_revision(&tmp, &format!("salida: {LINEA_OCULTA_LIB}"));
+        let conteo = revisar_lectura(&root, None, "x", &ruta).expect("revisa");
+        assert_eq!(conteo.huella, 1, "{conteo:?}");
+        assert!(conteo.marcado());
+        let texto = texto_revision_lectura("x", &conteo);
+        assert!(!texto.contains("clave-secreta-42"), "{texto}");
+        assert!(texto.contains("marcado"), "{texto}");
+        let json = json_revision_lectura("x", &conteo).to_string();
+        assert!(!json.contains("clave-secreta-42"), "{json}");
+        assert!(json.contains("\"huella\":1"), "{json}");
+    }
+
+    #[test]
+    fn revisar_lectura_transcript_limpio_da_cero_y_sin_marcas() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = raiz_con_oculto_lib(&tmp);
+        let ruta = transcript_revision(&tmp, "nada que ver con el oráculo");
+        let conteo = revisar_lectura(&root, None, "x", &ruta).expect("revisa");
+        assert_eq!(conteo, observe::transcript::ConteoLecturas::default());
+        assert!(!conteo.marcado());
+        let texto = texto_revision_lectura("x", &conteo);
+        assert!(texto.contains("sin marcas"), "{texto}");
+        let json = json_revision_lectura("x", &conteo);
+        assert_eq!(json["marcado"], false);
+    }
+
+    #[test]
+    fn revisar_lectura_transcript_inexistente_da_error_de_uso_con_la_ruta() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = raiz_con_oculto_lib(&tmp);
+        let falta = tmp.path().join("no-existe.jsonl");
+        let error = revisar_lectura(&root, None, "x", &falta).expect_err("debe fallar");
+        match error {
+            Error::Uso(mensaje) => {
+                assert!(mensaje.contains(&falta.display().to_string()), "{mensaje}")
+            }
+            otro => panic!("se esperaba Uso, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn revisar_lectura_tarea_sin_oculto_da_error_de_uso_con_la_ruta() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = raiz_con_oculto_lib(&tmp);
+        fs::create_dir_all(root.join("oraculos/y")).expect("tarea sin oculto");
+        let ruta = transcript_revision(&tmp, "x");
+        let esperada = root.join("oraculos/y/oculto");
+        let error = revisar_lectura(&root, None, "y", &ruta).expect_err("debe fallar");
+        match error {
+            Error::Uso(mensaje) => assert!(
+                mensaje.contains(&esperada.display().to_string()),
+                "{mensaje}"
+            ),
+            otro => panic!("se esperaba Uso, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn revisar_lectura_no_crea_ni_cambia_archivos_del_root_home() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = raiz_con_oculto_lib(&tmp);
+        let ruta = transcript_revision(&tmp, &format!("{LINEA_OCULTA_LIB}\ndef test_indice(tmp):"));
+        let antes = archivos_con_bytes(&root);
+        let conteo = revisar_lectura(&root, None, "x", &ruta).expect("revisa");
+        assert!(conteo.marcado(), "{conteo:?}");
+        assert_eq!(archivos_con_bytes(&root), antes);
     }
 }

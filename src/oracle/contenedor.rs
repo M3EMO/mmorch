@@ -1,7 +1,8 @@
 //! Corre un comando en un contenedor de podman sin red y con un único directorio escribible.
 
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::os::unix::process::CommandExt;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -47,6 +48,43 @@ static CONTADOR: AtomicU64 = AtomicU64::new(0);
 pub const SUFIJO_SELINUX: &str = "z";
 /// Opción de `podman run` y `podman build` que no pasa al contenedor las variables de proxy del host (M4).
 pub(crate) const PROXY_FUERA: &str = "--http-proxy=false";
+/// Perfil de `cargo` sin debuginfo (P106 c): compilar y enlazar cuesta menos.
+/// Todo comando sobre el `target` sembrado comparte esta huella de perfil. Por eso viven aquí.
+/// Un valor de `e.env` para la misma clave va después y gana.
+const PERFIL_SIN_DEBUGINFO: [(&str, &str); 2] = [
+    ("CARGO_PROFILE_DEV_DEBUG", "0"),
+    ("CARGO_PROFILE_TEST_DEBUG", "0"),
+];
+
+/// Variable que elige el motor del contenedor. Sin valor, o con otro valor, el motor es podman.
+pub const VARIABLE_CONTENEDOR_MODO: &str = "ROOT_CONTENEDOR_MODO";
+/// Valor de `VARIABLE_CONTENEDOR_MODO` que elige bubblewrap.
+pub const MODO_BWRAP: &str = "bwrap";
+/// Archivo con el entorno de la imagen para el modo bwrap. Una línea `CLAVE=valor` por variable.
+pub const VARIABLE_BWRAP_ENTORNO: &str = "ROOT_BWRAP_ENTORNO";
+/// Variable con el id de la imagen que usa el modo bwrap.
+pub const VARIABLE_BWRAP_IMAGEN_ID: &str = "ROOT_BWRAP_IMAGEN_ID";
+
+/// Motor que corre el contenedor de evaluación.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Podman,
+    Bwrap,
+}
+
+/// Motor que elige `valor`. Solo `bwrap` exacto elige bubblewrap. Todo lo demás es podman.
+pub fn backend_de(valor: Option<&str>) -> Backend {
+    match valor {
+        Some(MODO_BWRAP) => Backend::Bwrap,
+        _ => Backend::Podman,
+    }
+}
+
+/// Motor que elige la variable `ROOT_CONTENEDOR_MODO` del proceso.
+pub fn backend_actual() -> Backend {
+    let valor = std::env::var(VARIABLE_CONTENEDOR_MODO).ok();
+    backend_de(valor.as_deref())
+}
 
 /// Qué correr, con qué montajes y con qué límite de tiempo. Su `Debug` oculta el valor de los secretos.
 #[derive(Clone)]
@@ -124,16 +162,196 @@ pub fn argumentos(e: &Ejecucion, nombre: &str) -> Vec<String> {
 /// Lleva `--userns=keep-id`: el proceso corre como el usuario del host, sin privilegios dentro. Así el
 /// producto no reemplaza `/bin/sh` ni `/usr/bin/timeout` de la imagen. `argumentos` (run --rm) no lo lleva.
 pub(crate) fn argumentos_separado(e: &Ejecucion, nombre: &str, comando: &[&str]) -> Vec<String> {
-    let Some((entrada, resto)) = comando.split_first() else {
-        return Vec::new();
+    // En modo bwrap no hay contenedor separado. Se devuelve vacío, la misma señal de "sin comando".
+    argumentos_separado_con(backend_actual(), e, nombre, comando).unwrap_or_default()
+}
+
+/// Igual que `argumentos_separado`, con el motor pasado por quien llama. En bwrap da error: no hay
+/// contenedor separado. Con podman arma los argumentos de `podman run -d`.
+pub(crate) fn argumentos_separado_con(
+    backend: Backend,
+    e: &Ejecucion,
+    nombre: &str,
+    comando: &[&str],
+) -> Result<Vec<String>, ErrorOraculo> {
+    match backend {
+        Backend::Bwrap => Err(ErrorOraculo::Infra(
+            "el contenedor separado de Entrega no existe en modo bwrap".into(),
+        )),
+        Backend::Podman => {
+            let Some((entrada, resto)) = comando.split_first() else {
+                return Ok(Vec::new());
+            };
+            let mut args: Vec<String> = ["run", "-d", "--name", nombre].map(String::from).into();
+            args.push("--userns=keep-id".into());
+            args.extend(opciones(e));
+            args.extend(["--entrypoint", entrada].map(String::from));
+            args.push(e.imagen.clone());
+            args.extend(resto.iter().map(|a| a.to_string()));
+            Ok(args)
+        }
+    }
+}
+
+/// Carpetas que el runtime de Colab crea antes de correr bwrap. bwrap no las crea en una raíz de solo lectura.
+/// Los dos scripts tools/colab/*.sh y tests/colab_preparar.rs deben coincidir con esta lista.
+pub const CARPETAS_RUNTIME: [&str; 6] = [
+    "/repo", "/salida", "/oraculo", "/cache", "/rustsec", "/trabajo",
+];
+
+/// Argumentos de `bwrap` para la ejecución, sin el binario `bwrap`. Corre sin podman y sin secretos.
+/// Los montajes siguen el orden y los destinos de `opciones`. `entorno` es el de la imagen.
+pub fn argumentos_bwrap(
+    e: &Ejecucion,
+    entorno: &[(String, String)],
+) -> Result<Vec<String>, ErrorOraculo> {
+    if !e.secretos.is_empty() {
+        return Err(ErrorOraculo::Infra(
+            "en modo bwrap no hay secretos: en Colab no hay claves".into(),
+        ));
+    }
+    revisar_destinos_bwrap(e)?;
+    let mut args: Vec<String> = Vec::new();
+    args.extend(
+        [
+            "--die-with-parent",
+            "--unshare-user",
+            "--uid",
+            "0",
+            "--gid",
+            "0",
+            "--unshare-pid",
+        ]
+        .map(String::from),
+    );
+    if !e.red {
+        args.push("--unshare-net".into());
+    }
+    args.extend(
+        [
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev-bind",
+            "/dev",
+            "/dev",
+            "--ro-bind",
+            "/proc",
+            "/proc",
+            "--tmpfs",
+            "/tmp",
+        ]
+        .map(String::from),
+    );
+    if let Some(repo) = &e.repo {
+        montaje_bwrap(&mut args, "--ro-bind", repo, "/repo");
+    }
+    if let Some(trabajo) = &e.trabajo {
+        montaje_bwrap(&mut args, "--ro-bind", trabajo, "/trabajo");
+    }
+    if let Some(oraculo) = &e.oraculo {
+        // bwrap no crea un punto de montaje en una raíz de solo lectura, pero sí dentro de un tmpfs
+        // suyo. Sin este tmpfs, Colab falla con "bwrap: Can't mkdir /oraculo/contrato: Read-only file system".
+        args.extend(["--tmpfs", "/oraculo"].map(String::from));
+        let destino = e.oraculo_destino.as_deref().unwrap_or("/oraculo");
+        montaje_bwrap(&mut args, "--ro-bind", oraculo, destino);
+    }
+    if let Some(cache) = &e.cache {
+        let flag = if e.cache_rw { "--bind" } else { "--ro-bind" };
+        montaje_bwrap(&mut args, flag, cache, "/cache");
+    }
+    if let Some(rustsec) = &e.rustsec {
+        montaje_bwrap(&mut args, "--ro-bind", rustsec, "/rustsec");
+    }
+    montaje_bwrap(&mut args, "--bind", &e.salida, "/salida");
+    args.push("--clearenv".into());
+    let perfil = PERFIL_SIN_DEBUGINFO
+        .iter()
+        .map(|(clave, valor)| (clave.to_string(), valor.to_string()));
+    let variables = entorno
+        .iter()
+        .cloned()
+        .chain(perfil)
+        .chain(e.env.iter().cloned());
+    for (clave, valor) in variables {
+        args.extend(["--setenv".to_string(), clave, valor]);
+    }
+    args.extend(["--chdir", "/", "sh", "-c"].map(String::from));
+    args.push(e.cmd.clone());
+    Ok(args)
+}
+
+fn montaje_bwrap(args: &mut Vec<String>, flag: &str, origen: &Path, destino: &str) {
+    args.push(flag.into());
+    args.push(origen.display().to_string());
+    args.push(destino.into());
+}
+
+/// Revisa que cada destino de montaje sea una carpeta de `CARPETAS_RUNTIME` o esté bajo `/oraculo/`.
+/// Da error antes de armar los argumentos. Así bwrap no intenta un montaje que el runtime no crea.
+fn revisar_destinos_bwrap(e: &Ejecucion) -> Result<(), ErrorOraculo> {
+    let mut destinos: Vec<&str> = Vec::new();
+    if e.repo.is_some() {
+        destinos.push("/repo");
+    }
+    if e.trabajo.is_some() {
+        destinos.push("/trabajo");
+    }
+    if e.oraculo.is_some() {
+        destinos.push(e.oraculo_destino.as_deref().unwrap_or("/oraculo"));
+    }
+    if e.cache.is_some() {
+        destinos.push("/cache");
+    }
+    if e.rustsec.is_some() {
+        destinos.push("/rustsec");
+    }
+    destinos.push("/salida");
+    for destino in destinos {
+        let sube = Path::new(destino)
+            .components()
+            .any(|componente| componente == Component::ParentDir);
+        if sube {
+            return Err(ErrorOraculo::Infra(format!(
+                "el destino {destino} tiene un componente `..`"
+            )));
+        }
+        if !CARPETAS_RUNTIME.contains(&destino) && !destino.starts_with("/oraculo/") {
+            return Err(ErrorOraculo::Infra(format!(
+                "el destino {destino} no es una carpeta del runtime ni está bajo /oraculo/"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Entorno de la imagen para el modo bwrap. Lee `ruta`: una línea `CLAVE=valor` por variable.
+/// Sin ruta, o si el archivo no se lee, da entorno vacío y un aviso. Las líneas sin `=` se ignoran.
+pub fn entorno_de_imagen(ruta: Option<&str>) -> (Vec<(String, String)>, Option<String>) {
+    let Some(ruta) = ruta else {
+        let aviso =
+            format!("falta el entorno de la imagen: {VARIABLE_BWRAP_ENTORNO} no tiene ruta");
+        return (Vec::new(), Some(aviso));
     };
-    let mut args: Vec<String> = ["run", "-d", "--name", nombre].map(String::from).into();
-    args.push("--userns=keep-id".into());
-    args.extend(opciones(e));
-    args.extend(["--entrypoint", entrada].map(String::from));
-    args.push(e.imagen.clone());
-    args.extend(resto.iter().map(|a| a.to_string()));
-    args
+    match std::fs::read_to_string(ruta) {
+        Ok(texto) => (parsear_entorno(&texto), None),
+        Err(error) => {
+            let aviso = format!(
+                "falta el entorno de la imagen: no se lee {ruta} ({VARIABLE_BWRAP_ENTORNO}): {error}"
+            );
+            (Vec::new(), Some(aviso))
+        }
+    }
+}
+
+/// Pares `CLAVE=valor` de un texto. Parte en el primer `=`. Descarta líneas sin `=` y claves vacías.
+fn parsear_entorno(texto: &str) -> Vec<(String, String)> {
+    texto
+        .lines()
+        .filter_map(|linea| linea.split_once('='))
+        .filter(|(clave, _)| !clave.is_empty())
+        .map(|(clave, valor)| (clave.to_string(), valor.to_string()))
+        .collect()
 }
 
 /// Opciones de `podman run` de la ejecución: endurecimiento, límites, montajes y variables. Van
@@ -183,6 +401,10 @@ fn opciones(e: &Ejecucion) -> Vec<String> {
         );
     }
     montaje(&mut args, &e.salida, "/salida", SUFIJO_SELINUX);
+    for (clave, valor) in PERFIL_SIN_DEBUGINFO {
+        args.push("-e".into());
+        args.push(format!("{clave}={valor}"));
+    }
     for (clave, valor) in &e.env {
         args.push("-e".into());
         args.push(format!("{clave}={valor}"));
@@ -199,16 +421,48 @@ fn montaje(args: &mut Vec<String>, origen: &Path, destino: &str, opciones: &str)
     args.push(format!("{}:{destino}:{opciones}", origen.display()));
 }
 
-/// Error de un contenedor que venció su plazo. Lleva el plazo y el nombre del contenedor eliminado.
-fn error_de_plazo(timeout: Duration, nombre: &str) -> ErrorOraculo {
+/// Error de una corrida que venció su plazo. Lleva el plazo y el nombre de lo eliminado.
+/// Con podman el nombre es el contenedor. Con bwrap es el pid del proceso.
+fn error_de_plazo(timeout: Duration, nombre: &str, backend: Backend) -> ErrorOraculo {
+    let motor = match backend {
+        Backend::Podman => "contenedor",
+        Backend::Bwrap => "proceso bwrap",
+    };
     ErrorOraculo::PlazoVencido {
         segundos: timeout.as_secs_f64(),
+        motor,
         contenedor: nombre.to_string(),
     }
 }
 
-/// Corre el comando en un contenedor nuevo y devuelve su resultado.
+/// Corre el comando en un contenedor nuevo y devuelve su resultado. El motor sale de `ROOT_CONTENEDOR_MODO`.
 pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
+    ejecutar_con(e, backend_actual(), "bwrap")
+}
+
+/// Corre el comando con el motor `backend`. `programa` es el binario de bwrap. Con podman no se usa.
+fn ejecutar_con(
+    e: &Ejecucion,
+    backend: Backend,
+    programa: &str,
+) -> Result<Resultado, ErrorOraculo> {
+    match backend {
+        Backend::Podman => ejecutar_podman(e),
+        Backend::Bwrap => {
+            validar_rutas(e)?;
+            let _turno = turno_de_contenedor();
+            let ruta = std::env::var(VARIABLE_BWRAP_ENTORNO).ok();
+            let (entorno, aviso) = entorno_de_imagen(ruta.as_deref());
+            if let Some(aviso) = aviso {
+                eprintln!("r00t oraculo: {aviso}");
+            }
+            ejecutar_bwrap(e, programa, &entorno)
+        }
+    }
+}
+
+/// Corre el comando en un contenedor de podman nuevo y devuelve su resultado.
+fn ejecutar_podman(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
     validar_rutas(e)?;
     let _turno = turno_de_contenedor();
     crate::limpieza::barrer_al_arrancar("podman");
@@ -221,7 +475,7 @@ pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
         Ok(Some(estado)) => estado,
         Ok(None) => {
             terminar(&mut hijo, &nombre);
-            return Err(error_de_plazo(e.timeout, &nombre));
+            return Err(error_de_plazo(e.timeout, &nombre, Backend::Podman));
         }
         // Sin esto, un fallo al consultar el proceso dejaría el contenedor corriendo.
         Err(err) => {
@@ -229,13 +483,70 @@ pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
             return Err(err);
         }
     };
+    resultado_de(estado, salida, error, inicio, "podman")
+}
+
+/// Corre `programa` con los argumentos de bwrap y espera hasta `e.timeout`. Si vence, mata el grupo entero.
+/// No borra nada: bwrap no deja contenedor. El error de plazo nombra el pid del proceso.
+fn ejecutar_bwrap(
+    e: &Ejecucion,
+    programa: &str,
+    entorno: &[(String, String)],
+) -> Result<Resultado, ErrorOraculo> {
+    let args = argumentos_bwrap(e, entorno)?;
+    let inicio = Instant::now();
+    let mut hijo = Command::new(programa)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Grupo propio: al vencer el plazo, Root mata a bwrap y a los procesos que dejó.
+        .process_group(0)
+        .spawn()
+        .map_err(|err| ErrorOraculo::Infra(format!("no se pudo lanzar bwrap: {err}")))?;
+    let salida = hijo.stdout.take().map(leer_cola_en_hilo);
+    let error = hijo.stderr.take().map(leer_cola_en_hilo);
+    let estado = match esperar(&mut hijo, e.timeout) {
+        Ok(Some(estado)) => estado,
+        Ok(None) => {
+            let pid = hijo.id().to_string();
+            matar_grupo(&mut hijo);
+            return Err(error_de_plazo(e.timeout, &pid, Backend::Bwrap));
+        }
+        Err(err) => {
+            matar_grupo(&mut hijo);
+            return Err(err);
+        }
+    };
+    resultado_de(estado, salida, error, inicio, "bwrap")
+}
+
+/// Mata el grupo de procesos del hijo con SIGKILL, y luego al hijo. Así no queda ningún nieto vivo.
+/// Usa el `kill` del sistema: sin `libc` no hay otra forma. Los errores se ignoran.
+pub(crate) fn matar_grupo(hijo: &mut Child) {
+    let grupo = format!("-{}", hijo.id());
+    let mut kill = Command::new("kill");
+    kill.args(["-KILL", "--", grupo.as_str()]);
+    let _ = correr_comando(kill, "kill", PLAZO_LIMPIEZA);
+    matar(hijo);
+}
+
+/// Arma el `Resultado` de un comando que ya terminó. `etiqueta` nombra el motor en los errores de señal e infra.
+fn resultado_de(
+    estado: ExitStatus,
+    salida: Option<JoinHandle<Vec<u8>>>,
+    error: Option<JoinHandle<Vec<u8>>>,
+    inicio: Instant,
+    etiqueta: &str,
+) -> Result<Resultado, ErrorOraculo> {
     let stdout = recoger(salida);
     let stderr = recoger(error);
     let segundos = inicio.elapsed().as_secs_f64();
     let Some(codigo) = estado.code() else {
-        return Err(ErrorOraculo::Infra("podman terminó por una señal".into()));
+        return Err(ErrorOraculo::Infra(format!(
+            "{etiqueta} terminó por una señal"
+        )));
     };
-    if let Some(error) = error_de_infra(codigo, &stderr) {
+    if let Some(error) = error_de_infra(etiqueta, codigo, &stderr) {
         return Err(error);
     }
     Ok(Resultado {
@@ -701,10 +1012,11 @@ fn cola(texto: &str) -> String {
 }
 
 /// Da `Infra` si el código de salida indica un fallo del entorno y no del comando evaluado.
-fn error_de_infra(codigo: i32, stderr: &str) -> Option<ErrorOraculo> {
+/// `motor` nombra el programa que falló: "podman" o "bwrap".
+fn error_de_infra(motor: &str, codigo: i32, stderr: &str) -> Option<ErrorOraculo> {
     if CODIGOS_DE_INFRA.contains(&codigo) {
         return Some(ErrorOraculo::Infra(format!(
-            "podman falló ({codigo}): {}",
+            "{motor} falló ({codigo}): {}",
             cola(stderr)
         )));
     }
@@ -722,7 +1034,7 @@ mod tests {
 
     /// Mensaje de `Infra` para un código, o `None` si el código no es de infraestructura.
     fn infra_de(codigo: i32) -> Option<String> {
-        match error_de_infra(codigo, "detalle") {
+        match error_de_infra("podman", codigo, "detalle") {
             Some(ErrorOraculo::Infra(mensaje)) => Some(mensaje),
             _ => None,
         }
@@ -748,6 +1060,36 @@ mod tests {
     fn error_de_infra_deja_pasar_0_1_y_2() {
         for codigo in [0, 1, 2] {
             assert!(infra_de(codigo).is_none(), "código {codigo}");
+        }
+    }
+
+    /// Mensaje de `Infra` que `resultado_de` arma para un código de salida y un motor.
+    fn infra_de_motor(motor: &str, codigo: i32) -> Option<String> {
+        // El estado crudo de espera lleva el código de salida en el byte alto.
+        let estado = <std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(
+            codigo << 8,
+        );
+        let error = Some(std::thread::spawn(|| b"detalle".to_vec()));
+        match resultado_de(estado, None, error, Instant::now(), motor) {
+            Err(ErrorOraculo::Infra(mensaje)) => Some(mensaje),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn error_de_infra_bwrap_no_nombra_podman() {
+        for codigo in [125, 126, 127, 137] {
+            let mensaje = infra_de_motor("bwrap", codigo).expect("código de infraestructura");
+            assert!(!mensaje.contains("podman"), "{mensaje}");
+            assert!(mensaje.starts_with("bwrap falló ("), "{mensaje}");
+        }
+    }
+
+    #[test]
+    fn error_de_infra_podman_conserva_su_mensaje() {
+        for codigo in [125, 126, 127, 137] {
+            let mensaje = infra_de_motor("podman", codigo).expect("código de infraestructura");
+            assert!(mensaje.starts_with("podman falló ("), "{mensaje}");
         }
     }
 
@@ -801,12 +1143,29 @@ mod tests {
 
     #[test]
     fn error_de_plazo_lleva_el_plazo_y_el_nombre_del_contenedor() {
-        let error = error_de_plazo(Duration::from_secs(1200), "root-x");
+        let error = error_de_plazo(Duration::from_secs(1200), "root-x", Backend::Podman);
         assert!(
-            matches!(&error, ErrorOraculo::PlazoVencido { segundos, contenedor }
+            matches!(&error, ErrorOraculo::PlazoVencido { segundos, contenedor, .. }
                 if *segundos == 1200.0 && contenedor == "root-x"),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn error_de_plazo_de_podman_dice_contenedor() {
+        let error = error_de_plazo(Duration::from_secs(1200), "x", Backend::Podman);
+        assert_eq!(
+            error.to_string(),
+            "error de infraestructura del oráculo: timeout tras 1200 s; contenedor x eliminado"
+        );
+    }
+
+    #[test]
+    fn error_de_plazo_de_bwrap_dice_proceso_bwrap_y_no_contenedor() {
+        let error = error_de_plazo(Duration::from_secs(1200), "1234", Backend::Bwrap);
+        let texto = error.to_string();
+        assert!(texto.contains("proceso bwrap"), "{texto}");
+        assert!(!texto.contains("contenedor"), "{texto}");
     }
 
     fn ejecucion() -> Ejecucion {
@@ -858,6 +1217,53 @@ mod tests {
     fn contenedor_argumentos_pasan_cada_variable_de_entorno() {
         let args = argumentos(&ejecucion(), "n");
         assert!(contiene_par(&args, "-e", "PYTHONPATH=/repo"));
+    }
+
+    /// Posición del `-e` que precede al par `clave=valor`, o `None` si no existe.
+    fn posicion_de_variable(args: &[String], variable: &str) -> Option<usize> {
+        args.windows(2)
+            .position(|p| p[0] == "-e" && p[1] == variable)
+    }
+
+    #[test]
+    fn contenedor_argumentos_llevan_perfil_sin_debuginfo() {
+        let args = argumentos(&ejecucion(), "n");
+        assert!(
+            contiene_par(&args, "-e", "CARGO_PROFILE_DEV_DEBUG=0"),
+            "{args:?}"
+        );
+        assert!(
+            contiene_par(&args, "-e", "CARGO_PROFILE_TEST_DEBUG=0"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn contenedor_argumentos_separado_llevan_perfil_sin_debuginfo() {
+        let args = argumentos_separado(&ejecucion(), "n", &["sleep", "infinity"]);
+        assert!(
+            contiene_par(&args, "-e", "CARGO_PROFILE_DEV_DEBUG=0"),
+            "{args:?}"
+        );
+        assert!(
+            contiene_par(&args, "-e", "CARGO_PROFILE_TEST_DEBUG=0"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn contenedor_env_propio_manda_sobre_el_perfil_sin_debuginfo() {
+        let mut e = ejecucion();
+        e.env.push(("CARGO_PROFILE_DEV_DEBUG".into(), "2".into()));
+        let args = argumentos(&e, "n");
+        let constante = posicion_de_variable(&args, "CARGO_PROFILE_DEV_DEBUG=0")
+            .expect("la constante va en los argumentos");
+        let propio = posicion_de_variable(&args, "CARGO_PROFILE_DEV_DEBUG=2")
+            .expect("el valor de e.env va en los argumentos");
+        assert!(
+            constante < propio,
+            "podman usa el último -e: el de e.env debe ir después: {args:?}"
+        );
     }
 
     #[test]
@@ -1423,5 +1829,522 @@ mod tests {
             "terminar tardó {:?}",
             inicio.elapsed()
         );
+    }
+
+    // Tests del modo bwrap (Colab sin podman).
+
+    fn ventana_de_tres(args: &[String], a: &str, b: &str, c: &str) -> bool {
+        args.windows(3).any(|w| w[0] == a && w[1] == b && w[2] == c)
+    }
+
+    #[test]
+    fn bwrap_monta_repo_oraculo_cache_y_salida() {
+        let mut e = ejecucion();
+        e.cache = Some(PathBuf::from("/tmp/c"));
+        let args = argumentos_bwrap(&e, &[]).expect("arma");
+        assert!(
+            ventana_de_tres(&args, "--ro-bind", "/tmp/r", "/repo"),
+            "{args:?}"
+        );
+        assert!(
+            ventana_de_tres(&args, "--ro-bind", "/tmp/o", "/oraculo"),
+            "{args:?}"
+        );
+        assert!(
+            ventana_de_tres(&args, "--ro-bind", "/tmp/c", "/cache"),
+            "{args:?}"
+        );
+        assert!(
+            ventana_de_tres(&args, "--bind", "/tmp/s", "/salida"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn bwrap_cache_rw_monta_cache_con_bind() {
+        let mut e = ejecucion();
+        e.cache = Some(PathBuf::from("/tmp/c"));
+        e.cache_rw = true;
+        let args = argumentos_bwrap(&e, &[]).expect("arma");
+        assert!(
+            ventana_de_tres(&args, "--bind", "/tmp/c", "/cache"),
+            "{args:?}"
+        );
+        assert!(
+            !ventana_de_tres(&args, "--ro-bind", "/tmp/c", "/cache"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn bwrap_red_false_lleva_unshare_net_y_red_true_no() {
+        let sin_red = argumentos_bwrap(&ejecucion(), &[]).expect("arma");
+        assert!(
+            sin_red.contains(&"--unshare-net".to_string()),
+            "{sin_red:?}"
+        );
+
+        let mut con_red = ejecucion();
+        con_red.red = true;
+        let args = argumentos_bwrap(&con_red, &[]).expect("arma");
+        assert!(!args.contains(&"--unshare-net".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn bwrap_clearenv_va_antes_del_primer_setenv_y_termina_con_sh_c() {
+        let args =
+            argumentos_bwrap(&ejecucion(), &[("LANG".into(), "C.UTF-8".into())]).expect("arma");
+        let clearenv = args.iter().position(|a| a == "--clearenv");
+        let setenv = args.iter().position(|a| a == "--setenv");
+        assert!(clearenv.is_some() && clearenv < setenv, "{args:?}");
+        let fin: Vec<&str> = args[args.len() - 5..].iter().map(String::as_str).collect();
+        assert_eq!(fin, ["--chdir", "/", "sh", "-c", "pytest -q"], "{args:?}");
+    }
+
+    #[test]
+    fn bwrap_setenv_va_en_orden_entorno_perfil_y_env_propio() {
+        let mut e = ejecucion();
+        e.env.push(("CARGO_PROFILE_DEV_DEBUG".into(), "1".into()));
+        let entorno = vec![("LANG".to_string(), "C.UTF-8".to_string())];
+        let args = argumentos_bwrap(&e, &entorno).expect("arma");
+        let pares: Vec<(String, String)> = args
+            .windows(3)
+            .filter(|w| w[0] == "--setenv")
+            .map(|w| (w[1].clone(), w[2].clone()))
+            .collect();
+        let esperado = vec![
+            ("LANG".to_string(), "C.UTF-8".to_string()),
+            ("CARGO_PROFILE_DEV_DEBUG".to_string(), "0".to_string()),
+            ("CARGO_PROFILE_TEST_DEBUG".to_string(), "0".to_string()),
+            ("PYTHONPATH".to_string(), "/repo".to_string()),
+            ("CARGO_PROFILE_DEV_DEBUG".to_string(), "1".to_string()),
+        ];
+        assert_eq!(pares, esperado, "{args:?}");
+    }
+
+    #[test]
+    fn bwrap_arranca_como_root_del_usuario_con_pid_propio() {
+        let args = argumentos_bwrap(&ejecucion(), &[]).expect("arma");
+        let inicio: Vec<&str> = args[..9].iter().map(String::as_str).collect();
+        assert_eq!(
+            inicio,
+            [
+                "--die-with-parent",
+                "--unshare-user",
+                "--uid",
+                "0",
+                "--gid",
+                "0",
+                "--unshare-pid",
+                "--unshare-net",
+                "--ro-bind",
+            ],
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn bwrap_con_secreto_da_error_que_nombra_los_secretos() {
+        let mut e = ejecucion();
+        e.secretos = vec![("DEEPSEEK_API_KEY".into(), "sk-xyz".into())];
+        match argumentos_bwrap(&e, &[]) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("secretos"), "{mensaje}");
+                assert!(!mensaje.contains("sk-xyz"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra: {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn bwrap_no_lleva_limites_de_memoria_pids_ni_nombre() {
+        let args = argumentos_bwrap(&ejecucion(), &[]).expect("arma");
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "--memory" || a.starts_with("--memory")),
+            "{args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "--pids-limit" || a.starts_with("--pids-limit")),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|a| a == "--name"), "{args:?}");
+    }
+
+    #[test]
+    fn backend_de_solo_bwrap_exacto_es_bwrap() {
+        assert_eq!(backend_de(Some("bwrap")), Backend::Bwrap);
+        assert_eq!(backend_de(None), Backend::Podman);
+        assert_eq!(backend_de(Some("podman")), Backend::Podman);
+        assert_eq!(backend_de(Some("BWRAP")), Backend::Podman);
+        assert_eq!(backend_de(Some("")), Backend::Podman);
+    }
+
+    #[test]
+    fn bwrap_guarda_argumentos_de_podman_siguen_igual() {
+        let args = argumentos(&ejecucion(), "n");
+        assert_eq!(args.first().map(String::as_str), Some("run"));
+        assert!(!args.iter().any(|a| a == "--unshare-net"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--clearenv"), "{args:?}");
+    }
+
+    #[test]
+    fn bwrap_guarda_argumentos_de_podman_literales_no_cambian() {
+        let esperados = [
+            "run",
+            "--rm",
+            "--name",
+            "n",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--pids-limit=512",
+            "--memory=2g",
+            "--pull=never",
+            "--http-proxy=false",
+            "--network",
+            "none",
+            "--tmpfs",
+            "/tmp:rw",
+            "-v",
+            "/tmp/r:/repo:ro,z",
+            "-v",
+            "/tmp/o:/oraculo:ro,z",
+            "-v",
+            "/tmp/s:/salida:z",
+            "-e",
+            "CARGO_PROFILE_DEV_DEBUG=0",
+            "-e",
+            "CARGO_PROFILE_TEST_DEBUG=0",
+            "-e",
+            "PYTHONPATH=/repo",
+            "docker.io/library/alpine:3.20",
+            "sh",
+            "-c",
+            "pytest -q",
+        ];
+        assert_eq!(
+            argumentos(&ejecucion(), "n"),
+            esperados.map(String::from).to_vec()
+        );
+    }
+
+    /// Posición del primer tramo `pat` dentro de `args`, o `None` si no aparece.
+    fn posicion(args: &[String], pat: &[&str]) -> Option<usize> {
+        args.windows(pat.len())
+            .position(|w| w.iter().zip(pat).all(|(a, p)| a == p))
+    }
+
+    #[test]
+    fn bwrap_destinos_de_montaje_salen_de_la_raiz_runtime_o_de_un_tmpfs() {
+        const BASE: [&str; 4] = ["/", "/dev", "/proc", "/tmp"];
+        let destinos = [
+            None,
+            Some(super::super::DIR_CONTRATO),
+            Some(super::super::DIR_OCULTO),
+            Some("/oraculo/escenarios"),
+        ];
+        for destino in destinos {
+            let mut e = ejecucion();
+            e.oraculo_destino = destino.map(String::from);
+            let args = argumentos_bwrap(&e, &[]).expect("arma");
+            for (i, arg) in args.iter().enumerate() {
+                let montado = match arg.as_str() {
+                    "--ro-bind" | "--bind" => args.get(i + 2),
+                    "--tmpfs" => args.get(i + 1),
+                    _ => None,
+                };
+                let Some(montado) = montado else { continue };
+                if BASE.contains(&montado.as_str()) {
+                    continue;
+                }
+                let en_runtime = CARPETAS_RUNTIME.contains(&montado.as_str());
+                let bajo_tmpfs = args[..i].windows(2).any(|w| {
+                    w[0] == "--tmpfs"
+                        && (montado == &w[1] || montado.starts_with(&format!("{}/", w[1])))
+                });
+                assert!(
+                    en_runtime || bajo_tmpfs,
+                    "destino {montado} sin carpeta runtime ni tmpfs previo (oraculo_destino {destino:?}): {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bwrap_oraculo_destino_fuera_del_runtime_da_error_que_lo_nombra() {
+        let mut e = ejecucion();
+        e.oraculo_destino = Some("/otra".into());
+        match argumentos_bwrap(&e, &[]) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("/otra"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra: {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn bwrap_oraculo_destino_con_punto_punto_da_error_que_lo_nombra() {
+        let mut e = ejecucion();
+        e.oraculo_destino = Some("/oraculo/../x".into());
+        match argumentos_bwrap(&e, &[]) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("/oraculo/../x"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra: {otro:?}"),
+        }
+
+        e.oraculo_destino = Some("/oraculo/contrato".into());
+        assert!(
+            argumentos_bwrap(&e, &[]).is_ok(),
+            "/oraculo/contrato debe pasar"
+        );
+    }
+
+    #[test]
+    fn bwrap_tmpfs_oraculo_va_antes_del_ro_bind_del_oraculo() {
+        let mut e = ejecucion();
+        let sin_destino = argumentos_bwrap(&e, &[]).expect("arma");
+        let tmpfs = posicion(&sin_destino, &["--tmpfs", "/oraculo"]);
+        let montaje = posicion(&sin_destino, &["--ro-bind", "/tmp/o", "/oraculo"]);
+        assert!(tmpfs.is_some() && tmpfs < montaje, "{sin_destino:?}");
+
+        e.oraculo_destino = Some("/oraculo/contrato".into());
+        let con_destino = argumentos_bwrap(&e, &[]).expect("arma");
+        let tmpfs = posicion(&con_destino, &["--tmpfs", "/oraculo"]);
+        let montaje = posicion(&con_destino, &["--ro-bind", "/tmp/o", "/oraculo/contrato"]);
+        assert!(tmpfs.is_some() && tmpfs < montaje, "{con_destino:?}");
+
+        e.oraculo = None;
+        let sin_oraculo = argumentos_bwrap(&e, &[]).expect("arma");
+        assert!(
+            posicion(&sin_oraculo, &["--tmpfs", "/oraculo"]).is_none(),
+            "{sin_oraculo:?}"
+        );
+    }
+
+    #[test]
+    fn bwrap_separado_con_bwrap_da_error_y_con_podman_da_lo_de_hoy() {
+        let comando = ["sleep", "600"];
+        assert!(matches!(
+            argumentos_separado_con(Backend::Bwrap, &ejecucion(), "n", &comando),
+            Err(ErrorOraculo::Infra(_))
+        ));
+        let con_podman = argumentos_separado_con(Backend::Podman, &ejecucion(), "n", &comando)
+            .expect("podman arma");
+        assert_eq!(con_podman, argumentos_separado(&ejecucion(), "n", &comando));
+    }
+
+    #[test]
+    fn bwrap_entorno_de_imagen_cubre_sin_ruta_archivo_malo_y_archivo_bueno() {
+        let (vacio, aviso) = entorno_de_imagen(None);
+        assert!(vacio.is_empty());
+        assert!(aviso.is_some_and(|a| a.contains("ROOT_BWRAP_ENTORNO")));
+
+        let dir = tempfile::tempdir().expect("temporal");
+        let falta = dir.path().join("no-existe");
+        let (vacio, aviso) = entorno_de_imagen(falta.to_str());
+        assert!(vacio.is_empty());
+        assert!(aviso.is_some_and(|a| a.contains("ROOT_BWRAP_ENTORNO")));
+
+        let ruta = dir.path().join("entorno");
+        std::fs::write(
+            &ruta,
+            "PATH=/usr/bin:/bin\n\nRUTA_CON_IGUAL=a=b\nSIN_IGUAL\n",
+        )
+        .expect("escribe");
+        let (entorno, aviso) = entorno_de_imagen(ruta.to_str());
+        assert_eq!(aviso, None);
+        assert_eq!(
+            entorno,
+            vec![
+                ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+                ("RUTA_CON_IGUAL".to_string(), "a=b".to_string()),
+            ]
+        );
+    }
+
+    /// Carpeta de prueba con `ro`, `oraculo` y `sal` creadas dentro de `dir`.
+    fn ejecucion_en(dir: &Path) -> Ejecucion {
+        let repo = dir.join("ro");
+        let oraculo = dir.join("oraculo");
+        let salida = dir.join("sal");
+        for carpeta in [&repo, &oraculo, &salida] {
+            std::fs::create_dir_all(carpeta).expect("crea carpeta");
+        }
+        Ejecucion {
+            imagen: "sin-imagen".into(),
+            repo: Some(repo),
+            oraculo: Some(oraculo),
+            oraculo_destino: None,
+            salida,
+            cmd: "true".into(),
+            env: Vec::new(),
+            timeout: Duration::from_secs(60),
+            red: false,
+            cache: None,
+            cache_rw: false,
+            rustsec: None,
+            trabajo: None,
+            secretos: Vec::new(),
+        }
+    }
+
+    /// Escribe un script `sh` ejecutable en `dir` y da su ruta.
+    fn script_falso(dir: &Path, nombre: &str, cuerpo: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let ruta = dir.join(nombre);
+        std::fs::write(&ruta, format!("#!/bin/sh\n{cuerpo}\n")).expect("escribe el script");
+        std::fs::set_permissions(&ruta, std::fs::Permissions::from_mode(0o755)).expect("permisos");
+        ruta.display().to_string()
+    }
+
+    #[test]
+    fn bwrap_ejecutar_lanza_el_programa_con_los_argumentos_de_bwrap() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let registro = dir.path().join("args.txt");
+        let cuerpo = format!("printf '%s\\n' \"$@\" > '{}'", registro.display());
+        let script = script_falso(dir.path(), "falso", &cuerpo);
+        let e = ejecucion_en(dir.path());
+        let resultado = ejecutar_bwrap(&e, &script, &[]);
+        assert!(resultado.is_ok(), "{resultado:?}");
+        let recibidos =
+            std::fs::read_to_string(&registro).expect("el script escribió sus argumentos");
+        let esperados = argumentos_bwrap(&e, &[]).expect("arma");
+        assert_eq!(recibidos, format!("{}\n", esperados.join("\n")));
+    }
+
+    /// Verdadero si el proceso sigue corriendo. Un zombi ya murió: cuenta como muerto.
+    fn vivo(pid: &str) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => {
+                let estado = stat.rsplit(')').next().unwrap_or("").trim_start();
+                !estado.starts_with('Z')
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn bwrap_ejecutar_plazo_vencido_mata_el_grupo_entero() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let archivo = dir.path().join("pids.txt");
+        let cuerpo = format!(
+            "echo $$ > '{p}'; sleep 30 & echo $! >> '{p}'; sleep 30",
+            p = archivo.display()
+        );
+        let script = script_falso(dir.path(), "falso", &cuerpo);
+        let mut e = ejecucion_en(dir.path());
+        e.timeout = Duration::from_secs(1);
+        let resultado = ejecutar_bwrap(&e, &script, &[]);
+        assert!(
+            matches!(resultado, Err(ErrorOraculo::PlazoVencido { .. })),
+            "{resultado:?}"
+        );
+        let texto = std::fs::read_to_string(&archivo).expect("el script escribió sus pids");
+        let pids: Vec<&str> = texto.lines().collect();
+        assert_eq!(pids.len(), 2, "{texto:?}");
+        let inicio = Instant::now();
+        while pids.iter().any(|p| vivo(p)) && inicio.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        for pid in &pids {
+            assert!(!vivo(pid), "el proceso {pid} sigue vivo tras el plazo");
+        }
+    }
+
+    #[test]
+    fn bwrap_ejecutar_devuelve_codigo_y_salida() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let script = script_falso(dir.path(), "falso", "echo hola; exit 3");
+        let e = ejecucion_en(dir.path());
+        let resultado = ejecutar_bwrap(&e, &script, &[]).expect("corre");
+        assert_eq!(resultado.codigo, 3, "{resultado:?}");
+        assert!(resultado.stdout.contains("hola"), "{resultado:?}");
+    }
+
+    #[test]
+    fn bwrap_ejecutar_con_secreto_no_lanza_el_programa() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let marca = dir.path().join("marca");
+        let cuerpo = format!("touch '{}'", marca.display());
+        let script = script_falso(dir.path(), "falso", &cuerpo);
+        let mut e = ejecucion_en(dir.path());
+        e.secretos = vec![("DEEPSEEK_API_KEY".into(), "sk-xyz".into())];
+        match ejecutar_bwrap(&e, &script, &[]) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("secretos"), "{mensaje}");
+                assert!(!mensaje.contains("sk-xyz"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra: {otro:?}"),
+        }
+        assert!(!marca.exists(), "el programa no debió correr");
+    }
+
+    #[test]
+    fn bwrap_ejecutar_con_valida_rutas_antes_de_lanzar() {
+        let dir = tempfile::tempdir().expect("temporal");
+        let marca = dir.path().join("marca");
+        let cuerpo = format!("touch '{}'", marca.display());
+        let script = script_falso(dir.path(), "falso", &cuerpo);
+        let mut e = ejecucion_en(dir.path());
+        e.repo = Some(dir.path().join("no-existe"));
+        match ejecutar_con(&e, Backend::Bwrap, &script) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("no existe"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra: {otro:?}"),
+        }
+        assert!(!marca.exists(), "el programa no debió correr");
+    }
+
+    /// Verdadero si `bwrap` está en el PATH.
+    fn hay_bwrap() -> bool {
+        std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|carpeta| carpeta.join("bwrap").is_file())
+        })
+    }
+
+    #[test]
+    fn bwrap_ejecutar_real_aisla_repo_salida_y_red() {
+        if !hay_bwrap() {
+            eprintln!("SALTEADO: no hay bwrap");
+            return;
+        }
+        // `--ro-bind / /` deja la raíz de solo lectura: bwrap no crea `/repo` ni `/salida`.
+        // El runtime de Colab los trae. Aquí el host tiene que traerlos.
+        if !Path::new("/repo").exists() || !Path::new("/salida").exists() {
+            eprintln!(
+                "SALTEADO: el host no tiene /repo y /salida, y bwrap no los crea en una raíz ro"
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().expect("temporal");
+        let mut e = ejecucion_en(dir.path());
+        e.oraculo = None;
+        std::fs::write(dir.path().join("ro").join("a"), "hola").expect("escribe");
+        // La red se mira en /proc/net/dev: /sys/class/net muestra las interfaces del host.
+        e.cmd = "cat /repo/a; touch /repo/b 2>/dev/null && echo escribe_repo || echo repo_ro; \
+                 touch /salida/c && echo escribe_salida; \
+                 tail -n +3 /proc/net/dev | grep -vq '^ *lo:' && echo red_abierta || echo red_cerrada"
+            .into();
+        let entorno = [("PATH".to_string(), "/usr/bin:/bin".to_string())];
+        let resultado = ejecutar_bwrap(&e, "bwrap", &entorno).expect("corre bwrap");
+        if resultado.stderr.contains("Operation not permitted")
+            || resultado.stderr.contains("namespace")
+        {
+            eprintln!(
+                "SALTEADO: bwrap no crea namespaces aquí: {}",
+                resultado.stderr
+            );
+            return;
+        }
+        assert_eq!(resultado.codigo, 0, "{resultado:?}");
+        for esperado in ["hola", "repo_ro", "escribe_salida", "red_cerrada"] {
+            assert!(resultado.stdout.contains(esperado), "{resultado:?}");
+        }
+        assert!(dir.path().join("sal").join("c").exists(), "{resultado:?}");
     }
 }

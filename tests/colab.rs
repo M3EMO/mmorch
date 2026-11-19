@@ -2,11 +2,14 @@
 //! Ningún test toca Colab: el falso registra cada invocación en `llamadas.log`.
 
 use std::fs::{self, File};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[path = "comun/ejecutable.rs"]
+mod ejecutable;
+use ejecutable::escribir_ejecutable;
 
 const JUNIT_COLAB: &str =
     r#"<testsuite><testcase classname="tests.test_o" name="o2"/></testsuite>"#;
@@ -86,6 +89,7 @@ exec)
   for a in "$@"; do if [ "$prev" = "-f" ]; then f="$a"; fi; prev="$a"; done
   case "$f" in
     */gpu.py) echo "ROOT_GPU=$GPU" ;;
+    */une-trozos.py) echo "ROOT_UNIDO=ok" ;;
     */prepara.py) echo "ROOT_PREPARADO=1" ;;
     */prepara-rust.py) echo "ROOT_RUST=rustup" ;;
     */corre.py)
@@ -107,8 +111,7 @@ esac
         junit = JUNIT_COLAB,
     );
     let ruta = dir.join("colab-falso");
-    fs::write(&ruta, guion).expect("escribe el falso");
-    fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+    escribir_ejecutable(&ruta, &guion);
     ruta
 }
 
@@ -454,6 +457,7 @@ exec)
   for a in "$@"; do if [ "$prev" = "-f" ]; then f="$a"; fi; prev="$a"; done
   case "$f" in
     */gpu.py) echo "ROOT_GPU=Tesla T4" ;;
+    */une-trozos.py) echo "ROOT_UNIDO=ok" ;;
     */prepara.py) echo "ROOT_PREPARADO=1" ;;
     */prepara-rust.py) echo "ROOT_RUST=rustup" ;;
     */corre.py) echo "ROOT_LANZADO=1" ;;
@@ -469,8 +473,7 @@ esac
         estado = estado,
     );
     let ruta = dir.join("colab-a-medida");
-    fs::write(&ruta, guion).expect("escribe el falso");
-    fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+    escribir_ejecutable(&ruta, &guion);
     ruta
 }
 

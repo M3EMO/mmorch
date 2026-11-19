@@ -65,6 +65,10 @@ Sin hallazgos: \"hallazgos\":[].";
 
 /// Versión de la forma de elegir los extractos. Cambiarla cambia la huella: los limpios con la lectura vieja no se reusan.
 const VERSION_LECTURA: &str = "lectura-guiada-1";
+/// Inicio de la causa de una respuesta que no parsea. Lo usa `leer_json` y el reintento por JSON.
+const PREFIJO_JSON_INVALIDO: &str = "JSON inválido";
+/// Línea que el reintento por JSON inválido agrega al final del usuario. No entra a la huella del prompt.
+const LINEA_REINTENTO_JSON: &str = "La respuesta anterior no era JSON válido. Respondé SOLO el objeto JSON, sin texto antes ni después.";
 
 /// Huella de los textos fijos del prompt del juez. Cambiar uno cambia la huella: los limpios guardados con el
 /// prompt viejo ya no se reusan.
@@ -714,6 +718,24 @@ fn pedir(modelo: &dyn ModeloJuez, prompt: &Prompt) -> Result<Respuesta, String> 
     parsear(&salida.texto)
 }
 
+/// Pide el juicio. Si la respuesta no es JSON válido, repite la llamada una vez con `LINEA_REINTENTO_JSON`.
+/// Si el reintento también falla, la causa nombra los dos errores. Otras causas no se reintentan.
+fn pedir_con_reintento_json(modelo: &dyn ModeloJuez, prompt: &Prompt) -> Result<Respuesta, String> {
+    let causa = match pedir(modelo, prompt) {
+        Ok(respuesta) => return Ok(respuesta),
+        Err(causa) if !causa.starts_with(PREFIJO_JSON_INVALIDO) => return Err(causa),
+        Err(causa) => causa,
+    };
+    let mut reintento = prompt.clone();
+    reintento.usuario.push('\n');
+    reintento.usuario.push_str(LINEA_REINTENTO_JSON);
+    reintento.reintento_juez = true;
+    if exceso_de_entrada(&reintento).is_some() {
+        return Err(causa);
+    }
+    pedir(modelo, &reintento).map_err(|otra| format!("{causa}; reintento: {otra}"))
+}
+
 /// Pide el juicio al modelo y aplica el parseo estricto y el gate. Hace como mucho un reintento.
 pub fn juzgar(
     e: &EntradaJuez,
@@ -729,7 +751,7 @@ pub fn juzgar(
     if let Some(motivo) = exceso_de_entrada(&prompt) {
         return sin_veredicto(motivo, &pedidos, guardados);
     }
-    let respuesta = match pedir(modelo, &prompt) {
+    let respuesta = match pedir_con_reintento_json(modelo, &prompt) {
         Ok(respuesta) => respuesta,
         Err(causa) => return sin_veredicto(causa, &pedidos, guardados),
     };
@@ -742,6 +764,7 @@ pub fn juzgar(
         leidos: &guardados,
     };
     let mut lectura = leer_items(respuesta.items, &cx);
+    lectura.descartes.extend(respuesta.descartes);
     let mut hallazgos = Vec::new();
     let mut hallazgos_descartados = Vec::new();
     for valor in respuesta.hallazgos {
@@ -843,7 +866,9 @@ fn reintentar(
         modelo: cx.modelo,
         leidos: cx.leidos,
     };
-    leer_items(respuesta.items, &cx_reintento)
+    let mut lectura = leer_items(respuesta.items, &cx_reintento);
+    lectura.descartes.extend(respuesta.descartes);
+    lectura
 }
 
 /// Texto de la sección `REINTENTO:`: una línea por cita que no pasó el gate, y una por id roto.
@@ -1088,22 +1113,78 @@ fn descarte(que: impl Into<String>, motivo: impl Into<String>) -> Descarte {
     }
 }
 
-/// Respuesta del juez: dos arreglos, `items` y `hallazgos`.
+/// Respuesta del juez: dos arreglos, `items` y `hallazgos`, y los descartes de su lectura.
 struct Respuesta {
     items: Vec<Value>,
     hallazgos: Vec<Value>,
+    descartes: Vec<Descarte>,
 }
 
-/// Parseo estricto: un objeto JSON con las claves `items` y `hallazgos`, con o sin un bloque ```json.
+const MOTIVO_JSON_REPARADO: &str = "JSON reparado: coma final";
+
+/// Quita comas finales (antes de `}` o `]`) fuera de los textos entre comillas. Nada más.
+fn quitar_comas_finales(texto: &str) -> String {
+    let chars: Vec<char> = texto.chars().collect();
+    let mut salida = String::with_capacity(texto.len());
+    let mut en_texto = false;
+    let mut escapado = false;
+    for (i, &c) in chars.iter().enumerate() {
+        if en_texto {
+            if escapado {
+                escapado = false;
+            } else if c == '\\' {
+                escapado = true;
+            } else if c == '"' {
+                en_texto = false;
+            }
+        } else if c == '"' {
+            en_texto = true;
+        } else if c == ',' && cierra_tras(&chars[i + 1..]) {
+            continue;
+        }
+        salida.push(c);
+    }
+    salida
+}
+
+/// Sí si el primer carácter que no es blanco JSON es `}` o `]`.
+fn cierra_tras(resto: &[char]) -> bool {
+    resto
+        .iter()
+        .copied()
+        .find(|c| !matches!(c, ' ' | '\t' | '\n' | '\r'))
+        .is_some_and(|c| matches!(c, '}' | ']'))
+}
+
+/// Parsea el JSON tal cual. Si falla, prueba sin comas finales y avisa del descarte.
+/// Si el reparado tampoco parsea, el error es el del parseo estricto.
+fn leer_json(texto: &str) -> Result<(Value, Vec<Descarte>), String> {
+    let limpio = desenvuelto(texto);
+    match serde_json::from_str::<Value>(limpio) {
+        Ok(valor) => Ok((valor, Vec::new())),
+        Err(estricto) => match serde_json::from_str::<Value>(&quitar_comas_finales(limpio)) {
+            Ok(valor) => Ok((
+                valor,
+                vec![descarte("respuesta del juez", MOTIVO_JSON_REPARADO)],
+            )),
+            Err(_) => Err(format!("{PREFIJO_JSON_INVALIDO}: {estricto}")),
+        },
+    }
+}
+
+/// Parseo: un objeto JSON con las claves `items` y `hallazgos`, con o sin un bloque ```json.
 fn parsear(texto: &str) -> Result<Respuesta, String> {
-    let valor: Value =
-        serde_json::from_str(desenvuelto(texto)).map_err(|e| format!("JSON inválido: {e}"))?;
+    let (valor, descartes) = leer_json(texto)?;
     let Value::Object(mut campos) = valor else {
         return Err("se esperaba un objeto JSON".into());
     };
     let items = arreglo(campos.remove("items"), "items")?;
     let hallazgos = arreglo(campos.remove("hallazgos"), "hallazgos")?;
-    Ok(Respuesta { items, hallazgos })
+    Ok(Respuesta {
+        items,
+        hallazgos,
+        descartes,
+    })
 }
 
 fn arreglo(valor: Option<Value>, clave: &str) -> Result<Vec<Value>, String> {
@@ -1693,6 +1774,98 @@ mod tests {
     fn juez_json_roto_da_sin_veredicto() {
         let r = juzgar_con(&caso(), "{\"items\": [".into());
         assert_sin_veredicto(&r);
+    }
+
+    // Coma final: se repara solo si el texto estricto no parsea.
+
+    #[test]
+    fn parsear_repara_coma_final_en_objeto_y_arreglo() {
+        let texto = "{\"items\":[{\"item\":\"a\",\"nivel\":1,}],\"hallazgos\":[],}";
+        let r = parsear(texto).expect("parsea con la coma final reparada");
+        assert_eq!(r.items.len(), 1);
+        assert!(r.hallazgos.is_empty());
+        assert_eq!(
+            r.descartes,
+            vec![descarte("respuesta del juez", MOTIVO_JSON_REPARADO)]
+        );
+    }
+
+    #[test]
+    fn parsear_repara_coma_final_dentro_de_bloque_json() {
+        let texto = "```json\n{\"items\":[],\"hallazgos\":[],}\n```";
+        let r = parsear(texto).expect("parsea el bloque reparado");
+        assert!(r.items.is_empty());
+        assert_eq!(r.descartes.len(), 1);
+    }
+
+    #[test]
+    fn parsear_sin_coma_final_no_agrega_descarte() {
+        let r = parsear("{\"items\":[],\"hallazgos\":[]}").expect("parsea");
+        assert!(r.descartes.is_empty());
+    }
+
+    #[test]
+    fn parsear_con_reparo_fallido_da_el_error_estricto() {
+        // Sin la coma final sigue roto: `1 2` no es un arreglo válido.
+        let texto = "{\"items\":[1 2],\"hallazgos\":[],}";
+        let estricto = serde_json::from_str::<Value>(texto).unwrap_err();
+        let err = parsear(texto).err().expect("debe fallar");
+        assert_eq!(err, format!("JSON inválido: {estricto}"));
+    }
+
+    #[test]
+    fn parsear_json_cortado_sigue_con_json_invalido() {
+        let err = parsear("{\"items\": [").err().expect("debe fallar");
+        assert!(err.starts_with("JSON inválido"), "{err}");
+    }
+
+    #[test]
+    fn quitar_comas_finales_quita_coma_con_espacios_y_saltos() {
+        let texto = "{\"a\":[1, 2 ,\n\t]\n , }";
+        assert_eq!(quitar_comas_finales(texto), "{\"a\":[1, 2 \n\t]\n  }");
+    }
+
+    #[test]
+    fn quitar_comas_finales_no_toca_coma_dentro_de_texto() {
+        let texto = "{\"items\":[{\"item\":\"a\",\"cita\":\"x,}\"}],\"hallazgos\":[]}";
+        assert_eq!(quitar_comas_finales(texto), texto);
+    }
+
+    #[test]
+    fn quitar_comas_finales_respeta_comilla_escapada() {
+        // JSON: {"cita":"a\",}"}  La coma va dentro del texto.
+        let texto = "{\"cita\":\"a\\\",}\"}";
+        assert_eq!(quitar_comas_finales(texto), texto);
+    }
+
+    #[test]
+    fn quitar_comas_finales_quita_coma_tras_comilla_escapada() {
+        // JSON: {"a":"x\"","b":1,}  La coma final sí se quita.
+        let texto = "{\"a\":\"x\\\"\",\"b\":1,}";
+        assert_eq!(quitar_comas_finales(texto), "{\"a\":\"x\\\"\",\"b\":1}");
+    }
+
+    #[test]
+    fn quitar_comas_finales_respeta_barra_escapada() {
+        // JSON: {"a":"x\\",}  La barra escapada cierra el texto; la coma sí se quita.
+        let texto = "{\"a\":\"x\\\\\",}";
+        assert_eq!(quitar_comas_finales(texto), "{\"a\":\"x\\\\\"}");
+    }
+
+    #[test]
+    fn juzgar_con_coma_final_trae_el_descarte_de_reparacion() {
+        let c = caso();
+        let items = json!([item_nivel(MODULARIDAD, 1, json!([real()]))]).to_string();
+        let texto = format!("{{\"items\":{items},\"hallazgos\":[],}}");
+        let r = juzgar_con(&c, texto);
+        assert_eq!(r.estado, EstadoJuez::Ok);
+        assert!(r.niveles.contains_key(MODULARIDAD), "{r:?}");
+        assert!(
+            r.descartes
+                .contains(&descarte("respuesta del juez", MOTIVO_JSON_REPARADO)),
+            "{:?}",
+            r.descartes
+        );
     }
 
     #[test]
@@ -3274,6 +3447,111 @@ mod tests {
         assert_eq!(visto.len(), 2);
         assert!(!visto[0].reintento_juez, "la 1ª llamada no es reintento");
         assert!(visto[1].reintento_juez, "la 2ª llamada es el reintento");
+    }
+
+    // Reintento por JSON inválido: la llamada entera se repite una vez.
+
+    #[test]
+    fn juez_json_cortado_reintenta_y_juzga_con_la_segunda_respuesta() {
+        let c = caso();
+        let completa = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 1, json!([real()])),
+            ]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok("{\"items\": [".into()), Ok(completa)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2, "un reintento por JSON");
+        assert_eq!(r.estado, EstadoJuez::Ok, "{r:?}");
+        assert_eq!(r.niveles.get(MODULARIDAD), Some(&2));
+        assert_eq!(r.niveles.get(TOPE), Some(&1));
+    }
+
+    #[test]
+    fn juez_reintento_por_json_marca_el_prompt_y_agrega_la_linea() {
+        let c = caso();
+        let completa = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 1, json!([real()])),
+            ]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok("{\"items\": [".into()), Ok(completa)]);
+        juzgar_secuencia(&c, &modelo);
+        let visto = modelo.visto.borrow();
+        assert_eq!(visto.len(), 2);
+        assert!(!visto[0].usuario.contains(LINEA_REINTENTO_JSON));
+        assert!(!visto[0].reintento_juez, "la 1ª llamada no es reintento");
+        assert!(visto[1].usuario.contains(LINEA_REINTENTO_JSON));
+        assert!(visto[1].usuario.ends_with(LINEA_REINTENTO_JSON));
+        assert!(visto[1].reintento_juez, "la 2ª llamada es el reintento");
+    }
+
+    #[test]
+    fn juez_dos_json_cortados_dan_sin_veredicto_con_las_dos_causas() {
+        let c = caso();
+        let modelo =
+            FalsoSecuencia::nueva(vec![Ok("{\"items\": [".into()), Ok("{\"items\": [".into())]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2, "exactamente un reintento");
+        assert_sin_veredicto(&r);
+        match &r.estado {
+            EstadoJuez::SinVeredicto(causa) => {
+                assert!(causa.starts_with("JSON inválido"), "{causa}");
+                assert!(causa.contains("; reintento: JSON inválido"), "{causa}");
+            }
+            otro => panic!("esperaba SinVeredicto, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn juez_error_de_proveedor_no_reintenta_por_json() {
+        let c = caso();
+        let modelo = FalsoSecuencia::nueva(vec![Err("tiempo agotado".into())]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(
+            modelo.visto.borrow().len(),
+            1,
+            "el error de proveedor no se reintenta"
+        );
+        match &r.estado {
+            EstadoJuez::SinVeredicto(causa) => {
+                assert!(causa.starts_with("el modelo falló"), "{causa}");
+            }
+            otro => panic!("esperaba SinVeredicto, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn juez_truncada_no_reintenta_por_json() {
+        let c = caso();
+        let modelo = Falso::truncada_con("{\"items\": [".into());
+        let r = juzgar(&c.entrada(), &modelo, MODELO, &LimitesPrompt::default());
+        assert_eq!(
+            modelo.visto.borrow().len(),
+            1,
+            "la truncada no se reintenta por JSON"
+        );
+        assert_eq!(
+            r.estado,
+            EstadoJuez::SinVeredicto("tope de salida alcanzado (32000 tokens)".into())
+        );
+    }
+
+    #[test]
+    fn huella_del_juez_no_cambia_con_el_reintento() {
+        assert_eq!(huella_del_prompt(), "9263145aa4df4c7a");
+        assert_eq!(
+            crate::oracle::calibra::huella_de(Dimension::Diseno),
+            "19b81dea4119d429"
+        );
+        assert_eq!(
+            crate::oracle::calibra::huella_de(Dimension::Arquitectura),
+            "60c5fb9b0d576398"
+        );
     }
 
     // Reintento: un solo por juicio, solo para los ids rotos o sin gate.

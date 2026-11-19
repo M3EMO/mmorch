@@ -27,10 +27,13 @@ pub enum Defecto {
     DockerfileRoot,
     ComportamientoRoto,
     CuerpoVaciado,
+    EstadoGlobal,
+    EfectoEnNucleo,
+    LastreDeMemoria,
 }
 
 /// Todos los defectos, en el orden de `Defecto`.
-pub const TODOS: [Defecto; 11] = [
+pub const TODOS: [Defecto; 14] = [
     Defecto::SecretoEnCodigo,
     Defecto::PanicoEnEntrada,
     Defecto::BucleCuadratico,
@@ -42,6 +45,9 @@ pub const TODOS: [Defecto; 11] = [
     Defecto::DockerfileRoot,
     Defecto::ComportamientoRoto,
     Defecto::CuerpoVaciado,
+    Defecto::EstadoGlobal,
+    Defecto::EfectoEnNucleo,
+    Defecto::LastreDeMemoria,
 ];
 
 impl Defecto {
@@ -58,6 +64,9 @@ impl Defecto {
             Defecto::DockerfileRoot => Dimension::Entrega,
             Defecto::ComportamientoRoto => Dimension::Funciona,
             Defecto::CuerpoVaciado => Dimension::Completitud,
+            Defecto::EstadoGlobal => Dimension::Diseno,
+            Defecto::EfectoEnNucleo => Dimension::Arquitectura,
+            Defecto::LastreDeMemoria => Dimension::Eficiencia,
         }
     }
 
@@ -75,6 +84,9 @@ impl Defecto {
             Defecto::DockerfileRoot => "entrega.contenedor",
             Defecto::ComportamientoRoto => "funciona.correccion",
             Defecto::CuerpoVaciado => "completitud.alcance",
+            Defecto::EstadoGlobal => "diseno.estado",
+            Defecto::EfectoEnNucleo => "arquitectura.adecuacion",
+            Defecto::LastreDeMemoria => "eficiencia.capacidad",
         }
     }
 }
@@ -181,6 +193,9 @@ impl Inyeccion {
             Defecto::PanicoEnEntrada
             | Defecto::BucleCuadratico
             | Defecto::ErrorTragado
+            | Defecto::EstadoGlobal
+            | Defecto::EfectoEnNucleo
+            | Defecto::LastreDeMemoria
             | Defecto::CuerpoVaciado => {
                 identidad_de_lugar(self.defecto, &self.archivo, self.linea, "")
             }
@@ -206,11 +221,13 @@ pub struct Contexto<'a> {
     /// Rangos de líneas del cambio (1-based, inclusivos) por ruta relativa. `None`: la tarea no trae `bootstrap/`.
     pub cambios: Option<&'a Rangos>,
     /// Carpeta del estado inicial (`bootstrap/`). `Some`: `ComportamientoRoto` cambia también operadores y condiciones,
-    /// `CuerpoVaciado` vacía solo funciones que ya existían, y `ModuloBorrado` no aplica.
-    /// `None`: `CuerpoVaciado` elige cualquier función de producción.
+    /// `CuerpoVaciado` vacía solo funciones que ya existían, y `ModuloBorrado` no aplica. `None`: `CuerpoVaciado`
+    /// elige cualquier función de producción.
     pub inicial: Option<&'a Path>,
     /// Identidades que la elección no puede tomar: las ya usadas y las inválidas. Vacío: no excluye nada.
     pub excluidos: &'a Excluidos,
+    /// Funciones que la sonda de lastre vio correr (Tarea 137). `LastreDeMemoria` solo elige entre ellas. Vacía: no aplica.
+    pub corridas: &'a [(String, String)],
 }
 
 /// Aplica `defecto` a la copia de repo Rust en `dir`. `capas` son las de `[arquitectura]` de la tarea.
@@ -231,6 +248,7 @@ pub fn inyectar(
         cambios: None,
         inicial: None,
         excluidos: &BTreeSet::new(),
+        corridas: &[],
     };
     inyectar_con(defecto, dir, &contexto, semilla)
 }
@@ -277,6 +295,11 @@ pub fn inyectar_con(
                     (archivo, linea)
                 },
             )
+        }
+        Defecto::EstadoGlobal => estado_global(dir, &mut rng, contexto.cambios, ex)?,
+        Defecto::EfectoEnNucleo => efecto_en_nucleo(dir, &mut rng, contexto.cambios, ex)?,
+        Defecto::LastreDeMemoria => {
+            lastre_de_memoria(dir, &mut rng, contexto.cambios, contexto.corridas, ex)?
         }
     };
     // Con `cambios`, un defecto de línea o de módulo solo cae dentro del cambio: toda elección lo está.
@@ -379,15 +402,15 @@ impl Prng {
 }
 
 /// Partes de un texto por `\n`. Unirlas de nuevo con `unir` da el texto original, con su último salto.
-fn partir(texto: &str) -> Vec<String> {
+pub(super) fn partir(texto: &str) -> Vec<String> {
     texto.split('\n').map(str::to_string).collect()
 }
 
-fn unir(lineas: &[String]) -> String {
+pub(super) fn unir(lineas: &[String]) -> String {
     lineas.join("\n")
 }
 
-fn leer(dir: &Path, relativa: &str) -> io::Result<String> {
+pub(super) fn leer(dir: &Path, relativa: &str) -> io::Result<String> {
     fs::read_to_string(dir.join(relativa))
 }
 
@@ -404,7 +427,7 @@ fn linea_de(texto: &str, patron: &str) -> u32 {
 }
 
 /// Líneas de producción: las de antes del primer `#[cfg(test)]`. El resto es de tests.
-fn limite_de_produccion(lineas: &[String]) -> usize {
+pub(super) fn limite_de_produccion(lineas: &[String]) -> usize {
     lineas
         .iter()
         .position(|l| l.trim() == "#[cfg(test)]")
@@ -523,7 +546,7 @@ const BUCLE: &str =
 /// Nombre de la función que declara `linea` (`pub fn procesar(` da `procesar`). `None` si no declara una.
 /// Acepta visibilidad (`pub`, `pub(crate)`, `pub(super)`) y los calificadores `const`, `async` y `unsafe`,
 /// en cualquier orden.
-fn nombre_de_funcion(linea: &str) -> Option<&str> {
+pub(super) fn nombre_de_funcion(linea: &str) -> Option<&str> {
     let mut t = linea.trim_start();
     if let Some(resto) = ["pub(crate) ", "pub(super) ", "pub "]
         .iter()
@@ -795,18 +818,18 @@ fn modulo_borrado(
 /// Un cuerpo de función en un archivo: la línea de la firma, la de la `{` de apertura y la de la `}` de cierre
 /// (0-based), con la posición de cada llave en su línea. Las posiciones son bytes de la línea original.
 #[derive(Debug, Clone, Copy)]
-struct Cuerpo {
-    firma: usize,
-    abre: usize,
-    abre_pos: usize,
-    cierra: usize,
-    cierra_pos: usize,
+pub(super) struct Cuerpo {
+    pub(super) firma: usize,
+    pub(super) abre: usize,
+    pub(super) abre_pos: usize,
+    pub(super) cierra: usize,
+    pub(super) cierra_pos: usize,
 }
 
 /// Cuerpo de la función que declara la línea `firma`. La firma puede ocupar varias líneas: el cuerpo empieza en la
 /// primera `{` fuera de paréntesis y corchetes. `None` si la firma termina en `;` (declaración), si no cierra, o si
 /// abre y cierra en la misma línea. `limpias` es el archivo entero de `limpias_de`: sin comentarios ni cadenas.
-fn cuerpo_de(limpias: &[String], firma: usize) -> Option<Cuerpo> {
+pub(super) fn cuerpo_de(limpias: &[String], firma: usize) -> Option<Cuerpo> {
     let mut nivel = 0i32;
     let mut apertura = None;
     'firma: for (j, limpia) in limpias.iter().enumerate().skip(firma) {
@@ -865,6 +888,16 @@ fn declara_fn(texto: &str, nombre: &str) -> bool {
         .any(|l| l.contains(&format!("fn {nombre}(")) || l.contains(&format!("fn {nombre}<")))
 }
 
+/// Texto de `archivo` en el estado inicial. `None` sin estado inicial. Vacío si el archivo no existe allí,
+/// así que ninguna función de ese archivo es vieja.
+fn texto_inicial(inicial: Option<&Path>, archivo: &str) -> io::Result<Option<String>> {
+    Ok(match inicial {
+        Some(inicial) if inicial.join(archivo).is_file() => Some(leer(inicial, archivo)?),
+        Some(_) => Some(String::new()),
+        None => None,
+    })
+}
+
 /// Vacía el cuerpo de una función de producción. El cuerpo queda en `todo!()`, con la firma intacta.
 /// Con `inicial`, solo elige funciones que ya existían en el estado inicial y que el cambio tocó.
 /// Sin `inicial`, elige cualquier función de producción con la semilla. Devuelve el lugar y si la elegida
@@ -880,11 +913,7 @@ fn cuerpo_vaciado(
     let mut candidatos: Vec<(String, Cuerpo, bool)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
-        let previo = match inicial {
-            Some(inicial) if inicial.join(&archivo).is_file() => Some(leer(inicial, &archivo)?),
-            Some(_) => Some(String::new()),
-            None => None,
-        };
+        let previo = texto_inicial(inicial, &archivo)?;
         let limpias = limpias_de(&lineas);
         let limite = limite_de_produccion(&lineas);
         for firma in 0..limite {
@@ -1000,6 +1029,206 @@ fn error_tragado(dir: &Path, rng: &mut Prng, excluidos: &Excluidos) -> io::Resul
     lineas[i] = format!("{sangria}let _ = {expr};");
     escribir(dir, &archivo, &unir(&lineas))?;
     Ok(Some((archivo, i as u32 + 1)))
+}
+
+/// Nombre del contador de `EstadoGlobal` en un archivo que no lo usa.
+const NOMBRE_CONTADOR: &str = "ROOT_CONTADOR_CALIBRACION";
+
+/// `NOMBRE_CONTADOR`, o el primero con sufijo `_2`, `_3`, ... que el texto no contenga.
+fn nombre_libre(texto: &str) -> String {
+    std::iter::once(NOMBRE_CONTADOR.to_string())
+        .chain((2..).map(|n| format!("{NOMBRE_CONTADOR}_{n}")))
+        .find(|n| !texto.contains(n.as_str()))
+        .expect("siempre hay un sufijo libre")
+}
+
+/// `true` si la línea declara un `mod x {` en línea: el módulo abre su bloque en la misma línea.
+fn es_mod_en_linea(limpia: &str) -> bool {
+    limpia.split_whitespace().any(|p| p == "mod") && limpia.trim_end().ends_with('{')
+}
+
+/// `true` si la función de la línea `firma` no es `const fn` ni `unsafe fn`, y no es de test: sin `#[test]`
+/// ni `#[cfg(test)]` entre los atributos que la preceden.
+pub(super) fn es_fn_normal(lineas: &[String], firma: usize) -> bool {
+    let antes_de_fn = lineas[firma].split("fn ").next().unwrap_or("");
+    let calificada = antes_de_fn
+        .split_whitespace()
+        .any(|p| p == "const" || p == "unsafe");
+    let de_test = lineas[..firma]
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .take_while(|t| t.starts_with("#[") || t.starts_with("///"))
+        .any(|t| t.starts_with("#[") && t.contains("test"));
+    !calificada && !de_test
+}
+
+/// Funciones de producción donde `EstadoGlobal`, `EfectoEnNucleo` y `LastreDeMemoria` ponen su línea: `(archivo, cuerpo)`.
+/// Solo archivos que toca el cambio (`archivo_tocado`). Una función es candidata si su cuerpo cierra dentro de la
+/// producción, si su `{` de apertura termina la línea y si `es_fn_normal`. `cuerpo_de` ya descarta el cuerpo de una sola línea.
+/// Límites: no detecta una función dentro de un bloque `unsafe { }`. Un archivo con `mod x {` en línea se salta
+/// entero: el static va en la raíz del archivo y no se ve desde un módulo anidado.
+fn funciones_de_efecto(dir: &Path, cambios: Option<&Rangos>) -> io::Result<Vec<(String, Cuerpo)>> {
+    let mut salida = Vec::new();
+    for archivo in rust_en(dir, "src")? {
+        if !archivo_tocado(cambios, &archivo) {
+            continue;
+        }
+        let lineas = partir(&leer(dir, &archivo)?);
+        let limpias = limpias_de(&lineas);
+        let limite = limite_de_produccion(&lineas);
+        if limpias[..limite].iter().any(|l| es_mod_en_linea(l)) {
+            continue;
+        }
+        for firma in 0..limite {
+            if nombre_de_funcion(&lineas[firma]).is_none() || !es_fn_normal(&lineas, firma) {
+                continue;
+            }
+            let Some(cuerpo) = cuerpo_de(&limpias, firma).filter(|c| c.cierra < limite) else {
+                continue;
+            };
+            if lineas[cuerpo.abre].trim_end().ends_with('{') {
+                salida.push((archivo.clone(), cuerpo));
+            }
+        }
+    }
+    Ok(salida)
+}
+
+/// Agrega un contador atómico global y lo incrementa al inicio de una función de producción: estado global mutable.
+/// La línea reportada es la del incremento, `abre + 2` (1-based), justo debajo de la `{`.
+fn estado_global(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
+    let candidatos = funciones_de_efecto(dir, cambios)?;
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, c)| {
+        identidad_de_lugar(Defecto::EstadoGlobal, a, c.abre as u32 + 2, "")
+    });
+    let Some((archivo, cuerpo)) = libre else {
+        return Ok(None);
+    };
+    let texto = leer(dir, &archivo)?;
+    let nombre = nombre_libre(&texto);
+    // Primero la línea del incremento, después el static: el static va tras la función, no la mueve.
+    let mut lineas = partir(&texto);
+    let sangria: String = lineas[cuerpo.firma]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    lineas.insert(
+        cuerpo.abre + 1,
+        format!(
+            "{sangria}    let _ = {nombre}.fetch_add(1, std::sync::atomic::Ordering::Relaxed);"
+        ),
+    );
+    let estatica = format!(
+        "static {nombre}: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);"
+    );
+    escribir(
+        dir,
+        &archivo,
+        &insertar_antes_de_tests(&unir(&lineas), &[estatica]),
+    )?;
+    Ok(Some((archivo, cuerpo.abre as u32 + 2)))
+}
+
+/// Agrega una lectura del entorno al inicio de una función de producción del cambio: un efecto de lado en el
+/// núcleo. La línea reportada es la de la lectura, `abre + 2` (1-based), justo debajo de la `{`.
+fn efecto_en_nucleo(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
+    let candidatos = funciones_de_efecto(dir, cambios)?;
+    let libre = rng.elegir_libre(&candidatos, excluidos, |(a, c)| {
+        identidad_de_lugar(Defecto::EfectoEnNucleo, a, c.abre as u32 + 2, "")
+    });
+    let Some((archivo, cuerpo)) = libre else {
+        return Ok(None);
+    };
+    let mut lineas = partir(&leer(dir, &archivo)?);
+    let sangria: String = lineas[cuerpo.firma]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    lineas.insert(
+        cuerpo.abre + 1,
+        format!("{sangria}    let _ = std::env::var(\"ROOT_EFECTO\");"),
+    );
+    escribir(dir, &archivo, &unir(&lineas))?;
+    Ok(Some((archivo, cuerpo.abre as u32 + 2)))
+}
+
+/// Bytes que `LastreDeMemoria` reserva en cada llamada. 64 MB más sobre los 42 MB de pico de s2-t1 dan una
+/// razón cercana a 2,5, que pasa el umbral 1,5 (`UMBRAL_NO_LISTO`).
+const LASTRE_BYTES: usize = 64 << 20;
+/// Texto de `LASTRE_BYTES` en el código inyectado. Debe decir lo mismo que la constante.
+const LASTRE_TEXTO: &str = "64 << 20";
+// Si la constante cambia, el texto inyectado cambia con ella: el compilador avisa si no coinciden.
+const _: () = assert!(LASTRE_BYTES == 64 << 20);
+
+/// Agrega una reserva de memoria que el compilador no puede quitar, al inicio de una función de producción del
+/// cambio: lastre de memoria. La línea reportada es la de la reserva, `abre + 2` (1-based), justo debajo de la `{`.
+/// Elige solo funciones que la sonda de lastre vio correr (`corridas`), por archivo y nombre. Primero una del cambio;
+/// si no queda ninguna libre, una de cualquier archivo de producción. Sin `corridas` no aplica: no toca el repo.
+fn lastre_de_memoria(
+    dir: &Path,
+    rng: &mut Prng,
+    cambios: Option<&Rangos>,
+    corridas: &[(String, String)],
+    excluidos: &Excluidos,
+) -> io::Result<Lugar> {
+    if corridas.is_empty() {
+        return Ok(None);
+    }
+    let identidad = |(a, c): &(String, Cuerpo)| {
+        identidad_de_lugar(Defecto::LastreDeMemoria, a, c.abre as u32 + 2, "")
+    };
+    let candidatos = funciones_de_efecto(dir, cambios)?;
+    let mut candidatos = en_corridas(dir, candidatos, corridas)?;
+    let mut libre = rng.elegir_libre(&candidatos, excluidos, identidad);
+    if libre.is_none() && cambios.is_some() {
+        let todas = funciones_de_efecto(dir, None)?;
+        candidatos = en_corridas(dir, todas, corridas)?;
+        libre = rng.elegir_libre(&candidatos, excluidos, identidad);
+    }
+    let Some((archivo, cuerpo)) = libre else {
+        return Ok(None);
+    };
+    let mut lineas = partir(&leer(dir, &archivo)?);
+    let sangria: String = lineas[cuerpo.firma]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    lineas.insert(
+        cuerpo.abre + 1,
+        format!("{sangria}    let _lastre = std::hint::black_box(vec![1u8; {LASTRE_TEXTO}]);"),
+    );
+    escribir(dir, &archivo, &unir(&lineas))?;
+    Ok(Some((archivo, cuerpo.abre as u32 + 2)))
+}
+
+/// Candidatas cuyo archivo y nombre están en `corridas`. El nombre sale de la línea de la firma de cada una.
+fn en_corridas(
+    dir: &Path,
+    candidatas: Vec<(String, Cuerpo)>,
+    corridas: &[(String, String)],
+) -> io::Result<Vec<(String, Cuerpo)>> {
+    let mut salida = Vec::new();
+    for (archivo, cuerpo) in candidatas {
+        let lineas = partir(&leer(dir, &archivo)?);
+        let Some(nombre) = nombre_de_funcion(&lineas[cuerpo.firma]) else {
+            continue;
+        };
+        if corridas.iter().any(|(a, n)| *a == archivo && n == nombre) {
+            salida.push((archivo, cuerpo));
+        }
+    }
+    Ok(salida)
 }
 
 /// Lo que `AssertBorrado` apagó: el lugar del primer `#[ignore]` y el mutante elegido.
@@ -1313,7 +1542,7 @@ fn es_parte_de_palabra(c: char) -> bool {
 
 /// Texto limpio de cada línea del archivo, en el mismo orden.
 /// `analizar` recuerda el estado entre líneas. Un comentario o una cadena que cruza líneas queda en blanco.
-fn limpias_de(lineas: &[String]) -> Vec<String> {
+pub(super) fn limpias_de(lineas: &[String]) -> Vec<String> {
     analizar(lineas)
         .into_iter()
         .map(|l| sin_caracteres(&l.limpia))
@@ -1971,6 +2200,7 @@ mod tests {
                 muertos: &[],
                 inicial: None,
                 excluidos: &BTreeSet::new(),
+                corridas: &[],
                 cambios: None,
             };
             let inyeccion = inyectar_con(Defecto::ArchivoDios, dir.path(), &contexto, 42)
@@ -2132,6 +2362,7 @@ mod tests {
             limites: &limites,
             inicial: None,
             excluidos: &BTreeSet::new(),
+            corridas: &[],
             muertos,
             cambios: None,
         };
@@ -2196,6 +2427,7 @@ mod tests {
             camino_caliente: &[],
             inicial: None,
             excluidos: &BTreeSet::new(),
+            corridas: &[],
             limites: &limites,
             muertos: &[muerto_de_leer_numero()],
             cambios: None,
@@ -2506,6 +2738,7 @@ mod tests {
             cambios: None,
             inicial,
             excluidos,
+            corridas: &[],
         }
     }
 
@@ -2764,6 +2997,7 @@ mod tests {
             capas: &capas,
             inicial: None,
             excluidos: &BTreeSet::new(),
+            corridas: &[],
             camino_caliente: camino,
             limites: &limites,
             muertos: &[],
@@ -3118,6 +3352,7 @@ pub fn dos(x: u32) -> bool {
         let contexto = Contexto {
             inicial: None,
             excluidos: &BTreeSet::new(),
+            corridas: &[],
             capas: &capas,
             camino_caliente: &[],
             limites: &limites,
@@ -3263,6 +3498,7 @@ pub fn dos(x: u32) -> bool {
             cambios: Some(cambios),
             inicial: Some(inicial),
             excluidos: &BTreeSet::new(),
+            corridas: &[],
         };
         inyectar_con(Defecto::ComportamientoRoto, dir, &contexto, semilla)
     }
@@ -3427,6 +3663,7 @@ pub fn dos(x: u32) -> bool {
             cambios: Some(cambios),
             inicial: Some(inicial),
             excluidos,
+            corridas: &[],
         };
         inyectar_con(Defecto::ComportamientoRoto, dir, &contexto, semilla)
     }
@@ -3629,6 +3866,7 @@ pub fn dos(x: u32) -> bool {
             cambios: Some(cambios),
             inicial: Some(inicial),
             excluidos: &BTreeSet::new(),
+            corridas: &[],
         };
         inyectar_con(defecto, dir, &contexto, semilla)
     }
@@ -3854,6 +4092,478 @@ pub fn dos(x: u32) -> bool {
             if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
                 panic!("semilla {semilla}: la copia con {inyeccion:?} no compila:\n{stderr}");
             }
+        }
+    }
+
+    const LINEA_CONTADOR: &str =
+        "    let _ = ROOT_CONTADOR_CALIBRACION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);";
+
+    /// Repo con `src/a.rs` (dos funciones de producción y un test) y `src/b.rs` (una función).
+    fn repo_con_a_y_b() -> tempfile::TempDir {
+        repo_de(&[
+            (
+                "src/a.rs",
+                "pub fn uno(x: u32) -> u32 {\n    x + 1\n}\n\nfn dos(x: u32) -> u32 {\n    x * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(super::uno(1), 2);\n    }\n}\n",
+            ),
+            ("src/b.rs", "pub fn tres(x: u32) -> u32 {\n    x - 1\n}\n"),
+        ])
+    }
+
+    #[test]
+    fn estado_global_pone_el_contador_en_una_funcion_del_cambio() {
+        let dir = repo_con_a_y_b();
+        let b_antes = leer(dir.path(), "src/b.rs").expect("lee b");
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let inyeccion = con_cambios(Defecto::EstadoGlobal, dir.path(), Some(&cambios), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.archivo, "src/a.rs");
+        let a = leer(dir.path(), "src/a.rs").expect("lee a");
+        let lineas: Vec<&str> = a.lines().collect();
+        let i = inyeccion.linea as usize - 1;
+        assert_eq!(lineas[i], LINEA_CONTADOR, "{a}");
+        assert!(
+            lineas[i - 1].ends_with('{'),
+            "no va dentro de una función: {a}"
+        );
+        let estatica = lineas
+            .iter()
+            .position(|l| l.starts_with("static ROOT_CONTADOR_CALIBRACION"))
+            .expect("el static queda en el archivo");
+        assert!(estatica > i, "el static va después de la función: {a}");
+        assert_eq!(leer(dir.path(), "src/b.rs").expect("lee b"), b_antes);
+    }
+
+    #[test]
+    fn estado_global_la_copia_del_fixture_compila() {
+        let dir = copia_fixture();
+        inyectar(Defecto::EstadoGlobal, dir.path(), &capas_fixture(), 42)
+            .expect("E/S")
+            .expect("aplica");
+        let objetivo = tempfile::tempdir().expect("temporal");
+        if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
+            panic!("la copia del fixture no compila:\n{stderr}");
+        }
+    }
+
+    #[test]
+    fn estado_global_es_de_diseno_con_su_item() {
+        assert_eq!(Defecto::EstadoGlobal.dimension(), Dimension::Diseno);
+        assert_eq!(Defecto::EstadoGlobal.item(), "diseno.estado");
+        assert_eq!(
+            de_dimension(Dimension::Diseno),
+            vec![Defecto::ErrorTragado, Defecto::EstadoGlobal]
+        );
+        assert_eq!(TODOS.len(), 14);
+    }
+
+    #[test]
+    fn estado_global_no_elige_const_fn_ni_unsafe_fn_ni_tests() {
+        let codigo = "pub const fn c() -> u32 {\n    1\n}\n\npub unsafe fn u() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(1, 1);\n    }\n}\n";
+        let dir = repo_con_lib(codigo);
+        for semilla in 1..=20u64 {
+            let r = inyectar(Defecto::EstadoGlobal, dir.path(), &capas_fixture(), semilla)
+                .expect("E/S");
+            assert!(r.is_none(), "semilla {semilla}: {r:?}");
+        }
+        assert_eq!(leer(dir.path(), "src/lib.rs").expect("lee"), codigo);
+    }
+
+    #[test]
+    fn estado_global_elige_la_fn_normal_y_no_la_const() {
+        let dir =
+            repo_con_lib("pub const fn c() -> u32 {\n    1\n}\n\npub fn n() -> u32 {\n    2\n}\n");
+        let inyeccion = inyectar(Defecto::EstadoGlobal, dir.path(), &capas_fixture(), 7)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.linea, 6);
+        let nuevo = leer(dir.path(), "src/lib.rs").expect("lee");
+        assert!(
+            nuevo.contains("pub fn n() -> u32 {\n    let _ = ROOT_CONTADOR_CALIBRACION.fetch_add"),
+            "{nuevo}"
+        );
+    }
+
+    #[test]
+    fn estado_global_no_elige_archivo_con_mod_en_linea() {
+        let codigo = "pub mod interno {\n    pub fn f() -> u32 {\n        1\n    }\n}\n";
+        let dir = repo_con_lib(codigo);
+        for semilla in 1..=10u64 {
+            let r = inyectar(Defecto::EstadoGlobal, dir.path(), &capas_fixture(), semilla)
+                .expect("E/S");
+            assert!(r.is_none(), "semilla {semilla}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn estado_global_misma_semilla_mismo_lugar_y_nombre_libre_con_sufijo() {
+        let dir1 = repo_con_a_y_b();
+        let dir2 = repo_con_a_y_b();
+        let uno = inyectar(Defecto::EstadoGlobal, dir1.path(), &capas_fixture(), 9)
+            .expect("E/S")
+            .expect("aplica");
+        let otro = inyectar(Defecto::EstadoGlobal, dir2.path(), &capas_fixture(), 9)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(uno, otro);
+        assert_eq!(arbol(dir1.path()), arbol(dir2.path()));
+
+        let con_nombre = repo_de(&[(
+            "src/lib.rs",
+            "// ROOT_CONTADOR_CALIBRACION ya usado aquí\npub fn uno() -> u32 {\n    1\n}\n",
+        )]);
+        inyectar(
+            Defecto::EstadoGlobal,
+            con_nombre.path(),
+            &capas_fixture(),
+            9,
+        )
+        .expect("E/S")
+        .expect("aplica");
+        let nuevo = leer(con_nombre.path(), "src/lib.rs").expect("lee");
+        assert!(
+            nuevo.contains("static ROOT_CONTADOR_CALIBRACION_2: std::sync::atomic::AtomicUsize"),
+            "{nuevo}"
+        );
+        assert!(
+            nuevo.contains(
+                "    let _ = ROOT_CONTADOR_CALIBRACION_2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);"
+            ),
+            "{nuevo}"
+        );
+    }
+
+    const LINEA_EFECTO: &str = "    let _ = std::env::var(\"ROOT_EFECTO\");";
+
+    #[test]
+    fn efecto_en_nucleo_pone_la_linea_en_una_funcion_del_cambio() {
+        let dir = repo_con_a_y_b();
+        let b_antes = leer(dir.path(), "src/b.rs").expect("lee b");
+        let a_antes = leer(dir.path(), "src/a.rs").expect("lee a");
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let inyeccion = con_cambios(Defecto::EfectoEnNucleo, dir.path(), Some(&cambios), 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.defecto, Defecto::EfectoEnNucleo);
+        assert_eq!(inyeccion.archivo, "src/a.rs");
+        assert!(!inyeccion.en_cambio, "{inyeccion:?}");
+        let a = leer(dir.path(), "src/a.rs").expect("lee a");
+        let lineas: Vec<&str> = a.lines().collect();
+        let i = inyeccion.linea as usize - 1;
+        assert_eq!(lineas[i], LINEA_EFECTO, "{a}");
+        assert!(
+            lineas[i - 1].ends_with('{'),
+            "no va dentro de una función: {a}"
+        );
+        let sin_la_linea: Vec<&str> = lineas
+            .iter()
+            .enumerate()
+            .filter(|(n, _)| *n != i)
+            .map(|(_, l)| *l)
+            .collect();
+        let original: Vec<&str> = a_antes.lines().collect();
+        assert_eq!(sin_la_linea, original, "el resto del archivo cambia: {a}");
+        assert_eq!(leer(dir.path(), "src/b.rs").expect("lee b"), b_antes);
+    }
+
+    #[test]
+    fn efecto_en_nucleo_la_copia_del_fixture_compila() {
+        let dir = copia_fixture();
+        inyectar(Defecto::EfectoEnNucleo, dir.path(), &capas_fixture(), 42)
+            .expect("E/S")
+            .expect("aplica");
+        let objetivo = tempfile::tempdir().expect("temporal");
+        if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
+            panic!("la copia del fixture no compila:\n{stderr}");
+        }
+    }
+
+    #[test]
+    fn efecto_en_nucleo_es_de_arquitectura_con_su_item() {
+        assert_eq!(Defecto::EfectoEnNucleo.dimension(), Dimension::Arquitectura);
+        assert_eq!(Defecto::EfectoEnNucleo.item(), "arquitectura.adecuacion");
+        assert_eq!(
+            de_dimension(Dimension::Arquitectura),
+            vec![Defecto::CicloEntreCapas, Defecto::EfectoEnNucleo]
+        );
+        assert_eq!(TODOS.len(), 14);
+    }
+
+    #[test]
+    fn efecto_en_nucleo_no_elige_const_fn_ni_tests() {
+        let codigo = "pub const fn c() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(1, 1);\n    }\n}\n";
+        let dir = repo_con_lib(codigo);
+        for semilla in 1..=20u64 {
+            let r = inyectar(
+                Defecto::EfectoEnNucleo,
+                dir.path(),
+                &capas_fixture(),
+                semilla,
+            )
+            .expect("E/S");
+            assert!(r.is_none(), "semilla {semilla}: {r:?}");
+        }
+        assert_eq!(leer(dir.path(), "src/lib.rs").expect("lee"), codigo);
+    }
+
+    /// Línea que deja `LastreDeMemoria`: con la sangría del cuerpo, justo debajo de la `{`.
+    const LINEA_LASTRE: &str = "    let _lastre = std::hint::black_box(vec![1u8; 64 << 20]);";
+    #[test]
+    fn lastre_de_memoria_es_de_eficiencia_con_su_item() {
+        assert_eq!(Defecto::LastreDeMemoria.dimension(), Dimension::Eficiencia);
+        assert_eq!(Defecto::LastreDeMemoria.item(), "eficiencia.capacidad");
+        assert_eq!(
+            de_dimension(Dimension::Eficiencia),
+            vec![Defecto::BucleCuadratico, Defecto::LastreDeMemoria]
+        );
+        assert_eq!(TODOS.len(), 14);
+    }
+
+    #[test]
+    fn lastre_de_memoria_no_elige_const_fn_ni_tests() {
+        let codigo = "pub const fn c() -> u32 {\n    1\n}\n\npub unsafe fn u() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(1, 1);\n    }\n}\n";
+        let dir = repo_con_lib(codigo);
+        let corridas = [
+            corrida("src/lib.rs", "c"),
+            corrida("src/lib.rs", "u"),
+            corrida("src/lib.rs", "t"),
+        ];
+        for semilla in 1..=20u64 {
+            let r = lastre_sin_inicial(dir.path(), None, &corridas, semilla).expect("E/S");
+            assert!(r.is_none(), "semilla {semilla}: {r:?}");
+        }
+        assert_eq!(leer(dir.path(), "src/lib.rs").expect("lee"), codigo);
+    }
+
+    #[test]
+    fn lastre_de_memoria_sin_cambios_cae_en_cualquier_funcion_de_produccion() {
+        let dir = repo_con_lib("pub fn f() -> u32 {\n    1\n}\n");
+        let corridas = [corrida("src/lib.rs", "f")];
+        let inyeccion = lastre_sin_inicial(dir.path(), None, &corridas, 7)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.linea, 2);
+        let nuevo = leer(dir.path(), "src/lib.rs").expect("lee");
+        assert!(
+            nuevo.contains(
+                "pub fn f() -> u32 {\n    let _lastre = std::hint::black_box(vec![1u8; 64 << 20]);"
+            ),
+            "{nuevo}"
+        );
+    }
+
+    /// Código de `src/a.rs` con una función vieja (`vieja`, en el estado inicial) y una nueva (`nueva`).
+    const CODIGO_A: &str = "pub fn vieja(x: u32) -> u32 {\n    x + 1\n}\n\npub fn nueva(x: u32) -> u32 {\n    x * 2\n}\n";
+
+    /// `src/a.rs` con `vieja` y `nueva`, las dos viejas, y el test viejo que llama solo a `vieja`.
+    const A_CON_DOS_VIEJAS: &str = "pub fn vieja(x: u32) -> u32 {\n    x + 1\n}\n\npub fn nueva(x: u32) -> u32 {\n    x * 2\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn llama_a_vieja() {\n        assert_eq!(vieja(1), 2);\n    }\n}\n";
+
+    /// `src/b.rs` con `tres` y su test viejo. Sirve de estado inicial y de repo.
+    const B_CON_TEST: &str = "pub fn tres(x: u32) -> u32 {\n    x - 1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn llama_a_tres() {\n        assert_eq!(tres(2), 1);\n    }\n}\n";
+    #[test]
+    fn lastre_de_memoria_sin_corridas_no_aplica_y_no_toca_el_repo() {
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        for semilla in 1..=5u64 {
+            let dir = repo_de(&[("src/a.rs", CODIGO_A)]);
+            let antes = arbol(dir.path());
+            let r = lastre_sin_inicial(dir.path(), Some(&cambios), &[], semilla).expect("E/S");
+            assert!(r.is_none(), "semilla {semilla}: {r:?}");
+            assert_eq!(arbol(dir.path()), antes, "semilla {semilla}");
+        }
+    }
+
+    #[test]
+    fn lastre_de_memoria_con_corridas_la_copia_compila() {
+        let cambios: BTreeMap<String, Vec<(u32, u32)>> =
+            ["src/almacen.rs", "src/comandos.rs", "src/protocolo.rs"]
+                .iter()
+                .map(|r| (r.to_string(), vec![(1, 100)]))
+                .collect();
+        let corridas = [
+            corrida("src/protocolo.rs", "leer_numero"),
+            corrida("src/comandos.rs", "ejecutar"),
+        ];
+        let objetivo = tempfile::tempdir().expect("temporal");
+        for semilla in 1..=8u64 {
+            let dir = copia_fixture();
+            let inicial = copia_fixture();
+            let inyeccion =
+                con_corridas_de(dir.path(), &cambios, inicial.path(), &corridas, semilla)
+                    .expect("E/S")
+                    .expect("aplica");
+            if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
+                panic!("semilla {semilla}: la copia con {inyeccion:?} no compila:\n{stderr}");
+            }
+        }
+    }
+
+    /// `inyectar_con` de `LastreDeMemoria` en `dir`, con `cambios`, el estado inicial `inicial` y `corridas`.
+    fn con_corridas_de(
+        dir: &Path,
+        cambios: &BTreeMap<String, Vec<(u32, u32)>>,
+        inicial: &Path,
+        corridas: &[(String, String)],
+        semilla: u64,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos: &[],
+            cambios: Some(cambios),
+            inicial: Some(inicial),
+            excluidos: &BTreeSet::new(),
+            corridas,
+        };
+        inyectar_con(Defecto::LastreDeMemoria, dir, &contexto, semilla)
+    }
+
+    /// `inyectar_con` de `LastreDeMemoria` en `dir`, con `cambios` y `corridas`, sin estado inicial.
+    fn lastre_sin_inicial(
+        dir: &Path,
+        cambios: Option<&BTreeMap<String, Vec<(u32, u32)>>>,
+        corridas: &[(String, String)],
+        semilla: u64,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos: &[],
+            cambios,
+            inicial: None,
+            excluidos: &BTreeSet::new(),
+            corridas,
+        };
+        inyectar_con(Defecto::LastreDeMemoria, dir, &contexto, semilla)
+    }
+
+    /// Par (archivo, nombre) de una función que corrió en la sonda de lastre.
+    fn corrida(archivo: &str, nombre: &str) -> (String, String) {
+        (archivo.to_string(), nombre.to_string())
+    }
+
+    /// `src/a.rs` con `vieja` (su test viejo la llama) y `corrio` (ningún test la llama).
+    const DOS_VIEJAS_UNA_LLAMADA: &str = "pub fn vieja(x: u32) -> u32 {\n    x + 1\n}\n\npub fn corrio(x: u32) -> u32 {\n    x * 3\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn llama_a_vieja() {\n        assert_eq!(vieja(1), 2);\n    }\n}\n";
+
+    #[test]
+    fn lastre_sonda_con_corridas_va_a_la_funcion_que_corrio() {
+        let inicial = repo_de(&[("src/a.rs", DOS_VIEJAS_UNA_LLAMADA)]);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let corridas = [corrida("src/a.rs", "corrio")];
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/a.rs", DOS_VIEJAS_UNA_LLAMADA)]);
+            let inyeccion =
+                con_corridas_de(dir.path(), &cambios, inicial.path(), &corridas, semilla)
+                    .expect("E/S")
+                    .expect("aplica");
+            assert_eq!(inyeccion.archivo, "src/a.rs", "semilla {semilla}");
+            let a = leer(dir.path(), "src/a.rs").expect("lee a");
+            let lineas: Vec<&str> = a.lines().collect();
+            let i = inyeccion.linea as usize - 1;
+            assert_eq!(lineas[i], LINEA_LASTRE, "semilla {semilla}: {a}");
+            assert_eq!(
+                lineas[i - 1],
+                "pub fn corrio(x: u32) -> u32 {",
+                "semilla {semilla}: el lastre no va en la que corrió: {a}"
+            );
+        }
+    }
+    #[test]
+    fn lastre_sonda_corridas_sin_funcion_en_el_repo_no_aplica() {
+        let inicial = repo_de(&[("src/a.rs", A_CON_DOS_VIEJAS)]);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let corridas = [corrida("src/a.rs", "fantasma")];
+        for semilla in 1..=5u64 {
+            let dir = repo_de(&[("src/a.rs", A_CON_DOS_VIEJAS)]);
+            let antes = arbol(dir.path());
+            let r = con_corridas_de(dir.path(), &cambios, inicial.path(), &corridas, semilla)
+                .expect("E/S");
+            assert!(r.is_none(), "semilla {semilla}: {r:?}");
+            assert_eq!(arbol(dir.path()), antes, "semilla {semilla}");
+        }
+    }
+
+    #[test]
+    fn lastre_sonda_gana_la_funcion_del_cambio_sobre_la_de_fuera() {
+        let estado = [
+            ("src/a.rs", DOS_VIEJAS_UNA_LLAMADA),
+            ("src/b.rs", B_CON_TEST),
+        ];
+        let inicial = repo_de(&estado);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let corridas = [corrida("src/a.rs", "corrio"), corrida("src/b.rs", "tres")];
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&estado);
+            let inyeccion =
+                con_corridas_de(dir.path(), &cambios, inicial.path(), &corridas, semilla)
+                    .expect("E/S")
+                    .expect("aplica");
+            assert_eq!(inyeccion.archivo, "src/a.rs", "semilla {semilla}");
+            let a = leer(dir.path(), "src/a.rs").expect("lee a");
+            let lineas: Vec<&str> = a.lines().collect();
+            let i = inyeccion.linea as usize - 1;
+            assert_eq!(
+                lineas[i - 1],
+                "pub fn corrio(x: u32) -> u32 {",
+                "semilla {semilla}: {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn lastre_sonda_si_solo_corrio_fuera_del_cambio_va_a_esa() {
+        let estado = [
+            ("src/a.rs", DOS_VIEJAS_UNA_LLAMADA),
+            ("src/b.rs", B_CON_TEST),
+        ];
+        let inicial = repo_de(&estado);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let corridas = [corrida("src/b.rs", "tres")];
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&estado);
+            let inyeccion =
+                con_corridas_de(dir.path(), &cambios, inicial.path(), &corridas, semilla)
+                    .expect("E/S")
+                    .expect("aplica");
+            assert_eq!(inyeccion.archivo, "src/b.rs", "semilla {semilla}");
+            let b = leer(dir.path(), "src/b.rs").expect("lee b");
+            assert!(
+                b.contains(&format!("pub fn tres(x: u32) -> u32 {{\n{LINEA_LASTRE}")),
+                "semilla {semilla}: {b}"
+            );
+        }
+    }
+
+    /// Tarea 143: con la lista de la sonda, una función nueva (que no existe en el estado inicial) que la
+    /// sonda vio correr es candidata. La lista dice qué corre en el repo; `inicial` no filtra más.
+    #[test]
+    fn lastre_sonda_funcion_nueva_que_corrio_es_candidata() {
+        let con_nueva = DOS_VIEJAS_UNA_LLAMADA.replace(
+            "#[cfg(test)]",
+            "pub fn nueva(x: u32) -> u32 {\n    x + 7\n}\n\n#[cfg(test)]",
+        );
+        let inicial = repo_de(&[("src/a.rs", DOS_VIEJAS_UNA_LLAMADA)]);
+        let cambios = rangos_de("src/a.rs", &[(1, 100)]);
+        let corridas = [corrida("src/a.rs", "nueva")];
+        for semilla in 1..=20u64 {
+            let dir = repo_de(&[("src/a.rs", con_nueva.as_str())]);
+            let inyeccion =
+                con_corridas_de(dir.path(), &cambios, inicial.path(), &corridas, semilla)
+                    .expect("E/S")
+                    .expect("aplica");
+            let a = leer(dir.path(), "src/a.rs").expect("lee a");
+            let lineas: Vec<&str> = a.lines().collect();
+            let i = inyeccion.linea as usize - 1;
+            assert_eq!(
+                lineas[i - 1],
+                "pub fn nueva(x: u32) -> u32 {",
+                "semilla {semilla}: {a}"
+            );
         }
     }
 }

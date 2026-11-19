@@ -10,6 +10,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use root::corre::dir_corridas;
 use root::goal::calcular_hash;
 
+#[path = "comun/ejecutable.rs"]
+mod ejecutable;
+use ejecutable::escribir_ejecutable;
+
 const GOAL: &str = "# GOAL de prueba\n\nContenido de fixture.\n";
 
 /// Un repo de Root, un `$HOME` y un `ROOT_HOME` de prueba, con la tarea `memo` y la config `ecc-test`.
@@ -230,19 +234,17 @@ fn credencial_falsa(usuario: &Path) {
 }
 
 /// `podman` falso: `ps` no imprime nada y cualquier otro comando anota su pid en `bin/hijo.pid` y duerme 30 s.
+/// `escribir_ejecutable` lo escribe con permisos y lo prueba: la sentinela sale antes del cuerpo.
+/// Original: `src/limpieza.rs::podman_falso`.
 fn podman_falso(bin: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     fs::create_dir_all(bin).expect("bin");
-    let ruta = bin.join("podman");
-    fs::write(
-        &ruta,
-        format!(
+    escribir_ejecutable(
+        &bin.join("podman"),
+        &format!(
             "#!/bin/sh\nif [ \"$1\" = ps ]; then exit 0; fi\necho $$ > '{}'\nexec sleep 30\n",
             bin.join("hijo.pid").display()
         ),
-    )
-    .expect("podman falso");
-    fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+    );
 }
 
 /// Copias `.credentials.json` que hay bajo las carpetas de corridas de `usuario`.

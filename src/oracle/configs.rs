@@ -406,10 +406,19 @@ fn contenido_de(crudo: &str) -> String {
 
 /// Verdadero si el valor es un literal que parece un secreto. Vacío, referencia, plantilla,
 /// placeholder, `null` de YAML, o número y booleano sin comillas dan falso.
+/// Un permiso de GitHub Actions da falso: `read`, `write`, `none`, `read-all` o `write-all`.
+/// Cuenta sin importar mayúsculas o comillas. Un valor con forma de token sí cuenta.
 fn es_literal_secreto(crudo: &str) -> bool {
     let valor = contenido_de(crudo);
     let minuscula = valor.to_lowercase();
     if valor.is_empty() || matches!(minuscula.as_str(), "~" | "null") {
+        return false;
+    }
+    // Permisos de GitHub Actions, como `id-token: write`. No son secretos.
+    if matches!(
+        minuscula.as_str(),
+        "read" | "write" | "none" | "read-all" | "write-all"
+    ) {
         return false;
     }
     // Sin comillas, un número o un booleano no es secreto. Entre comillas, sí cuenta.
@@ -1106,6 +1115,59 @@ mod tests {
         assert_eq!(r.hallazgos.len(), 1);
         assert!(!serializado(&r).contains("hunter2-valor-secreto"));
         assert!(!r.hallazgos[0].detalle.contains("hunter2"));
+    }
+
+    #[test]
+    fn configs_secretos_id_token_write_en_permissions_no_cuenta() {
+        let texto = "permissions:\n  id-token: write\n";
+        let repo = repo_con(".github/workflows/ci.yml", texto);
+        let r = sonda_secretos_configs(repo.path(), &[]);
+        assert!(r.hallazgos.is_empty(), "sobran: {:?}", r.hallazgos);
+    }
+
+    #[test]
+    fn configs_secretos_valores_de_permiso_no_cuentan_sin_importar_forma() {
+        let casos = [
+            "contents: read",
+            "packages: none",
+            "id-token: read",
+            "id-token: WRITE",
+            "id-token: \"read\"",
+            "id-token: 'Write'",
+            "id-token: none",
+            "id-token: \"Read-All\"",
+            "id-token: write-all",
+            "id-token: 'WRITE-ALL'",
+        ];
+        for linea in casos {
+            let texto = format!("permissions:\n  {linea}\n");
+            let repo = repo_con("ci.yml", &texto);
+            let r = sonda_secretos_configs(repo.path(), &[]);
+            assert!(r.hallazgos.is_empty(), "{linea}: {:?}", r.hallazgos);
+        }
+    }
+
+    #[test]
+    fn configs_secretos_valor_con_forma_de_token_sigue_contando_en_id_token() {
+        let repo = repo_con(
+            ".github/workflows/ci.yml",
+            "permissions:\n  id-token: \"ghp_1234567890abcdef\"\n",
+        );
+        let r = sonda_secretos_configs(repo.path(), &[]);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert!(!serializado(&r).contains("ghp_1234567890abcdef"));
+    }
+
+    #[test]
+    fn configs_secretos_toml_token_permiso_no_cuenta_y_token_real_si() {
+        let repo = repo_con("a.toml", "token = \"write\"\n");
+        let r = sonda_secretos_configs(repo.path(), &[]);
+        assert!(r.hallazgos.is_empty(), "sobran: {:?}", r.hallazgos);
+
+        let repo = repo_con("a.toml", "token = \"ghp_1234567890abcdef\"\n");
+        let r = sonda_secretos_configs(repo.path(), &[]);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert!(!serializado(&r).contains("ghp_1234567890abcdef"));
     }
 
     #[test]

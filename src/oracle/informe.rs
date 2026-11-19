@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use super::ErrorOraculo;
+use super::calibra::es_motivo_inestable;
+use super::eficiencia::UMBRAL_NO_LISTO;
 use super::evidencia::oraciones_con_id;
 use super::juez::desenvuelto;
 use super::perfiles::tiene_perfil;
@@ -19,7 +21,8 @@ use crate::config::ReglasDecision;
 use crate::proveedores::{self, Prompt, causa_tope_alcanzado};
 use crate::tipos::{
     Accion, AvisoPrevio, Confianza, Cumplimiento, Decision, Dimension, Eleccion, Estado,
-    EstadoRequisito, Fuente, Hallazgo, Informe, ParteSinVeredicto, Veredicto,
+    EstadoRequisito, Fuente, Hallazgo, Informe, MedidaEficiencia, ParteSinVeredicto, Puntaje,
+    Veredicto,
 };
 
 /// Máximo de riesgos y de próximos pasos.
@@ -191,7 +194,7 @@ pub fn informar_con(
         riesgos: riesgos(v, tarea),
         proximos_pasos: proximos_pasos(v, tarea, &bloqueantes, presentes),
         bloqueantes,
-        resumen: resumen(v, &decidido.disparos),
+        resumen: resumen(v, rubricas, &decidido.disparos),
         confianza: confianza(v, tarea),
     };
     if let Some(redactor) = redactor {
@@ -320,14 +323,37 @@ fn decidir(
     }
 }
 
+/// Motivo de la dimensión sin veredicto, o `None` si cuenta como medida. Sigue P103 a para cualquier motivo.
+/// La excepción es una dimensión inestable en esta tarea: cuenta como medida y el resumen la nombra (P104 b).
+/// Lo que frena la decisión sale de `sin_veredicto_que_frena`, que parte de esta función.
+fn sin_veredicto_de(p: &Puntaje) -> Option<&str> {
+    p.sin_veredicto
+        .as_deref()
+        .filter(|motivo| !es_motivo_inestable(motivo))
+}
+
+/// Motivo de la dimensión sin veredicto que frena la decisión, o `None`. Frena todo lo que `sin_veredicto_de`
+/// cuenta como sin veredicto. Frena también una dimensión inestable que es Seguridad, Completitud o cuya
+/// rúbrica bloquea. Así la inestabilidad no tapa a una dimensión que bloquea.
+fn sin_veredicto_que_frena<'a>(p: &'a Puntaje, rubricas: &[Rubrica]) -> Option<&'a str> {
+    let frena_si_inestable = matches!(p.dimension, Dimension::Seguridad | Dimension::Completitud)
+        || bloquea_la_dimension(p.dimension, rubricas);
+    match sin_veredicto_de(p) {
+        Some(motivo) => Some(motivo),
+        None if frena_si_inestable => p.sin_veredicto.as_deref(),
+        None => None,
+    }
+}
+
 /// Dimensiones sin veredicto que dejan la decisión en `SinDecision` si no hay evidencia de `Bloqueado` ni de
 /// `NoListo` (decisión 48, desempate 9 y Tarea 32). Una dimensión cuya rúbrica tiene un ítem `bloquea = true`
-/// lo hace. Completitud lo hace siempre, aunque su rúbrica no bloquee. Una dimensión sin veredicto sin ítems
-/// que bloquean no cambia la decisión.
+/// lo hace con su regla propia. Completitud lo hace siempre, aunque su rúbrica no bloquee. Cualquier otra
+/// dimensión sin veredicto lo hace con `dimension_sin_veredicto` (P103 a). Una dimensión inestable que no
+/// frena cuenta como medida y no entra aquí (P104 b). Una dimensión `no_aplica` no cuenta.
 fn sin_decision(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     let mut salida = Vec::new();
     for p in &v.puntajes {
-        let Some(motivo) = p.sin_veredicto.as_deref() else {
+        let Some(motivo) = sin_veredicto_que_frena(p, rubricas) else {
             continue;
         };
         if bloquea_la_dimension(p.dimension, rubricas) {
@@ -344,6 +370,8 @@ fn sin_decision(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
             });
         } else if p.dimension == Dimension::Completitud {
             salida.push(completitud_sin_veredicto(Some(motivo)));
+        } else {
+            salida.push(dimension_sin_veredicto(p.dimension, motivo));
         }
     }
     let hay_completitud = v
@@ -362,41 +390,35 @@ fn cubre(prueba: &str, test: &str) -> bool {
     test == prueba || test.starts_with(&format!("{prueba}::"))
 }
 
-/// Tests ocultos que fallan y que ningún requisito prueba. Un requisito prueba un test si lo nombra en
-/// `pruebas` o `bordes`, por id exacto o por archivo. Una referencia `contrato:` apunta al contrato y no
-/// cubre un test oculto.
-fn tests_fuera_de_requisitos(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
-    v.ocultos_fallidos
+/// Ids de los requisitos que prueban `test`. Un requisito lo prueba si lo nombra en `pruebas` o `bordes`, por
+/// id exacto o por archivo. Con `contrato` falso cuentan las referencias sin prefijo, de la suite oculta. Con
+/// `contrato` verdadero cuentan las `contrato:`. Cada referencia apunta a una sola de las dos suites.
+fn requisitos_que_prueban<'a>(tarea: &'a Tarea, test: &str, contrato: bool) -> Vec<&'a str> {
+    tarea
+        .requisito
         .iter()
-        .filter(|test| {
-            !tarea.requisito.iter().any(|r| {
-                r.pruebas
-                    .iter()
-                    .chain(&r.bordes)
-                    .any(|prueba| cubre(prueba, test))
+        .filter(|r| {
+            r.pruebas.iter().chain(&r.bordes).any(|prueba| {
+                match prueba.strip_prefix(PREFIJO_CONTRATO) {
+                    Some(referencia) => contrato && cubre(referencia, test),
+                    None => !contrato && cubre(prueba, test),
+                }
             })
         })
-        .cloned()
+        .map(|r| r.id.as_str())
         .collect()
 }
 
-/// Tests del contrato que fallan y que ningún requisito prueba. Un requisito lo prueba si nombra el test con
-/// `contrato:` en `pruebas` o `bordes`, por id exacto o por archivo. Una referencia sin prefijo apunta a la
-/// suite oculta y no lo cubre.
-fn tests_contrato_fuera_de_requisitos(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
-    v.contrato_fallidos
-        .iter()
-        .filter(|test| {
-            !tarea.requisito.iter().any(|r| {
-                r.pruebas.iter().chain(&r.bordes).any(|prueba| {
-                    prueba
-                        .strip_prefix(PREFIJO_CONTRATO)
-                        .is_some_and(|referencia| cubre(referencia, test))
-                })
-            })
-        })
-        .cloned()
-        .collect()
+/// Frase de un test que falla: nombra a los requisitos que lo prueban, o dice que ninguno lo prueba.
+fn frase_de_test_que_falla(quien: &str, test: &str, requisitos: &[&str]) -> String {
+    match requisitos {
+        [] => format!("El {quien} {test} falla y ningún requisito lo prueba."),
+        [uno] => format!("El {quien} {test} falla; lo prueba el requisito {uno}."),
+        _ => format!(
+            "El {quien} {test} falla; lo prueban los requisitos {}.",
+            unir(requisitos)
+        ),
+    }
 }
 
 /// Verdadero si la rúbrica de `dimension` tiene algún ítem con `bloquea = true`.
@@ -484,9 +506,11 @@ fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     salida
 }
 
-/// Reglas de no listo: un producto o sus tests que no compilan, un test oculto o del contrato que falla y
-/// ningún requisito prueba, la completitud con veredicto bajo su mínimo, y una dimensión calibrada bajo su mínimo de
-/// `[decision.minimo]`. Una completitud sin veredicto no dispara aquí: `sin_decision` la cubre si no hay evidencia.
+/// Reglas de no listo: un producto o sus tests que no compilan; cada test oculto o del contrato que falla, lo
+/// cubra o no un requisito (`test_oculto_falla`, `test_contrato_falla`); la completitud con veredicto bajo su
+/// mínimo; y una dimensión calibrada bajo su mínimo de `[decision.minimo]`. Una completitud sin veredicto no
+/// dispara aquí: `sin_decision` la cubre si no hay evidencia. Una regresión de eficiencia mayor que
+/// `UMBRAL_NO_LISTO` también dispara aquí, sin esperar la calibración.
 fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Disparo> {
     let mut salida = Vec::new();
     if v.no_compila {
@@ -496,17 +520,33 @@ fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Dispar
             hallazgo: None,
         });
     }
-    for id in tests_fuera_de_requisitos(v, tarea) {
+    for test in &v.ocultos_fallidos {
+        let quienes = requisitos_que_prueban(tarea, test, false);
         salida.push(Disparo {
-            regla: format!("test_oculto_fuera_de_requisitos: {id}"),
-            frase: format!("El test oculto {id} falla y ningún requisito lo prueba."),
+            regla: format!("test_oculto_falla: {test}"),
+            frase: frase_de_test_que_falla("test oculto", test, &quienes),
             hallazgo: None,
         });
     }
-    for id in tests_contrato_fuera_de_requisitos(v, tarea) {
+    for test in &v.contrato_fallidos {
+        let quienes = requisitos_que_prueban(tarea, test, true);
         salida.push(Disparo {
-            regla: format!("test_contrato_fuera_de_requisitos: {id}"),
-            frase: format!("El test del contrato {id} falla y ningún requisito lo prueba."),
+            regla: format!("test_contrato_falla: {test}"),
+            frase: frase_de_test_que_falla("test del contrato", test, &quienes),
+            hallazgo: None,
+        });
+    }
+    // Regresión de eficiencia: no espera la calibración, como `test_oculto_falla`.
+    for m in &v.eficiencia_auto {
+        let Some(razon) = m.razon else {
+            continue;
+        };
+        if !m.regresion || razon <= UMBRAL_NO_LISTO {
+            continue;
+        }
+        salida.push(Disparo {
+            regla: format!("eficiencia_regresion: {}", m.medida),
+            frase: frase_de_regresion_o_generica(m, razon),
             hallazgo: None,
         });
     }
@@ -573,6 +613,18 @@ fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Dispar
     salida
 }
 
+/// Disparo de una dimensión sin veredicto que no bloquea por su rúbrica: la decisión queda en sin decisión.
+fn dimension_sin_veredicto(dimension: Dimension, motivo: &str) -> Disparo {
+    Disparo {
+        regla: format!("dimension_sin_veredicto: {}", dimension.clave()),
+        frase: format!(
+            "{} no tiene veredicto: {motivo}.",
+            nombre_dimension(dimension)
+        ),
+        hallazgo: None,
+    }
+}
+
 /// Disparo de la completitud sin veredicto: la decisión queda cerrada en no listo.
 fn completitud_sin_veredicto(motivo: Option<&str>) -> Disparo {
     let motivo = motivo.unwrap_or("sin puntaje de completitud");
@@ -592,22 +644,82 @@ fn sin_cumplir(e: &EstadoRequisito) -> bool {
 }
 
 /// Resumen determinista: una frase por disparo, con sus ids. Sin disparos, dice qué cumple.
-fn resumen(v: &Veredicto, disparos: &[Disparo]) -> String {
-    if disparos.is_empty() {
+/// Al final suma la línea de dimensiones sin medir, la de suites no corridas, la de inestables y la de eficiencia, si hay. En ese orden.
+fn resumen(v: &Veredicto, rubricas: &[Rubrica], disparos: &[Disparo]) -> String {
+    let base = if disparos.is_empty() {
         let cumplen: Vec<&str> = v
             .requisitos
             .iter()
             .filter(|e| e.cumplimiento == Cumplimiento::Cumplido)
             .map(|e| e.id.as_str())
             .collect();
-        return if cumplen.is_empty() {
+        if cumplen.is_empty() {
             "Listo: ninguna regla de bloqueo ni de no listo disparó.".to_string()
         } else {
             format!("Listo: cumplen {}.", unir(&cumplen))
-        };
-    }
-    let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
-    frases.join(" ")
+        }
+    } else {
+        let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
+        frases.join(" ")
+    };
+    let lineas: Vec<String> = [
+        linea_sin_medir(v, rubricas),
+        linea_suites_no_corrieron(v),
+        linea_inestable(v, rubricas),
+        linea_de_eficiencia(v),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    std::iter::once(base)
+        .chain(lineas)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Línea con las dimensiones que frenan sin veredicto, en el orden de `puntajes`. Las `no_aplica` no entran.
+/// Una inestable que cuenta como medida no entra; sale en `linea_inestable`. Usa "Sin medir:" para una y para varias.
+fn linea_sin_medir(v: &Veredicto, rubricas: &[Rubrica]) -> Option<String> {
+    let nombres: Vec<&str> = v
+        .puntajes
+        .iter()
+        .filter(|p| sin_veredicto_que_frena(p, rubricas).is_some())
+        .map(|p| nombre_dimension(p.dimension))
+        .collect();
+    (!nombres.is_empty()).then(|| format!("Sin medir: {}.", unir(&nombres)))
+}
+
+/// Motivo de una dimensión sin veredicto por un corte de la descarga. `tipo` dice por qué se cortó.
+pub(super) fn motivo_de_corte(tipo: &str, detalle: &str) -> String {
+    format!("descarga sin veredicto ({tipo}): {detalle}")
+}
+
+/// Extrae `tipo` de un motivo con el formato de `motivo_de_corte`. Devuelve `None` si el motivo no lo tiene.
+fn tipo_de_corte(motivo: &str) -> Option<&str> {
+    let resto = motivo.strip_prefix("descarga sin veredicto (")?;
+    let (tipo, _) = resto.split_once("): ")?;
+    Some(tipo)
+}
+
+/// Línea que dice que las suites no corrieron por un corte. Usa el primer `sin_veredicto` de corte en `puntajes`.
+fn linea_suites_no_corrieron(v: &Veredicto) -> Option<String> {
+    v.puntajes
+        .iter()
+        .find_map(|p| p.sin_veredicto.as_deref().and_then(tipo_de_corte))
+        .map(|tipo| format!("Las suites no corrieron: la descarga se cortó ({tipo})."))
+}
+
+/// Línea con las dimensiones inestables en esta tarea que cuentan como medida, en el orden de `puntajes`.
+/// Usa "Inestable en esta tarea:" para una y para varias. Las que frenan salen en `linea_sin_medir`.
+fn linea_inestable(v: &Veredicto, rubricas: &[Rubrica]) -> Option<String> {
+    let nombres: Vec<&str> = v
+        .puntajes
+        .iter()
+        .filter(|p| p.sin_veredicto.as_deref().is_some_and(es_motivo_inestable))
+        .filter(|p| sin_veredicto_que_frena(p, rubricas).is_none())
+        .map(|p| nombre_dimension(p.dimension))
+        .collect();
+    (!nombres.is_empty()).then(|| format!("Inestable en esta tarea: {}.", unir(&nombres)))
 }
 
 /// Un candidato a acción con sus claves de orden: el peso del requisito afectado y la severidad.
@@ -1256,6 +1368,107 @@ fn nombre_dimension(d: Dimension) -> &'static str {
     }
 }
 
+/// Bytes en un MiB. Las medidas de memoria y tamaño llegan en bytes.
+const BYTES_POR_MIB: f64 = 1_048_576.0;
+
+/// Razón con un decimal y coma, como se lee en español.
+fn razon_a_texto(razon: f64) -> String {
+    format!("{razon:.1}").replace('.', ",")
+}
+
+/// Frase de una regresión de eficiencia: la razón con un decimal y los dos valores. Los tiempos van en
+/// segundos. La memoria y el tamaño van en bytes y se muestran en MiB. `None` si faltan números o la medida
+/// es desconocida.
+fn frase_de_regresion(m: &MedidaEficiencia) -> Option<String> {
+    let (Some(referencia), Some(repo), Some(razon)) = (m.referencia, m.repo, m.razon) else {
+        return None;
+    };
+    let razon_txt = razon_a_texto(razon);
+    let segundos = |v: f64| numero(v as f32);
+    let mib = |v: f64| numero((v / BYTES_POR_MIB) as f32);
+    let frase = match m.medida.as_str() {
+        "tiempo_tests" => format!(
+            "Los tests tardan {razon_txt} veces más: {} s contra {} s.",
+            segundos(repo),
+            segundos(referencia)
+        ),
+        "tiempo_compilacion" => format!(
+            "La compilación tarda {razon_txt} veces más: {} s contra {} s.",
+            segundos(repo),
+            segundos(referencia)
+        ),
+        "memoria_pico" => format!(
+            "Los tests usan {razon_txt} veces más memoria: {} MiB contra {} MiB.",
+            mib(repo),
+            mib(referencia)
+        ),
+        "tamano_binario" => format!(
+            "El binario pesa {razon_txt} veces más: {} MiB contra {} MiB.",
+            mib(repo),
+            mib(referencia)
+        ),
+        _ => return None,
+    };
+    Some(frase)
+}
+
+/// Frase de una regresión con razón presente. Una medida sin frase propia, por id desconocido o por faltar
+/// números, usa la genérica: el id y la razón, y los valores si están.
+fn frase_de_regresion_o_generica(m: &MedidaEficiencia, razon: f64) -> String {
+    if let Some(frase) = frase_de_regresion(m) {
+        return frase;
+    }
+    let razon_txt = razon_a_texto(razon);
+    match (m.repo, m.referencia) {
+        (Some(repo), Some(referencia)) => format!(
+            "La medida {} empeora {razon_txt} veces: {} contra {}.",
+            m.medida,
+            numero(repo as f32),
+            numero(referencia as f32)
+        ),
+        _ => format!("La medida {} empeora {razon_txt} veces.", m.medida),
+    }
+}
+
+/// Orden fijo de las medidas para desempatar el resumen. Un id fuera de esta lista va después de todas,
+/// y entre esos, en orden alfabético.
+const ORDEN_DE_MEDIDAS: [&str; 4] = [
+    "tiempo_tests",
+    "memoria_pico",
+    "tiempo_compilacion",
+    "tamano_binario",
+];
+
+/// Posición de `medida` en `ORDEN_DE_MEDIDAS`. Un id desconocido queda después de todas.
+fn posicion_en_orden(medida: &str) -> usize {
+    ORDEN_DE_MEDIDAS
+        .iter()
+        .position(|o| *o == medida)
+        .unwrap_or(ORDEN_DE_MEDIDAS.len())
+}
+
+/// Línea de eficiencia del resumen. Con regresión, nombra la de mayor razón; en empate, la de menor posición
+/// en `ORDEN_DE_MEDIDAS`, y entre dos ids desconocidos, la de menor id alfabético. Sin regresión y con medidas
+/// con valor, dice que no hay regresiones. Sin medidas con valor, no hay línea.
+fn linea_de_eficiencia(v: &Veredicto) -> Option<String> {
+    let con_valor = || v.eficiencia_auto.iter().filter(|m| m.razon.is_some());
+    let mayor = con_valor().filter(|m| m.regresion).max_by(|a, b| {
+        a.razon
+            .partial_cmp(&b.razon)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| posicion_en_orden(&b.medida).cmp(&posicion_en_orden(&a.medida)))
+            .then_with(|| b.medida.cmp(&a.medida))
+    });
+    if let Some(m) = mayor {
+        let razon = m.razon?;
+        return Some(frase_de_regresion_o_generica(m, razon));
+    }
+    con_valor()
+        .next()
+        .is_some()
+        .then(|| "Sin regresiones de eficiencia.".to_string())
+}
+
 /// Número con dos decimales y coma, como se lee en español.
 fn numero(valor: f32) -> String {
     format!("{valor:.2}").replace('.', ",")
@@ -1424,6 +1637,7 @@ modulos = ["config"]
                     exactitud_balanceada: None,
                     items: Vec::new(),
                     sin_veredicto: None,
+                    no_aplica: None,
                     faltantes: Vec::new(),
                 },
                 (Dimension::Completitud, None) => Puntaje {
@@ -1435,6 +1649,7 @@ modulos = ["config"]
                     exactitud_balanceada: None,
                     items: Vec::new(),
                     sin_veredicto: Some("ningún requisito tiene nivel medido".into()),
+                    no_aplica: None,
                     faltantes: Vec::new(),
                 },
                 _ => Puntaje {
@@ -1446,6 +1661,7 @@ modulos = ["config"]
                     exactitud_balanceada: None,
                     items: Vec::new(),
                     sin_veredicto: None,
+                    no_aplica: None,
                     faltantes: Vec::new(),
                 },
             })
@@ -2041,8 +2257,9 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_eficiencia_sin_veredicto_deja_listo_y_la_lista_en_confianza() {
-        // Eficiencia no tiene ítems con `bloquea`: sin veredicto, la decisión sigue en `Listo`.
+    fn informe_eficiencia_sin_veredicto_da_sin_decision_y_la_lista_en_confianza() {
+        // P103 a: "Listo" exige veredicto en toda dimensión que aplica. Eficiencia sin sondas no tiene veredicto,
+        // aunque su rúbrica no tenga ítems con `bloquea`. La decisión queda en `SinDecision`.
         let mut v = ecc();
         v.puntajes[2].valor = 0.0;
         v.puntajes[2].sin_veredicto = Some("sin sondas".into());
@@ -2054,7 +2271,7 @@ modulos = ["config"]
             None,
         )
         .expect("informa");
-        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
         assert_eq!(i.confianza.sin_veredicto.len(), 1, "{:?}", i.confianza);
         assert_eq!(
             i.confianza.sin_veredicto[0].dimension,
@@ -2063,8 +2280,651 @@ modulos = ["config"]
         assert_eq!(i.confianza.sin_veredicto[0].motivo, "sin sondas");
     }
 
+    /// Medida de eficiencia con sus números. `razon` va tal cual, como la deja la medición.
+    fn eficiencia(
+        medida: &str,
+        referencia: f64,
+        repo: f64,
+        razon: f64,
+        ruido: f64,
+        regresion: bool,
+    ) -> MedidaEficiencia {
+        MedidaEficiencia {
+            medida: medida.into(),
+            referencia: Some(referencia),
+            repo: Some(repo),
+            razon: Some(razon),
+            ruido: Some(ruido),
+            regresion,
+            motivo: None,
+            corridas_referencia: vec![],
+            corridas_repo: vec![],
+        }
+    }
+
     #[test]
-    fn informe_oculto_que_falla_fuera_de_requisitos_da_no_listo_y_lo_nombra() {
+    fn informe_eficiencia_regresion_de_1_6_sobre_el_ruido_da_no_listo_y_la_frase() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.01, 1.62, 1.6, 0.02, true)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("eficiencia_regresion: tiempo_tests"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.resumen
+                .contains("Los tests tardan 1,6 veces más: 1,62 s contra 1,01 s."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_regresion_dentro_del_ruido_no_dispara() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.01, 1.62, 1.6, 0.7, false)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+        assert!(!i.motivo.contains("eficiencia_regresion"), "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_eficiencia_regresion_de_1_3_no_dispara_y_el_resumen_la_nombra() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.0, 1.3, 1.3, 0.02, true)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+        assert!(
+            i.resumen
+                .contains("Los tests tardan 1,3 veces más: 1,30 s contra 1,00 s."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_sin_regresiones_lo_dice_en_el_resumen() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.0, 1.0, 1.0, 0.02, false)];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("Sin regresiones de eficiencia."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_sin_medicion_no_suma_linea() {
+        let i = informe_de(&ecc());
+        assert!(
+            !i.resumen.contains("regresiones de eficiencia"),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("veces más"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_dos_regresiones_nombra_la_de_mayor_razon() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia(
+                "memoria_pico",
+                100.0 * BYTES_POR_MIB,
+                130.0 * BYTES_POR_MIB,
+                1.3,
+                0.02,
+                true,
+            ),
+            eficiencia("tiempo_compilacion", 7.75, 10.85, 1.4, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .contains("La compilación tarda 1,4 veces más: 10,85 s contra 7,75 s."),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("usan 1,3 veces"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_empate_nombra_la_medida_del_orden_fijo() {
+        // Razón igual: gana tiempo_tests aunque tamano_binario vaya último en el vector, donde hoy gana
+        // (en empate queda la última).
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia("tiempo_tests", 1.0, 1.3, 1.3, 0.02, true),
+            eficiencia(
+                "tamano_binario",
+                10.0 * BYTES_POR_MIB,
+                13.0 * BYTES_POR_MIB,
+                1.3,
+                0.02,
+                true,
+            ),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .contains("Los tests tardan 1,3 veces más: 1,30 s contra 1,00 s."),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("El binario pesa"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_empate_con_id_desconocido_gana_el_conocido() {
+        // El id desconocido va último: hoy gana por ser la última del empate.
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia(
+                "tamano_binario",
+                10.0 * BYTES_POR_MIB,
+                13.0 * BYTES_POR_MIB,
+                1.3,
+                0.02,
+                true,
+            ),
+            eficiencia("otra", 1.25, 1.625, 1.3, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .contains("El binario pesa 1,3 veces más: 13,00 MiB contra 10,00 MiB."),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("La medida otra"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_empate_entre_desconocidos_gana_el_alfabetico() {
+        // Dos ids fuera del orden fijo, misma razón: gana el primero en orden alfabético, no el último del vector.
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia("zeta", 1.0, 1.3, 1.3, 0.02, true),
+            eficiencia("alfa", 1.0, 1.3, 1.3, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("La medida alfa empeora 1,3 veces"),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("La medida zeta"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_empate_entre_desconocidos_no_depende_del_vector() {
+        // Mismo caso con el vector invertido: el resultado no cambia.
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia("alfa", 1.0, 1.3, 1.3, 0.02, true),
+            eficiencia("zeta", 1.0, 1.3, 1.3, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("La medida alfa empeora 1,3 veces"),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("La medida zeta"), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_eficiencia_razon_mayor_gana_a_desconocido_alfabetico() {
+        // Guarda: una razón mayor gana aunque el id sea alfabéticamente posterior.
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia("alfa", 1.0, 1.3, 1.3, 0.02, true),
+            eficiencia("zeta", 1.0, 1.5, 1.5, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("La medida zeta empeora 1,5 veces"),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_mayor_razon_desconocida_sigue_ganando() {
+        // El orden solo desempata: una razón mayor gana aunque el id sea desconocido.
+        let mut v = ecc();
+        v.eficiencia_auto = vec![
+            eficiencia("tiempo_tests", 1.0, 1.3, 1.3, 0.02, true),
+            eficiencia("otra", 1.25, 2.0, 1.6, 0.02, true),
+        ];
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .contains("La medida otra empeora 1,6 veces: 2,00 contra 1,25."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_regresion_con_secreto_da_bloqueado() {
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto", "gitleaks", false));
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.01, 2.02, 2.0, 0.02, true)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_eficiencia_regresion_no_espera_la_calibracion() {
+        let mut v = ecc();
+        for p in v.puntajes.iter_mut() {
+            p.calibrada = false;
+            p.motivo_sin_calibrar = Some("sin calibrar".into());
+        }
+        v.eficiencia_auto = vec![eficiencia("tiempo_tests", 1.01, 1.62, 1.6, 0.02, true)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("eficiencia_regresion: tiempo_tests"),
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_id_desconocido_con_regresion_dispara() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("otra", 1.25, 2.0, 1.6, 0.02, true)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("eficiencia_regresion: otra"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.resumen
+                .contains("La medida otra empeora 1,6 veces: 2,00 contra 1,25."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_id_desconocido_dentro_del_ruido_no_dispara() {
+        let mut v = ecc();
+        v.eficiencia_auto = vec![eficiencia("otra", 1.25, 2.0, 1.6, 0.7, false)];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+        assert!(!i.motivo.contains("eficiencia_regresion"), "{}", i.motivo);
+    }
+
+    #[test]
+    fn frase_de_regresion_da_las_cuatro_medidas_con_mib() {
+        let casos = [
+            (
+                eficiencia("tiempo_tests", 1.01, 1.62, 1.6, 0.02, true),
+                "Los tests tardan 1,6 veces más: 1,62 s contra 1,01 s.",
+            ),
+            (
+                eficiencia("tiempo_compilacion", 7.75, 12.40, 1.6, 0.02, true),
+                "La compilación tarda 1,6 veces más: 12,40 s contra 7,75 s.",
+            ),
+            (
+                eficiencia(
+                    "memoria_pico",
+                    100.0 * BYTES_POR_MIB,
+                    160.0 * BYTES_POR_MIB,
+                    1.6,
+                    0.02,
+                    true,
+                ),
+                "Los tests usan 1,6 veces más memoria: 160,00 MiB contra 100,00 MiB.",
+            ),
+            (
+                eficiencia(
+                    "tamano_binario",
+                    10.0 * BYTES_POR_MIB,
+                    16.0 * BYTES_POR_MIB,
+                    1.6,
+                    0.02,
+                    true,
+                ),
+                "El binario pesa 1,6 veces más: 16,00 MiB contra 10,00 MiB.",
+            ),
+        ];
+        for (medida, esperada) in casos {
+            assert_eq!(
+                frase_de_regresion(&medida).as_deref(),
+                Some(esperada),
+                "{}",
+                medida.medida
+            );
+        }
+    }
+
+    /// Deja sin veredicto la dimensión `dimension` con el motivo `motivo`.
+    fn con_sin_veredicto(v: &mut Veredicto, dimension: Dimension, motivo: &str) {
+        let p = v
+            .puntajes
+            .iter_mut()
+            .find(|p| p.dimension == dimension)
+            .expect("hay la dimensión");
+        p.valor = 0.0;
+        p.sin_veredicto = Some(motivo.into());
+    }
+
+    #[test]
+    fn informe_diseno_sin_veredicto_da_sin_decision_y_nombra_la_regla() {
+        // P103 a: cualquier dimensión sin veredicto deja `SinDecision`, aunque su rúbrica no bloquee.
+        let mut v = ecc();
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("dimension_sin_veredicto: diseno"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.resumen
+                .contains("Diseño no tiene veredicto: el juez no corrió."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_eficiencia_no_aplica_sin_veredicto_no_dispara_y_deja_listo() {
+        // Un `no_aplica` no es un veredicto que falte: la tarea no pide la dimensión.
+        let mut v = ecc();
+        let eficiencia = v
+            .puntajes
+            .iter_mut()
+            .find(|p| p.dimension == Dimension::Eficiencia)
+            .expect("hay eficiencia");
+        eficiencia.valor = 0.0;
+        eficiencia.no_aplica = Some("la tarea no pide eficiencia".into());
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_test_oculto_fallido_con_diseno_sin_veredicto_da_no_listo() {
+        // La evidencia de `NoListo` gana a `SinDecision`: no se suma el disparo de Diseño.
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/extra.py::caso_suelto".into()];
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(i.motivo.contains("test_oculto_falla"), "{}", i.motivo);
+        assert!(
+            !i.motivo.contains("dimension_sin_veredicto"),
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
+    fn informe_secreto_con_diseno_sin_veredicto_da_bloqueado() {
+        // Un secreto bloquea siempre. Diseño sin veredicto no cambia eso.
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto", "gitleaks", true));
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert_eq!(i.bloqueantes, vec!["h-secreto".to_string()]);
+    }
+
+    #[test]
+    fn informe_diseno_inestable_en_la_tarea_cuenta_como_medida_y_da_listo() {
+        // P104 b: una dimensión inestable en esta tarea cuenta como medida. No deja la decisión sin decisión.
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Diseno,
+            "inestable en esta tarea: diseno.errores",
+        );
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_resumen_diseno_inestable_la_nombra_en_inestable_y_no_sin_medir() {
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Diseno,
+            "inestable en esta tarea: diseno.errores",
+        );
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("Inestable en esta tarea: Diseño."),
+            "{}",
+            i.resumen
+        );
+        assert!(!i.resumen.contains("Sin medir: Diseño."), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_diseno_inestable_y_arquitectura_sin_juez_dan_sin_decision_con_arquitectura() {
+        // Diseño inestable cuenta como medida. Arquitectura sin juez sigue frenando la decisión.
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Diseno,
+            "inestable en esta tarea: diseno.errores",
+        );
+        con_sin_veredicto(&mut v, Dimension::Arquitectura, "el juez no corrió");
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("dimension_sin_veredicto: arquitectura"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            !i.motivo.contains("dimension_sin_veredicto: diseno"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.resumen.contains("Sin medir: Arquitectura."),
+            "{}",
+            i.resumen
+        );
+        assert!(
+            i.resumen.contains("Inestable en esta tarea: Diseño."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_seguridad_inestable_en_la_tarea_sigue_dando_sin_decision() {
+        // Seguridad bloquea por su rúbrica embebida. Su inestabilidad no la cuenta como medida.
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Seguridad,
+            "inestable en esta tarea: seguridad.x",
+        );
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(
+            i.motivo
+                .contains("dimension_que_bloquea_sin_veredicto: seguridad"),
+            "{}",
+            i.motivo
+        );
+        assert!(i.resumen.contains("Sin medir: Seguridad."), "{}", i.resumen);
+        assert!(
+            !i.resumen.contains("Inestable en esta tarea:"),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_completitud_inestable_en_la_tarea_sigue_dando_sin_decision() {
+        // Completitud frena la decisión aunque su motivo sea de inestable.
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Completitud,
+            "inestable en esta tarea: completitud.x",
+        );
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("completitud_sin_veredicto"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.resumen.contains("Sin medir: Completitud."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn es_motivo_inestable_reconoce_solo_el_prefijo_de_inestable() {
+        assert!(es_motivo_inestable(
+            "inestable en esta tarea: diseno.errores"
+        ));
+        assert!(!es_motivo_inestable("el juez no corrió"));
+    }
+
+    #[test]
+    fn informe_resumen_sin_veredicto_nombra_la_dimension_sin_medir() {
+        let mut v = ecc();
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        let i = informe_de(&v);
+        assert!(i.resumen.contains("Sin medir: Diseño."), "{}", i.resumen);
+    }
+
+    #[test]
+    fn informe_resumen_sin_veredicto_nombra_las_dos_dimensiones_sin_medir() {
+        // El orden sale de `puntajes`: Arquitectura va antes que Diseño.
+        let mut v = ecc();
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        con_sin_veredicto(&mut v, Dimension::Arquitectura, "el juez no corrió");
+        let i = informe_de(&v);
+        assert!(
+            i.resumen.contains("Sin medir: Arquitectura y Diseño."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_de_un_corte_no_instala_dice_que_las_suites_no_corrieron() {
+        let mut v = ecc();
+        con_sin_veredicto(
+            &mut v,
+            Dimension::Diseno,
+            &motivo_de_corte("no instala", "x"),
+        );
+        let i = informe_de(&v);
+        assert!(
+            i.resumen
+                .contains("Las suites no corrieron: la descarga se cortó (no instala)."),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_normal_no_dice_que_las_suites_no_corrieron() {
+        let i = informe_de(&ecc());
+        assert!(
+            !i.resumen.contains("Las suites no corrieron"),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_veredicto_viejo_sin_no_aplica_con_diseno_sin_veredicto_da_sin_decision() {
+        // Guarda: un JSON viejo, sin `no_aplica`, decide como hoy. Una dimensión sin veredicto da `SinDecision`.
+        let mut v = ecc();
+        con_sin_veredicto(&mut v, Dimension::Diseno, "el juez no corrió");
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        for p in json["puntajes"].as_array_mut().expect("lista de puntajes") {
+            p.as_object_mut().expect("puntaje").remove("no_aplica");
+        }
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee");
+        let i = informar(
+            &viejo,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("dimension_sin_veredicto: diseno"),
+            "{}",
+            i.motivo
+        );
+        // Un JSON viejo sano sigue en `Listo`.
+        let mut json_sano = serde_json::to_value(ecc()).expect("serializa");
+        for p in json_sano["puntajes"]
+            .as_array_mut()
+            .expect("lista de puntajes")
+        {
+            p.as_object_mut().expect("puntaje").remove("no_aplica");
+        }
+        let sano: Veredicto = serde_json::from_value(json_sano).expect("lee");
+        let i_sano = informar(
+            &sano,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
+        assert_eq!(i_sano.decision, Decision::Listo, "{}", i_sano.motivo);
+    }
+
+    #[test]
+    fn informe_oculto_que_falla_sin_requisito_da_no_listo_y_lo_nombra() {
         // Desempate 11: un test oculto que falla y no prueba ningún requisito es una promesa del producto.
         // La regla no depende de `completitud_minima`: con el mínimo en cero, sigue en `NoListo`.
         let mut v = ecc();
@@ -2075,11 +2935,7 @@ modulos = ["config"]
         };
         let i = informar(&v, &tarea(), &reglas, &BTreeSet::new(), None).expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(
-            i.motivo.contains("test_oculto_fuera_de_requisitos"),
-            "{}",
-            i.motivo
-        );
+        assert!(i.motivo.contains("test_oculto_falla"), "{}", i.motivo);
         assert!(
             i.motivo.contains("tests/extra.py::caso_suelto"),
             "{}",
@@ -2088,8 +2944,8 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_oculto_que_falla_dentro_de_un_requisito_no_dispara_la_regla() {
-        // `tests/t.py::flaky` es la prueba de R1 en la tarea de prueba: el requisito lo cubre.
+    fn informe_oculto_que_falla_dentro_de_un_requisito_da_no_listo_y_lo_dispara() {
+        // Cambio de la Tarea 113: `tests/t.py::flaky` es la prueba de R1. Antes no disparaba; ahora sí.
         let mut v = ecc();
         v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
         let i = informar(
@@ -2100,15 +2956,16 @@ modulos = ["config"]
             None,
         )
         .expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
-            !i.motivo.contains("test_oculto_fuera_de_requisitos"),
+            i.motivo.contains("test_oculto_falla: tests/t.py::flaky"),
             "{}",
             i.motivo
         );
     }
 
     #[test]
-    fn informe_test_del_contrato_que_falla_fuera_de_requisitos_da_no_listo() {
+    fn informe_test_del_contrato_que_falla_sin_requisito_da_no_listo() {
         // Decisión 50: un test del contrato que falla y que ningún requisito prueba con `contrato:` da `NoListo`.
         let mut v = ecc();
         v.contrato_fallidos = vec!["tests/contrato.py::suelto".into()];
@@ -2121,11 +2978,7 @@ modulos = ["config"]
         )
         .expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(
-            i.motivo.contains("test_contrato_fuera_de_requisitos"),
-            "{}",
-            i.motivo
-        );
+        assert!(i.motivo.contains("test_contrato_falla"), "{}", i.motivo);
         assert!(
             i.motivo.contains("tests/contrato.py::suelto"),
             "{}",
@@ -2138,11 +2991,7 @@ modulos = ["config"]
         };
         let i = informar(&v, &tarea(), &reglas, &BTreeSet::new(), None).expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(
-            i.motivo.contains("test_contrato_fuera_de_requisitos"),
-            "{}",
-            i.motivo
-        );
+        assert!(i.motivo.contains("test_contrato_falla"), "{}", i.motivo);
     }
 
     #[test]
@@ -2203,8 +3052,9 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_test_del_contrato_que_falla_dentro_de_un_requisito_no_dispara_la_regla() {
-        // Decisión 50: una referencia `contrato:` cubre el test del contrato, por id exacto o por archivo.
+    fn informe_test_del_contrato_dentro_de_un_requisito_da_no_listo_y_lo_dispara() {
+        // Cambio de la Tarea 113: una referencia `contrato:` cubre el test, pero la regla dispara igual.
+        // El test se nombra por id exacto o por archivo, y en ambos casos sale `test_contrato_falla`.
         let mut t = tarea();
         t.requisito[0]
             .pruebas
@@ -2213,8 +3063,10 @@ modulos = ["config"]
         v.contrato_fallidos = vec!["tests/contrato.py::caso".into()];
         let i =
             informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
-            !i.motivo.contains("test_contrato_fuera_de_requisitos"),
+            i.motivo
+                .contains("test_contrato_falla: tests/contrato.py::caso"),
             "{}",
             i.motivo
         );
@@ -2227,8 +3079,10 @@ modulos = ["config"]
         v.contrato_fallidos = vec!["tests/contrato.py::otro".into()];
         let i =
             informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
-            !i.motivo.contains("test_contrato_fuera_de_requisitos"),
+            i.motivo
+                .contains("test_contrato_falla: tests/contrato.py::otro"),
             "{}",
             i.motivo
         );
@@ -2248,11 +3102,7 @@ modulos = ["config"]
         )
         .expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(
-            i.motivo.contains("test_contrato_fuera_de_requisitos"),
-            "{}",
-            i.motivo
-        );
+        assert!(i.motivo.contains("test_contrato_falla"), "{}", i.motivo);
     }
 
     #[test]
@@ -2264,11 +3114,117 @@ modulos = ["config"]
         v.ocultos_fallidos = vec!["tests/extra.py::caso_suelto".into()];
         let i =
             informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
+        assert!(i.motivo.contains("test_oculto_falla"), "{}", i.motivo);
+    }
+
+    /// Pone la completitud de `v` en `valor`. La dimensión ya tiene veredicto en `ecc()`.
+    fn con_completitud(v: &mut Veredicto, valor: f32) {
+        let p = v
+            .puntajes
+            .iter_mut()
+            .find(|p| p.dimension == Dimension::Completitud)
+            .expect("hay completitud");
+        p.valor = valor;
+    }
+
+    #[test]
+    fn informe_test_oculto_que_falla_cubierto_por_requisito_da_no_listo() {
+        // Regla nueva: un test oculto que falla da `NoListo` aunque un requisito lo pruebe.
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
+        con_completitud(&mut v, 0.95);
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
-            i.motivo.contains("test_oculto_fuera_de_requisitos"),
+            i.motivo.contains("test_oculto_falla: tests/t.py::flaky"),
             "{}",
             i.motivo
         );
+    }
+
+    #[test]
+    fn informe_test_oculto_que_falla_nombra_el_test_y_su_requisito() {
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
+        let disparos = no_listo(&v, &tarea(), &ReglasDecision::default());
+        let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
+        assert_eq!(
+            frases,
+            vec!["El test oculto tests/t.py::flaky falla; lo prueba el requisito R1."]
+        );
+    }
+
+    #[test]
+    fn informe_test_oculto_probado_por_dos_requisitos_los_nombra_a_los_dos() {
+        let mut t = tarea();
+        t.requisito[1].bordes.push("tests/t.py::flaky".into());
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
+        let disparos = no_listo(&v, &t, &ReglasDecision::default());
+        let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
+        assert_eq!(
+            frases,
+            vec!["El test oculto tests/t.py::flaky falla; lo prueban los requisitos R1 y R2."]
+        );
+    }
+
+    #[test]
+    fn informe_test_oculto_sin_requisito_da_no_listo_con_frase_de_ninguno() {
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/extra.py::caso_suelto".into()];
+        let disparos = no_listo(&v, &tarea(), &ReglasDecision::default());
+        let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
+        assert_eq!(
+            frases,
+            vec!["El test oculto tests/extra.py::caso_suelto falla y ningún requisito lo prueba."]
+        );
+    }
+
+    #[test]
+    fn informe_test_del_contrato_cubierto_por_requisito_da_no_listo_y_lo_nombra() {
+        let mut t = tarea();
+        t.requisito[0]
+            .pruebas
+            .push("contrato:tests/contrato.py::caso".into());
+        let mut v = ecc();
+        v.contrato_fallidos = vec!["tests/contrato.py::caso".into()];
+        con_completitud(&mut v, 0.95);
+        let i =
+            informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo
+                .contains("test_contrato_falla: tests/contrato.py::caso"),
+            "{}",
+            i.motivo
+        );
+        let disparos = no_listo(&v, &t, &ReglasDecision::default());
+        let frases: Vec<&str> = disparos.iter().map(|d| d.frase.as_str()).collect();
+        assert_eq!(
+            frases,
+            vec!["El test del contrato tests/contrato.py::caso falla; lo prueba el requisito R1."]
+        );
+    }
+
+    #[test]
+    fn informe_test_oculto_inestable_fuera_de_ocultos_fallidos_no_dispara() {
+        // Un test inestable no es un fallo estable: no entra en `ocultos_fallidos`.
+        let mut v = ecc();
+        v.inestables = vec!["tests/extra.py::flaky".into()];
+        let i = informe_de(&v);
+        assert!(!i.motivo.contains("test_oculto_falla"), "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_secreto_con_test_oculto_rojo_da_bloqueado() {
+        // Guarda: un secreto bloquea aunque haya un test oculto que falla.
+        let mut v = ecc();
+        v.hallazgos
+            .push(seguridad_de("h-secreto", "gitleaks", true));
+        v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
+        let i = informe_de(&v);
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert_eq!(i.bloqueantes, vec!["h-secreto".to_string()]);
     }
 
     #[test]
@@ -2325,7 +3281,7 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_test_oculto_fuera_de_requisitos_da_no_listo_con_seguridad_sin_veredicto() {
+    fn informe_test_oculto_que_falla_da_no_listo_con_seguridad_sin_veredicto() {
         // Tarea 32: la evidencia de un test oculto que falla da `NoListo` aunque Seguridad no tenga veredicto.
         let mut v = ecc();
         v.ocultos_fallidos = vec!["tests/extra.py::caso_suelto".into()];
@@ -2345,11 +3301,7 @@ modulos = ["config"]
         )
         .expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
-        assert!(
-            i.motivo.contains("test_oculto_fuera_de_requisitos"),
-            "{}",
-            i.motivo
-        );
+        assert!(i.motivo.contains("test_oculto_falla"), "{}", i.motivo);
         assert!(
             !i.motivo.contains("dimension_que_bloquea_sin_veredicto"),
             "{}",

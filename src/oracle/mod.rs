@@ -8,6 +8,7 @@ pub mod colab;
 pub mod configs;
 pub mod contenedor;
 pub mod descarga;
+pub mod eficiencia;
 pub mod entrega;
 pub mod evidencia;
 pub mod historial;
@@ -43,14 +44,19 @@ use crate::ficha::{self, ErrorFicha};
 use crate::proveedores::{Prompt, RespuestaJuez};
 use crate::tipos::{
     Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, HallazgoDescartado, ItemFaltante,
-    Pendiente, Puntaje, Rol, TasaTest, VERSION, Veredicto,
+    MedidaEficiencia, Pendiente, Puntaje, Rol, TasaTest, VERSION, Veredicto,
 };
 use crate::track::stats::wilson_inferior;
 use calibra::Calibraciones;
+use calibra::sonda_lastre::{
+    ARCHIVO_LISTA, FuncionMarcada, armar_copia_marcada, cmd_sonda, dejar_sonda_lastre, leer_salida,
+    sonda_lastre_pedida, tomar_sonda_lastre,
+};
 use contenedor::{Ejecucion, Resultado};
 use descarga::python::AVISO_NO_VERIFICADAS;
+use eficiencia::ResultadoMedida;
 use entrega::{FabricaEscenarios, FabricaReal, Podman, PodmanReal, ResultadoEntrega};
-use informe::{Redactor, RedactorMedido, RedactorProveedor};
+use informe::{Redactor, RedactorMedido, RedactorProveedor, motivo_de_corte};
 use juez::{EntradaJuez, EstadoJuez, ExtractoGuardado, JuezProveedor, ModeloJuez, ResultadoJuez};
 use junit::{Junit, ResultadoTest};
 use perfiles::herramientas::{EjecutorContenedor, EjecutorHerramienta};
@@ -108,11 +114,15 @@ pub enum ErrorOraculo {
     /// Infraestructura: podman ausente, error de podman o E/S. Un plazo vencido es `PlazoVencido`.
     #[error("error de infraestructura del oráculo: {0}")]
     Infra(String),
-    /// Venció el plazo de una corrida en contenedor: el contenedor se eliminó. Sale con código 3.
+    /// Venció el plazo de una corrida: el contenedor o el proceso bwrap se eliminó. Sale con código 3.
     #[error(
-        "error de infraestructura del oráculo: timeout tras {segundos} s; contenedor {contenedor} eliminado"
+        "error de infraestructura del oráculo: timeout tras {segundos} s; {motor} {contenedor} eliminado"
     )]
-    PlazoVencido { segundos: f64, contenedor: String },
+    PlazoVencido {
+        segundos: f64,
+        motor: &'static str,
+        contenedor: String,
+    },
     /// El junit falta o está mal formado.
     #[error("junit inválido: {0}")]
     Junit(String),
@@ -577,6 +587,94 @@ const DIMENSIONES: [Dimension; 9] = [
     Dimension::Pruebas,
 ];
 
+/// Corre la sonda de lastre sobre una copia marcada del repo bueno (`repo_copia`), con el filtro de sus tests
+/// comunes, y deja su resultado. Sin filtro, no copia ni corre. Sus fallos suman un aviso y la evaluación sigue.
+/// La carpeta de trabajo se borra al terminar, también con error.
+fn correr_sonda_de_lastre(
+    tmp: &Path,
+    repo_copia: &Path,
+    cache: Option<&Path>,
+    rustsec: Option<&Path>,
+    herramientas: FabricaHerramientas,
+    filtro: Result<String, String>,
+    avisos: &mut Vec<String>,
+) {
+    let resultado = match filtro {
+        Err(motivo) => Err(motivo),
+        Ok(filtro) => match temporal(tmp) {
+            Ok(trabajo) => {
+                let resultado = medir_lastre(
+                    trabajo.path(),
+                    repo_copia,
+                    cache,
+                    rustsec,
+                    herramientas,
+                    &filtro,
+                );
+                if let Err(e) = borrado::borrar_dir_dentro(tmp, trabajo.path()) {
+                    avisos.push(format!(
+                        "sonda de lastre: no se borró su carpeta de trabajo: {e}"
+                    ));
+                }
+                resultado
+            }
+            Err(e) => Err(format!(
+                "sonda de lastre: no se creó la carpeta de trabajo: {e}"
+            )),
+        },
+    };
+    if let Err(motivo) = &resultado {
+        avisos.push(motivo.clone());
+    }
+    dejar_sonda_lastre(resultado);
+}
+
+/// Filtro de los tests comunes para la sonda. Da el motivo si la medición de Eficiencia no lo dejó.
+fn filtro_de_la_sonda() -> Result<String, String> {
+    match eficiencia::filtro_de_tests_comunes() {
+        None => Err(
+            "sonda de lastre: sin filtro de tests comunes: la medición de Eficiencia no corrió"
+                .into(),
+        ),
+        Some(Err(motivo)) => Err(format!(
+            "sonda de lastre: sin filtro de tests comunes: {motivo}"
+        )),
+        Some(Ok(filtro)) => Ok(filtro),
+    }
+}
+
+/// Arma la copia marcada de `repo_copia` en `trabajo`, corre la sonda con `filtro` y lee las funciones que
+/// corrieron.
+fn medir_lastre(
+    trabajo: &Path,
+    repo_copia: &Path,
+    cache: Option<&Path>,
+    rustsec: Option<&Path>,
+    herramientas: FabricaHerramientas,
+    filtro: &str,
+) -> Result<BTreeSet<FuncionMarcada>, String> {
+    let ruta_repo = trabajo.join("repo");
+    let mapa = armar_copia_marcada(repo_copia, &ruta_repo)
+        .map_err(|e| format!("sonda de lastre: la copia marcada no se armó: {e}"))?;
+    let ruta_salida = trabajo.join("salida");
+    fs::create_dir_all(&ruta_salida)
+        .map_err(|e| format!("sonda de lastre: la salida no se creó: {e}"))?;
+    // Podman rootless: si el contenedor corre con otro uid, la salida debe ser escribible por todos.
+    fs::set_permissions(&ruta_salida, fs::Permissions::from_mode(0o777))
+        .map_err(|e| format!("sonda de lastre: permisos de la salida: {e}"))?;
+    let ej = herramientas(&Preparada {
+        repo: ruta_repo,
+        cache: cache.map(Path::to_path_buf),
+        rustsec: rustsec.map(Path::to_path_buf),
+    });
+    ej.ejecutar_en(&cmd_sonda(filtro), &ruta_salida)
+        .map_err(|e| format!("sonda de lastre: el ejecutor falló: {e}"))?;
+    // La lista va por archivo: la consola se corta y no siempre trae las marcas.
+    let texto = fs::read_to_string(ruta_salida.join(ARCHIVO_LISTA))
+        .map_err(|_| "sonda de lastre: sin salida; el comando no llegó a sus marcas".to_string())?;
+    Ok(leer_salida(&texto, &mapa))
+}
+
 /// Como `evaluar`, con las dependencias que se le pasen.
 fn evaluar_con(
     repo: &Path,
@@ -656,11 +754,13 @@ fn evaluar_con(
             rustsec,
             hallazgos,
         } => (cache, rustsec, hallazgos),
-        descarga::Preparacion::SinVeredicto(hallazgos) => {
-            let motivo = motivo_de_la_descarga(&hallazgos);
+        descarga::Preparacion::SinVeredicto(hallazgos, corte) => {
+            let detalle = hallazgos.first().map_or("", |h| h.detalle.as_str());
+            let motivo = motivo_de_corte(corte.texto(), detalle);
             let mut v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
             v.ambiguedades = ambiguedades.clone();
             v.commit = identidad.clone();
+            let v = veredicto_de_corte(v, corte, tarea, &deps.reglas, deps.rubricas)?;
             return Ok(con_costo(v, &juez_config));
         }
     };
@@ -821,6 +921,48 @@ fn evaluar_con(
         }
         None
     };
+    // La medición automática de Eficiencia: Rust con `bootstrap/`, si la partes pide. Sus dos ejecutores son
+    // nuevos, sin memo ni reuso (Tarea 115).
+    let mut avisos_eficiencia = Vec::new();
+    let eficiencia_auto =
+        if partes.mide(Dimension::Eficiencia) && tarea.lenguaje == "rust" && bootstrap.is_dir() {
+            let ej_inicial = (deps.herramientas)(&Preparada {
+                repo: bootstrap.clone(),
+                cache: cache.clone(),
+                rustsec: rustsec.clone(),
+            });
+            let ej_del_repo = (deps.herramientas)(&Preparada {
+                repo: repo_copia.clone(),
+                cache: cache.clone(),
+                rustsec: rustsec.clone(),
+            });
+            eficiencia::medir(
+                ej_inicial.as_ref(),
+                ej_del_repo.as_ref(),
+                &home.join("tmp"),
+                &mut avisos_eficiencia,
+            )
+        } else {
+            Vec::new()
+        };
+    avisos.extend(avisos_eficiencia);
+    // La sonda de lastre (Tarea 137): solo si `calibra` la pide. Corre después de Eficiencia: su filtro de tests
+    // comunes sale de esa medición. Sin ella, la evaluación no cambia.
+    if sonda_lastre_pedida() {
+        // Sin resultado viejo: aunque aquí no corra, no queda el de una evaluación anterior.
+        let _ = tomar_sonda_lastre();
+        if tarea.lenguaje == "rust" && bootstrap.is_dir() {
+            correr_sonda_de_lastre(
+                &tmp,
+                &repo_copia,
+                cache.as_deref(),
+                rustsec.as_deref(),
+                deps.herramientas,
+                filtro_de_la_sonda(),
+                &mut avisos,
+            );
+        }
+    }
     let preparada = Preparada {
         repo: repo_copia.clone(),
         cache,
@@ -877,6 +1019,7 @@ fn evaluar_con(
         deps.calibracion,
         no_compila,
         base_previa.as_ref(),
+        &eficiencia_auto,
     )?;
     let mut tasas = BTreeMap::new();
     for (id, tasa) in &contrato.tasas {
@@ -906,12 +1049,19 @@ fn evaluar_con(
     let mut puntajes = medicion.puntajes;
     let tarea_hash = calibra::hash_de_tarea(tarea)?;
     deps.calibracion
-        .aplicar(&tarea.nombre, &tarea_hash, &mut puntajes);
+        .aplicar_en(&home, &tarea.nombre, &tarea_hash, &mut puntajes);
+    // Un puntaje que la tarea no pide no se calibra: `global` y `sin_calibrar` no lo cuentan.
+    for puntaje in puntajes.iter_mut().filter(|p| p.no_aplica.is_some()) {
+        puntaje.calibrada = false;
+    }
     // Un puntaje calibrado no lleva motivo. Uno sin calibrar lleva el motivo de su fila, si esa fila no vale.
-    for puntaje in puntajes.iter_mut().filter(|p| !p.calibrada) {
+    for puntaje in puntajes
+        .iter_mut()
+        .filter(|p| !p.calibrada && p.no_aplica.is_none())
+    {
         puntaje.motivo_sin_calibrar = deps
             .calibracion
-            .motivo_sin_calibrar(&tarea.nombre, &tarea_hash, puntaje.dimension)
+            .motivo_sin_calibrar_en(&home, &tarea.nombre, &tarea_hash, puntaje.dimension)
             .map(str::to_string);
     }
     let sin_calibrar = sin_calibrar(&puntajes);
@@ -945,6 +1095,8 @@ fn evaluar_con(
         hallazgos_descartados: medicion.hallazgos_descartados,
         extractos: medicion.extractos,
         no_compila,
+        eficiencia_auto: medicion.eficiencia_auto,
+        carga_ajena: medicion.carga_ajena,
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
     let redactor_medido = deps
@@ -1031,6 +1183,10 @@ struct Medicion {
     hallazgos_descartados: Vec<HallazgoDescartado>,
     /// Ventanas que leyó el juez de diseño. Van al `Veredicto`.
     extractos: Vec<ExtractoGuardado>,
+    /// Medidas de Eficiencia contra el estado inicial, en el orden de `Medida`. Van al `Veredicto`.
+    eficiencia_auto: Vec<MedidaEficiencia>,
+    /// Mayor carga ajena de las medidas de Eficiencia, en núcleos. Va al `Veredicto`.
+    carga_ajena: Option<f64>,
 }
 
 /// El juez de diseño que `medir` usa: el modelo si se armó, su nombre y las rúbricas de la evaluación.
@@ -1053,7 +1209,8 @@ struct Juicio {
 
 /// Mide las nueve dimensiones con las sondas, los requisitos y el juez de diseño. `descarga` son los
 /// hallazgos de la descarga: los que tocan una dimensión con sondas entran a su puntaje. `partes` dice qué
-/// corre: lo que no corre no llama a su contenedor, y su dimensión no se mide (Tarea 12).
+/// corre: lo que no corre no llama a su contenedor, y su dimensión no se mide (Tarea 12). `auto` son las
+/// medidas de Eficiencia contra `bootstrap/`; vacío si no se midieron (Tarea 115).
 #[allow(clippy::too_many_arguments)]
 fn medir(
     tarea: &Tarea,
@@ -1068,7 +1225,10 @@ fn medir(
     calibracion: &Calibraciones,
     no_compila: bool,
     base: Option<&previos::LineaBase>,
+    auto: &[ResultadoMedida],
 ) -> Result<Medicion, ErrorOraculo> {
+    let eficiencia_auto: Vec<MedidaEficiencia> = auto.iter().map(medida_de_eficiencia).collect();
+    let carga_ajena = auto.iter().filter_map(|r| r.carga_ajena).reduce(f64::max);
     let resultados = requisitos::desde_clasificaciones(contrato, oculto);
     let estados = requisitos::evaluar_requisitos(
         &tarea.requisito,
@@ -1239,7 +1399,15 @@ fn medir(
                 // Si ninguna sonda de la dimensión mide para el lenguaje, sus hallazgos quedan y su parte de
                 // sondas no tiene veredicto (Tarea 31).
                 let sin_sondas = sin_sonda_todas(dimension, juez.rubricas, tarea);
-                let mut de_sondas = if sin_sondas {
+                let mut de_sondas = if dimension == Dimension::Eficiencia {
+                    puntaje_de_eficiencia(
+                        tarea,
+                        de_la_dimension,
+                        extra,
+                        &eficiencia_auto,
+                        bootstrap.is_dir(),
+                    )
+                } else if sin_sondas {
                     sin_veredicto_puntaje(dimension, motivo_sin_sonda(&tarea.lenguaje))
                 } else {
                     puntaje_de(dimension, de_la_dimension, extra, tarea)
@@ -1294,6 +1462,8 @@ fn medir(
         pendientes: entrega.pendientes,
         hallazgos_descartados: descartados,
         extractos,
+        eficiencia_auto,
+        carga_ajena,
     })
 }
 
@@ -1461,6 +1631,7 @@ fn parte_juez(
             exactitud_balanceada: None,
             items: puntuacion.items,
             sin_veredicto: None,
+            no_aplica: None,
             faltantes,
         },
         peso,
@@ -1587,7 +1758,7 @@ fn juntar_partes(dimension: Dimension, sondas: Parte, juez: Option<Parte>) -> Pu
     let mut faltantes = Vec::new();
     sumar_faltantes(&mut faltantes, sondas.puntaje.faltantes.clone());
     // Una parte de sondas con veredicto pesa al menos 1: sin pesos en la rúbrica, su valor sigue (B).
-    let ws = if sondas.puntaje.sin_veredicto.is_some() {
+    let ws = if sondas.puntaje.sin_valor() {
         0
     } else {
         sondas.peso.max(1)
@@ -1600,6 +1771,10 @@ fn juntar_partes(dimension: Dimension, sondas: Parte, juez: Option<Parte>) -> Pu
         None => (0.0, 0),
     };
     if ws + wj == 0 {
+        // Si todos los motivos dicen que la tarea no pide la dimensión, no hay veredicto que dar.
+        if !motivos.is_empty() && motivos.iter().all(|m| es_no_aplica(m)) {
+            return puntaje_no_aplica(dimension, motivos.join("; "), faltantes);
+        }
         return sin_veredicto_con_faltantes(dimension, motivos.join("; "), faltantes);
     }
     let valor = (ws as f32 * sondas.puntaje.valor + wj as f32 * vj) / (ws + wj) as f32;
@@ -1612,13 +1787,14 @@ fn juntar_partes(dimension: Dimension, sondas: Parte, juez: Option<Parte>) -> Pu
         exactitud_balanceada: None,
         items: juez.map(|j| j.puntaje.items).unwrap_or_default(),
         sin_veredicto: None,
+        no_aplica: None,
         faltantes,
     }
 }
 
 /// Peso con el que una parte entra al valor: su suma de pesos si tiene veredicto, 0 si no (desempate B).
 fn peso_medido(parte: &Parte) -> u32 {
-    if parte.puntaje.sin_veredicto.is_some() {
+    if parte.puntaje.sin_valor() {
         0
     } else {
         parte.peso
@@ -1683,7 +1859,7 @@ fn aplicar_cobertura(
     medido: u32,
     puntaje: Puntaje,
 ) -> Puntaje {
-    if rubrica_del_juez(rubricas, dimension).is_none() {
+    if puntaje.no_aplica.is_some() || rubrica_del_juez(rubricas, dimension).is_none() {
         return puntaje;
     }
     let total = peso_total(dimension, rubricas, excluidos);
@@ -1699,7 +1875,7 @@ fn aplicar_cobertura(
 }
 
 /// Ítems del juez que `evaluar` deja fuera de `dimension`: los inestables de su fila más reciente (Tarea 83,
-/// punto 2). Una medición de calibración no los quita: la calibración juzga la base con todos sus ítems.
+/// punto 2). En una calibración, los casos reciben los inestables de la base por un valor de hilo. La base no.
 fn excluidos_de(
     calibracion: &Calibraciones,
     tarea: &Tarea,
@@ -1708,17 +1884,19 @@ fn excluidos_de(
     rubricas: &[Rubrica],
     dimension: Dimension,
 ) -> Vec<String> {
-    if partes.dimension.is_some() {
-        return Vec::new();
-    }
     let Some(del_juez) = rubrica_del_juez(rubricas, dimension) else {
         return Vec::new();
     };
-    calibracion
-        .inestables_de(&tarea.nombre, tarea_hash, dimension)
-        .iter()
-        .filter(|id| del_juez.item.iter().any(|i| i.id == **id))
-        .cloned()
+    let inestables: Vec<String> = if partes.dimension.is_some() {
+        inestables_de_calibracion()
+    } else {
+        calibracion
+            .inestables_de(&tarea.nombre, tarea_hash, dimension)
+            .to_vec()
+    };
+    inestables
+        .into_iter()
+        .filter(|id| del_juez.item.iter().any(|i| i.id == *id))
         .collect()
 }
 
@@ -1730,7 +1908,7 @@ fn aplicar_inestables(
     excluidos: &[String],
     puntaje: Puntaje,
 ) -> Puntaje {
-    if excluidos.is_empty() {
+    if excluidos.is_empty() || puntaje.no_aplica.is_some() {
         return puntaje;
     }
     let inestables = excluidos.to_vec();
@@ -1843,6 +2021,95 @@ fn puntaje_de(
     }
 }
 
+/// Pasa una medida de `eficiencia` a la forma del veredicto (Tarea 115).
+fn medida_de_eficiencia(r: &ResultadoMedida) -> MedidaEficiencia {
+    MedidaEficiencia {
+        medida: r.medida.id().into(),
+        referencia: r.referencia,
+        repo: r.repo,
+        razon: r.comparacion.as_ref().map(|c| c.razon),
+        ruido: r.comparacion.as_ref().map(|c| c.ruido),
+        regresion: r.comparacion.as_ref().is_some_and(|c| c.regresion),
+        motivo: r.motivo.clone(),
+        corridas_referencia: r.corridas_referencia.clone(),
+        corridas_repo: r.corridas_repo.clone(),
+    }
+}
+
+/// Valor de una medida automática: 1 sin regresión; con regresión, referencia sobre repo (1 sobre la razón).
+/// `None` si la medida no tiene valor (Tarea 115).
+fn valor_de_medida(m: &MedidaEficiencia) -> Option<f32> {
+    let razon = m.razon?;
+    Some(if m.regresion {
+        (1.0 / razon) as f32
+    } else {
+        1.0
+    })
+}
+
+/// Puntaje de Eficiencia (Tarea 115). Con `[eficiencia]`, el banco da su valor y la medición automática lo
+/// baja si mide menos. Sin `[eficiencia]`, la medición automática decide en Rust con `bootstrap/`.
+/// `auto` vacío: no se midió, y el banco decide solo, como antes.
+fn puntaje_de_eficiencia(
+    tarea: &Tarea,
+    mut sondas: Vec<ResultadoSonda>,
+    extra: Vec<Hallazgo>,
+    auto: &[MedidaEficiencia],
+    con_estado_inicial: bool,
+) -> Puntaje {
+    const DIMENSION: Dimension = Dimension::Eficiencia;
+    if tarea.eficiencia.is_none() {
+        // Sin `[eficiencia]`, la sonda solo dice que la tarea no la pide: no cuenta.
+        sondas.clear();
+        if tarea.lenguaje != "rust" {
+            return sin_veredicto_puntaje(
+                DIMENSION,
+                perfiles::herramientas::MOTIVO_SIN_EFICIENCIA.into(),
+            );
+        }
+        if !con_estado_inicial {
+            return sin_veredicto_puntaje(
+                DIMENSION,
+                perfiles::herramientas::MOTIVO_SIN_ESTADO_INICIAL.into(),
+            );
+        }
+    }
+    if auto.is_empty() {
+        return puntaje_de(DIMENSION, sondas, extra, tarea);
+    }
+    let auto_min = auto.iter().filter_map(valor_de_medida).reduce(f32::min);
+    let banco = sondas.into_iter().next();
+    let valor_banco = banco.as_ref().and_then(|s| s.valor);
+    let valor = match (valor_banco, auto_min) {
+        (Some(b), Some(a)) => Some(b.min(a)),
+        (Some(b), None) => Some(b),
+        (None, Some(a)) => Some(a),
+        (None, None) => None,
+    };
+    match valor {
+        Some(valor) => {
+            let hallazgos = banco.map(|s| s.hallazgos).unwrap_or_default();
+            let sonda = ResultadoSonda {
+                dimension: DIMENSION,
+                valor: Some(valor),
+                motivo: None,
+                hallazgos,
+            };
+            puntaje_de(DIMENSION, vec![sonda], extra, tarea)
+        }
+        None => {
+            // El motivo del banco va primero. Después, los de cada medida, sin repetir.
+            let mut motivos: Vec<String> = banco.and_then(|s| s.motivo).into_iter().collect();
+            for motivo in auto.iter().filter_map(|m| m.motivo.clone()) {
+                if !motivos.contains(&motivo) {
+                    motivos.push(motivo);
+                }
+            }
+            sin_veredicto_puntaje(DIMENSION, motivos.join("; "))
+        }
+    }
+}
+
 /// Exclusiones de la suite del contrato: las entradas `contrato:` de `[[entorno]]` y de
 /// `[[oraculo_dudoso]]`, sin el prefijo. Así coinciden con los ids que mide la suite (desempates 1 y 16).
 fn excluidos_del_contrato(tarea: &Tarea) -> BTreeSet<String> {
@@ -1908,6 +2175,7 @@ fn funciona(
         exactitud_balanceada: None,
         items: Vec::new(),
         sin_veredicto: None,
+        no_aplica: None,
         faltantes: Vec::new(),
     }
 }
@@ -1948,8 +2216,40 @@ fn sin_veredicto_puntaje(dimension: Dimension, motivo: String) -> Puntaje {
         exactitud_balanceada: None,
         items: Vec::new(),
         sin_veredicto: Some(motivo),
+        no_aplica: None,
         faltantes: Vec::new(),
     }
+}
+
+/// Puntaje de una dimensión que la tarea no pide: `valor` 0, sin veredicto y con el motivo de no aplica.
+fn puntaje_no_aplica(
+    dimension: Dimension,
+    motivo: String,
+    faltantes: Vec<ItemFaltante>,
+) -> Puntaje {
+    Puntaje {
+        inestables: Vec::new(),
+        motivo_sin_calibrar: None,
+        dimension,
+        valor: 0.0,
+        calibrada: false,
+        exactitud_balanceada: None,
+        items: Vec::new(),
+        sin_veredicto: None,
+        no_aplica: Some(motivo),
+        faltantes,
+    }
+}
+
+/// Verdadero si `motivo` dice que la tarea no pide la dimensión. Los demás motivos son de no medido.
+fn es_no_aplica(motivo: &str) -> bool {
+    [
+        perfiles::rust::MOTIVO_SIN_MODULOS,
+        perfiles::herramientas::MOTIVO_SIN_EFICIENCIA,
+        perfiles::herramientas::MOTIVO_SIN_ESTADO_INICIAL,
+        entrega::MOTIVO_SIN_ITEMS,
+    ]
+    .contains(&motivo)
 }
 
 /// Las nueve dimensiones sin veredicto, con el mismo motivo.
@@ -1965,7 +2265,7 @@ fn puntajes_sin_veredicto(motivo: &str) -> Vec<Puntaje> {
 fn sin_calibrar(puntajes: &[Puntaje]) -> Vec<Dimension> {
     puntajes
         .iter()
-        .filter(|p| p.sin_veredicto.is_none() && !p.calibrada)
+        .filter(|p| !p.sin_valor() && !p.calibrada)
         .map(|p| p.dimension)
         .collect()
 }
@@ -1982,12 +2282,43 @@ fn avisos_de_dependencias(hallazgos: &[Hallazgo]) -> Vec<String> {
     avisos
 }
 
-/// Motivo de una descarga sin veredicto: el detalle de su primer hallazgo, si lo hay.
-fn motivo_de_la_descarga(hallazgos: &[Hallazgo]) -> String {
-    match hallazgos.first() {
-        Some(h) => format!("descarga sin veredicto: {}", h.detalle),
-        None => "descarga sin veredicto".into(),
-    }
+/// Cierra el veredicto de un corte de la descarga: marca si el producto no compila e informa la decisión.
+/// Sin requisitos no hay módulos que nombrar: `presentes` va vacío. Sin redactor: el informe es determinista.
+fn veredicto_de_corte(
+    mut v: Veredicto,
+    corte: descarga::Corte,
+    tarea: &Tarea,
+    reglas: &ReglasDecision,
+    rubricas: &[Rubrica],
+) -> Result<Veredicto, ErrorOraculo> {
+    v.no_compila = corte.no_compila();
+    let informe = informe::informar_con(&v, tarea, reglas, rubricas, &BTreeSet::new(), None)?;
+    v.estado = informe::estado_de(Some(&informe));
+    v.informe = Some(informe);
+    Ok(v)
+}
+
+/// Los cortes que `motivo_de_corte` puede escribir en un motivo.
+const CORTES: [descarga::Corte; 4] = [
+    descarga::Corte::NoInstala,
+    descarga::Corte::LockInvalido,
+    descarga::Corte::FuenteNoAceptada,
+    descarga::Corte::Otro,
+];
+
+/// El corte que escribió `motivo_de_corte` en `motivo`. Devuelve `None` si el motivo no lo tiene.
+/// El prefijo sale de `motivo_de_corte` con detalle vacío: no hay otro formato aquí.
+pub(crate) fn corte_de_motivo(motivo: &str) -> Option<descarga::Corte> {
+    CORTES
+        .into_iter()
+        .find(|c| motivo.starts_with(&motivo_de_corte(c.texto(), "")))
+}
+
+/// El primer corte de la descarga en `v`, leído de los motivos de sus puntajes. `None` si no hay ninguno.
+pub(crate) fn corte_del_veredicto(v: &Veredicto) -> Option<descarga::Corte> {
+    v.puntajes
+        .iter()
+        .find_map(|p| p.sin_veredicto.as_deref().and_then(corte_de_motivo))
 }
 
 /// Carga la tarea `nombre` de `ROOT_HOME` y la evalúa con las opciones por defecto.
@@ -2237,6 +2568,9 @@ thread_local! {
     /// Plazos de las suites de las corridas de este hilo. `None`: vale `OpcionesOraculo::timeout`.
     static PLAZOS_SUITES: std::cell::RefCell<Option<PlazosSuites>> =
         const { std::cell::RefCell::new(None) };
+    /// Ítems inestables de la base de la calibración en curso. Solo la leen los casos de este hilo.
+    static INESTABLES_DE_CALIBRACION: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Anota una corrida de la suite `dir` que duró `segundos`. Gana la corrida más lenta de la suite.
@@ -2270,6 +2604,27 @@ pub(crate) fn con_plazos_suites<T>(plazos: Option<PlazosSuites>, f: impl FnOnce(
     let anterior = PLAZOS_SUITES.with(|p| p.replace(plazos));
     let _restaura = Restaura(anterior);
     f()
+}
+
+/// Corre `f` con `inestables` como los ítems inestables de la base en este hilo. Al salir, también ante pánico,
+/// vuelve el valor anterior. Lo usan los casos de una calibración: la base y sus repeticiones no lo reciben.
+pub(crate) fn con_inestables_de_calibracion<T>(inestables: &[String], f: impl FnOnce() -> T) -> T {
+    /// Devuelve la lista anterior al salir del ámbito.
+    struct Restaura(Vec<String>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = std::mem::take(&mut self.0);
+            INESTABLES_DE_CALIBRACION.with(|i| *i.borrow_mut() = anterior);
+        }
+    }
+    let anterior = INESTABLES_DE_CALIBRACION.with(|i| i.replace(inestables.to_vec()));
+    let _restaura = Restaura(anterior);
+    f()
+}
+
+/// Ítems inestables de la base en este hilo. Vacía fuera de `con_inestables_de_calibracion`.
+pub(crate) fn inestables_de_calibracion() -> Vec<String> {
+    INESTABLES_DE_CALIBRACION.with(|i| i.borrow().clone())
 }
 
 /// Plazo de la suite `dir` en este hilo. `None` si la corrida no es de una calibración.
@@ -2332,7 +2687,13 @@ fn evaluar_suite(
     let previa = clasificar(&completas, &[], excluidos);
     let mut extras = Vec::new();
     if !previa.inestables.is_empty() && c.tarea.repeticiones_inestable > c.tarea.repeticiones {
-        let reintento = reintento_de(comando, dir, &previa.inestables)?;
+        let reintento = reintento_de(
+            comando,
+            dir,
+            &previa.inestables,
+            &previa.nombres,
+            &c.tarea.lenguaje,
+        )?;
         for _ in c.tarea.repeticiones..c.tarea.repeticiones_inestable {
             // El reintento corre solo los inestables: su junit no trae la lista completa.
             match correr_una(c, &reintento, dir, xml, pytest, None, correr)? {
@@ -2436,12 +2797,18 @@ fn esperados_de_requisitos(
 }
 
 /// Comando de las corridas extra: corre solo los tests `inestables` de la suite `dir`.
-/// Usa `reintento` si existe; si no, reemplaza `dir` al final de `cmd`.
+/// Según `lenguaje`: Rust filtra por el `name` del junit (`nombres`); los demás (Python, shell, etc.)
+/// usan node ids `archivo.py::nombre`. Sin plantilla `reintento`, reemplaza la cola de `cmd` que termina en `dir`.
 fn reintento_de(
     comando: &Comando,
     dir: &str,
     inestables: &[String],
+    nombres: &BTreeMap<String, String>,
+    lenguaje: &str,
 ) -> Result<String, ErrorOraculo> {
+    if lenguaje == "rust" {
+        return Ok(reintento_rust(comando, inestables, nombres));
+    }
     let lista = inestables
         .iter()
         .map(|id| comillas(&node_id(dir, id)))
@@ -2456,6 +2823,41 @@ fn reintento_de(
             "el comando no termina en {dir} y no tiene reintento: agregalo en tarea.toml"
         ))),
     }
+}
+
+/// Comando de reintento de Rust. Con `reintento`, `{tests}` pasa a un filtro de nextest: un
+/// `test(=<name>)` por inestable, con el `name` del testcase del junit. Si algún inestable no tiene
+/// `name` anotado, o sin `reintento`, devuelve `cmd` entero: el comando ya corre sus tests.
+fn reintento_rust(
+    comando: &Comando,
+    inestables: &[String],
+    nombres: &BTreeMap<String, String>,
+) -> String {
+    let Some(plantilla) = &comando.reintento else {
+        return comando.cmd.clone();
+    };
+    let Some(names) = inestables
+        .iter()
+        .map(|id| nombres.get(id))
+        .collect::<Option<Vec<&String>>>()
+    else {
+        return comando.cmd.clone();
+    };
+    let filtro = names
+        .iter()
+        .map(|nombre| format!("test(={})", escapar_nextest(nombre)))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    plantilla.replace("{tests}", &comillas(&filtro))
+}
+
+/// Escapa un `name` de Rust para un matcher `test(=<name>)` de nextest. Antepone `\` a `\`, `)` y `,`.
+/// El `(` no se escapa. La barra va primero, para no escapar dos veces lo que se agrega.
+fn escapar_nextest(nombre: &str) -> String {
+    nombre
+        .replace('\\', "\\\\")
+        .replace(')', "\\)")
+        .replace(',', "\\,")
 }
 
 /// Node id de pytest para un test `archivo::nombre` de la suite `dir`.
@@ -2481,6 +2883,8 @@ pub struct Clasificacion {
     omitidos: BTreeSet<String>,
     /// Ids ordenados de los tests inestables.
     inestables: Vec<String>,
+    /// Nombre `name` del testcase de cada id, según las corridas completas. El primero que aparezca gana.
+    nombres: BTreeMap<String, String>,
     /// Tasa de cada test inestable, con la clave `archivo::nombre` (sin prefijo de suite).
     tasas: BTreeMap<String, TasaTest>,
     /// Conteo de la suite. Un inestable no pasa, pero sí cuenta en el total.
@@ -2535,6 +2939,13 @@ fn clasificar(
         .flat_map(|j| j.tests.keys().map(String::as_str))
         .collect();
     let mut c = Clasificacion::default();
+    for j in completas {
+        for (id, nombre) in &j.nombres {
+            c.nombres
+                .entry(id.clone())
+                .or_insert_with(|| nombre.clone());
+        }
+    }
     for id in ids {
         if excluidos.contains(id) {
             continue;
@@ -3314,7 +3725,8 @@ mod tests {
             Some(Decision::NoListo)
         );
         assert_eq!(v.estado, Estado::Rojo);
-        // Con el mínimo en 0,75, el mismo conteo da listo y verde: el conteo no decide.
+        // Con el mínimo en 0,75, la completitud ya no dispara. El test oculto t4 sigue rojo y da no listo
+        // por `test_oculto_falla` (Tarea 113): la decisión sale de las reglas y no del conteo.
         let reglas = ReglasDecision {
             completitud_minima: 0.75,
             ..ReglasDecision::default()
@@ -3325,11 +3737,19 @@ mod tests {
             ..deps_de(&correr, &herramientas_falsas)
         };
         let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
-        assert_eq!(
-            v.informe.as_ref().map(|i| i.decision),
-            Some(Decision::Listo)
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(informe.decision, Decision::NoListo, "{}", informe.motivo);
+        assert!(
+            informe.motivo.contains("test_oculto_falla"),
+            "{}",
+            informe.motivo
         );
-        assert_eq!(v.estado, Estado::Verde);
+        assert!(
+            !informe.motivo.contains("completitud_bajo_minimo"),
+            "{}",
+            informe.motivo
+        );
+        assert_eq!(v.estado, Estado::Rojo);
     }
 
     #[test]
@@ -3488,8 +3908,14 @@ mod tests {
             cmd: "x --junitxml=/salida/oculto.xml /oraculo/oculto".into(),
             reintento: None,
         };
-        let r =
-            reintento_de(&c, "/oraculo/oculto", &["test_f::t_flaky".to_string()]).expect("deriva");
+        let r = reintento_de(
+            &c,
+            "/oraculo/oculto",
+            &["test_f::t_flaky".to_string()],
+            &BTreeMap::new(),
+            "python",
+        )
+        .expect("deriva");
         assert_eq!(
             r,
             "x --junitxml=/salida/oculto.xml '/oraculo/oculto/test_f.py::t_flaky'"
@@ -3503,7 +3929,8 @@ mod tests {
             reintento: Some("pytest -q {tests}".into()),
         };
         let ids = ["a::t1".to_string(), "b::t2".to_string()];
-        let r = reintento_de(&c, "/oraculo/contrato", &ids).expect("plantilla");
+        let r = reintento_de(&c, "/oraculo/contrato", &ids, &BTreeMap::new(), "python")
+            .expect("plantilla");
         assert_eq!(
             r,
             "pytest -q '/oraculo/contrato/a.py::t1' '/oraculo/contrato/b.py::t2'"
@@ -3517,7 +3944,13 @@ mod tests {
             reintento: None,
         };
         assert!(matches!(
-            reintento_de(&c, "/oraculo/oculto", &["a::t".to_string()]),
+            reintento_de(
+                &c,
+                "/oraculo/oculto",
+                &["a::t".to_string()],
+                &BTreeMap::new(),
+                "python"
+            ),
             Err(ErrorOraculo::Tarea(_))
         ));
     }
@@ -3528,8 +3961,203 @@ mod tests {
             cmd: "x /oraculo/oculto".into(),
             reintento: None,
         };
-        let r = reintento_de(&c, "/oraculo/oculto", &["a::it's".to_string()]).expect("deriva");
+        let r = reintento_de(
+            &c,
+            "/oraculo/oculto",
+            &["a::it's".to_string()],
+            &BTreeMap::new(),
+            "python",
+        )
+        .expect("deriva");
         assert_eq!(r, "x '/oraculo/oculto/a.py::it'\\''s'");
+    }
+
+    #[test]
+    fn inestable_reintento_rust_arma_filtro_nextest() {
+        let c = Comando {
+            cmd: "cargo nextest run".into(),
+            reintento: Some("cargo nextest run -E {tests}".into()),
+        };
+        let ids = ["a::t1".to_string(), "t2".to_string()];
+        let nombres = BTreeMap::from([
+            ("a::t1".to_string(), "t1".to_string()),
+            ("t2".to_string(), "t2".to_string()),
+        ]);
+        let r = reintento_de(&c, "tests", &ids, &nombres, "rust").expect("filtro");
+        assert_eq!(r, "cargo nextest run -E 'test(=t1) | test(=t2)'");
+    }
+
+    #[test]
+    fn inestable_reintento_rust_sin_reintento_da_el_comando_entero() {
+        let c = Comando {
+            cmd: "cargo nextest run --workspace".into(),
+            reintento: None,
+        };
+        let nombres = BTreeMap::from([("a::t".to_string(), "t".to_string())]);
+        let r = reintento_de(
+            &c,
+            "/oraculo/oculto",
+            &["a::t".to_string()],
+            &nombres,
+            "rust",
+        );
+        assert_eq!(r.expect("nunca error"), "cargo nextest run --workspace");
+    }
+
+    #[test]
+    fn inestable_reintento_rust_nunca_usa_binary_id() {
+        let c = Comando {
+            cmd: "cargo nextest run".into(),
+            reintento: Some("cargo nextest run -E {tests}".into()),
+        };
+        let ids = ["mi_crate::mod::t".to_string(), "otro::x::y".to_string()];
+        let nombres = BTreeMap::from([
+            ("mi_crate::mod::t".to_string(), "mod::t".to_string()),
+            ("otro::x::y".to_string(), "x::y".to_string()),
+        ]);
+        let r = reintento_de(&c, "tests", &ids, &nombres, "rust").expect("filtro");
+        assert!(!r.contains("binary_id"), "{r}");
+        assert!(r.contains("test(=mod::t)"), "{r}");
+        assert!(r.contains("test(=x::y)"), "{r}");
+    }
+
+    #[test]
+    fn inestable_reintento_rust_sin_nombre_da_el_comando_entero() {
+        let c = Comando {
+            cmd: "cargo nextest run --workspace".into(),
+            reintento: Some("cargo nextest run -E {tests}".into()),
+        };
+        let ids = ["a::t1".to_string(), "a::t2".to_string()];
+        let nombres = BTreeMap::from([("a::t1".to_string(), "t1".to_string())]);
+        let r = reintento_de(&c, "tests", &ids, &nombres, "rust").expect("nunca error");
+        assert_eq!(r, "cargo nextest run --workspace");
+    }
+
+    #[test]
+    fn inestable_reintento_rust_usa_el_name_del_junit_de_punta_a_punta() {
+        let falla = junit::parsear(
+            r#"<testsuite>
+  <testcase classname="paquete::archivo" name="modulo::test_a"><failure message="x"/></testcase>
+</testsuite>"#,
+        )
+        .expect("parsea")
+        .con_ids();
+        let pasa = junit::parsear(
+            r#"<testsuite>
+  <testcase classname="paquete::archivo" name="modulo::test_a"/>
+</testsuite>"#,
+        )
+        .expect("parsea")
+        .con_ids();
+        let previa = clasificar(&[falla, pasa], &[], &sin_exclusiones());
+        assert_eq!(previa.inestables.len(), 1, "{:?}", previa.inestables);
+        let c = Comando {
+            cmd: "cargo nextest run".into(),
+            reintento: Some("cargo nextest run -E {tests}".into()),
+        };
+        let r =
+            reintento_de(&c, "tests", &previa.inestables, &previa.nombres, "rust").expect("filtro");
+        assert_eq!(r, "cargo nextest run -E 'test(=modulo::test_a)'");
+    }
+
+    #[test]
+    fn inestable_clasificar_guarda_el_nombre_del_inestable() {
+        let mut uno = Junit::default();
+        uno.tests.insert("a::t1".into(), ResultadoTest::Falla);
+        uno.nombres.insert("a::t1".into(), "modulo::t1".into());
+        let mut otro = Junit::default();
+        otro.tests.insert("a::t1".into(), ResultadoTest::Pasa);
+        otro.nombres.insert("a::t1".into(), "modulo::t1".into());
+        let c = clasificar(&[uno, otro], &[], &sin_exclusiones());
+        assert_eq!(c.inestables, vec!["a::t1".to_string()]);
+        assert_eq!(
+            c.nombres.get("a::t1").map(String::as_str),
+            Some("modulo::t1")
+        );
+    }
+
+    #[test]
+    fn escapar_nextest_escapa_barra_parentesis_y_coma_sin_tocar_el_parentesis_abierto() {
+        assert_eq!(escapar_nextest("a::t(1),x\\y"), "a::t(1\\)\\,x\\\\y");
+        assert_eq!(escapar_nextest("t(1),x"), "t(1\\)\\,x");
+        assert_eq!(escapar_nextest("modulo::test_a"), "modulo::test_a");
+    }
+
+    #[test]
+    fn inestable_reintento_python_mismos_ids_con_y_sin_plantilla() {
+        let ids = ["a::t1".to_string()];
+        let lista = "'/o/d/a.py::t1'";
+        let sin = Comando {
+            cmd: "pytest -q /o/d".into(),
+            reintento: None,
+        };
+        let con = Comando {
+            cmd: "pytest -q /o/d".into(),
+            reintento: Some("pytest -q {tests}".into()),
+        };
+        assert_eq!(
+            reintento_de(&sin, "/o/d", &ids, &BTreeMap::new(), "python").expect("deriva"),
+            format!("pytest -q {lista}")
+        );
+        assert_eq!(
+            reintento_de(&con, "/o/d", &ids, &BTreeMap::new(), "python").expect("plantilla"),
+            format!("pytest -q {lista}")
+        );
+    }
+
+    #[test]
+    fn inestable_reintento_shell_usa_la_cola_del_comando() {
+        let c = Comando {
+            cmd: "bash correr.sh /oraculo/oculto".into(),
+            reintento: None,
+        };
+        let r = reintento_de(
+            &c,
+            "/oraculo/oculto",
+            &["a::t1".to_string()],
+            &BTreeMap::new(),
+            "shell",
+        )
+        .expect("deriva");
+        assert_eq!(r, "bash correr.sh '/oraculo/oculto/a.py::t1'");
+    }
+
+    #[test]
+    fn inestable_reintento_shell_con_plantilla() {
+        let c = Comando {
+            cmd: "bash correr.sh /o/d".into(),
+            reintento: Some("sh run {tests}".into()),
+        };
+        let r = reintento_de(
+            &c,
+            "/o/d",
+            &["a::t1".to_string()],
+            &BTreeMap::new(),
+            "shell",
+        )
+        .expect("plantilla");
+        assert_eq!(r, "sh run '/o/d/a.py::t1'");
+    }
+
+    #[test]
+    fn inestable_reintento_otro_lenguaje_sin_cola_ni_plantilla_es_error_de_tarea() {
+        let c = Comando {
+            cmd: "go test ./...".into(),
+            reintento: None,
+        };
+        match reintento_de(
+            &c,
+            "/oraculo/oculto",
+            &["a::t".to_string()],
+            &BTreeMap::new(),
+            "go",
+        ) {
+            Err(ErrorOraculo::Tarea(msg)) => {
+                assert!(msg.contains("no termina en"), "{msg}");
+                assert!(!msg.contains("no tiene regla"), "{msg}");
+            }
+            otro => panic!("esperaba error de tarea, salió {otro:?}"),
+        }
     }
 
     fn poner_mtime(ruta: &Path, cuando: SystemTime) {
@@ -4555,6 +5183,7 @@ mod tests {
     fn vencimiento() -> ErrorOraculo {
         ErrorOraculo::PlazoVencido {
             segundos: 1200.0,
+            motor: "contenedor",
             contenedor: "x".into(),
         }
     }
@@ -4564,6 +5193,7 @@ mod tests {
         let salida = tempfile::tempdir().expect("salida");
         let vencido = ErrorOraculo::PlazoVencido {
             segundos: 5.0,
+            motor: "contenedor",
             contenedor: "otro".into(),
         };
         let texto_viejo = ErrorOraculo::Infra("timeout tras 5 s; x".into());
@@ -4587,6 +5217,7 @@ mod tests {
     fn plazo_vencido_con_su_mensaje_de_siempre_y_codigo_3() {
         let error = ErrorOraculo::PlazoVencido {
             segundos: 1200.0,
+            motor: "contenedor",
             contenedor: "x".into(),
         };
         assert_eq!(
@@ -6013,7 +6644,7 @@ mod tests {
         let sin: Vec<Dimension> = v
             .puntajes
             .iter()
-            .filter(|p| p.sin_veredicto.is_some())
+            .filter(|p| p.sin_valor())
             .map(|p| p.dimension)
             .collect();
         // Entrega no tiene ítems propios medidos: sus requisitos no cuentan (son de Completitud).
@@ -6036,7 +6667,8 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let v = veredicto_sano(base.path());
         let arq = puntaje_de_prueba(&v, Dimension::Arquitectura);
-        assert_eq!(arq.sin_veredicto.as_deref(), Some("sin módulos"), "{arq:?}");
+        assert_eq!(arq.no_aplica.as_deref(), Some("sin módulos"), "{arq:?}");
+        assert_eq!(arq.sin_veredicto, None, "{arq:?}");
         let faltan: Vec<_> = arq
             .faltantes
             .iter()
@@ -6044,6 +6676,933 @@ mod tests {
             .collect();
         assert_eq!(faltan.len(), 1, "{:?}", arq.faltantes);
         assert_eq!(faltan[0].motivo, "sin módulos");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_sin_tabla_rust_es_no_aplica() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        tarea.eficiencia = None;
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        // Sin `bootstrap/` no hay estado inicial contra el que medir (Tarea 115).
+        assert_eq!(
+            efi.no_aplica.as_deref(),
+            Some("sin estado inicial"),
+            "{efi:?}"
+        );
+        assert_eq!(efi.sin_veredicto, None, "{efi:?}");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_sin_tabla_no_rust_es_no_aplica() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        tarea.lenguaje = "python".into();
+        tarea.eficiencia = None;
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(
+            efi.no_aplica.as_deref(),
+            Some("la tarea no define [eficiencia]"),
+            "{efi:?}"
+        );
+        assert_eq!(efi.sin_veredicto, None, "{efi:?}");
+    }
+
+    // --- Tarea 115: medición automática de Eficiencia contra `bootstrap/` ---
+
+    /// Ejecutor de la medición de Eficiencia. Responde los comandos de `eficiencia.rs`, y lo demás como
+    /// `HerramientasSanas`. El estado inicial tarda 1 s por corrida de tests; el repo, `ns_repo`. El banco
+    /// da `ops` ops/s; sin `ops`, el banco falla.
+    struct EficienciaFalsa {
+        base: HerramientasSanas,
+        inicial: bool,
+        ns_repo: u64,
+        ops: Option<f64>,
+        cmds: Comandos,
+    }
+
+    impl EjecutorHerramienta for EficienciaFalsa {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if cmd == "bench-eficiencia" {
+                let mut salida = SalidaHerramienta::default();
+                match self.ops {
+                    Some(ops) => salida.stdout = format!(r#"{{"ops_s": {ops}}}"#),
+                    None => salida.codigo = 1,
+                }
+                return Ok(salida);
+            }
+            let medicion = cmd == eficiencia::cmd_metadata()
+                || cmd == eficiencia::cmd_lista()
+                || cmd == eficiencia::cmd_compilar_tests()
+                || cmd.contains("date +%s%N");
+            if !medicion {
+                return self.base.ejecutar(cmd);
+            }
+            self.cmds.borrow_mut().push(cmd.to_string());
+            let mut salida = SalidaHerramienta::default();
+            if cmd == eficiencia::cmd_metadata() {
+                let metadata =
+                    r#"{"packages":[{"name":"app","targets":[{"kind":["bin"],"name":"app"}]}]}"#;
+                salida
+                    .archivos
+                    .insert("metadata.json".into(), metadata.into());
+            } else if cmd == eficiencia::cmd_lista() {
+                let lista = r#"<testsuites><testsuite name="x"><testcase name="t1" classname="c"/></testsuite></testsuites>"#;
+                salida.archivos.insert("lista.xml".into(), lista.into());
+            } else if cmd.contains("--no-run") {
+                // Compilación de tests (Tarea 119): sale bien y no mide nada.
+                salida.stdout = "ROOT_COMPILAR 0\n".into();
+            } else if cmd.contains("cargo clean") {
+                salida.stdout = "ROOT_NS 2000000000\nROOT_BUILD 0\nROOT_SIZE 500\n".into();
+            } else {
+                // Corrida medida de tests: su `--no-run` ya no está en el comando (Tarea 119).
+                let ns = if self.inicial {
+                    1_000_000_000
+                } else {
+                    self.ns_repo
+                };
+                salida.stdout = format!("ROOT_NS {ns}\nROOT_MEM 1000\n");
+            }
+            Ok(salida)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            self.base.tiene_rustsec()
+        }
+    }
+
+    /// Fábrica de `EficienciaFalsa`. El lado del estado inicial se reconoce por su ruta `bootstrap`.
+    fn fabrica_eficiencia(
+        ns_repo: u64,
+        ops: Option<f64>,
+        cmds: Comandos,
+    ) -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
+        move |p: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(EficienciaFalsa {
+                base: HerramientasSanas {
+                    faltan: Vec::new(),
+                    fuga: false,
+                },
+                inicial: p.repo.ends_with("bootstrap"),
+                ns_repo,
+                ops,
+                cmds: cmds.clone(),
+            })
+        }
+    }
+
+    /// Tarea de Rust sin `[eficiencia]`, con `bootstrap/` y su `Cargo.lock` listos.
+    fn tarea_rust_sin_tabla_con_estado_inicial(base: &Path) -> Tarea {
+        let mut tarea = tarea_rust(base);
+        tarea.eficiencia = None;
+        let bootstrap = tarea.dir.join("bootstrap");
+        fs::create_dir_all(&bootstrap).expect("bootstrap");
+        fs::write(bootstrap.join("Cargo.lock"), LOCK_SANO).expect("lock inicial");
+        tarea
+    }
+
+    /// Evalúa la tarea de Rust con el ejecutor de Eficiencia `fabrica` y las suites sanas.
+    fn evaluar_con_eficiencia(
+        base: &Path,
+        tarea: &Tarea,
+        fabrica: &dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
+        partes: Option<Partes>,
+    ) -> Veredicto {
+        let repo = repo_rust(base, LOCK_SANO);
+        let home = home_con_cache(base, LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let o = OpcionesOraculo {
+            partes,
+            ..opciones(&home)
+        };
+        evaluar_falso_con(&repo, tarea, &o, &correr, fabrica).expect("evalúa")
+    }
+
+    #[test]
+    fn oraculo_eficiencia_rust_sin_tabla_con_estado_inicial_mide_sola() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_sin_tabla_con_estado_inicial(base.path());
+        let cmds = Comandos::default();
+        let fabrica = fabrica_eficiencia(1_000_000_000, None, cmds.clone());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(efi.no_aplica, None, "{efi:?}");
+        assert_eq!(efi.sin_veredicto, None, "{efi:?}");
+        assert!((efi.valor - 1.0).abs() < 0.01, "{efi:?}");
+        assert_eq!(v.eficiencia_auto.len(), 4, "{:?}", v.eficiencia_auto);
+        assert!(!cmds.borrow().is_empty(), "la medición debe correr");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_auto_con_tests_1_3_veces_mas_lentos_da_077() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_sin_tabla_con_estado_inicial(base.path());
+        let fabrica = fabrica_eficiencia(1_300_000_000, None, Comandos::default());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert!((efi.valor - 0.77).abs() < 0.01, "{efi:?}");
+        let tiempo = v
+            .eficiencia_auto
+            .iter()
+            .find(|m| m.medida == "tiempo_tests")
+            .expect("tiempo_tests");
+        assert!(tiempo.regresion, "{tiempo:?}");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_rust_sin_estado_inicial_sin_tabla_es_no_aplica_con_motivo() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        tarea.eficiencia = None;
+        let cmds = Comandos::default();
+        let fabrica = fabrica_eficiencia(1_300_000_000, None, cmds.clone());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(
+            efi.no_aplica.as_deref(),
+            Some("sin estado inicial"),
+            "{efi:?}"
+        );
+        assert_eq!(efi.sin_veredicto, None, "{efi:?}");
+        assert!(cmds.borrow().is_empty(), "sin estado inicial no mide");
+        assert!(v.eficiencia_auto.is_empty(), "{:?}", v.eficiencia_auto);
+    }
+
+    #[test]
+    fn oraculo_eficiencia_banco_bajo_gana_a_la_medicion() {
+        // El banco da 3000 ops/s con piso 5000: 0,6. La medición da 0,77. Vale el menor: 0,6.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_estado_inicial_y_tabla(base.path());
+        let fabrica = fabrica_eficiencia(1_300_000_000, Some(3000.0), Comandos::default());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert!((efi.valor - 0.6).abs() < 0.01, "{efi:?}");
+        assert!(
+            v.hallazgos
+                .iter()
+                .any(|h| h.dimension == Dimension::Eficiencia),
+            "el hallazgo del banco sigue: {:?}",
+            v.hallazgos
+        );
+    }
+
+    #[test]
+    fn oraculo_eficiencia_banco_alto_deja_ganar_a_la_medicion() {
+        // El banco da 4500 ops/s: 0,9. La medición da 0,77. Vale el menor: 0,77.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_estado_inicial_y_tabla(base.path());
+        let fabrica = fabrica_eficiencia(1_300_000_000, Some(4500.0), Comandos::default());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert!((efi.valor - 0.77).abs() < 0.01, "{efi:?}");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_banco_sin_valor_deja_decidir_a_la_medicion() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_estado_inicial_y_tabla(base.path());
+        let fabrica = fabrica_eficiencia(1_300_000_000, None, Comandos::default());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(efi.sin_veredicto, None, "{efi:?}");
+        assert!((efi.valor - 0.77).abs() < 0.01, "{efi:?}");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_sin_medidas_da_sin_veredicto_con_motivos() {
+        // Ningún comando de medición responde: cada medida trae su motivo y la dimensión no es "no aplica".
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_sin_tabla_con_estado_inicial(base.path());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &herramientas(&[]), None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(efi.no_aplica, None, "{efi:?}");
+        let motivo = efi.sin_veredicto.as_deref().unwrap_or_default();
+        assert!(motivo.contains("sin metadata.json"), "{motivo}");
+    }
+
+    #[test]
+    fn oraculo_eficiencia_calibracion_de_diseno_no_llama_la_medicion() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_sin_tabla_con_estado_inicial(base.path());
+        let cmds = Comandos::default();
+        let fabrica = fabrica_eficiencia(1_300_000_000, None, cmds.clone());
+        let partes = partes_de(Dimension::Diseno, &[], &tarea);
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, Some(partes));
+        assert!(cmds.borrow().is_empty(), "{:?}", cmds.borrow());
+        assert!(v.eficiencia_auto.is_empty(), "{:?}", v.eficiencia_auto);
+    }
+
+    /// Lo que ve la sonda de lastre en un test: los comandos que llegan y las copias marcadas.
+    #[derive(Default)]
+    struct EspiaSonda {
+        comandos: std::cell::RefCell<Vec<String>>,
+        copias: std::cell::RefCell<Vec<PathBuf>>,
+    }
+
+    /// Ejecutor de la sonda falso: escribe `lista` en el archivo de la sonda (`None`: no escribe nada) y
+    /// responde `respuesta` a su comando. Lo demás va a `resto`.
+    struct SondaFalsa {
+        espia: std::rc::Rc<EspiaSonda>,
+        respuesta: Result<Option<&'static str>, &'static str>,
+        /// Lo que no es la sonda: la medición de Eficiencia, con `EficienciaFalsa`.
+        resto: Box<dyn EjecutorHerramienta>,
+    }
+
+    impl EjecutorHerramienta for SondaFalsa {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if cmd.contains(ARCHIVO_LISTA) {
+                return Err(ErrorOraculo::Infra(
+                    "la sonda necesita carpeta de salida".into(),
+                ));
+            }
+            self.resto.ejecutar(cmd)
+        }
+
+        fn ejecutar_en(&self, cmd: &str, salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if !cmd.contains(ARCHIVO_LISTA) {
+                return self.resto.ejecutar_en(cmd, salida);
+            }
+            self.espia.comandos.borrow_mut().push(cmd.to_string());
+            match self.respuesta {
+                Ok(lista) => {
+                    if let Some(lista) = lista {
+                        fs::write(salida.join(ARCHIVO_LISTA), lista).expect("lista");
+                    }
+                    Ok(SalidaHerramienta::default())
+                }
+                Err(motivo) => Err(ErrorOraculo::Infra(motivo.into())),
+            }
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            true
+        }
+    }
+
+    /// Fábrica de la sonda: anota las copias marcadas que llegan y da `respuesta` a la sonda. Lo demás lo
+    /// responde `EficienciaFalsa`. Con `lista_inicial`, el estado inicial lista esa salida de tests.
+    fn fabrica_de_sonda(
+        espia: std::rc::Rc<EspiaSonda>,
+        respuesta: Result<Option<&'static str>, &'static str>,
+        lista_inicial: Option<&'static str>,
+    ) -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
+        move |p: &Preparada| {
+            let marcada = fs::read_to_string(p.repo.join("src/lib.rs"))
+                .is_ok_and(|t| t.contains("ROOT_SONDA_0"));
+            if marcada {
+                espia.copias.borrow_mut().push(p.repo.clone());
+            }
+            let inicial = p.repo.ends_with("bootstrap");
+            let eficiencia = Box::new(EficienciaFalsa {
+                base: HerramientasSanas {
+                    faltan: Vec::new(),
+                    fuga: false,
+                },
+                inicial,
+                ns_repo: 1_300_000_000,
+                ops: Some(6000.0),
+                cmds: Comandos::default(),
+            });
+            let resto: Box<dyn EjecutorHerramienta> = match lista_inicial {
+                Some(xml) if inicial => Box::new(ListaDelInicial {
+                    xml,
+                    dentro: eficiencia,
+                }),
+                _ => eficiencia,
+            };
+            Box::new(SondaFalsa {
+                espia: espia.clone(),
+                respuesta,
+                resto,
+            })
+        }
+    }
+
+    /// Ejecutor del estado inicial que responde `xml` a `cmd_lista`. Lo demás va a `dentro`.
+    struct ListaDelInicial {
+        xml: &'static str,
+        dentro: Box<dyn EjecutorHerramienta>,
+    }
+
+    impl EjecutorHerramienta for ListaDelInicial {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if cmd != eficiencia::cmd_lista() {
+                return self.dentro.ejecutar(cmd);
+            }
+            let mut salida = SalidaHerramienta::default();
+            salida.archivos.insert("lista.xml".into(), self.xml.into());
+            Ok(salida)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            self.dentro.tiene_rustsec()
+        }
+    }
+
+    /// Salida de `cmd_lista` con `t1` y `t2`, los dos pasan. Solo el estado inicial la usa en las pruebas.
+    const LISTA_CON_T2: &str = r#"<testsuites><testsuite name="x"><testcase name="t1" classname="c"/><testcase name="t2" classname="c"/></testsuite></testsuites>"#;
+    /// Fuente del repo bueno en las pruebas de la sonda: `uno`, igual que la de `bootstrap/`.
+    const FUENTE_SONDA: &str = "pub fn uno() -> u8 {\n    1\n}\n";
+
+    /// Tarea de Rust con `bootstrap/` de una función `uno` en la línea 1 de `src/lib.rs`.
+    fn tarea_rust_con_bootstrap_de_funciones(base: &Path) -> Tarea {
+        let tarea = tarea_rust(base);
+        let bootstrap = tarea.dir.join("bootstrap");
+        fs::create_dir_all(bootstrap.join("src")).expect("bootstrap/src");
+        fs::write(
+            bootstrap.join("src/lib.rs"),
+            "pub fn uno() -> u8 {\n    1\n}\n",
+        )
+        .expect("lib.rs inicial");
+        fs::write(bootstrap.join("Cargo.lock"), LOCK_SANO).expect("lock inicial");
+        tarea
+    }
+
+    /// Evalúa `tarea` con el repo `fuente_repo` y `partes` (o todas). No pide la sonda: lo hace quien llama.
+    fn evaluar_tarea_de_sonda(
+        base: &Path,
+        tarea: &Tarea,
+        fuente_repo: &str,
+        partes: Option<Partes>,
+        fabrica: &dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
+    ) -> Veredicto {
+        let repo = repo_rust(base, LOCK_SANO);
+        fs::write(repo.join("src/lib.rs"), fuente_repo).expect("lib.rs del repo");
+        let home = home_con_cache(base, LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let o = OpcionesOraculo {
+            partes,
+            ..opciones(&home)
+        };
+        evaluar_falso_con(&repo, tarea, &o, &correr, fabrica).expect("evalúa")
+    }
+
+    /// Evalúa la tarea de Rust con la sonda `respuesta`. Con `pedida`, la evaluación corre bajo la sonda pedida.
+    fn evaluar_con_sonda(
+        base: &Path,
+        espia: &std::rc::Rc<EspiaSonda>,
+        respuesta: Result<Option<&'static str>, &'static str>,
+        pedida: bool,
+    ) -> Veredicto {
+        let tarea = tarea_rust_con_bootstrap_de_funciones(base);
+        let fabrica = fabrica_de_sonda(espia.clone(), respuesta, None);
+        let evaluar = || evaluar_tarea_de_sonda(base, &tarea, FUENTE_SONDA, None, &fabrica);
+        if pedida {
+            calibra::sonda_lastre::con_sonda_lastre(evaluar)
+        } else {
+            evaluar()
+        }
+    }
+
+    /// `true` si la marca de la sonda va justo después de la firma `fn <nombre>(` de `texto`.
+    fn marcada_en_la_funcion(texto: &str, nombre: &str) -> bool {
+        let lineas: Vec<&str> = texto.lines().collect();
+        let firma = format!("fn {nombre}(");
+        lineas
+            .iter()
+            .position(|l| l.contains(&firma))
+            .is_some_and(|pos| {
+                lineas
+                    .get(pos + 1)
+                    .is_some_and(|l| l.contains("ROOT_SONDA_"))
+            })
+    }
+
+    #[test]
+    fn sonda_lastre_con_sonda_marca_la_copia_del_repo_bueno_y_no_la_de_bootstrap() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_bootstrap_de_funciones(base.path());
+        let textos = std::cell::RefCell::new(Vec::<String>::new());
+        let fabrica_base = fabrica_lastre(1_300_000_000, Comandos::default());
+        // Antes de que la sonda borre su copia, anota el texto de las copias marcadas que llegan.
+        let fabrica = |p: &Preparada| {
+            if let Ok(texto) = fs::read_to_string(p.repo.join("src/lib.rs"))
+                && texto.contains("ROOT_SONDA_")
+            {
+                textos.borrow_mut().push(texto);
+            }
+            fabrica_base(p)
+        };
+        // Solo el repo bueno tiene `solo_repo`: bootstrap no.
+        let fuente = "pub fn uno() -> u8 {\n    1\n}\n\npub fn solo_repo() -> u8 {\n    2\n}\n";
+        calibra::sonda_lastre::con_sonda_lastre(|| {
+            evaluar_tarea_de_sonda(base.path(), &tarea, fuente, None, &fabrica)
+        });
+        let textos = textos.into_inner();
+        assert_eq!(textos.len(), 1, "{textos:?}");
+        assert!(
+            marcada_en_la_funcion(&textos[0], "solo_repo"),
+            "{}",
+            textos[0]
+        );
+    }
+
+    #[test]
+    fn sonda_lastre_comando_lleva_el_filtro_de_los_tests_comunes() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_bootstrap_de_funciones(base.path());
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        // El estado inicial lista `t2` y el repo no: `t2` no es común y el filtro la excluye.
+        let fabrica = fabrica_de_sonda(espia.clone(), Ok(Some("")), Some(LISTA_CON_T2));
+        calibra::sonda_lastre::con_sonda_lastre(|| {
+            evaluar_tarea_de_sonda(base.path(), &tarea, FUENTE_SONDA, None, &fabrica)
+        });
+        let comandos = espia.comandos.borrow();
+        assert_eq!(comandos.len(), 1, "{comandos:?}");
+        assert!(
+            comandos[0].contains(
+                "nextest.toml -E 'not (test(=t2))'; ls /tmp/root-sonda > /salida/root-sonda.lista"
+            ),
+            "{}",
+            comandos[0]
+        );
+    }
+
+    #[test]
+    fn sonda_lastre_sin_filtro_de_tests_comunes_da_error_y_no_corre() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_bootstrap_de_funciones(base.path());
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        let fabrica = fabrica_de_sonda(espia.clone(), Ok(Some("")), None);
+        // Las partes de Diseño no miden Eficiencia: no queda referencia de dos lados en el hilo.
+        let _ = eficiencia::tomar_referencia();
+        let partes = partes_de(Dimension::Diseno, &[], &tarea);
+        let v = calibra::sonda_lastre::con_sonda_lastre(|| {
+            evaluar_tarea_de_sonda(base.path(), &tarea, FUENTE_SONDA, Some(partes), &fabrica)
+        });
+        let Some(Err(motivo)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
+            panic!("sin filtro la sonda debía dejar un error");
+        };
+        assert!(motivo.contains("sin filtro de tests comunes"), "{motivo}");
+        assert!(v.avisos.iter().any(|a| a == &motivo), "{:?}", v.avisos);
+        assert!(
+            espia.comandos.borrow().is_empty(),
+            "la sonda no debe correr"
+        );
+    }
+
+    #[test]
+    fn sonda_lastre_funcion_nueva_del_repo_que_corre_queda_en_la_lista() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_bootstrap_de_funciones(base.path());
+        let fabrica = fabrica_lastre(1_300_000_000, Comandos::default());
+        let fuente = "pub fn uno() -> u8 {\n    1\n}\n\npub fn solo_repo() -> u8 {\n    2\n}\n";
+        let _ = calibra::sonda_lastre::con_sonda_lastre(|| {
+            evaluar_tarea_de_sonda(base.path(), &tarea, fuente, None, &fabrica)
+        });
+        let Some(Ok(corrieron)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
+            panic!("la sonda debía dejar una lista");
+        };
+        let solo = calibra::sonda_lastre::FuncionMarcada {
+            archivo: "src/lib.rs".into(),
+            linea: 5,
+            nombre: "solo_repo".into(),
+        };
+        assert!(corrieron.contains(&solo), "{corrieron:?}");
+    }
+
+    #[test]
+    fn sonda_lastre_pedida_manda_el_comando_con_copia_marcada_y_la_borra() {
+        let base = tempfile::tempdir().expect("base");
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        evaluar_con_sonda(base.path(), &espia, Ok(Some("")), true);
+        assert!(
+            espia
+                .comandos
+                .borrow()
+                .iter()
+                .any(|c| c.contains("mkdir -p /tmp/root-sonda")),
+            "{:?}",
+            espia.comandos.borrow()
+        );
+        let copias = espia.copias.borrow();
+        assert_eq!(copias.len(), 1, "{copias:?}");
+        assert!(!copias[0].exists(), "la copia se borra al terminar");
+    }
+
+    #[test]
+    fn sonda_lastre_sin_pedida_no_manda_comando_ni_deja_resultado() {
+        let base = tempfile::tempdir().expect("base");
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        let _ = calibra::sonda_lastre::tomar_sonda_lastre();
+        evaluar_con_sonda(base.path(), &espia, Ok(Some("")), false);
+        assert!(
+            espia.comandos.borrow().is_empty(),
+            "{:?}",
+            espia.comandos.borrow()
+        );
+        assert!(espia.copias.borrow().is_empty());
+        assert!(calibra::sonda_lastre::tomar_sonda_lastre().is_none());
+    }
+
+    #[test]
+    fn sonda_lastre_lista_en_el_archivo_deja_la_funcion_que_corrio() {
+        let base = tempfile::tempdir().expect("base");
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        let lista = "src_lib_rs__1__uno\n";
+        evaluar_con_sonda(base.path(), &espia, Ok(Some(lista)), true);
+        let Some(Ok(corrieron)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
+            panic!("la sonda debía dejar un resultado válido");
+        };
+        let esperada = calibra::sonda_lastre::FuncionMarcada {
+            archivo: "src/lib.rs".into(),
+            linea: 1,
+            nombre: "uno".into(),
+        };
+        assert_eq!(corrieron, BTreeSet::from([esperada]));
+    }
+
+    #[test]
+    fn sonda_lastre_fallo_del_ejecutor_deja_motivo_aviso_y_sigue() {
+        let base = tempfile::tempdir().expect("base");
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        let v = evaluar_con_sonda(base.path(), &espia, Err("contenedor caído"), true);
+        let Some(Err(motivo)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
+            panic!("el fallo debía dejar un motivo");
+        };
+        assert!(motivo.contains("el ejecutor falló"), "{motivo}");
+        assert!(v.avisos.iter().any(|a| a == &motivo), "{:?}", v.avisos);
+        let copias = espia.copias.borrow();
+        assert_eq!(copias.len(), 1, "{copias:?}");
+        assert!(!copias[0].exists(), "la copia se borra también con error");
+    }
+
+    #[test]
+    fn sonda_lastre_salida_sin_marcas_deja_error_sin_salida() {
+        let base = tempfile::tempdir().expect("base");
+        let espia = std::rc::Rc::new(EspiaSonda::default());
+        // Sin archivo: la consola puede traer marcas, pero no hay lista que leer.
+        let v = evaluar_con_sonda(base.path(), &espia, Ok(None), true);
+        let Some(Err(motivo)) = calibra::sonda_lastre::tomar_sonda_lastre() else {
+            panic!("la salida sin marcas debía dejar un motivo");
+        };
+        assert!(motivo.contains("sin salida"), "{motivo}");
+        assert!(v.avisos.iter().any(|a| a == &motivo), "{:?}", v.avisos);
+    }
+
+    /// Ejecutor de `medir_lastre` que escribe la lista de ids de `repo` en la salida, si `escribe`, y
+    /// responde `stdout` como cola de la consola.
+    struct ListaFalsa {
+        repo: PathBuf,
+        escribe: bool,
+        stdout: String,
+    }
+
+    impl EjecutorHerramienta for ListaFalsa {
+        fn ejecutar(&self, _cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            Err(ErrorOraculo::Infra(
+                "la sonda necesita carpeta de salida".into(),
+            ))
+        }
+
+        fn ejecutar_en(
+            &self,
+            _cmd: &str,
+            salida: &Path,
+        ) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if self.escribe {
+                let mut ids = Vec::new();
+                ids_de_sonda(&self.repo.join("src"), &mut ids);
+                fs::write(salida.join("root-sonda.lista"), ids.join("\n")).expect("lista");
+            }
+            Ok(SalidaHerramienta {
+                stdout: self.stdout.clone(),
+                ..SalidaHerramienta::default()
+            })
+        }
+    }
+
+    /// Copia fuente de `base/fuente` con `texto` en `src/lib.rs`. Devuelve su ruta.
+    fn fuente_con(base: &Path, texto: &str) -> PathBuf {
+        let repo = base.join("fuente");
+        fs::create_dir_all(repo.join("src")).expect("src");
+        fs::write(repo.join("src/lib.rs"), texto).expect("lib.rs");
+        repo
+    }
+
+    #[test]
+    fn sonda_lastre_con_la_cola_de_4000_del_stdout_da_las_300_funciones() {
+        let base = tempfile::tempdir().expect("base");
+        let fuente: String = (0..300)
+            .map(|n| format!("pub fn f{n}() -> u32 {{\n    {n}\n}}\n\n"))
+            .collect();
+        let repo = fuente_con(base.path(), &fuente);
+        // Como `resultado_de`: el stdout llega solo con sus últimos 4000 caracteres, sin marcas.
+        let stdout = "salida de tests\n".repeat(400);
+        let cola = stdout[stdout.len() - 4000..].to_string();
+        let fabrica = |p: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(ListaFalsa {
+                repo: p.repo.clone(),
+                escribe: true,
+                stdout: cola.clone(),
+            })
+        };
+        let corrieron = medir_lastre(
+            &base.path().join("trabajo"),
+            &repo,
+            None,
+            None,
+            &fabrica,
+            "",
+        )
+        .expect("mide");
+        assert_eq!(corrieron.len(), 300, "{corrieron:?}");
+    }
+
+    #[test]
+    fn sonda_lastre_sin_archivo_da_el_error_de_las_marcas() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = fuente_con(base.path(), "pub fn uno() -> u32 {\n    1\n}\n");
+        // Aunque el stdout traiga las marcas, sin el archivo no hay lista que leer.
+        let fabrica = |p: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(ListaFalsa {
+                repo: p.repo.clone(),
+                escribe: false,
+                stdout: "ROOT_SONDA_INICIO\nROOT_SONDA_FIN\n".into(),
+            })
+        };
+        let motivo = medir_lastre(
+            &base.path().join("trabajo"),
+            &repo,
+            None,
+            None,
+            &fabrica,
+            "",
+        )
+        .expect_err("sin archivo hay error");
+        assert!(
+            motivo.contains("el comando no llegó a sus marcas"),
+            "{motivo}"
+        );
+    }
+
+    /// Ids de la sonda de lastre de todos los `.rs` bajo `dir`, en orden de lectura.
+    fn ids_de_sonda(dir: &Path, ids: &mut Vec<String>) {
+        let Ok(entradas) = fs::read_dir(dir) else {
+            return;
+        };
+        for entrada in entradas.flatten() {
+            let ruta = entrada.path();
+            if ruta.is_dir() {
+                ids_de_sonda(&ruta, ids);
+            } else if ruta.extension().is_some_and(|e| e == "rs")
+                && let Ok(texto) = fs::read_to_string(&ruta)
+            {
+                for linea in texto.lines().filter(|l| l.contains("ROOT_SONDA_")) {
+                    let Some(pos) = linea.find("/tmp/root-sonda/") else {
+                        continue;
+                    };
+                    let id: String = linea[pos + "/tmp/root-sonda/".len()..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    ids.push(id);
+                }
+            }
+        }
+    }
+
+    /// Ejecutor de la calibración de punta a punta: la sonda responde todas las funciones menos `no_corre`;
+    /// el resto de los comandos lo responde `EficienciaFalsa`.
+    struct LastreFalso {
+        eficiencia: EficienciaFalsa,
+        repo: PathBuf,
+    }
+
+    impl EjecutorHerramienta for LastreFalso {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if cmd.contains(ARCHIVO_LISTA) {
+                return Err(ErrorOraculo::Infra(
+                    "la sonda necesita carpeta de salida".into(),
+                ));
+            }
+            self.eficiencia.ejecutar(cmd)
+        }
+
+        fn ejecutar_en(&self, cmd: &str, salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+            if !cmd.contains(ARCHIVO_LISTA) {
+                return self.eficiencia.ejecutar_en(cmd, salida);
+            }
+            let mut ids = Vec::new();
+            ids_de_sonda(&self.repo.join("src"), &mut ids);
+            let ids: Vec<String> = ids
+                .into_iter()
+                .filter(|id| !id.ends_with("__no_corre"))
+                .collect();
+            fs::write(salida.join(ARCHIVO_LISTA), ids.join("\n")).expect("lista");
+            Ok(SalidaHerramienta {
+                stdout: "34 tests pasan\n".into(),
+                ..SalidaHerramienta::default()
+            })
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            self.eficiencia.tiene_rustsec()
+        }
+    }
+
+    /// Fábrica de `LastreFalso`. Cada copia recibe su propio `EficienciaFalsa` con `cmds`.
+    fn fabrica_lastre(
+        ns_repo: u64,
+        cmds: Comandos,
+    ) -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
+        move |p: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(LastreFalso {
+                eficiencia: EficienciaFalsa {
+                    base: HerramientasSanas {
+                        faltan: Vec::new(),
+                        fuga: false,
+                    },
+                    inicial: p.repo.ends_with("bootstrap"),
+                    ns_repo,
+                    ops: None,
+                    cmds: cmds.clone(),
+                },
+                repo: p.repo.clone(),
+            })
+        }
+    }
+
+    /// Nombre de la función en cuya `{` cae el lastre de `texto`: la firma `fn` inmediatamente anterior.
+    fn funcion_del_lastre(texto: &str) -> Option<String> {
+        let mut firma = None;
+        for linea in texto.lines() {
+            if linea.contains("let _lastre = std::hint::black_box(") {
+                return firma;
+            }
+            if let Some(pos) = linea.find("fn ") {
+                let nombre: String = linea[pos + 3..]
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !nombre.is_empty() {
+                    firma = Some(nombre);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn sonda_lastre_calibracion_de_eficiencia_de_punta_a_punta_pone_el_lastre_en_la_lista() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let bootstrap = tarea.dir.join("bootstrap");
+        fs::create_dir_all(bootstrap.join("src")).expect("bootstrap/src");
+        fs::write(
+            bootstrap.join("src/lib.rs"),
+            "pub fn uno() -> u8 {\n    let x = 1;\n    x\n}\n\n\
+             pub fn dos() -> u8 {\n    let x = 2;\n    x\n}\n\n\
+             pub fn no_corre() -> u8 {\n    let x = 3;\n    x\n}\n",
+        )
+        .expect("lib.rs inicial");
+        fs::write(bootstrap.join("Cargo.lock"), LOCK_SANO).expect("lock inicial");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn uno() -> u8 {\n    let x = 1;\n    x\n}\n\n\
+             pub fn dos() -> u8 {\n    let x = 2;\n    x\n}\n\n\
+             pub fn no_corre() -> u8 {\n    let x = 3;\n    x\n}\n\n\
+             pub fn nueva() -> u8 {\n    let x = 4;\n    x\n}\n",
+        )
+        .expect("repo bueno");
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let lastres = std::sync::Mutex::new(Vec::<String>::new());
+        let evaluador = |ruta: &Path| -> Result<Veredicto, ErrorOraculo> {
+            let fabrica = fabrica_lastre(1_300_000_000, Comandos::default());
+            let v = evaluar_falso_con(ruta, &tarea, &opciones(&home), &correr, &fabrica)?;
+            if let Ok(texto) = fs::read_to_string(ruta.join("src/lib.rs"))
+                && texto.contains("let _lastre = std::hint::black_box(")
+                && let Some(nombre) = funcion_del_lastre(&texto)
+            {
+                lastres.lock().expect("lastres").push(nombre);
+            }
+            Ok(v)
+        };
+        calibra::calibrar_con(&tarea, Dimension::Eficiencia, 6, 42, &repo, &evaluador)
+            .expect("calibra");
+        let lastres = lastres.into_inner().expect("lastres");
+        assert!(!lastres.is_empty(), "debe haber al menos un lastre");
+        // Tarea 143: `nueva` existe solo en el repo y corre en los tests comunes, así que también es lugar válido.
+        // `no_corre` no corre y sigue fuera.
+        let lista = ["uno", "dos", "nueva"];
+        assert!(
+            lastres.iter().all(|f| lista.contains(&f.as_str())),
+            "todo lastre cae en la lista: {lastres:?}"
+        );
+    }
+
+    #[test]
+    fn oraculo_eficiencia_no_rust_con_estado_inicial_no_mide_sola() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust_sin_tabla_con_estado_inicial(base.path());
+        tarea.lenguaje = "python".into();
+        let cmds = Comandos::default();
+        let fabrica = fabrica_eficiencia(1_300_000_000, None, cmds.clone());
+        let v = evaluar_con_eficiencia(base.path(), &tarea, &fabrica, None);
+        let efi = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(
+            efi.no_aplica.as_deref(),
+            Some("la tarea no define [eficiencia]"),
+            "{efi:?}"
+        );
+        assert!(cmds.borrow().is_empty(), "{:?}", cmds.borrow());
+    }
+
+    /// Tarea de Rust con `[eficiencia]` (piso 5000) y `bootstrap/` listo.
+    fn tarea_rust_con_estado_inicial_y_tabla(base: &Path) -> Tarea {
+        let tarea = tarea_rust(base);
+        let bootstrap = tarea.dir.join("bootstrap");
+        fs::create_dir_all(&bootstrap).expect("bootstrap");
+        fs::write(bootstrap.join("Cargo.lock"), LOCK_SANO).expect("lock inicial");
+        tarea
+    }
+
+    #[test]
+    fn oraculo_entrega_sin_entrega_es_no_aplica() {
+        // Sin `[entrega]`, sin escenarios ni Dockerfile: la Entrega no midió ningún ítem propio.
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
+        assert_eq!(
+            entrega.no_aplica.as_deref(),
+            Some("entrega sin ítems medidos"),
+            "{entrega:?}"
+        );
+        assert_eq!(entrega.sin_veredicto, None, "{entrega:?}");
+    }
+
+    #[test]
+    fn oraculo_diseno_sin_juez_sigue_con_sin_veredicto_y_sin_no_aplica() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let rubricas = [rubrica_diseno()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con(
+            &repo,
+            &tarea,
+            &opciones(&home),
+            Dependencias {
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        )
+        .expect("evalúa");
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        assert!(diseno.sin_veredicto.is_some(), "{diseno:?}");
+        assert_eq!(diseno.no_aplica, None, "{diseno:?}");
     }
 
     /// Tarea de Rust como `tarea_rust`, con `[arquitectura]` que declara una capa de tres módulos.
@@ -6353,7 +7912,7 @@ mod tests {
         let informe = v.informe.as_ref().expect("hay informe");
         assert_eq!(informe.decision, Decision::NoListo, "{}", informe.motivo);
         assert!(
-            informe.motivo.contains("test_contrato_fuera_de_requisitos"),
+            informe.motivo.contains("test_contrato_falla"),
             "{}",
             informe.motivo
         );
@@ -6475,10 +8034,18 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_descarga_sin_veredicto_deja_las_nueve_sin_veredicto() {
+    fn oraculo_corte_fuente_no_aceptada_deja_las_nueve_sin_veredicto() {
         let base = tempfile::tempdir().expect("base");
         let tarea = tarea_rust(base.path());
-        let repo = repo_rust(base.path(), LOCK_ROTO);
+        // Cambió de valor: antes usaba `LOCK_ROTO`, y el corte era el del lock. Ahora la fuente no aceptada es
+        // una dependencia git por ssh, con un lock sano.
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [dependencies]\nfoo = { git = \"ssh://git@github.com/x/y\" }\n",
+        )
+        .expect("Cargo.toml con fuente git por ssh");
         let home = base.path().join("home");
         let v = evaluar_falso(&repo, &tarea, &home, &sin_suites, &herramientas(&[]))
             .expect("la descarga sin veredicto no es error de infraestructura");
@@ -6492,6 +8059,285 @@ mod tests {
             v.hallazgos
                 .iter()
                 .any(|h| h.dimension == Dimension::Entrega)
+        );
+    }
+
+    /// Repo de Rust sin `Cargo.toml`: el `Cargo.lock` dado es lo que la descarga lee. Así el inventario no
+    /// rechaza el lock antes, y el corte es el de `preparar_rust`.
+    fn repo_rust_sin_manifiesto(base: &Path, lock: &str) -> PathBuf {
+        let repo = repo_rust(base, lock);
+        fs::remove_file(repo.join("Cargo.toml")).expect("sin Cargo.toml");
+        repo
+    }
+
+    /// Lo que todo corte de la descarga debe cumplir: informe con la decisión y el estado que su corte pide,
+    /// nueve dimensiones sin veredicto con el motivo de la descarga, y el hallazgo del corte nombrado en el
+    /// informe (`marca` está en su detalle).
+    fn assert_corte_con_informe(v: &Veredicto, marca: &str, decision: Decision, estado: Estado) {
+        let informe = v.informe.as_ref().expect("el corte trae informe");
+        assert_eq!(informe.decision, decision, "{}", informe.motivo);
+        assert_eq!(v.estado, estado);
+        assert_eq!(v.puntajes.len(), 9);
+        for p in &v.puntajes {
+            assert_eq!(p.valor, 0.0, "{:?}", p.dimension);
+            let motivo = p.sin_veredicto.as_deref().expect("sin veredicto");
+            assert!(motivo.contains("descarga"), "{motivo}");
+        }
+        assert!(
+            informe
+                .resumen
+                .contains("Las suites no corrieron: la descarga se cortó ("),
+            "el resumen nombra el corte: {}",
+            informe.resumen
+        );
+        assert!(
+            informe.riesgos.iter().any(|r| r.texto.contains(marca)),
+            "los riesgos nombran el hallazgo del corte: {:?}",
+            informe.riesgos
+        );
+    }
+
+    #[test]
+    fn oraculo_corte_lock_invalido_trae_informe_que_nombra_el_hallazgo() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust_sin_manifiesto(base.path(), LOCK_ROTO);
+        let home = base.path().join("home");
+        let v = evaluar_falso(&repo, &tarea, &home, &sin_suites, &herramientas(&[]))
+            .expect("el corte no es error de infraestructura");
+        assert!(
+            v.hallazgos
+                .iter()
+                .any(|h| h.detalle.contains("Cargo.lock inválido")),
+            "{:?}",
+            v.hallazgos
+        );
+        // Cambió de valor: antes daba SinDecision. Un lock que no parsea no compila, así que da NoListo y rojo.
+        assert_corte_con_informe(&v, "Cargo.lock inválido", Decision::NoListo, Estado::Rojo);
+    }
+
+    #[test]
+    fn oraculo_corte_lock_roto_con_manifiesto_da_lock_invalido_y_no_listo() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        // Con `Cargo.toml` sano: el lock roto lo ve `preparar_rust` y no el inventario.
+        let repo = repo_rust(base.path(), LOCK_ROTO);
+        let home = base.path().join("home");
+        let v = evaluar_falso(&repo, &tarea, &home, &sin_suites, &herramientas(&[]))
+            .expect("el corte no es error de infraestructura");
+        assert!(
+            v.hallazgos
+                .iter()
+                .any(|h| h.detalle.contains("Cargo.lock inválido")),
+            "{:?}",
+            v.hallazgos
+        );
+        assert_corte_con_informe(&v, "Cargo.lock inválido", Decision::NoListo, Estado::Rojo);
+    }
+
+    #[test]
+    fn oraculo_corte_fuente_no_aceptada_trae_informe_que_nombra_el_hallazgo() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        // Una dependencia git por ssh: el inventario la rechaza antes de cualquier contenedor.
+        fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [dependencies]\nfoo = { git = \"ssh://git@github.com/x/y\" }\n",
+        )
+        .expect("Cargo.toml con fuente git por ssh");
+        let home = base.path().join("home");
+        let v = evaluar_falso(&repo, &tarea, &home, &sin_suites, &herramientas(&[]))
+            .expect("el corte no es error de infraestructura");
+        assert_corte_con_informe(
+            &v,
+            "fuente no aceptada",
+            Decision::SinDecision,
+            Estado::SinVeredicto,
+        );
+    }
+
+    #[test]
+    fn oraculo_camino_normal_trae_informe_y_estado_de_su_decision() {
+        // Guarda: el camino sin corte no cambia. Su estado sale de su informe, como antes.
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(v.estado, informe::estado_de(Some(informe)));
+        assert!(
+            !informe.motivo.contains("descarga"),
+            "el camino normal no lleva motivo de descarga: {}",
+            informe.motivo
+        );
+    }
+
+    /// Hallazgo de entrega de un corte, con el detalle que el motivo nombra.
+    fn hallazgo_de_corte(detalle: &str) -> Hallazgo {
+        Hallazgo {
+            dimension: Dimension::Entrega,
+            severidad: 3,
+            archivo: "Cargo.lock".into(),
+            linea: 1,
+            cita: String::new(),
+            detalle: detalle.into(),
+            fuente: Fuente::Sonda(descarga::SONDA_DESCARGA.into()),
+            id: String::new(),
+            impacto: Vec::new(),
+            previo: false,
+        }
+    }
+
+    /// Veredicto de un corte, armado como `evaluar_con`: el motivo sale del corte y del primer hallazgo.
+    fn veredicto_de_corte_de_prueba(
+        base: &Path,
+        corte: descarga::Corte,
+        hallazgos: Vec<Hallazgo>,
+    ) -> Veredicto {
+        let tarea = tarea_rust(base);
+        let detalle = hallazgos.first().map_or("", |h| h.detalle.as_str());
+        let motivo = motivo_de_corte(corte.texto(), detalle);
+        let v = sin_veredicto(
+            base,
+            &tarea,
+            &BTreeMap::new(),
+            hallazgos,
+            Vec::new(),
+            Vec::new(),
+            &motivo,
+        );
+        veredicto_de_corte(v, corte, &tarea, &ReglasDecision::default(), &[])
+            .expect("informa el corte")
+    }
+
+    #[test]
+    fn corte_no_instala_da_no_listo_rojo_y_nombra_el_corte() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_de_corte_de_prueba(
+            base.path(),
+            descarga::Corte::NoInstala,
+            vec![hallazgo_de_corte("paquete `x` no existe en el índice")],
+        );
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(informe.decision, Decision::NoListo, "{}", informe.motivo);
+        assert_eq!(v.estado, Estado::Rojo);
+        assert!(
+            informe
+                .resumen
+                .contains("Las suites no corrieron: la descarga se cortó (no instala)."),
+            "{}",
+            informe.resumen
+        );
+    }
+
+    #[test]
+    fn corte_fuente_no_aceptada_da_sin_decision_con_informe() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_de_corte_de_prueba(
+            base.path(),
+            descarga::Corte::FuenteNoAceptada,
+            vec![hallazgo_de_corte("fuente no aceptada: git por ssh")],
+        );
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(
+            informe.decision,
+            Decision::SinDecision,
+            "{}",
+            informe.motivo
+        );
+        assert_eq!(v.estado, Estado::SinVeredicto);
+        assert!(
+            !v.no_compila,
+            "una fuente no aceptada no dice que no compila"
+        );
+        assert!(
+            informe
+                .resumen
+                .contains("Las suites no corrieron: la descarga se cortó (fuente no aceptada)."),
+            "{}",
+            informe.resumen
+        );
+    }
+
+    #[test]
+    fn corte_con_secreto_de_severidad_3_da_bloqueado() {
+        let base = tempfile::tempdir().expect("base");
+        let secreto = Hallazgo {
+            dimension: Dimension::Seguridad,
+            severidad: 3,
+            archivo: "src/lib.rs".into(),
+            linea: 1,
+            cita: "***".into(),
+            detalle: "secreto filtrado".into(),
+            fuente: Fuente::Sonda(juez::SONDA_GITLEAKS.into()),
+            id: String::new(),
+            impacto: Vec::new(),
+            previo: false,
+        };
+        let v = veredicto_de_corte_de_prueba(
+            base.path(),
+            descarga::Corte::NoInstala,
+            vec![hallazgo_de_corte("paquete `x` no existe"), secreto],
+        );
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(informe.decision, Decision::Bloqueado, "{}", informe.motivo);
+        assert_eq!(v.estado, Estado::Rojo);
+    }
+
+    #[test]
+    fn cortes_dejan_las_nueve_dimensiones_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        for corte in [
+            descarga::Corte::NoInstala,
+            descarga::Corte::LockInvalido,
+            descarga::Corte::FuenteNoAceptada,
+        ] {
+            let v = veredicto_de_corte_de_prueba(
+                base.path(),
+                corte,
+                vec![hallazgo_de_corte("detalle del corte")],
+            );
+            assert_eq!(v.puntajes.len(), 9, "{corte:?}");
+            for p in &v.puntajes {
+                assert_eq!(p.valor, 0.0, "{corte:?} {:?}", p.dimension);
+                let motivo = p.sin_veredicto.as_deref().expect("sin veredicto");
+                assert!(motivo.contains("descarga"), "{corte:?}: {motivo}");
+            }
+        }
+    }
+
+    #[test]
+    fn corte_de_motivo_ida_y_vuelta_para_cada_variante() {
+        let cortes = [
+            descarga::Corte::NoInstala,
+            descarga::Corte::LockInvalido,
+            descarga::Corte::FuenteNoAceptada,
+            descarga::Corte::Otro,
+        ];
+        for c in cortes {
+            let motivo = motivo_de_corte(c.texto(), "detalle con (paréntesis): y dos puntos");
+            assert_eq!(corte_de_motivo(&motivo), Some(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn corte_de_motivo_motivo_ajeno_da_none() {
+        assert_eq!(corte_de_motivo("no compila"), None);
+        assert_eq!(corte_de_motivo(""), None);
+    }
+
+    #[test]
+    fn corte_del_veredicto_sin_cortes_da_none_y_con_corte_da_some() {
+        let base = tempfile::tempdir().expect("base");
+        assert_eq!(corte_del_veredicto(&veredicto_sano(base.path())), None);
+        let cortado = veredicto_de_corte_de_prueba(
+            base.path(),
+            descarga::Corte::LockInvalido,
+            vec![hallazgo_de_corte("detalle del corte")],
+        );
+        assert_eq!(
+            corte_del_veredicto(&cortado),
+            Some(descarga::Corte::LockInvalido)
         );
     }
 
@@ -7002,15 +8848,22 @@ mod tests {
         inestables: &[&str],
         huella: Option<String>,
     ) -> Calibraciones {
+        // `inestables_de` pide el `tarea_hash` actual: la fila lleva el de `tarea_rust`.
+        let carpeta = tempfile::tempdir().expect("carpeta de la tarea");
+        let tarea_hash = calibra::hash_de_tarea(&tarea_rust(carpeta.path())).expect("hash");
         Calibraciones {
             v: calibra::VERSION,
             filas: vec![calibra::Fila {
-                tarea_hash: None,
+                sonda_lastre: calibra::SondaLastre::default(),
+                base_sin_veredicto: None,
+                eficiencia_base: Vec::new(),
+                tarea_hash: Some(tarea_hash),
                 plazo_mutantes: None,
                 duracion_contrato: None,
                 duracion_oculto: None,
                 repo_origen: None,
                 inyecciones_distintas: None,
+                defectos_sin_veredicto: 0,
                 equivalentes_excluidos: 0,
                 tarea: tarea.into(),
                 dimension,
@@ -7036,6 +8889,8 @@ mod tests {
                 huella,
                 inestables: inestables.iter().map(|i| (*i).into()).collect(),
                 extractos_base: Vec::new(),
+                juicios_base: Vec::new(),
+                causas_inestables: BTreeMap::new(),
             }],
         }
     }
@@ -7491,13 +9346,18 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let repo = repo_rust(base.path(), LOCK_SANO);
         let home = home_con_cache(base.path(), LOCK_SANO);
+        let hash = calibra::hash_de_tarea(&tarea_rust(base.path())).expect("hash");
         fs::write(
             home.join(calibra::ARCHIVO),
             json!({"v": 1, "filas": [
-                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 20, "defectos": 10,
-                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.95},
-                {"tarea": "tarea-rust", "dimension": "diseno", "n": 20, "defectos": 10,
-                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.7},
+                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 32, "defectos": 16, "limpios": 16,
+                 "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+                 "sensibilidad": 1.0, "especificidad": 1.0, "exactitud_balanceada": 1.0,
+                 "tarea_hash": hash, "huella": calibra::huella_de(Dimension::Seguridad)},
+                {"tarea": "tarea-rust", "dimension": "diseno", "n": 32, "defectos": 16, "limpios": 16,
+                 "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+                 "sensibilidad": 0.5, "especificidad": 1.0, "exactitud_balanceada": 0.7,
+                 "tarea_hash": hash, "huella": calibra::huella_de(Dimension::Diseno)},
             ]})
             .to_string(),
         )
@@ -7529,10 +9389,10 @@ mod tests {
         );
         let seguridad = puntaje_de_prueba(&v, Dimension::Seguridad);
         assert!(seguridad.calibrada);
-        assert_eq!(seguridad.exactitud_balanceada, Some(0.95));
+        assert_eq!(seguridad.exactitud_balanceada, Some(1.0));
         let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
         assert!(!diseno.calibrada);
-        assert_eq!(diseno.exactitud_balanceada, Some(0.7));
+        assert_eq!(diseno.exactitud_balanceada, Some(0.75));
         let global = v.global.expect("hay una calibrada con veredicto");
         assert!((global - seguridad.valor).abs() < 1e-6, "{global}");
         assert!(v.sin_calibrar.contains(&Dimension::Diseno));
@@ -7540,7 +9400,7 @@ mod tests {
         let con_veredicto: Vec<Dimension> = v
             .puntajes
             .iter()
-            .filter(|p| p.sin_veredicto.is_none() && p.dimension != Dimension::Seguridad)
+            .filter(|p| !p.sin_valor() && p.dimension != Dimension::Seguridad)
             .map(|p| p.dimension)
             .collect();
         assert_eq!(v.sin_calibrar, con_veredicto);
@@ -7551,14 +9411,18 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let repo = repo_rust(base.path(), LOCK_SANO);
         let home = home_con_cache(base.path(), LOCK_SANO);
+        let hash = calibra::hash_de_tarea(&tarea_rust(base.path())).expect("hash");
         fs::write(
             home.join(calibra::ARCHIVO),
             json!({"v": 1, "filas": [
-                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 20, "defectos": 10,
-                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.95},
-                {"tarea": "tarea-rust", "dimension": "diseno", "n": 20, "defectos": 10,
-                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.95,
-                 "huella": "vieja"},
+                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 32, "defectos": 16, "limpios": 16,
+                 "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+                 "sensibilidad": 1.0, "especificidad": 1.0, "exactitud_balanceada": 1.0,
+                 "tarea_hash": hash, "huella": calibra::huella_de(Dimension::Seguridad)},
+                {"tarea": "tarea-rust", "dimension": "diseno", "n": 32, "defectos": 16, "limpios": 16,
+                 "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+                 "sensibilidad": 1.0, "especificidad": 1.0, "exactitud_balanceada": 1.0,
+                 "tarea_hash": hash, "huella": "vieja"},
             ]})
             .to_string(),
         )
@@ -7709,6 +9573,7 @@ mod tests {
         let lib = [("src/lib.rs", "pub fn f() -> u8 { 1 }\n")];
         let ecc = repo_con(base.path().join("memora-ecc"), LOCK_SANO, &lib);
         let sdlc = repo_con(base.path().join("memora-sdlc"), LOCK_SANO, &lib);
+        let hash = calibra::hash_de_tarea(&tarea_rust(base.path())).expect("hash");
         let filas = [
             Dimension::Funciona,
             Dimension::Seguridad,
@@ -7721,27 +9586,31 @@ mod tests {
         ]
         .into_iter()
         .map(|dimension| calibra::Fila {
-            tarea_hash: None,
+            sonda_lastre: calibra::SondaLastre::default(),
+            base_sin_veredicto: None,
+            eficiencia_base: Vec::new(),
+            tarea_hash: Some(hash.clone()),
             plazo_mutantes: None,
             duracion_contrato: None,
             duracion_oculto: None,
             repo_origen: None,
-            inyecciones_distintas: None,
+            inyecciones_distintas: Some(16),
+            defectos_sin_veredicto: 0,
             equivalentes_excluidos: 0,
             tarea: "tarea-rust".into(),
             dimension,
-            n: 20,
-            defectos: 10,
-            limpios: 10,
+            n: 32,
+            defectos: 16,
+            limpios: 16,
             limpios_sin_veredicto: 0,
             no_aplicable: 0,
             defectos_en_piso: 0,
             omisiones: 0,
             semilla: 42,
             ts: 1.0,
-            sensibilidad: Some(0.95),
-            especificidad: Some(0.95),
-            exactitud_balanceada: Some(0.95),
+            sensibilidad: Some(1.0),
+            especificidad: Some(1.0),
+            exactitud_balanceada: Some(1.0),
             items: BTreeMap::new(),
             incompleta: false,
             no_aplica: None,
@@ -7749,9 +9618,11 @@ mod tests {
             reemplazos: 0,
             ruidosos: Vec::new(),
             casos_ruidosos: 0,
-            huella: None,
+            huella: Some(calibra::huella_de(dimension)),
             inestables: Vec::new(),
             extractos_base: Vec::new(),
+            juicios_base: Vec::new(),
+            causas_inestables: BTreeMap::new(),
         })
         .collect();
         let calibracion = Calibraciones {
@@ -7785,6 +9656,71 @@ mod tests {
         );
     }
 
+    /// La calibración de otra tarea cuenta solo si el `tarea.toml` de esa tarea sale del home de la evaluación.
+    #[test]
+    fn oraculo_calibra_con_el_tarea_toml_del_home_de_la_evaluacion() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let toml_otra = "nombre = \"otra-tarea\"\n";
+        let carpeta_otra = home.join("oraculos").join("otra-tarea");
+        fs::create_dir_all(&carpeta_otra).expect("carpeta de otra tarea");
+        fs::write(carpeta_otra.join("tarea.toml"), toml_otra).expect("tarea.toml de otra tarea");
+        let fila = calibra::Fila {
+            sonda_lastre: calibra::SondaLastre::default(),
+            base_sin_veredicto: None,
+            eficiencia_base: Vec::new(),
+            tarea_hash: Some(crate::goal::calcular_hash(toml_otra.as_bytes())),
+            plazo_mutantes: None,
+            duracion_contrato: None,
+            duracion_oculto: None,
+            repo_origen: None,
+            inyecciones_distintas: Some(16),
+            defectos_sin_veredicto: 0,
+            equivalentes_excluidos: 0,
+            tarea: "otra-tarea".into(),
+            dimension: Dimension::Funciona,
+            n: 32,
+            defectos: 16,
+            limpios: 16,
+            limpios_sin_veredicto: 0,
+            no_aplicable: 0,
+            defectos_en_piso: 0,
+            omisiones: 0,
+            semilla: 42,
+            ts: 1.0,
+            sensibilidad: Some(1.0),
+            especificidad: Some(1.0),
+            exactitud_balanceada: Some(1.0),
+            items: BTreeMap::new(),
+            incompleta: false,
+            no_aplica: None,
+            inestable: None,
+            reemplazos: 0,
+            ruidosos: Vec::new(),
+            casos_ruidosos: 0,
+            huella: Some(calibra::huella_de(Dimension::Funciona)),
+            inestables: Vec::new(),
+            extractos_base: Vec::new(),
+            juicios_base: Vec::new(),
+            causas_inestables: BTreeMap::new(),
+        };
+        let calibracion = Calibraciones {
+            v: calibra::VERSION,
+            filas: vec![fila],
+        };
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let deps = Dependencias {
+            calibracion: &calibracion,
+            ..deps_de(&correr, &fabrica)
+        };
+        let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
+        let funciona = puntaje_de_prueba(&v, Dimension::Funciona);
+        assert!(funciona.calibrada, "{funciona:?}");
+    }
+
     /// Parte de Estructura con `valor` y `peso`, sin veredicto ni faltantes.
     fn parte_de(valor: f32, peso: u32) -> Parte {
         Parte {
@@ -7797,6 +9733,7 @@ mod tests {
                 exactitud_balanceada: None,
                 items: Vec::new(),
                 sin_veredicto: None,
+                no_aplica: None,
                 faltantes: Vec::new(),
             },
             peso,
@@ -8187,6 +10124,102 @@ mod tests {
     }
 
     #[test]
+    fn oraculo_calibracion_cubre_6_de_8_de_peso_estable_con_los_inestables_fuera() {
+        // Diseño: robustez (3) y operabilidad (2) son inestables. El peso estable es 8. Un limpio que mide 6 cubre.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let hash = calibra::hash_de_tarea(&tarea).expect("hash");
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let partes = Partes {
+            dimension: Some(Dimension::Diseno),
+            ..Partes::default()
+        };
+        let juez = JuezDiseno {
+            modelo: None,
+            nombre: MODELO_JUEZ,
+            rubricas: &rubricas,
+        };
+        let r = resultado_con_niveles(&[
+            ("diseno.modularidad", 2),
+            ("diseno.errores", 2),
+            ("diseno.documentacion", 2),
+        ]);
+        let inestables = vec![
+            "diseno.robustez".to_string(),
+            "diseno.operabilidad".to_string(),
+        ];
+        let excluidos = con_inestables_de_calibracion(&inestables, || {
+            excluidos_de(
+                &Calibraciones::default(),
+                &tarea,
+                &hash,
+                &partes,
+                &rubricas,
+                Dimension::Diseno,
+            )
+        });
+        assert_eq!(peso_total(Dimension::Diseno, &rubricas, &excluidos), 8);
+        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new(), &excluidos);
+        assert_eq!(p.sin_veredicto, None, "{p:?}");
+    }
+
+    #[test]
+    fn excluidos_fuera_de_calibracion_dan_los_de_la_fila() {
+        // Guarda: sin calibración (`dimension` None), `excluidos_de` lee la fila de `calibracion.inestables_de`.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let hash = calibra::hash_de_tarea(&tarea).expect("hash");
+        let calibracion: Calibraciones = serde_json::from_value(json!({"v": 1, "filas": [
+            {"tarea": tarea.nombre, "dimension": "diseno", "n": 32, "defectos": 16, "limpios": 16,
+             "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+             "sensibilidad": 1.0, "especificidad": 1.0, "exactitud_balanceada": 1.0,
+             "tarea_hash": hash, "huella": calibra::huella_de(Dimension::Diseno),
+             "inestables": ["diseno.robustez", "diseno.operabilidad"]},
+        ]}))
+        .expect("calibración");
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let excluidos = excluidos_de(
+            &calibracion,
+            &tarea,
+            &hash,
+            &Partes::default(),
+            &rubricas,
+            Dimension::Diseno,
+        );
+        assert_eq!(excluidos, vec!["diseno.robustez", "diseno.operabilidad"]);
+    }
+
+    #[test]
+    fn excluidos_en_calibracion_sin_valor_de_hilo_dan_vacio() {
+        // Guarda: con `dimension` fijada y sin valor de hilo, no hay exclusiones. La base se juzga entera.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let hash = calibra::hash_de_tarea(&tarea).expect("hash");
+        let calibracion: Calibraciones = serde_json::from_value(json!({"v": 1, "filas": [
+            {"tarea": tarea.nombre, "dimension": "diseno", "n": 32, "defectos": 16, "limpios": 16,
+             "inyecciones_distintas": 16, "semilla": 42, "ts": 1.0,
+             "sensibilidad": 1.0, "especificidad": 1.0, "exactitud_balanceada": 1.0,
+             "tarea_hash": hash, "huella": calibra::huella_de(Dimension::Diseno),
+             "inestables": ["diseno.robustez", "diseno.operabilidad"]},
+        ]}))
+        .expect("calibración");
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let partes = Partes {
+            dimension: Some(Dimension::Diseno),
+            ..Partes::default()
+        };
+        let excluidos = excluidos_de(
+            &calibracion,
+            &tarea,
+            &hash,
+            &partes,
+            &rubricas,
+            Dimension::Diseno,
+        );
+        assert!(excluidos.is_empty(), "{excluidos:?}");
+    }
+
+    #[test]
     fn oraculo_diseno_con_items_medidos_bajo_dos_tercios_queda_sin_veredicto_con_faltantes() {
         // Diseño mide modularidad 3, robustez 3 y errores 2: 8 de 13 de peso. Sin dos tercios, sin veredicto.
         let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
@@ -8484,7 +10517,7 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_sin_dockerfile_no_llama_a_podman_y_entrega_queda_sin_veredicto() {
+    fn oraculo_sin_dockerfile_no_llama_a_podman_y_entrega_queda_no_aplica() {
         let base = tempfile::tempdir().expect("base");
         let repo = repo_rust(base.path(), LOCK_SANO);
         let correr = correr_suites(JUNIT_CONTRATO);
@@ -8493,12 +10526,10 @@ mod tests {
         let deps = deps_con_podman(&correr, &fabrica, &podman);
         let v = evaluar_con_deps(base.path(), &repo, deps);
         assert_eq!(podman.total(), 0, "{:?}", podman.builds());
-        // Los requisitos son de Completitud: sin ítem propio medido, Entrega no da veredicto.
+        // Los requisitos son de Completitud: sin `[entrega]` ni Dockerfile, la tarea no pide Entrega.
         let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
-        let motivo = entrega
-            .sin_veredicto
-            .as_deref()
-            .expect("entrega sin veredicto");
+        assert_eq!(entrega.sin_veredicto, None, "{entrega:?}");
+        let motivo = entrega.no_aplica.as_deref().expect("entrega no aplica");
         assert!(motivo.contains("sin ítems medidos"), "{motivo}");
     }
 
@@ -10038,7 +12069,7 @@ mod tests {
         let informe = v.informe.as_ref().expect("hay informe");
         assert_eq!(informe.decision, Decision::NoListo, "{}", informe.motivo);
         assert!(
-            informe.motivo.contains("test_oculto_fuera_de_requisitos"),
+            informe.motivo.contains("test_oculto_falla"),
             "{}",
             informe.motivo
         );

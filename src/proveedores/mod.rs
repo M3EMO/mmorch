@@ -7,7 +7,9 @@ mod sse;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::{self, Read, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -205,12 +207,10 @@ pub struct Claves {
 }
 
 impl Claves {
-    /// Lee `DEEPSEEK_API_KEY` y `ANTHROPIC_API_KEY`. Una variable vacía cuenta como ausente.
+    /// Usa las claves del descriptor si `main` las cargó. Si no, lee `DEEPSEEK_API_KEY` y
+    /// `ANTHROPIC_API_KEY` del entorno. Una variable vacía cuenta como ausente.
     pub fn del_entorno() -> Claves {
-        Claves {
-            deepseek: leer_clave(variable(Proveedor::Deepseek)),
-            anthropic: leer_clave(variable(Proveedor::Anthropic)),
-        }
+        del_entorno_o(CLAVES_DEL_DESCRIPTOR.get())
     }
 
     fn para(&self, proveedor: Proveedor) -> Option<&Clave> {
@@ -232,11 +232,104 @@ pub fn disponible(
     claves.para(proveedor).is_some() && breaker.permite(familia(proveedor), ahora)
 }
 
+/// Claves cargadas, o el entorno si no hay. Separada de `del_entorno` para testearla sin el `OnceLock`.
+fn del_entorno_o(cargadas: Option<&Claves>) -> Claves {
+    match cargadas {
+        Some(claves) => claves.clone(),
+        None => Claves {
+            deepseek: leer_clave(variable(Proveedor::Deepseek)),
+            anthropic: leer_clave(variable(Proveedor::Anthropic)),
+        },
+    }
+}
+
 fn leer_clave(nombre: &str) -> Option<Clave> {
     std::env::var(nombre)
         .ok()
         .filter(|valor| !valor.is_empty())
         .map(Clave)
+}
+
+/// Variable que nombra el descriptor de donde `main` lee las claves.
+pub const VARIABLE_CLAVES_FD: &str = "ROOT_CLAVES_FD";
+
+/// Claves leídas del descriptor. Se llena una sola vez, en `main`.
+static CLAVES_DEL_DESCRIPTOR: OnceLock<Claves> = OnceLock::new();
+
+/// Error al leer las claves del descriptor. Ningún mensaje muestra un valor ni una línea.
+#[derive(Debug, ErrorDerive)]
+pub enum ErrorClaves {
+    #[error("ROOT_CLAVES_FD no nombra un descriptor abierto válido")]
+    FdInvalido,
+    #[error("no se puede leer el descriptor de claves: {0}")]
+    Lectura(String),
+    #[error("línea {numero} del descriptor de claves: {motivo}")]
+    Linea { numero: usize, motivo: &'static str },
+    #[error("las claves del descriptor ya se cargaron")]
+    YaCargadas,
+}
+
+/// Lee `DEEPSEEK_API_KEY=<valor>` y `ANTHROPIC_API_KEY=<valor>` hasta EOF.
+/// Un valor vacío cuenta como ausente. Otra clave, una línea sin `=` o una clave repetida dan error.
+pub fn leer_claves(lector: impl Read) -> Result<Claves, ErrorClaves> {
+    let mut claves = Claves::default();
+    for (indice, linea) in BufReader::new(lector).split(b'\n').enumerate() {
+        let numero = indice + 1;
+        let bytes = linea.map_err(|e| ErrorClaves::Lectura(e.to_string()))?;
+        let bytes = bytes.strip_suffix(b"\r").unwrap_or(&bytes);
+        let texto = std::str::from_utf8(bytes).map_err(|_| ErrorClaves::Linea {
+            numero,
+            motivo: "no es texto UTF-8",
+        })?;
+        let (nombre, valor) = texto.split_once('=').ok_or(ErrorClaves::Linea {
+            numero,
+            motivo: "se espera CLAVE=valor",
+        })?;
+        let destino = match nombre {
+            "DEEPSEEK_API_KEY" => &mut claves.deepseek,
+            "ANTHROPIC_API_KEY" => &mut claves.anthropic,
+            _ => {
+                return Err(ErrorClaves::Linea {
+                    numero,
+                    motivo: "clave no reconocida",
+                });
+            }
+        };
+        if destino.is_some() {
+            return Err(ErrorClaves::Linea {
+                numero,
+                motivo: "clave repetida",
+            });
+        }
+        if !valor.is_empty() {
+            *destino = Some(Clave(valor.to_string()));
+        }
+    }
+    Ok(claves)
+}
+
+/// Lee `ROOT_CLAVES_FD` y las claves de ese descriptor. Va en `main`, antes de `Cli::parse` y de
+/// crear hilos. Sin la variable, no hace nada. Quita la variable del entorno en cuanto la lee.
+pub fn cargar_claves_de_fd_del_entorno() -> Result<(), ErrorClaves> {
+    let Some(valor) = std::env::var_os(VARIABLE_CLAVES_FD) else {
+        return Ok(());
+    };
+    // SAFETY: se llama desde `main` antes de crear hilos, así que nadie lee el entorno en paralelo.
+    unsafe { std::env::remove_var(VARIABLE_CLAVES_FD) };
+    let fd = valor
+        .to_str()
+        .and_then(|texto| texto.parse::<RawFd>().ok())
+        .filter(|fd| *fd >= 0)
+        .ok_or(ErrorClaves::FdInvalido)?;
+    // Un descriptor cerrado no se puede tomar con `from_raw_fd`. /proc lo dice sin llamar a libc.
+    std::fs::metadata(format!("/proc/self/fd/{fd}")).map_err(|_| ErrorClaves::FdInvalido)?;
+    // SAFETY: r00t recibe el descriptor para uso exclusivo. Está abierto (chequeado arriba).
+    // Al soltar `File`, dentro de `leer_claves`, el descriptor se cierra.
+    let archivo = unsafe { File::from_raw_fd(fd) };
+    let claves = leer_claves(archivo)?;
+    CLAVES_DEL_DESCRIPTOR
+        .set(claves)
+        .map_err(|_| ErrorClaves::YaCargadas)
 }
 
 /// Variable de entorno que guarda la clave de cada proveedor.
@@ -1494,5 +1587,56 @@ mod tests {
         }));
         assert!(panico.is_err());
         assert!(limite_actual().is_none());
+    }
+
+    #[test]
+    fn proveedores_claves_fd_lee_deepseek() {
+        let claves = leer_claves("DEEPSEEK_API_KEY=sk-1\n".as_bytes()).expect("lee");
+        assert_eq!(claves.deepseek.as_ref().map(Clave::as_str), Some("sk-1"));
+        assert!(claves.anthropic.is_none());
+    }
+
+    #[test]
+    fn proveedores_claves_fd_lee_las_dos_claves() {
+        let texto = "DEEPSEEK_API_KEY=sk-a\nANTHROPIC_API_KEY=sk-b=c\n";
+        let claves = leer_claves(texto.as_bytes()).expect("lee");
+        assert_eq!(claves.deepseek.as_ref().map(Clave::as_str), Some("sk-a"));
+        assert_eq!(claves.anthropic.as_ref().map(Clave::as_str), Some("sk-b=c"));
+    }
+
+    #[test]
+    fn proveedores_claves_fd_otra_clave_no_muestra_el_valor() {
+        let error = leer_claves("OTRA=valorsecreto99\n".as_bytes()).expect_err("otra clave");
+        assert!(!format!("{error}").contains("valorsecreto99"), "{error}");
+        assert!(
+            !format!("{error:?}").contains("valorsecreto99"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn proveedores_claves_fd_linea_sin_igual_no_muestra_el_valor() {
+        let error = leer_claves("sk-secreto-sin-igual\n".as_bytes()).expect_err("sin igual");
+        assert!(!format!("{error}").contains("sk-secreto"), "{error}");
+        assert!(!format!("{error:?}").contains("sk-secreto"), "{error:?}");
+    }
+
+    #[test]
+    fn proveedores_claves_fd_clave_repetida_es_error() {
+        let texto = "DEEPSEEK_API_KEY=sk-a\nDEEPSEEK_API_KEY=sk-b\n";
+        let error = leer_claves(texto.as_bytes()).expect_err("repetida");
+        let texto_error = format!("{error:?}");
+        assert!(!texto_error.contains("sk-a") && !texto_error.contains("sk-b"));
+    }
+
+    #[test]
+    fn proveedores_claves_fd_del_entorno_o_usa_las_cargadas() {
+        let cargadas = Claves {
+            deepseek: Some(Clave::nueva("sk-desc")),
+            anthropic: None,
+        };
+        let claves = del_entorno_o(Some(&cargadas));
+        assert_eq!(claves.deepseek.as_ref().map(Clave::as_str), Some("sk-desc"));
+        assert!(claves.anthropic.is_none());
     }
 }

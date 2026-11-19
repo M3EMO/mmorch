@@ -259,6 +259,9 @@ pub struct Puntaje {
     /// Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.
     #[serde(default)]
     pub sin_veredicto: Option<String>,
+    /// Por qué la tarea no pide la dimensión. Con `Some`, `sin_veredicto` queda vacío y `valor` vale 0.
+    #[serde(default)]
+    pub no_aplica: Option<String>,
     /// Ítems de la dimensión que ninguna sonda mide para el lenguaje de la tarea.
     #[serde(default)]
     pub faltantes: Vec<ItemFaltante>,
@@ -270,6 +273,13 @@ pub struct Puntaje {
     /// Un puntaje sin el campo vale vacía.
     #[serde(default)]
     pub inestables: Vec<String>,
+}
+
+impl Puntaje {
+    /// Verdadero si la dimensión no tiene valor: no se pudo medir o la tarea no la pide.
+    pub fn sin_valor(&self) -> bool {
+        self.sin_veredicto.is_some() || self.no_aplica.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -346,6 +356,56 @@ pub struct ParteSinVeredicto {
 pub struct ItemFaltante {
     pub item: String,
     pub motivo: String,
+}
+
+/// Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).
+/// `razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MedidaEficiencia {
+    /// Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.
+    pub medida: String,
+    /// Mínimo de las corridas del estado inicial. `None` si la medida no tiene valor.
+    pub referencia: Option<f64>,
+    /// Mínimo de las corridas del repo. `None` si la medida no tiene valor.
+    pub repo: Option<f64>,
+    /// Repo sobre referencia. `None` si la medida no tiene valor.
+    pub razon: Option<f64>,
+    /// Dispersión de la referencia, con piso de 2 %. `None` si la medida no tiene valor.
+    pub ruido: Option<f64>,
+    /// Verdadero si el repo queda más lento o más pesado que el ruido permite.
+    pub regresion: bool,
+    /// Por qué la medida no tiene valor.
+    pub motivo: Option<String>,
+    /// Cada corrida del estado inicial, en el orden en que corrió. El ancla va al final. Vacía si no hay valor.
+    #[serde(default)]
+    pub corridas_referencia: Vec<f64>,
+    /// Cada corrida del repo, en el orden en que corrió. Vacía si no hay valor.
+    #[serde(default)]
+    pub corridas_repo: Vec<f64>,
+}
+
+/// La vuelta de eficiencia de una corrida (Tarea 116): la primera regresión y si la vuelta corrió.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct VueltaEficiencia {
+    /// Medidas con regresión de la primera evaluación: cada una con su razón y sus dos números.
+    pub regresiones: Vec<MedidaEficiencia>,
+    /// Verdadero si el rol de la vuelta se lanzó al menos una vez.
+    pub corrio: bool,
+    /// Por qué la fila se quedó con la primera evaluación. `None` si la segunda evaluación cuenta.
+    pub motivo: Option<String>,
+}
+
+/// La vuelta de instalación de una corrida: el builder vuelve con el arreglo si el producto no instala.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct VueltaInstalacion {
+    /// Vueltas del builder que se lanzaron. Como mucho, dos.
+    pub vueltas: u32,
+    /// Verdadero si el último veredicto ya no es un corte de instalación.
+    pub instalo: bool,
+    /// Por qué una vuelta no corrió o no terminó. `None` si la vuelta corrió hasta el final.
+    pub motivo: Option<String>,
+    /// Verdadero si una persona debe mirar la tarea: el producto sigue sin instalar.
+    pub pide_humano: bool,
 }
 
 /// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del
@@ -445,17 +505,17 @@ pub struct Veredicto {
     /// Dimensiones con veredicto que todavía no están calibradas. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub sin_calibrar: Vec<Dimension>,
-    /// Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da
-    /// `NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.
+    /// Ids ordenados de los tests ocultos que fallan de forma estable. Todo test estable que falla da
+    /// `NoListo` (`test_oculto_falla`), lo pruebe o no un requisito. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub ocultos_fallidos: Vec<String>,
     /// Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Vacío si no hay revisión guardada
     /// para el spec. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub ambiguedades: Vec<String>,
-    /// Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Un test que ningún
-    /// requisito prueba con `contrato:` da `NoListo` (`test_contrato_fuera_de_requisitos`). Un veredicto
-    /// viejo lee vacío.
+    /// Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Todo test estable
+    /// que falla da `NoListo` (`test_contrato_falla`), lo pruebe o no un requisito. Un veredicto viejo lee
+    /// vacío.
     #[serde(default)]
     pub contrato_fallidos: Vec<String>,
     /// Hallazgos del juez de diseño que se descartaron, con su motivo. No cuentan para ningún puntaje.
@@ -468,6 +528,13 @@ pub struct Veredicto {
     /// El producto no compila: la suite del contrato salió con 101 bajo nextest. Un veredicto viejo lee false.
     #[serde(default)]
     pub no_compila: bool,
+    /// Medidas de Eficiencia contra el estado inicial, que Root mide sola en Rust. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub eficiencia_auto: Vec<MedidaEficiencia>,
+    /// Mayor carga ajena de las corridas de Eficiencia automática, en núcleos. `None` si no hubo control de
+    /// carga o si la medición no leyó la CPU propia. Un veredicto viejo lee None.
+    #[serde(default)]
+    pub carga_ajena: Option<f64>,
 }
 
 impl Default for Veredicto {
@@ -501,6 +568,8 @@ impl Default for Veredicto {
             hallazgos_descartados: Vec::new(),
             extractos: Vec::new(),
             no_compila: false,
+            eficiencia_auto: Vec::new(),
+            carga_ajena: None,
         }
     }
 }
@@ -604,6 +673,12 @@ pub struct Fila {
     /// Commit con el que se compiló el binario `r00t`. Las filas anteriores la leen vacía.
     #[serde(default)]
     pub commit_binario: String,
+    /// Una corrida sin vuelta, y las filas anteriores a este campo, la leen en `None`.
+    #[serde(default)]
+    pub vuelta_eficiencia: Option<VueltaEficiencia>,
+    /// Vuelta de instalación: solo la lleva una corrida con corte de instalación. Las filas anteriores la leen en `None`.
+    #[serde(default)]
+    pub vuelta_instalacion: Option<VueltaInstalacion>,
 }
 
 impl Default for Fila {
@@ -622,6 +697,8 @@ impl Default for Fila {
             reanudada: false,
             vueltas: 0,
             commit_binario: String::new(),
+            vuelta_eficiencia: None,
+            vuelta_instalacion: None,
         }
     }
 }
@@ -688,6 +765,7 @@ mod tests {
                 exactitud_balanceada: Some(0.97),
                 items: Vec::new(),
                 sin_veredicto: None,
+                no_aplica: None,
                 faltantes: Vec::new(),
             }],
             hallazgos: vec![Hallazgo {
@@ -722,6 +800,8 @@ mod tests {
             hallazgos_descartados: Vec::new(),
             extractos: Vec::new(),
             no_compila: false,
+            eficiencia_auto: Vec::new(),
+            carga_ajena: None,
         }
     }
 
@@ -762,6 +842,8 @@ mod tests {
             reanudada: false,
             vueltas: 0,
             commit_binario: String::new(),
+            vuelta_eficiencia: None,
+            vuelta_instalacion: None,
         }
     }
 
@@ -872,6 +954,7 @@ mod tests {
             exactitud_balanceada: None,
             items: Vec::new(),
             sin_veredicto: None,
+            no_aplica: None,
             faltantes: Vec::new(),
         });
         ida_y_vuelta(&Hallazgo {
@@ -1045,6 +1128,15 @@ mod tests {
     }
 
     #[test]
+    fn tipos_puntaje_viejo_sin_no_aplica_se_lee_none() {
+        let texto = r#"{"dimension":"eficiencia","valor":0.0,"calibrada":false,
+            "exactitud_balanceada":null,"sin_veredicto":"sin sondas"}"#;
+        let p: Puntaje = serde_json::from_str(texto).expect("un puntaje viejo se acepta");
+        assert_eq!(p.no_aplica, None);
+        assert!(p.sin_valor());
+    }
+
+    #[test]
     fn tipos_puntaje_viejo_sin_inestables_se_lee_vacia() {
         let texto = r#"{"dimension":"diseno","valor":0.5,"calibrada":false,
             "exactitud_balanceada":0.7,"items":[],"sin_veredicto":null,"faltantes":[]}"#;
@@ -1070,6 +1162,7 @@ mod tests {
             exactitud_balanceada: Some(0.7),
             items: Vec::new(),
             sin_veredicto: None,
+            no_aplica: None,
             faltantes: Vec::new(),
             motivo_sin_calibrar: Some("calibración de otro juez".into()),
         });
@@ -1086,6 +1179,7 @@ mod tests {
             exactitud_balanceada: None,
             items: Vec::new(),
             sin_veredicto: Some("juez no corrido".into()),
+            no_aplica: None,
             faltantes: Vec::new(),
         });
     }
@@ -1161,6 +1255,68 @@ mod tests {
     }
 
     #[test]
+    fn veredicto_viejo_sin_eficiencia_auto_lee_vacio() {
+        // Un veredicto anterior al campo `eficiencia_auto` lo lee con lista vacía (Tarea 115).
+        let v = Veredicto {
+            eficiencia_auto: vec![MedidaEficiencia {
+                medida: "tiempo_tests".into(),
+                referencia: Some(1.0),
+                repo: Some(1.3),
+                razon: Some(1.3),
+                ruido: Some(0.02),
+                regresion: true,
+                motivo: None,
+                corridas_referencia: vec![],
+                corridas_repo: vec![],
+            }],
+            ..Veredicto::default()
+        };
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("eficiencia_auto");
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee");
+        assert!(
+            viejo.eficiencia_auto.is_empty(),
+            "{:?}",
+            viejo.eficiencia_auto
+        );
+    }
+
+    #[test]
+    fn veredicto_viejo_sin_carga_ajena_lee_none() {
+        // Un veredicto anterior al campo `carga_ajena` lo lee con None.
+        let v = Veredicto {
+            carga_ajena: Some(0.30),
+            ..Veredicto::default()
+        };
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("carga_ajena")
+            .expect("el veredicto nuevo trae la clave");
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee");
+        assert_eq!(viejo.carga_ajena, None);
+    }
+
+    #[test]
+    fn medida_eficiencia_vieja_sin_corridas_lee_listas_vacias() {
+        // Una medida anterior a `corridas_referencia` y `corridas_repo` las lee con listas vacías.
+        let json = json!({
+            "medida": "tiempo_tests",
+            "referencia": 1.0,
+            "repo": 1.2,
+            "razon": 1.2,
+            "ruido": 0.02,
+            "regresion": true,
+            "motivo": null
+        });
+        let vieja: MedidaEficiencia = serde_json::from_value(json).expect("lee");
+        assert!(vieja.corridas_referencia.is_empty(), "{vieja:?}");
+        assert!(vieja.corridas_repo.is_empty(), "{vieja:?}");
+    }
+
+    #[test]
     fn repeticiones_veredicto_nuevo_vale_1_por_defecto() {
         assert_eq!(Veredicto::default().repeticiones, 1);
         assert!(Veredicto::default().inestables.is_empty());
@@ -1184,6 +1340,73 @@ mod tests {
         assert_eq!(Fila::default().commit_binario, "");
         let json = serde_json::to_value(Fila::default()).expect("serializa");
         assert_eq!(json["commit_binario"], json!(""), "{json}");
+    }
+
+    /// Fila anterior a `vuelta_eficiencia`: se lee con `None` (Tarea 116).
+    #[test]
+    fn fila_vieja_sin_vuelta_eficiencia_se_lee() {
+        let mut json = serde_json::to_value(Fila::default()).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("vuelta_eficiencia");
+        let vieja: Fila = serde_json::from_value(json).expect("lee");
+        assert_eq!(vieja.vuelta_eficiencia, None);
+    }
+
+    /// La vuelta de eficiencia sale y vuelve completa en el JSON de la fila.
+    #[test]
+    fn fila_con_vuelta_eficiencia_hace_round_trip() {
+        let vuelta = VueltaEficiencia {
+            regresiones: vec![MedidaEficiencia {
+                medida: "tiempo_tests".into(),
+                referencia: Some(10.0),
+                repo: Some(13.0),
+                razon: Some(1.3),
+                ruido: Some(0.05),
+                regresion: true,
+                motivo: None,
+                corridas_referencia: vec![],
+                corridas_repo: vec![],
+            }],
+            corrio: true,
+            motivo: Some("sin cupo".into()),
+        };
+        let fila = Fila {
+            vuelta_eficiencia: Some(vuelta.clone()),
+            ..Fila::default()
+        };
+        let json = serde_json::to_value(&fila).expect("serializa");
+        let leida: Fila = serde_json::from_value(json).expect("lee");
+        assert_eq!(leida.vuelta_eficiencia, Some(vuelta));
+    }
+
+    /// Fila anterior a `vuelta_instalacion`: se lee con `None` (Tarea 117).
+    #[test]
+    fn fila_vieja_sin_vuelta_instalacion_se_lee() {
+        let mut json = serde_json::to_value(Fila::default()).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("vuelta_instalacion");
+        let vieja: Fila = serde_json::from_value(json).expect("lee");
+        assert_eq!(vieja.vuelta_instalacion, None);
+    }
+
+    /// La vuelta de instalación sale y vuelve completa en el JSON de la fila.
+    #[test]
+    fn fila_con_vuelta_instalacion_hace_round_trip() {
+        let vuelta = VueltaInstalacion {
+            vueltas: 2,
+            instalo: false,
+            motivo: Some("sin cupo".into()),
+            pide_humano: true,
+        };
+        let fila = Fila {
+            vuelta_instalacion: Some(vuelta.clone()),
+            ..Fila::default()
+        };
+        let json = serde_json::to_value(&fila).expect("serializa");
+        let leida: Fila = serde_json::from_value(json).expect("lee");
+        assert_eq!(leida.vuelta_instalacion, Some(vuelta));
     }
 
     /// Fila anterior a `commit_binario`: se lee con cadena vacía.

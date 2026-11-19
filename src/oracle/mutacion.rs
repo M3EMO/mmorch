@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -11,11 +12,11 @@ use serde::{Deserialize, Serialize};
 use crate::oracle::ErrorOraculo;
 use crate::oracle::descarga::PRELUDIO;
 use crate::oracle::perfiles::herramientas::{
-    EjecutorHerramienta, con_cola, falta_herramienta, motivo_json, sin_veredicto,
+    EjecutorHerramienta, SalidaHerramienta, con_cola, falta_herramienta, motivo_json, sin_veredicto,
 };
 use crate::oracle::perfiles::{ResultadoSonda, crear_hallazgo};
 use crate::oracle::tarea::{MINUTOS_MAX_DEFECTO, MUTANTES_MAX_DEFECTO, Requisito, Tarea};
-use crate::tipos::Dimension;
+use crate::tipos::{Dimension, Hallazgo};
 
 const DIMENSION: Dimension = Dimension::Pruebas;
 const SONDA: &str = "cargo-mutants";
@@ -72,6 +73,27 @@ thread_local! {
     static ULTIMA_BASE_SEGUNDOS: RefCell<Option<f64>> = const { RefCell::new(None) };
     /// Plazo fijo por mutante que usa `comando_de_corrida` en este hilo. `None`: plazo automático.
     static PLAZO_FIJO: RefCell<Option<u64>> = const { RefCell::new(None) };
+    /// Carpeta de la calibración que usa la mutación de este hilo. `None`: los comandos de hoy.
+    static CARPETA_DE_MUTACION: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// Muestra de la base que usa `medir_mutantes` en este hilo. `None` o vacía: mide la muestra entera.
+    static MUESTRA_DE_BASE: RefCell<Option<Vec<MutanteEstado>>> = const { RefCell::new(None) };
+}
+
+/// Corre `f` con `muestra` como la muestra de la base. Al salir, también ante pánico, vuelve el valor
+/// anterior. Una muestra vacía no fija nada: `medir_mutantes` mide como hoy.
+pub(crate) fn con_muestra_de_base<T>(muestra: &[MutanteEstado], f: impl FnOnce() -> T) -> T {
+    /// Devuelve la muestra anterior al salir del ámbito.
+    struct Restaura(Option<Vec<MutanteEstado>>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = self.0.take();
+            MUESTRA_DE_BASE.with(|m| *m.borrow_mut() = anterior);
+        }
+    }
+    let nueva = (!muestra.is_empty()).then(|| muestra.to_vec());
+    let anterior = MUESTRA_DE_BASE.with(|m| m.replace(nueva));
+    let _restaura = Restaura(anterior);
+    f()
 }
 
 /// Saca la duración de la base de la última `sonda_mutacion` de este hilo. Deja el valor vacío.
@@ -92,6 +114,67 @@ pub(crate) fn con_plazo_fijo<T>(segundos: Option<u64>, f: impl FnOnce() -> T) ->
     let anterior = PLAZO_FIJO.with(|p| p.replace(segundos));
     let _restaura = Restaura(anterior);
     f()
+}
+
+/// Corre `f` con `carpeta` como la carpeta de la calibración de mutación. Sin carpeta, los comandos son los
+/// de hoy. Al salir, también ante pánico, vuelve el valor anterior.
+pub(crate) fn con_carpeta_de_mutacion<T>(carpeta: Option<&Path>, f: impl FnOnce() -> T) -> T {
+    /// Devuelve la carpeta anterior al salir del ámbito.
+    struct Restaura(Option<PathBuf>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = self.0.take();
+            CARPETA_DE_MUTACION.with(|c| *c.borrow_mut() = anterior);
+        }
+    }
+    let anterior = CARPETA_DE_MUTACION.with(|c| c.replace(carpeta.map(Path::to_path_buf)));
+    let _restaura = Restaura(anterior);
+    f()
+}
+
+/// Carpeta de mutación que ve este hilo. Solo para los tests de la calibración.
+#[cfg(test)]
+pub(crate) fn carpeta_de_mutacion_actual() -> Option<PathBuf> {
+    CARPETA_DE_MUTACION.with(|c| c.borrow().clone())
+}
+
+/// Hay carpeta fija en este hilo: la calibración corre en `/salida` sin copia extra.
+fn hay_carpeta_fija() -> bool {
+    CARPETA_DE_MUTACION.with(|c| c.borrow().is_some())
+}
+
+/// Ejecuta un comando de mutación. Con carpeta fija, `ejecutar_en` la monta en `/salida`. Si no, `ejecutar`.
+fn ejecutar_mutacion(
+    ej: &dyn EjecutorHerramienta,
+    cmd: &str,
+) -> Result<SalidaHerramienta, ErrorOraculo> {
+    match CARPETA_DE_MUTACION.with(|c| c.borrow().clone()) {
+        Some(carpeta) => ej.ejecutar_en(cmd, &carpeta),
+        None => ej.ejecutar(cmd),
+    }
+}
+
+/// Pasos antes de `cargo mutants`: copiar `/repo` a `/salida/work` y entrar. Con carpeta fija, antes borra
+/// los reportes de la corrida anterior y `/salida/work` y `/salida/mutants`.
+fn pasos_previos() -> String {
+    if !hay_carpeta_fija() {
+        return "cp -a /repo /salida/work && cd /salida/work".to_string();
+    }
+    // Corre DENTRO del contenedor, sobre una carpeta que Root creó para esta calibración; no es un borrado
+    // del host; la regla de `src/borrado.rs` (todo borrado de Root en el host pasa por ahí) no aplica.
+    format!(
+        "rm -f /salida/{ARCHIVO_OUTCOMES} /salida/{ARCHIVO_TESTS_FALLIDOS} /salida/{ARCHIVO_LISTADO} && \
+         rm -rf /salida/work /salida/mutants && cp -a /repo /salida/work && cd /salida/work"
+    )
+}
+
+/// Flag `--in-place` con carpeta fija: cargo-mutants muta la copia de `/salida/work`. Vacío si no.
+fn flag_in_place() -> &'static str {
+    if hay_carpeta_fija() {
+        " --in-place"
+    } else {
+        ""
+    }
 }
 
 /// Estado de un mutante de la muestra. `Vencido` es un `Timeout`: cuenta como muerto en el puntaje.
@@ -639,9 +722,11 @@ pub(crate) fn archivo_acotado() -> Option<String> {
 /// listado en `/salida`: el stdout del ejecutor se corta a sus últimos caracteres.
 pub(crate) fn comando_de_listado() -> String {
     let exclusion = exclusion_de_mutantes();
+    let pasos = pasos_previos();
+    let in_place = flag_in_place();
     format!(
-        "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
-         cargo mutants --list --json --no-shuffle{exclusion} > /salida/{ARCHIVO_LISTADO}"
+        "{PRELUDIO}{pasos} && \
+         cargo mutants --list --json --no-shuffle{in_place}{exclusion} > /salida/{ARCHIVO_LISTADO}"
     )
 }
 
@@ -690,9 +775,13 @@ fn comando_de_corrida(tarea: &Tarea, filtro: &str) -> String {
         .with(|p| *p.borrow())
         .map_or(String::new(), |s| format!(" --timeout {s}"));
     let exclusion = exclusion_de_mutantes();
+    let pasos = pasos_previos();
+    let in_place = flag_in_place();
+    // cargo-mutants 27 rechaza `--in-place` con `--jobs`, y `--in-place` ya corre un solo trabajo.
+    let jobs = if hay_carpeta_fija() { "" } else { " --jobs 1" };
     format!(
-        "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
-         CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle --jobs 1{plazo}{exclusion} \
+        "{PRELUDIO}{pasos} && \
+         CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle{in_place}{jobs}{plazo}{exclusion} \
          --output /salida/mutants{filtro} -- --offline; \
          (cd /salida/mutants/mutants.out && grep -H '^test .* \\.\\.\\. FAILED$' log/*.log) \
          > /salida/{ARCHIVO_TESTS_FALLIDOS} 2>/dev/null; \
@@ -796,6 +885,115 @@ fn dentro_del_cambio(nombre: &str, cambios: &BTreeMap<String, Vec<(u32, u32)>>) 
     })
 }
 
+/// Archivo y línea de un nombre `<archivo>:<línea>:<col>: ...`. Sin línea válida, la línea es 0.
+fn archivo_y_linea(nombre: &str) -> (&str, u32) {
+    let mut partes = nombre.split(':');
+    let archivo = partes.next().unwrap_or("");
+    let linea = partes
+        .next()
+        .and_then(|l| l.parse::<u32>().ok())
+        .unwrap_or(0);
+    (archivo, linea)
+}
+
+/// Hallazgo de un mutante vivo que se copia de la base. Archivo y línea salen del nombre.
+fn hallazgo_de_base(nombre: &str, requisitos: &[Requisito]) -> Hallazgo {
+    let (archivo, linea) = archivo_y_linea(nombre);
+    crear_hallazgo(
+        DIMENSION,
+        SEVERIDAD_VIVO,
+        archivo,
+        linea,
+        nombre,
+        DETALLE_VIVO,
+        SONDA,
+        requisitos,
+    )
+}
+
+/// Nombres de `muestra` que la corrida debe medir: los muertos o vencidos en `base`, y los que `base`
+/// no trae. Los vivos de `base` no se vuelven a correr.
+fn pedidos_de_base(muestra: &[String], base: &[MutanteEstado]) -> Vec<String> {
+    muestra
+        .iter()
+        .filter(|n| match base.iter().find(|b| b.nombre == **n) {
+            Some(b) => b.estado != EstadoMutante::Vivo,
+            None => true,
+        })
+        .cloned()
+        .collect()
+}
+
+/// Corre `pedidos` y arma su resultado. Deja `pedidos` en `filtro`. El reporte se lee contra `pedidos`.
+fn correr_pedidos(
+    ej: &dyn EjecutorHerramienta,
+    tarea: &Tarea,
+    pedidos: &[String],
+    max: u32,
+    filtro: &mut String,
+) -> ResultadoMutacion {
+    *filtro = filtro_de(pedidos);
+    let salida = match ejecutar_mutacion(ej, &comando_de_corrida(tarea, filtro.as_str())) {
+        Ok(s) => s,
+        Err(e) => return desde_sonda(sin_veredicto(DIMENSION, e.to_string())),
+    };
+    let Some(json) = salida.archivos.get(ARCHIVO_OUTCOMES) else {
+        let base = format!("no dejó reporte (cargo-mutants código {})", salida.codigo);
+        return desde_sonda(sin_veredicto(DIMENSION, con_cola(base, &salida.stderr)));
+    };
+    parsear_outcomes(json, max, &tarea.requisito, pedidos)
+        .unwrap_or_else(|e| desde_sonda(sin_veredicto(DIMENSION, e.to_string())))
+}
+
+/// Arma la muestra entera. Los mutantes que corrieron llevan su estado del reporte. Los demás llevan
+/// el de `base`, con su duración. Sin veredicto de la corrida, devuelve `corrida` tal cual.
+/// Los vivos copiados de la base suman hallazgo. Los de la corrida conservan los suyos.
+fn mezclar_con_base(
+    corrida: ResultadoMutacion,
+    muestra: &[String],
+    base: &[MutanteEstado],
+    requisitos: &[Requisito],
+) -> ResultadoMutacion {
+    if corrida.sonda.valor.is_none() {
+        return corrida;
+    }
+    let mutantes: Vec<MutanteEstado> = muestra
+        .iter()
+        .filter_map(|nombre| {
+            corrida
+                .mutantes
+                .iter()
+                .chain(base.iter())
+                .find(|m| m.nombre == *nombre)
+        })
+        .cloned()
+        .collect();
+    let muertos = mutantes
+        .iter()
+        .filter(|m| m.estado != EstadoMutante::Vivo)
+        .count() as u32;
+    let total_muestra = mutantes.len() as u32;
+    let mut sonda = corrida.sonda;
+    sonda.hallazgos.extend(
+        mutantes
+            .iter()
+            .filter(|m| {
+                m.estado == EstadoMutante::Vivo
+                    && !corrida.mutantes.iter().any(|c| c.nombre == m.nombre)
+            })
+            .map(|m| hallazgo_de_base(&m.nombre, requisitos)),
+    );
+    sonda.valor = Some(muertos as f32 / total_muestra as f32);
+    ResultadoMutacion {
+        sonda,
+        muertos,
+        vivos: total_muestra - muertos,
+        muestra: total_muestra,
+        mutantes,
+        ..corrida
+    }
+}
+
 /// Cuerpo de `sonda_mutacion_en`. Su resultado sale con la muestra de `mutantes`.
 /// Con `cambios`, la muestra y el total son los mutantes que caen dentro del cambio.
 /// `filtro` recibe el `-F` de la corrida, si llega a armarla.
@@ -815,7 +1013,7 @@ fn medir_mutantes(
         return desde_sonda(r);
     }
     // Primero el listado: da los nombres en orden. La corrida mide solo una muestra de `mutantes_max`.
-    let listado = match ej.ejecutar(&comando_de_listado()) {
+    let listado = match ejecutar_mutacion(ej, &comando_de_listado()) {
         Ok(s) => s,
         Err(e) => return desde_sonda(sin_veredicto(DIMENSION, e.to_string())),
     };
@@ -876,17 +1074,27 @@ fn medir_mutantes(
         }
         None => muestra,
     };
-    *filtro = filtro_de(&muestra);
-    let salida = match ej.ejecutar(&comando_de_corrida(tarea, filtro.as_str())) {
-        Ok(s) => s,
-        Err(e) => return desde_sonda(sin_veredicto(DIMENSION, e.to_string())),
+    let muestra_base = MUESTRA_DE_BASE.with(|m| m.borrow().clone());
+    let mut resultado = match muestra_base {
+        None => correr_pedidos(ej, tarea, &muestra, max, filtro),
+        Some(base) => {
+            // Hueco del Timeout: un test debilitado puede entrar en bucle con un mutante que la base dejaba
+            // vivo. Ese mutante vence su plazo y el `Timeout` cuenta como muerto. Eso sube el valor del caso.
+            // Nunca da una detección falsa: a lo sumo baja un poco la sensibilidad. El planner lo acepta.
+            let pedidos = pedidos_de_base(&muestra, &base);
+            let corrida = if pedidos.is_empty() && !muestra.is_empty() {
+                desde_sonda(ResultadoSonda {
+                    dimension: DIMENSION,
+                    valor: Some(0.0),
+                    motivo: None,
+                    hallazgos: Vec::new(),
+                })
+            } else {
+                correr_pedidos(ej, tarea, &pedidos, max, filtro)
+            };
+            mezclar_con_base(corrida, &muestra, &base, &tarea.requisito)
+        }
     };
-    let Some(json) = salida.archivos.get(ARCHIVO_OUTCOMES) else {
-        let base = format!("no dejó reporte (cargo-mutants código {})", salida.codigo);
-        return desde_sonda(sin_veredicto(DIMENSION, con_cola(base, &salida.stderr)));
-    };
-    let mut resultado = parsear_outcomes(json, max, &tarea.requisito, &muestra)
-        .unwrap_or_else(|e| desde_sonda(sin_veredicto(DIMENSION, e.to_string())));
     // El reporte solo trae la muestra: el total real sale del listado.
     if resultado.sonda.valor.is_some() && total > max {
         resultado.truncado = true;
@@ -900,8 +1108,6 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::fs;
-
-    use crate::oracle::perfiles::herramientas::SalidaHerramienta;
 
     const CON_ASSERTS: &str =
         include_str!("../../tests/fixtures/mutacion/outcomes-con-asserts.json");
@@ -2133,6 +2339,164 @@ mod tests {
         );
     }
 
+    /// Ejecutor que anota `(carpeta, comando)` en `ejecutar_en`. Lo demás (`ejecutar`) va a `sin_carpeta`.
+    struct FalsoEn {
+        en: RefCell<Vec<(PathBuf, String)>>,
+        sin_carpeta: Falso,
+    }
+
+    impl FalsoEn {
+        fn desde(sin_carpeta: Falso) -> Self {
+            FalsoEn {
+                en: RefCell::new(Vec::new()),
+                sin_carpeta,
+            }
+        }
+    }
+
+    impl EjecutorHerramienta for FalsoEn {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            self.sin_carpeta.ejecutar(cmd)
+        }
+
+        fn ejecutar_en(&self, cmd: &str, salida: &Path) -> Result<SalidaHerramienta, ErrorOraculo> {
+            self.en
+                .borrow_mut()
+                .push((salida.to_path_buf(), cmd.to_string()));
+            (self.sin_carpeta.responde)(cmd)
+        }
+    }
+
+    /// Valor de la carpeta de este hilo.
+    fn carpeta_del_hilo() -> Option<PathBuf> {
+        CARPETA_DE_MUTACION.with(|c| c.borrow().clone())
+    }
+
+    #[test]
+    fn mutacion_con_carpeta_fija_listado_y_corrida_reciben_esa_carpeta() {
+        let nombres = ["src/a.rs:1:5: replace a -> u8 with 0"];
+        let ej = FalsoEn::desde(con_listado_y_corrida(
+            listado_json(&nombres),
+            corrida_de(&nombres),
+        ));
+        let carpeta = PathBuf::from("/tmp/calibracion");
+        let r = con_carpeta_de_mutacion(Some(&carpeta), || sonda_mutacion(&ej, &tarea_pruebas(5)));
+        assert!(r.sonda.valor.is_some(), "{:?}", r.sonda.motivo);
+        let en = ej.en.borrow();
+        assert_eq!(en.len(), 2, "listado y corrida van por ejecutar_en: {en:?}");
+        assert!(en.iter().all(|(c, _)| *c == carpeta), "{en:?}");
+        assert!(en[0].1.contains("--list"), "{}", en[0].1);
+        assert!(en[1].1.contains("--output /salida/mutants"), "{}", en[1].1);
+        let sin = ej.sin_carpeta.cmds.borrow();
+        assert!(
+            sin.iter().all(|c| c.starts_with("command -v")),
+            "solo la sonda usa ejecutar: {sin:?}"
+        );
+    }
+
+    #[test]
+    fn mutacion_con_carpeta_fija_la_corrida_limpia_y_usa_in_place() {
+        let t = tarea_pruebas(5);
+        let cmd = con_carpeta_de_mutacion(Some(Path::new("/tmp/c")), || comando_de_corrida(&t, ""));
+        assert!(cmd.contains("rm -rf /salida/work"), "{cmd}");
+        assert!(cmd.contains("--in-place"), "{cmd}");
+        assert!(cmd.contains("CARGO_TARGET_DIR=/salida/target"), "{cmd}");
+        assert!(es_comando_de_mutacion(&cmd), "{cmd}");
+    }
+
+    #[test]
+    fn mutacion_con_carpeta_fija_la_corrida_no_lleva_jobs() {
+        let t = tarea_pruebas(5);
+        let cmd = con_carpeta_de_mutacion(Some(Path::new("/tmp/c")), || comando_de_corrida(&t, ""));
+        assert!(!cmd.contains("--jobs"), "{cmd}");
+        assert!(es_comando_de_mutacion(&cmd), "{cmd}");
+    }
+
+    #[test]
+    fn mutacion_con_carpeta_fija_el_listado_no_lleva_jobs() {
+        let cmd = con_carpeta_de_mutacion(Some(Path::new("/tmp/c")), comando_de_listado);
+        assert!(!cmd.contains("--jobs"), "{cmd}");
+        assert!(es_comando_de_listado(&cmd), "{cmd}");
+    }
+
+    #[test]
+    fn mutacion_con_carpeta_fija_el_listado_limpia_y_usa_in_place() {
+        let cmd = con_carpeta_de_mutacion(Some(Path::new("/tmp/c")), comando_de_listado);
+        assert!(cmd.contains("rm -rf /salida/work"), "{cmd}");
+        assert!(cmd.contains("--in-place"), "{cmd}");
+        assert!(es_comando_de_listado(&cmd), "{cmd}");
+    }
+
+    #[test]
+    fn mutacion_con_carpeta_fija_borra_los_reportes_antes_de_cargo_mutants() {
+        let t = tarea_pruebas(5);
+        let rm = "rm -f /salida/outcomes.json /salida/tests-fallidos.txt /salida/listado.json";
+        con_carpeta_de_mutacion(Some(Path::new("/tmp/c")), || {
+            for cmd in [comando_de_corrida(&t, ""), comando_de_listado()] {
+                let pos_rm = cmd.find(rm).unwrap_or_else(|| panic!("falta el rm: {cmd}"));
+                let pos_cargo = cmd.find("cargo mutants").expect("hay cargo mutants");
+                assert!(pos_rm < pos_cargo, "el rm va antes de cargo: {cmd}");
+            }
+        });
+    }
+
+    #[test]
+    fn mutacion_sin_carpeta_fija_los_comandos_son_los_de_hoy() {
+        let t = tarea_pruebas(5);
+        let listado = comando_de_listado();
+        assert_eq!(
+            listado,
+            format!(
+                "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
+                 cargo mutants --list --json --no-shuffle --exclude-re 'delete field .* from struct .* expression' > /salida/listado.json"
+            )
+        );
+        let corrida = comando_de_corrida(&t, "");
+        assert_eq!(
+            corrida,
+            format!(
+                "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
+                 CARGO_TARGET_DIR=/salida/target timeout 1200 cargo mutants --no-shuffle --jobs 1 --exclude-re 'delete field .* from struct .* expression' --output /salida/mutants -- --offline; \
+                 (cd /salida/mutants/mutants.out && grep -H '^test .* \\.\\.\\. FAILED$' log/*.log) \
+                 > /salida/tests-fallidos.txt 2>/dev/null; \
+                 cp /salida/mutants/mutants.out/outcomes.json /salida/outcomes.json 2>/dev/null"
+            )
+        );
+        let ej = FalsoEn::desde(con_listado_y_corrida(
+            listado_json(&["src/a.rs:1:5: replace a -> u8 with 0"]),
+            corrida_de(&["src/a.rs:1:5: replace a -> u8 with 0"]),
+        ));
+        let _ = sonda_mutacion(&ej, &t);
+        assert!(ej.en.borrow().is_empty(), "sin carpeta no hay ejecutar_en");
+        let sin = ej.sin_carpeta.cmds.borrow();
+        assert!(
+            sin.contains(&listado),
+            "el listado va por ejecutar: {sin:?}"
+        );
+        assert!(
+            sin.iter().any(|c| c.contains("--output /salida/mutants")),
+            "la corrida va por ejecutar: {sin:?}"
+        );
+    }
+
+    #[test]
+    fn mutacion_con_carpeta_de_mutacion_restaura_tras_f_y_tras_un_panico() {
+        assert_eq!(carpeta_del_hilo(), None);
+        con_carpeta_de_mutacion(Some(Path::new("/a")), || {
+            assert_eq!(carpeta_del_hilo().as_deref(), Some(Path::new("/a")));
+            con_carpeta_de_mutacion(Some(Path::new("/b")), || {
+                assert_eq!(carpeta_del_hilo().as_deref(), Some(Path::new("/b")));
+            });
+            assert_eq!(carpeta_del_hilo().as_deref(), Some(Path::new("/a")));
+        });
+        assert_eq!(carpeta_del_hilo(), None, "tras f vuelve el anterior");
+        let panico = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            con_carpeta_de_mutacion(Some(Path::new("/c")), || panic!("a propósito"));
+        }));
+        assert!(panico.is_err());
+        assert_eq!(carpeta_del_hilo(), None, "tras un pánico también vuelve");
+    }
+
     /// Reporte con un mutante por cada `(nombre, resumen)`, en orden. Cada uno tiene su línea.
     fn reporte_con(mutantes: &[(&str, &str)]) -> String {
         let mut outs = vec![serde_json::json!({"scenario": "Baseline", "summary": "Success"})];
@@ -2263,5 +2627,205 @@ mod tests {
         // Una sonda sin herramienta no arma filtro.
         let _ = sonda_mutacion(&falta_la_herramienta(), &tarea_pruebas(60));
         assert!(tomar_filtro().is_empty(), "sin corrida no hay filtro");
+    }
+
+    /// Catorce mutantes de prueba, en orden. Su nombre tiene la forma de `cargo-mutants`.
+    fn catorce() -> Vec<String> {
+        (1..=14)
+            .map(|i| format!("src/a.rs:{i}:1: replace f{i} with 0"))
+            .collect()
+    }
+
+    /// Listado JSON de `nombres`, en orden.
+    fn listado_de(nombres: &[String]) -> String {
+        let refs: Vec<&str> = nombres.iter().map(String::as_str).collect();
+        listado_json(&refs)
+    }
+
+    /// Muestra de base de `nombres`: todos Vivo, salvo los `(índice, estado)` dados. Duración 2.0.
+    fn base_con(nombres: &[String], estados: &[(usize, EstadoMutante)]) -> Vec<MutanteEstado> {
+        nombres
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let estado = estados
+                    .iter()
+                    .find(|(j, _)| *j == i)
+                    .map_or(EstadoMutante::Vivo, |(_, e)| *e);
+                MutanteEstado {
+                    nombre: n.clone(),
+                    estado,
+                    duracion_segundos: Some(2.0),
+                }
+            })
+            .collect()
+    }
+
+    /// Reporte en el que los catorce `nombres` están cazados.
+    fn todos_cazados(nombres: &[String]) -> String {
+        let pares: Vec<(&str, &str)> = nombres
+            .iter()
+            .map(|n| (n.as_str(), "CaughtMutant"))
+            .collect();
+        reporte_con(&pares)
+    }
+
+    /// Base de catorce: índices 2 y 6 muertos, 9 vencido. Los demás vivos.
+    fn base_de_catorce(nombres: &[String]) -> Vec<MutanteEstado> {
+        base_con(
+            nombres,
+            &[
+                (2, EstadoMutante::Muerto),
+                (6, EstadoMutante::Muerto),
+                (9, EstadoMutante::Vencido),
+            ],
+        )
+    }
+
+    #[test]
+    fn mutacion_con_muestra_de_base_corre_solo_los_muertos_y_vencidos() {
+        let nombres = catorce();
+        let base = base_de_catorce(&nombres);
+        let reporte = reporte_con(&[
+            (nombres[2].as_str(), "CaughtMutant"),
+            (nombres[6].as_str(), "CaughtMutant"),
+            (nombres[9].as_str(), "Timeout"),
+        ]);
+        let ej = con_listado_y_corrida(listado_de(&nombres), reporte);
+        let _ = con_muestra_de_base(&base, || sonda_mutacion(&ej, &tarea_con("rust", "")));
+        let cmd = corridas(&ej);
+        assert_eq!(cmd.len(), 1, "{cmd:?}");
+        assert_eq!(
+            pedidos_del_comando(&cmd[0]),
+            Some(vec![
+                nombres[2].clone(),
+                nombres[6].clone(),
+                nombres[9].clone()
+            ]),
+            "{}",
+            cmd[0]
+        );
+    }
+
+    #[test]
+    fn mutacion_con_muestra_de_base_trae_los_catorce_con_estado_de_cada_uno() {
+        let nombres = catorce();
+        let base = base_de_catorce(&nombres);
+        let reporte = reporte_con(&[
+            (nombres[2].as_str(), "CaughtMutant"),
+            (nombres[6].as_str(), "CaughtMutant"),
+            (nombres[9].as_str(), "Timeout"),
+        ]);
+        let ej = con_listado_y_corrida(listado_de(&nombres), reporte);
+        let r = con_muestra_de_base(&base, || sonda_mutacion(&ej, &tarea_con("rust", "")));
+        assert_eq!(r.mutantes.len(), 14);
+        let en_orden: Vec<&str> = r.mutantes.iter().map(|m| m.nombre.as_str()).collect();
+        let esperado: Vec<&str> = nombres.iter().map(String::as_str).collect();
+        assert_eq!(en_orden, esperado);
+        assert_eq!((r.muestra, r.muertos, r.vivos), (14, 3, 11));
+        assert_eq!(r.mutantes[9].estado, EstadoMutante::Vencido);
+        assert_eq!(r.mutantes[0].estado, EstadoMutante::Vivo);
+        // Un vivo copiado de la base conserva su duración de la base.
+        assert_eq!(r.mutantes[0].duracion_segundos, Some(2.0));
+        assert_eq!(r.sonda.hallazgos.len(), 11);
+        let valor = r.sonda.valor.expect("valor");
+        assert!((valor - 3.0 / 14.0).abs() < 1e-6, "valor {valor}");
+    }
+
+    #[test]
+    fn mutacion_con_muestra_de_base_un_muerto_que_sobrevive_baja_el_valor() {
+        let nombres = catorce();
+        let base = base_de_catorce(&nombres);
+        let reporte = reporte_con(&[
+            (nombres[2].as_str(), "CaughtMutant"),
+            (nombres[6].as_str(), "MissedMutant"),
+            (nombres[9].as_str(), "Timeout"),
+        ]);
+        let ej = con_listado_y_corrida(listado_de(&nombres), reporte);
+        let r = con_muestra_de_base(&base, || sonda_mutacion(&ej, &tarea_con("rust", "")));
+        assert_eq!((r.muestra, r.muertos, r.vivos), (14, 2, 12));
+        let valor = r.sonda.valor.expect("valor");
+        assert!((valor - 2.0 / 14.0).abs() < 1e-6, "valor {valor}");
+        assert_eq!(r.sonda.hallazgos.len(), 12);
+    }
+
+    #[test]
+    fn mutacion_con_muestra_de_base_sin_muertos_no_corre_la_mutacion() {
+        let nombres = catorce();
+        let base = base_con(&nombres, &[]);
+        let ej = con_listado_y_corrida(listado_de(&nombres), String::new());
+        let r = con_muestra_de_base(&base, || sonda_mutacion(&ej, &tarea_con("rust", "")));
+        assert!(corridas(&ej).is_empty(), "{:?}", ej.cmds.borrow());
+        assert_eq!(r.sonda.valor, Some(0.0));
+        assert_eq!((r.muertos, r.vivos, r.muestra), (0, 14, 14));
+        assert_eq!(r.mutantes, base);
+        assert_eq!(r.base_segundos, None);
+        assert_eq!(r.sonda.hallazgos.len(), 14);
+        assert!(tomar_filtro().is_empty());
+    }
+
+    #[test]
+    fn mutacion_con_muestra_de_base_pedido_que_falta_da_el_error_de_hoy() {
+        let nombres = catorce();
+        let base = base_de_catorce(&nombres);
+        let reporte = reporte_con(&[
+            (nombres[2].as_str(), "CaughtMutant"),
+            (nombres[6].as_str(), "CaughtMutant"),
+        ]);
+        let ej = con_listado_y_corrida(listado_de(&nombres), reporte);
+        let r = con_muestra_de_base(&base, || sonda_mutacion(&ej, &tarea_con("rust", "")));
+        assert_eq!(r.sonda.valor, None);
+        assert_eq!(
+            r.sonda.motivo,
+            Some(format!(
+                "el reporte no trae el mutante pedido {}",
+                nombres[9]
+            ))
+        );
+    }
+
+    #[test]
+    fn mutacion_sin_muestra_de_base_el_comando_es_el_de_hoy() {
+        let nombres = catorce();
+        let t = tarea_con("rust", "");
+        let esperado = vec![comando_de_corrida(&t, &filtro_de(&nombres))];
+        let ej = con_listado_y_corrida(listado_de(&nombres), todos_cazados(&nombres));
+        let _ = sonda_mutacion(&ej, &t);
+        assert_eq!(corridas(&ej), esperado);
+        // Una muestra vacía también equivale a no fijar nada.
+        let vacia: Vec<MutanteEstado> = Vec::new();
+        let ej = con_listado_y_corrida(listado_de(&nombres), todos_cazados(&nombres));
+        let _ = con_muestra_de_base(&vacia, || sonda_mutacion(&ej, &t));
+        assert_eq!(corridas(&ej), esperado);
+    }
+
+    #[test]
+    fn mutacion_con_muestra_de_base_restaura_tras_f_y_tras_un_panico() {
+        let base = base_de_catorce(&catorce());
+        con_muestra_de_base(&base, || {
+            assert!(MUESTRA_DE_BASE.with(|m| m.borrow().is_some()));
+        });
+        assert!(
+            MUESTRA_DE_BASE.with(|m| m.borrow().is_none()),
+            "tras salir vuelve al valor anterior"
+        );
+        let panico = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            con_muestra_de_base(&base, || panic!("a propósito"));
+        }));
+        assert!(panico.is_err());
+        assert!(
+            MUESTRA_DE_BASE.with(|m| m.borrow().is_none()),
+            "tras un pánico también vuelve"
+        );
+    }
+
+    #[test]
+    fn mutacion_archivo_y_linea_saca_los_dos_campos_del_nombre() {
+        assert_eq!(
+            archivo_y_linea("src/a.rs:12:5: replace a -> u8 with 0"),
+            ("src/a.rs", 12)
+        );
+        assert_eq!(archivo_y_linea("sin_formato"), ("sin_formato", 0));
+        assert_eq!(archivo_y_linea("src/a.rs:x:1: replace"), ("src/a.rs", 0));
     }
 }

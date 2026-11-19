@@ -58,6 +58,9 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit>... \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda los junit de vuelta, uno por repetición (`pendientes-N.xml`). Con `--colab`, corre el paquete en Colab y lo importa. Solo una corrida por tarea a la vez: la segunda sale con `3` y nombra a la primera (pid y hora). | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
 | `r00t oraculo pendientes --liberar` | Libera el runtime de Colab anotado en `$ROOT_HOME/colab/activo.json`, si hay uno, y sale. | sin salida JSON | construido (Tarea 7j) |
 | `r00t oraculo pendientes --vigilar` | Red de seguridad: lee `$ROOT_HOME/colab/activo.json`. Libera el runtime si pasó su tope o si su junit cumple lo pedido. Un runtime vigente no se toca. Sin `--tarea` ni `--repo`. | `{vigilancia, causa}`, con `vigilancia` `sin_runtime`, `vigente` o `liberado` | construido (Tarea 7l) |
+| `r00t colab empaquetar --binario <ruta> --trabajos <tarea>:<dimension>,... --repo <tarea>=<ruta> --rustup-sha256 <hex> --salida <archivo> [--raiz-root <dir>] [--n 4] [--semilla 42] [--juez]` | Arma el paquete de ida para calibrar en Colab. Imprime `ROOT_SHA_PAQUETE=<sha>`. Con `--juez`, el manifiesto lleva el tope de S2 (25 USD menos el gasto de API) y cada trabajo con juez lleva `--tope-usd`. `--n` fija las repeticiones por defecto de cada trabajo; `tarea:dimension:n` cambia la de un trabajo. Acepta Seguridad, Funciona, Completitud, Pruebas y Eficiencia; las dimensiones con juez solo con `--juez`. Rechaza pytest. Nunca lleva claves, eventos ni transcripts. | `{salida, archivos, trabajos, sha256}` | construido (Tarea 141, ampliado en la 142) |
+| `r00t colab importar <archivo> [--raiz-root <dir>] [--sha <hex>] [--ida <paquete>]` | Importa el paquete de vuelta de Colab. Con `--sha`, compara el SHA-256 del archivo antes de abrirlo. Con `--ida`, el archivo es la vuelta cruda del notebook y Root arma el paquete de vuelta. Agrega las líneas de gasto con `origen: colab`, sin duplicar. Revisa SHA-256, commit de Root y la verificación de versiones antes de escribir. Una fila entra solo si su huella, su `tarea_hash` y su base coinciden con los de la laptop. Guarda un respaldo en `colab/respaldos/<fecha>/`. | `{entraron, rechazadas, casos_copiados, respaldo, avisos}` | construido (Tarea 141) |
+| `r00t colab calibrar --paquete <archivo>... [--raiz-root <dir>] [--sin-stop]` | Corre cada paquete de `colab empaquetar` en un runtime de CPU propio, todos a la vez, y los importa de a uno. Libera cada runtime al terminar, con un error, con `SIGINT`, `SIGTERM` o a las 4 horas. Un runtime que falla no frena a los otros. Con `--sin-stop` no llama a `stop`: el runtime sigue abierto, gasta cerca de 0,08 unidades por hora, y `activo.json` conserva la sesión. Por cada runtime abierto imprime `ROOT_SESION_ABIERTA=`, `ROOT_CARPETA_REMOTA=` y `ROOT_TRABAJO_CMD=` (JSON, sin valores de claves). | `{runtimes}` | construido (Tarea 141) |
 | `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>] [--tope-usd <n>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. Con `--tope-usd <n>`, antes de la línea base y de cada caso compara el gasto de API desde el inicio, más el peor caso del caso, con el tope. Si no entra, registra un `Gate` `calibracion-tope`, guarda la fila de los casos hechos como `incompleta` y sale con `3`. El tope debe ser finito y mayor que 0; si no, sale con `2`. Eficiencia sin `[eficiencia]` en `tarea.toml` no aplica: sale con `0`, no corre la base ni los casos y agrega una fila con `no_aplica`. | `Fila` | construido (Tarea 12 y decisión 48). |
 | `r00t oraculo validar --casos <dir> [--json]` | Mide si el juicio de Root coincide con los casos de `<dir>` (orden conocido, defectos reales y el formulario a ciegas). Escribe `<dir>/validez.json`. Una métrica sin datos queda sin medir, nunca 0 ni 1. Sale con `0` aunque una métrica no cumpla. | `Validez` | construido (Tarea 12b). Formatos: sección ## Validez. |
 | `r00t oraculo validar --preparar-ciego --fuentes <manifiesto.toml> --casos <dir> [--semilla N]` | Arma un paquete anónimo por fuente en `<dir>/ciego/`, con su formulario, y la clave `ciego/clave.toml`. Las listas de rastros van a `$ROOT_HOME/validez/`, nunca a `ciego/`. Los conteos van a `$ROOT_HOME/validez/rastros.json`, no a la salida. | ids de los paquetes | construido (Tarea 12b). |
@@ -76,7 +79,8 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t track listar [--tarea t]` | Lista las filas, opcionalmente de una tarea. | lista de `Fila` | construido |
 | `r00t track comparar --a <c1> --b <c2> --tarea <t>` | Compara dos corridas de una tarea. | comparación | construido |
 | `r00t aprende [--replay]` | Recalcula `politica.json`. Con `--replay`, mide la política sin escribirla. | `Politica`, o `Replay` | construido |
-| `r00t corre --tarea <t> --config <c> [--reanuda <id>]` | Corre una tarea con una configuración (con `--json` global, imprime la fila completa): rutea todos los roles, los lanza por el contenedor del builder, registra sus sesiones y lecturas, evalúa y agrega una fila a `runs.jsonl`. Sin GOAL autorizado no arranca. Con `--reanuda <id>`, retoma una corrida cortada: su id empieza con `corre-<t>-<c>-` y su carpeta en `$HOME/.cache/root/corridas/<id>` trae `repo/`. Si no, sale con `2` y no lanza nada. Los roles que terminaron no se lanzan otra vez. El primer rol sin `result` exitoso retoma con `--resume` si tenía sesión. La fila lleva `reanudada: true` y `vueltas`, con todos los lanzamientos. | `Fila` | construido (Tareas 16 y 26, capa 1). Lanza cada rol en el contenedor `root-builder:1`, sin `ROOT_HOME` y con la credencial de Claude en solo lectura. Sin credencial, sale con `3` y no lanza nada. |
+| `r00t corre --tarea <t> --config <c> [--reanuda <id>]` | Corre una tarea con una configuración (con `--json` global, imprime la fila completa): rutea todos los roles, los lanza por el contenedor del builder, registra sus sesiones y lecturas, evalúa y agrega una fila a `runs.jsonl`. Sin GOAL autorizado no arranca. Con `--reanuda <id>`, retoma una corrida cortada: su id empieza con `corre-<t>-<c>-` y su carpeta en `$HOME/.cache/root/corridas/<id>` trae `repo/`. Si no, sale con `2` y no lanza nada. Los roles que terminaron no se lanzan otra vez. El primer rol sin `result` exitoso retoma con `--resume` si tenía sesión. La fila lleva `reanudada: true` y `vueltas`, con todos los lanzamientos. Si hubo vuelta de eficiencia, la fila lleva `vuelta_eficiencia`. Si hubo vuelta de instalación, la fila lleva `vuelta_instalacion`. | `Fila` | construido (Tareas 16 y 26, capa 1). Lanza cada rol en el contenedor `root-builder:1`, sin `ROOT_HOME` y con la credencial de Claude en solo lectura. Sin credencial, sale con `3` y no lanza nada. |
+| `r00t corre revisar-lectura --tarea <t> --transcript <ruta>` | Arma las huellas de la tarea con `ROOT_HOME` y revisa un transcript guardado. Imprime solo conteos por motivo (`huella`, `nombre`, `ruta`) y si queda marcado. Nunca imprime la cita ni la huella. No escribe eventos ni filas. | `{tarea, huella, nombre, ruta, marcado}` | construido (Tarea 166) |
 | `r00t goal verificar` | Verifica que `GOAL.md` coincida con `GOAL.hash`. | `{ok, hash}` | construido |
 | `r00t goal autorizar` | Autoriza un cambio al GOAL. Exige una TTY y una confirmación tecleada. | sin salida JSON | construido |
 | `r00t importar-mmorch --desde <metrics.jsonl>` | Copia en solo lectura el log de métricas de mmorch. | resumen de la importación | construido |
@@ -628,12 +632,28 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "Una medición de una dimensión de una tarea, con su muestra.",
       "type": "object",
       "properties": {
+        "base_sin_veredicto": {
+          "description": "Un juicio de la base no dio veredicto de la dimensión. La fila no mide casos. El texto dice qué juicio\nfalló y por qué. Una fila sin el campo vale `None`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "casos_ruidosos": {
           "description": "Casos medidos con `mutantes_cambiados` no vacío. Siguen contando para las métricas. Sin el campo vale 0.",
           "type": "integer",
           "format": "uint32",
           "default": 0,
           "minimum": 0
+        },
+        "causas_inestables": {
+          "description": "Guarda la causa de cada ítem de `inestables`. Dice qué juicio no lo trajo o cuánto varió. Una fila sin el\ncampo vale vacía.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
         },
         "defectos": {
           "description": "Defectos aplicados y medidos. La sensibilidad sale de ellos.",
@@ -644,6 +664,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "defectos_en_piso": {
           "description": "Defectos cuyo ítem ya estaba en piso en la base. Una fila sin el campo vale 0.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "defectos_sin_veredicto": {
+          "description": "Defectos distintos sin veredicto de la dimensión. No entran a la sensibilidad: no hay veredicto que medir.\nNo son defectos no detectados. Una fila sin el campo vale 0: esas filas contaban estos defectos como no\ndetectados, así que eran más estrictas.",
           "type": "integer",
           "format": "uint32",
           "default": 0,
@@ -669,6 +696,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           ],
           "format": "double",
           "default": null
+        },
+        "eficiencia_base": {
+          "description": "Medidas de Eficiencia de la base, contra el estado inicial. Solo Eficiencia las trae. Una fila sin el campo\nvale vacía.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MedidaEficiencia"
+          }
         },
         "equivalentes_excluidos": {
           "description": "Entradas de `[calibracion].equivalentes` que la corrida aplicó: el largo de la lista declarada, sin\nentradas repetidas (mismo archivo, línea y edición). Una fila sin el campo vale 0.",
@@ -705,7 +740,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "huella": {
-          "description": "Huella del juez con que se midió la fila: el prompt y las rúbricas de la dimensión (`huella_de`).\nUna fila sin el campo vale `None`. Con ítems del juez, `None` cuenta como vieja y no calibra.",
+          "description": "Huella del juez con que se midió la fila: el prompt y las rúbricas de la dimensión (`huella_de`).\nUna fila sin el campo vale `None`, y no cuenta para calibrar.",
           "type": [
             "string",
             "null"
@@ -713,7 +748,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": null
         },
         "incompleta": {
-          "description": "`true` si el tope de gasto detuvo la calibración antes de medir todos sus casos (decisión 48). Una\nfila incompleta no calibra la dimensión, aunque su exactitud llegue a `UMBRAL`.",
+          "description": "`true` si el tope de gasto detuvo la calibración antes de medir todos sus casos (decisión 48). Una\nfila incompleta no cuenta para la versión, aunque tenga casos suficientes.",
           "type": "boolean",
           "default": false
         },
@@ -734,7 +769,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "inyecciones_distintas": {
-          "description": "Identidades de inyección distintas entre los defectos medidos. Una fila sin el campo vale `None`:\nes anterior a la Tarea 106 y puede contar inyecciones repetidas. `Some(0)` si no midió defectos.",
+          "description": "Identidades de inyección distintas entre los defectos medidos con veredicto. Los defectos sin veredicto no\ncuentan aquí: van a `defectos_sin_veredicto`. Una fila sin el campo vale `None`: es anterior a la Tarea 106\ny puede contar inyecciones repetidas. `Some(0)` si no midió defectos con veredicto.",
           "type": [
             "integer",
             "null"
@@ -751,6 +786,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "format": "float"
           },
           "default": {}
+        },
+        "juicios_base": {
+          "description": "Lo que dijo cada juicio de la base sobre la dimensión, en orden. Una fila sin el campo vale vacía.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/JuicioBase"
+          }
         },
         "limpios": {
           "description": "Copias sin alterar medidas. La especificidad sale de ellas.",
@@ -841,11 +884,21 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "format": "float",
           "default": null
         },
+        "sonda_lastre": {
+          "description": "Estado de la sonda de lastre de la base (Tarea 143). Vacío fuera de Eficiencia.",
+          "$ref": "#/$defs/SondaLastre",
+          "default": {
+            "corrio": false,
+            "funciones": 0,
+            "motivo": null,
+            "pedida": false
+          }
+        },
         "tarea": {
           "type": "string"
         },
         "tarea_hash": {
-          "description": "Hash del `tarea.toml` con que se midió la fila. Otro `tarea.toml` deja la fila sin valor.\nUna fila sin el campo vale `None`, y sigue valiendo.",
+          "description": "Hash del `tarea.toml` con que se midió la fila. Otro `tarea.toml` deja la fila sin valor.\nUna fila sin el campo vale `None`, y no cuenta para calibrar.",
           "type": [
             "string",
             "null"
@@ -865,6 +918,225 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "semilla",
         "ts"
       ]
+    },
+    "Fuente": {
+      "description": "Quién produjo un hallazgo: una sonda determinista o un juez con modelo.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Sonda": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Sonda"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Juez": {
+              "type": "object",
+              "properties": {
+                "modelo": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "modelo"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Juez"
+          ]
+        }
+      ]
+    },
+    "ItemFaltante": {
+      "description": "Un ítem de rúbrica que ninguna sonda mide para el lenguaje de la tarea, con el motivo (Tarea 31).",
+      "type": "object",
+      "properties": {
+        "item": {
+          "type": "string"
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "motivo"
+      ]
+    },
+    "JuicioBase": {
+      "description": "Lo que dijo un juicio de la base sobre una dimensión: niveles, faltantes y sin veredicto.",
+      "type": "object",
+      "properties": {
+        "faltantes": {
+          "description": "Ítems de la dimensión que ninguna sonda mide para el lenguaje de la tarea, con su motivo.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ItemFaltante"
+          }
+        },
+        "niveles": {
+          "description": "Nivel de cada ítem de la dimensión que puntuó el juez, en orden.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NivelItem"
+          }
+        },
+        "sin_veredicto": {
+          "description": "Motivo por el que el juicio no dio veredicto de la dimensión. `None` si lo dio.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "MedidaEficiencia": {
+      "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
+      "type": "object",
+      "properties": {
+        "corridas_referencia": {
+          "description": "Cada corrida del estado inicial, en el orden en que corrió. El ancla va al final. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "corridas_repo": {
+          "description": "Cada corrida del repo, en el orden en que corrió. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "medida": {
+          "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
+          "type": "string"
+        },
+        "motivo": {
+          "description": "Por qué la medida no tiene valor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "razon": {
+          "description": "Repo sobre referencia. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "referencia": {
+          "description": "Mínimo de las corridas del estado inicial. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "regresion": {
+          "description": "Verdadero si el repo queda más lento o más pesado que el ruido permite.",
+          "type": "boolean"
+        },
+        "repo": {
+          "description": "Mínimo de las corridas del repo. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ruido": {
+          "description": "Dispersión de la referencia, con piso de 2 %. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "medida",
+        "regresion"
+      ]
+    },
+    "NivelItem": {
+      "description": "Nivel de un ítem de rúbrica. `nivel` va de 0 a 3.",
+      "type": "object",
+      "properties": {
+        "evidencia": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fuente": {
+          "$ref": "#/$defs/Fuente"
+        },
+        "item": {
+          "type": "string"
+        },
+        "nivel": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "item",
+        "nivel",
+        "evidencia",
+        "fuente"
+      ]
+    },
+    "SondaLastre": {
+      "description": "Estado de la sonda de lastre en una medición (Tarea 143). Solo Eficiencia la pide. Sin el campo, o en otras\ndimensiones, vale `default`.",
+      "type": "object",
+      "properties": {
+        "corrio": {
+          "description": "`true` si la sonda terminó sin error, aunque su lista de funciones esté vacía.",
+          "type": "boolean",
+          "default": false
+        },
+        "funciones": {
+          "description": "Funciones que corrieron en la base. Cero si la sonda no corrió o falló.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "motivo": {
+          "description": "Motivo del error de la sonda. `None` si no falló.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "pedida": {
+          "description": "`true` si la medición pidió la sonda: solo Eficiencia la pide.",
+          "type": "boolean",
+          "default": false
+        }
+      }
     }
   }
 }
@@ -887,6 +1159,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "default": null
     },
+    "carga_ajena": {
+      "description": "Mayor carga ajena de las corridas medidas del caso, en núcleos. `None` si la dimensión no es Eficiencia, si\nno hubo control de carga, o en un renglón viejo.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double",
+      "default": null
+    },
     "caso": {
       "description": "Índice `i` del bucle de la calibración. Los casos sin defecto aplicable no entran, así que puede haber huecos.",
       "type": "integer",
@@ -904,6 +1185,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "detectado": {
       "description": "Si la dimensión calibrada bajó frente a la base en este caso.",
       "type": "boolean"
+    },
+    "eficiencia": {
+      "description": "Medidas de Eficiencia de este caso, contra el estado inicial. Vacía si la dimensión no es Eficiencia o el\ncaso no midió. Un renglón viejo sin el campo lo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MedidaEficiencia"
+      }
     },
     "en_cambio": {
       "description": "`true` si el defecto cayó dentro del cambio de `bootstrap/`.\nEn `ComportamientoRoto`, la línea invertida es una línea tocada.\nEn `ModuloBorrado`, el módulo borrado es un archivo tocado.\nUn archivo tocado tiene al menos una línea del cambio. Los casos limpios y sin cambio valen `false`.",
@@ -948,6 +1237,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "format": "uint32",
       "default": null,
       "minimum": 0
+    },
+    "lugar_por": {
+      "description": "Dónde cayó el lastre: `sonda` (una función que la sonda vio correr) o `nombre` (la regla de la Tarea 136,\nsin sonda pedida). Solo en un caso con `LastreDeMemoria` medido. `None` en los demás.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
     },
     "motivo": {
       "description": "Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,\n`cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo:<cita>`, `test_malo_nuevo:<clave>`,\n`valor_menor` o `item_bajo:<item>`. `<cita>` es la del hallazgo nuevo que disparó. `<clave>` es\n`oculto:<id>` o `contrato:<id>` del test malo nuevo, y solo aparece en Completitud y Funciona.\n`None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.",
@@ -1141,6 +1438,81 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "desde",
         "hasta",
         "motivo"
+      ]
+    },
+    "MedidaEficiencia": {
+      "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
+      "type": "object",
+      "properties": {
+        "corridas_referencia": {
+          "description": "Cada corrida del estado inicial, en el orden en que corrió. El ancla va al final. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "corridas_repo": {
+          "description": "Cada corrida del repo, en el orden en que corrió. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "medida": {
+          "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
+          "type": "string"
+        },
+        "motivo": {
+          "description": "Por qué la medida no tiene valor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "razon": {
+          "description": "Repo sobre referencia. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "referencia": {
+          "description": "Mínimo de las corridas del estado inicial. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "regresion": {
+          "description": "Verdadero si el repo queda más lento o más pesado que el ruido permite.",
+          "type": "boolean"
+        },
+        "repo": {
+          "description": "Mínimo de las corridas del repo. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ruido": {
+          "description": "Dispersión de la referencia, con piso de 2 %. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "medida",
+        "regresion"
       ]
     },
     "MutanteEstado": {
@@ -2055,6 +2427,30 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "veredicto": {
       "$ref": "#/$defs/Veredicto"
     },
+    "vuelta_eficiencia": {
+      "description": "Una corrida sin vuelta, y las filas anteriores a este campo, la leen en `None`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VueltaEficiencia"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "vuelta_instalacion": {
+      "description": "Vuelta de instalación: solo la lleva una corrida con corte de instalación. Las filas anteriores la leen en `None`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VueltaInstalacion"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "vueltas": {
       "description": "Lanzamientos de `claude` de la corrida, sumando los de antes de reanudarla. Las filas anteriores la leen en 0.",
       "type": "integer",
@@ -2706,6 +3102,81 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "motivo"
       ]
     },
+    "MedidaEficiencia": {
+      "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
+      "type": "object",
+      "properties": {
+        "corridas_referencia": {
+          "description": "Cada corrida del estado inicial, en el orden en que corrió. El ancla va al final. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "corridas_repo": {
+          "description": "Cada corrida del repo, en el orden en que corrió. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "medida": {
+          "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
+          "type": "string"
+        },
+        "motivo": {
+          "description": "Por qué la medida no tiene valor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "razon": {
+          "description": "Repo sobre referencia. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "referencia": {
+          "description": "Mínimo de las corridas del estado inicial. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "regresion": {
+          "description": "Verdadero si el repo queda más lento o más pesado que el ruido permite.",
+          "type": "boolean"
+        },
+        "repo": {
+          "description": "Mínimo de las corridas del repo. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ruido": {
+          "description": "Dispersión de la referencia, con piso de 2 %. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "medida",
+        "regresion"
+      ]
+    },
     "NivelItem": {
       "description": "Nivel de un ítem de rúbrica. `nivel` va de 0 a 3.",
       "type": "object",
@@ -2837,6 +3308,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           ],
           "default": null
         },
+        "no_aplica": {
+          "description": "Por qué la tarea no pide la dimensión. Con `Some`, `sin_veredicto` queda vacío y `valor` vale 0.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "sin_veredicto": {
           "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",
           "type": [
@@ -2949,6 +3428,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "carga_ajena": {
+          "description": "Mayor carga ajena de las corridas de Eficiencia automática, en núcleos. `None` si no hubo control de\ncarga o si la medición no leyó la CPU propia. Un veredicto viejo lee None.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
         "commit": {
           "type": "string"
         },
@@ -2956,7 +3444,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "$ref": "#/$defs/Conteo"
         },
         "contrato_fallidos": {
-          "description": "Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Un test que ningún\nrequisito prueba con `contrato:` da `NoListo` (`test_contrato_fuera_de_requisitos`). Un veredicto\nviejo lee vacío.",
+          "description": "Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Todo test estable\nque falla da `NoListo` (`test_contrato_falla`), lo pruebe o no un requisito. Un veredicto viejo lee\nvacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -2976,6 +3464,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "costo_usd": {
           "type": "number",
           "format": "double"
+        },
+        "eficiencia_auto": {
+          "description": "Medidas de Eficiencia contra el estado inicial, que Root mide sola en Rust. Un veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MedidaEficiencia"
+          }
         },
         "estado": {
           "$ref": "#/$defs/Estado"
@@ -3045,7 +3541,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "$ref": "#/$defs/Conteo"
         },
         "ocultos_fallidos": {
-          "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da\n`NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.",
+          "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Todo test estable que falla da\n`NoListo` (`test_oculto_falla`), lo pruebe o no un requisito. Un veredicto viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -3128,6 +3624,66 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "hallazgos",
         "estado",
         "costo_usd"
+      ]
+    },
+    "VueltaEficiencia": {
+      "description": "La vuelta de eficiencia de una corrida (Tarea 116): la primera regresión y si la vuelta corrió.",
+      "type": "object",
+      "properties": {
+        "corrio": {
+          "description": "Verdadero si el rol de la vuelta se lanzó al menos una vez.",
+          "type": "boolean"
+        },
+        "motivo": {
+          "description": "Por qué la fila se quedó con la primera evaluación. `None` si la segunda evaluación cuenta.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "regresiones": {
+          "description": "Medidas con regresión de la primera evaluación: cada una con su razón y sus dos números.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MedidaEficiencia"
+          }
+        }
+      },
+      "required": [
+        "regresiones",
+        "corrio"
+      ]
+    },
+    "VueltaInstalacion": {
+      "description": "La vuelta de instalación de una corrida: el builder vuelve con el arreglo si el producto no instala.",
+      "type": "object",
+      "properties": {
+        "instalo": {
+          "description": "Verdadero si el último veredicto ya no es un corte de instalación.",
+          "type": "boolean"
+        },
+        "motivo": {
+          "description": "Por qué una vuelta no corrió o no terminó. `None` si la vuelta corrió hasta el final.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pide_humano": {
+          "description": "Verdadero si una persona debe mirar la tarea: el producto sigue sin instalar.",
+          "type": "boolean"
+        },
+        "vueltas": {
+          "description": "Vueltas del builder que se lanzaron. Como mucho, dos.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "vueltas",
+        "instalo",
+        "pide_humano"
       ]
     }
   }
@@ -4474,6 +5030,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "default": null
     },
+    "no_aplica": {
+      "description": "Por qué la tarea no pide la dimensión. Con `Some`, `sin_veredicto` queda vacío y `valor` vale 0.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
     "sin_veredicto": {
       "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",
       "type": [
@@ -5545,6 +6109,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "type": "string"
       }
     },
+    "carga_ajena": {
+      "description": "Mayor carga ajena de las corridas de Eficiencia automática, en núcleos. `None` si no hubo control de\ncarga o si la medición no leyó la CPU propia. Un veredicto viejo lee None.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double",
+      "default": null
+    },
     "commit": {
       "type": "string"
     },
@@ -5552,7 +6125,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "$ref": "#/$defs/Conteo"
     },
     "contrato_fallidos": {
-      "description": "Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Un test que ningún\nrequisito prueba con `contrato:` da `NoListo` (`test_contrato_fuera_de_requisitos`). Un veredicto\nviejo lee vacío.",
+      "description": "Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Todo test estable\nque falla da `NoListo` (`test_contrato_falla`), lo pruebe o no un requisito. Un veredicto viejo lee\nvacío.",
       "type": "array",
       "default": [],
       "items": {
@@ -5572,6 +6145,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "costo_usd": {
       "type": "number",
       "format": "double"
+    },
+    "eficiencia_auto": {
+      "description": "Medidas de Eficiencia contra el estado inicial, que Root mide sola en Rust. Un veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MedidaEficiencia"
+      }
     },
     "estado": {
       "$ref": "#/$defs/Estado"
@@ -5641,7 +6222,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "$ref": "#/$defs/Conteo"
     },
     "ocultos_fallidos": {
-      "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da\n`NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.",
+      "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Todo test estable que falla da\n`NoListo` (`test_oculto_falla`), lo pruebe o no un requisito. Un veredicto viejo lee vacío.",
       "type": "array",
       "default": [],
       "items": {
@@ -6335,6 +6916,81 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "motivo"
       ]
     },
+    "MedidaEficiencia": {
+      "description": "Una medida de Eficiencia que Root mide sola contra el estado inicial (`bootstrap/`, Tarea 115).\n`razon` es el repo sobre la referencia: más de 1 quiere decir más lento o más pesado.",
+      "type": "object",
+      "properties": {
+        "corridas_referencia": {
+          "description": "Cada corrida del estado inicial, en el orden en que corrió. El ancla va al final. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "corridas_repo": {
+          "description": "Cada corrida del repo, en el orden en que corrió. Vacía si no hay valor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "medida": {
+          "description": "Nombre estable de la medida: `tiempo_tests`, `memoria_pico`, `tiempo_compilacion` o `tamano_binario`.",
+          "type": "string"
+        },
+        "motivo": {
+          "description": "Por qué la medida no tiene valor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "razon": {
+          "description": "Repo sobre referencia. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "referencia": {
+          "description": "Mínimo de las corridas del estado inicial. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "regresion": {
+          "description": "Verdadero si el repo queda más lento o más pesado que el ruido permite.",
+          "type": "boolean"
+        },
+        "repo": {
+          "description": "Mínimo de las corridas del repo. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ruido": {
+          "description": "Dispersión de la referencia, con piso de 2 %. `None` si la medida no tiene valor.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "medida",
+        "regresion"
+      ]
+    },
     "NivelItem": {
       "description": "Nivel de un ítem de rúbrica. `nivel` va de 0 a 3.",
       "type": "object",
@@ -6460,6 +7116,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "motivo_sin_calibrar": {
           "description": "Por qué el puntaje no está calibrado por su huella, como \"calibración de otro juez\".\n`None` si está calibrado o si no hay fila con muestra suficiente.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "no_aplica": {
+          "description": "Por qué la tarea no pide la dimensión. Con `Some`, `sin_veredicto` queda vacío y `valor` vale 0.",
           "type": [
             "string",
             "null"

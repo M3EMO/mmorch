@@ -77,6 +77,58 @@ pub(super) fn inestables_de(
         .collect()
 }
 
+/// Causa de cada ítem que `inestables_de` marca inestable, con las mismas claves. Un ítem que falta en un juicio
+/// nombra el primer juicio que no lo trae. Un ítem que varía nombra su nivel mínimo y máximo.
+pub(super) fn causas_de(
+    juicios: &[&Veredicto],
+    dimension: Dimension,
+    del_juez: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    inestables_de(juicios, dimension, del_juez)
+        .into_iter()
+        .map(|item| {
+            let causa = causa_de(juicios, dimension, &item);
+            (item, causa)
+        })
+        .collect()
+}
+
+/// Causa de un ítem inestable. Una falta gana sobre una variación de niveles.
+fn causa_de(juicios: &[&Veredicto], dimension: Dimension, item: &str) -> String {
+    let primera_falta = juicios
+        .iter()
+        .enumerate()
+        .find(|(_, v)| nivel_en(v, dimension, item).is_none());
+    if let Some((indice, veredicto)) = primera_falta {
+        let motivo = motivo_faltante(veredicto, dimension, item).unwrap_or("sin nivel");
+        return format!("falta en el juicio {}: {motivo}", indice + 1);
+    }
+    let niveles: Vec<u8> = juicios
+        .iter()
+        .filter_map(|v| nivel_en(v, dimension, item))
+        .collect();
+    // Sin niveles no hay variación. `inestables_de` no marca ese ítem, así que no llega aquí.
+    let min = niveles.iter().min().copied().unwrap_or_default();
+    let max = niveles.iter().max().copied().unwrap_or_default();
+    format!("varía de {min} a {max}")
+}
+
+/// Motivo que `veredicto` dio para `item` en la `dimension` como faltante. `None` si no lo nombra.
+fn motivo_faltante<'a>(
+    veredicto: &'a Veredicto,
+    dimension: Dimension,
+    item: &str,
+) -> Option<&'a str> {
+    veredicto
+        .puntajes
+        .iter()
+        .find(|p| p.dimension == dimension)?
+        .faltantes
+        .iter()
+        .find(|f| f.item == item)
+        .map(|f| f.motivo.as_str())
+}
+
 /// Mediana de tres niveles: el del medio al ordenarlos.
 fn mediana(mut niveles: Vec<u8>) -> u8 {
     niveles.sort_unstable();
@@ -175,7 +227,7 @@ pub(super) fn motivo(inestables: &BTreeSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tipos::{Fuente, NivelItem, Puntaje};
+    use crate::tipos::{Fuente, ItemFaltante, NivelItem, Puntaje};
 
     const MODULARIDAD: &str = "diseno.modularidad";
     const ROBUSTEZ: &str = "diseno.robustez";
@@ -203,6 +255,7 @@ mod tests {
                     })
                     .collect(),
                 sin_veredicto: None,
+                no_aplica: None,
                 faltantes: vec![],
             }],
             ..Veredicto::default()
@@ -248,6 +301,67 @@ mod tests {
         let base = base_efectiva(&uno, &juicios, Dimension::Diseno, &inestables, &pesos.todos);
         let nivel = base.puntajes[0].items[0].nivel;
         assert_eq!(nivel, 3);
+    }
+
+    /// Causa de un ítem que varía de 1 a 3 entre tres juicios.
+    #[test]
+    fn causa_de_item_que_varia_nombra_el_minimo_y_el_maximo() {
+        let uno = juicio(&[(MODULARIDAD, 1)]);
+        let dos = juicio(&[(MODULARIDAD, 3)]);
+        let tres = juicio(&[(MODULARIDAD, 2)]);
+        let causas = causas_de(
+            &[&uno, &dos, &tres],
+            Dimension::Diseno,
+            &pesos_de_prueba().del_juez,
+        );
+        assert_eq!(
+            causas,
+            BTreeMap::from([(MODULARIDAD.to_string(), "varía de 1 a 3".to_string())])
+        );
+    }
+
+    /// Causa de un ítem que falta en el juicio 3, con su motivo en el puntaje de ese juicio.
+    #[test]
+    fn causa_de_item_que_falta_nombra_el_juicio_y_el_motivo() {
+        let uno = juicio(&[(MODULARIDAD, 2)]);
+        let dos = juicio(&[(MODULARIDAD, 2)]);
+        let mut tres = juicio(&[]);
+        tres.puntajes[0].faltantes = vec![ItemFaltante {
+            item: MODULARIDAD.into(),
+            motivo: "sin evidencia que pase el gate".into(),
+        }];
+        let causas = causas_de(
+            &[&uno, &dos, &tres],
+            Dimension::Diseno,
+            &pesos_de_prueba().del_juez,
+        );
+        assert_eq!(
+            causas,
+            BTreeMap::from([(
+                MODULARIDAD.to_string(),
+                "falta en el juicio 3: sin evidencia que pase el gate".to_string(),
+            )])
+        );
+    }
+
+    /// Causa de un ítem que falta en el juicio 2 sin faltante en ese puntaje: dice "sin nivel".
+    #[test]
+    fn causa_de_item_que_falta_sin_faltante_dice_sin_nivel() {
+        let uno = juicio(&[(MODULARIDAD, 2)]);
+        let dos = juicio(&[]);
+        let tres = juicio(&[(MODULARIDAD, 2)]);
+        let causas = causas_de(
+            &[&uno, &dos, &tres],
+            Dimension::Diseno,
+            &pesos_de_prueba().del_juez,
+        );
+        assert_eq!(
+            causas,
+            BTreeMap::from([(
+                MODULARIDAD.to_string(),
+                "falta en el juicio 2: sin nivel".to_string(),
+            )])
+        );
     }
 
     #[test]

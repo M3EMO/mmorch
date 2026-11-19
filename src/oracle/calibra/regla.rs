@@ -40,7 +40,7 @@ pub(super) fn detecta_con_juez(
 ) -> Option<String> {
     let pv = puntaje_de(veredicto, dimension)?;
     let pb = puntaje_de(base, dimension)?;
-    if pv.sin_veredicto.is_some() {
+    if pv.sin_valor() {
         return None;
     }
     hallazgo_de_sonda_nuevo(base, veredicto, dimension)
@@ -192,6 +192,7 @@ mod tests {
                 exactitud_balanceada: None,
                 items,
                 sin_veredicto: None,
+                no_aplica: None,
                 faltantes: vec![],
             }],
             hallazgos,
@@ -476,6 +477,26 @@ mod tests {
             Some("arquitectura.ciclo_entre_capas"),
             Some(&lugar("src/a.rs", 10)),
         );
+        assert_eq!(motivo, None);
+    }
+
+    #[test]
+    fn item_del_defecto_con_no_aplica_no_detecta() {
+        // La base baja de 3 a 0, pero el caso no pide la dimensión: no detecta.
+        let base = veredicto(
+            Dimension::Diseno,
+            1.0,
+            vec![nivel(ITEM_DISENO, 3, juez())],
+            vec![],
+        );
+        let mut caso = veredicto(
+            Dimension::Diseno,
+            0.0,
+            vec![nivel(ITEM_DISENO, 0, juez())],
+            vec![],
+        );
+        caso.puntajes[0].no_aplica = Some("la tarea no pide diseño".into());
+        let motivo = detecta_con_juez(&base, &caso, Dimension::Diseno, Some(ITEM_DISENO), None);
         assert_eq!(motivo, None);
     }
 

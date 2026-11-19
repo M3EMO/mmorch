@@ -17,6 +17,10 @@ use root::oracle::perfiles::deduplicar_hallazgos;
 use root::oracle::tarea::Tarea;
 use root::tipos::Dimension;
 
+#[path = "comun/ejecutable.rs"]
+mod ejecutable;
+use ejecutable::escribir_ejecutable;
+
 const ALPINE: &str = "docker.io/library/alpine:3.20";
 
 /// Falla con un mensaje claro si la imagen no está. Nunca la baja: el test no tiene red.
@@ -939,7 +943,6 @@ fn tarea_en(dir: &Path, extra: &str) -> Tarea {
 #[test]
 fn entrega_escenario_de_oraculo_corre_contra_la_imagen() {
     root::saltar_sin_podman!();
-    use std::os::unix::fs::PermissionsExt;
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let oraculo = tempfile::Builder::new()
@@ -948,8 +951,7 @@ fn entrega_escenario_de_oraculo_corre_contra_la_imagen() {
         .expect("carpeta de la tarea");
     fs::create_dir_all(oraculo.path().join("escenarios")).expect("crea escenarios/");
     let script = oraculo.path().join("escenarios/ok.sh");
-    fs::write(&script, "#!/bin/sh\ntest -f /hola.txt\n").expect("escribe el script");
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("permisos");
+    escribir_ejecutable(&script, "#!/bin/sh\ntest -f /hola.txt\n");
     let tarea = tarea_en(
         oraculo.path(),
         "[[escenario]]\nid = \"ok\"\ncmd = \"/oraculo/escenarios/ok.sh\"\n",
@@ -1078,7 +1080,6 @@ fn entrega_escenario_que_usa_oraculo_sin_carpeta_da_infraestructura() {
 fn entrega_escenario_con_carpeta_monta_solo_escenarios() {
     // Guarda: con `escenarios/`, el contenedor ve solo esa carpeta. `tarea.toml` no entra (M15).
     root::saltar_sin_podman!();
-    use std::os::unix::fs::PermissionsExt;
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let oraculo = tempfile::Builder::new()
@@ -1087,12 +1088,10 @@ fn entrega_escenario_con_carpeta_monta_solo_escenarios() {
         .expect("carpeta de la tarea");
     fs::create_dir_all(oraculo.path().join("escenarios")).expect("crea escenarios/");
     let script = oraculo.path().join("escenarios/ok.sh");
-    fs::write(
+    escribir_ejecutable(
         &script,
         "#!/bin/sh\ntest -d /oraculo/escenarios && test ! -e /oraculo/tarea.toml\n",
-    )
-    .expect("escribe el script");
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("permisos");
+    );
     let tarea = tarea_en(
         oraculo.path(),
         "[[escenario]]\nid = \"ok\"\ncmd = \"/oraculo/escenarios/ok.sh\"\n",
@@ -1468,7 +1467,7 @@ fn entrega_pide_credenciales_no_da_hallazgo_al_producto() {
         Some(Problema::PideCredenciales),
         "{imagenes:?}"
     );
-    let Preparacion::SinVeredicto(hallazgos) = p else {
+    let Preparacion::SinVeredicto(hallazgos, _) = p else {
         panic!("un 401 da sin veredicto de la fase: {p:?}");
     };
     assert!(

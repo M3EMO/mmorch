@@ -197,6 +197,7 @@ fn ensayar_con_home(
         cambios: None,
         inicial: None,
         excluidos: &BTreeSet::new(),
+        corridas: &[],
     };
     let inyeccion = inyectar_con(defecto, copia.path(), &contexto, SEMILLA)
         .expect("inyecta el defecto")
@@ -220,6 +221,7 @@ fn detecta_defecto(e: &Ensayo) -> bool {
     finalizar_casos(
         &e.base,
         e.inyeccion.defecto.dimension(),
+        &inyectar::de_dimension(e.inyeccion.defecto.dimension()),
         &[],
         &e.muertos,
         &mut casos,
@@ -277,6 +279,20 @@ fn afirma_detectado(e: &Ensayo, defecto: Defecto, en_linea: bool) {
 /// Sin cambios en la copia.
 fn sin_cambios(_: &Path) {}
 
+/// Los comandos de copia usan `cp -a`, no `cp -r`. Así conservan los atributos del repo.
+#[test]
+fn comando_eficiencia_no_usa_cp_r() {
+    assert!(
+        !COMANDO_EFICIENCIA.contains("cp -r"),
+        "{COMANDO_EFICIENCIA}"
+    );
+}
+
+#[test]
+fn comando_oculto_no_usa_cp_r() {
+    assert!(!COMANDO_OCULTO.contains("cp -r"), "{COMANDO_OCULTO}");
+}
+
 #[test]
 fn secreto_en_codigo_lo_detecta_gitleaks() {
     crate::saltar_sin_podman!();
@@ -293,6 +309,7 @@ fn secreto_en_codigo_lo_detecta_gitleaks() {
 
 #[test]
 fn panico_en_entrada_lo_detecta_la_sonda_nativa() {
+    crate::saltar_sin_podman!();
     let dir = tempfile::tempdir().expect("tarea");
     let tarea = tarea_en(dir.path(), IMAGEN_HERRAMIENTAS, "cargo test", REQUISITO);
     let partes = partes_para(Dimension::Seguridad, &tarea, |p| {
@@ -324,7 +341,7 @@ fn bucle_cuadratico_lo_detecta_el_comando_de_eficiencia() {
 
 /// Comando de `[eficiencia]`: copia el repo a `/tmp` (rw) y corre el ejemplo en debug. El ejemplo imprime
 /// `ops_s` en su última línea. Debug, para que el bucle no lo borre el optimizador.
-const COMANDO_EFICIENCIA: &str = "cp -r /repo /tmp/ws && cd /tmp/ws && CARGO_TARGET_DIR=/tmp/ws/target cargo run -q --example medir";
+const COMANDO_EFICIENCIA: &str = "cp -a /repo /tmp/ws && cd /tmp/ws && CARGO_TARGET_DIR=/tmp/ws/target cargo run -q --example medir";
 
 /// Ejemplo de la copia: llama a cada función de producción del fixture, unas 20 veces.
 const MEDIR_RS: &str = r#"use std::time::Instant;
@@ -426,7 +443,7 @@ const REQUISITO_MODULO: &str = "[[requisito]]\nid = \"R1\"\ntitulo = \"Ejecuta c
 const TEST_COMANDOS: &str = "use calibra_fixture::comandos::ejecutar;\n\n#[test]\nfn ejecuta_numero_valido() {\n    assert_eq!(ejecutar(\"7\"), Ok(7));\n}\n";
 
 /// Oculto: `cargo test` en una copia de escritura, con su salida convertida a junit por `junit.py`.
-const COMANDO_OCULTO: &str = "cp -r /repo /tmp/ws && cd /tmp/ws && cargo test --no-fail-fast --lib --tests 2>&1 | python3 /oraculo/oculto/junit.py > /salida/oculto.xml";
+const COMANDO_OCULTO: &str = "cp -a /repo /tmp/ws && cd /tmp/ws && cargo test --no-fail-fast --lib --tests 2>&1 | python3 /oraculo/oculto/junit.py > /salida/oculto.xml";
 
 /// Conversor de la salida de `cargo test` a junit: un `testcase` por línea `test <nombre> ... <estado>`.
 /// La clase es `tests.test_<binario>`, con el nombre del archivo de la corrida (`tests/comandos.rs` da `comandos`).
@@ -529,6 +546,56 @@ fn error_tragado_lo_detecta_el_juez_falso() {
 }
 
 #[test]
+fn estado_global_lo_detecta_el_juez_falso() {
+    let dir = tempfile::tempdir().expect("tarea");
+    let tarea = tarea_en(dir.path(), IMAGEN_HERRAMIENTAS, "cargo test", REQUISITO);
+    let partes = partes_para(Dimension::Diseno, &tarea, |p| {
+        p.gitleaks = false;
+        p.cargo_audit = false;
+        p.clippy = false;
+        p.eficiencia = false;
+        p.mutacion = false;
+        p.configs = false;
+        p.hadolint = false;
+        p.entrega = false;
+    });
+    let juez = JuezFalso;
+    let e = ensayar(
+        Defecto::EstadoGlobal,
+        &tarea,
+        partes,
+        Some(&juez),
+        &sin_cambios,
+    );
+    afirma_detectado(&e, Defecto::EstadoGlobal, true);
+}
+
+#[test]
+fn efecto_en_nucleo_lo_detecta_el_juez_falso() {
+    let dir = tempfile::tempdir().expect("tarea");
+    let tarea = tarea_en(dir.path(), IMAGEN_HERRAMIENTAS, "cargo test", REQUISITO);
+    let partes = partes_para(Dimension::Arquitectura, &tarea, |p| {
+        p.entrega = false;
+        p.gitleaks = false;
+        p.cargo_audit = false;
+        p.clippy = false;
+        p.eficiencia = false;
+        p.mutacion = false;
+        p.configs = false;
+        p.hadolint = false;
+    });
+    let juez = JuezFalso;
+    let e = ensayar(
+        Defecto::EfectoEnNucleo,
+        &tarea,
+        partes,
+        Some(&juez),
+        &sin_cambios,
+    );
+    afirma_detectado(&e, Defecto::EfectoEnNucleo, true);
+}
+
+#[test]
 fn dockerfile_root_lo_detecta_la_sonda_de_entrega() {
     crate::saltar_sin_podman!();
     let dir = tempfile::tempdir().expect("tarea");
@@ -556,7 +623,9 @@ fn dockerfile_root_lo_detecta_la_sonda_de_entrega() {
 /// y una cita de `src/lib.rs`. Sin `let _ =` en el prompt, todos quedan en 3: solo da cobertura de juez a
 /// Arquitectura y Estructura, que sin juez no tienen veredicto (`sin_veredicto` por cobertura). Con un
 /// `let _ =` en el prompt (lo que deja `ErrorTragado`), baja `diseno.errores` a nivel 1 y cita esa línea en
-/// un hallazgo. No mira nada más del repo: solo el texto que recibe.
+/// un hallazgo. Con el `fetch_add` del contador (lo que deja `EstadoGlobal`), baja `diseno.estado` igual. Con la
+/// lectura de `ROOT_EFECTO` (lo que deja `EfectoEnNucleo`), baja `arquitectura.adecuacion`. No mira nada más del
+/// repo: solo el texto que recibe.
 struct JuezFalso;
 
 impl ModeloJuez for JuezFalso {
@@ -572,13 +641,14 @@ impl ModeloJuez for JuezFalso {
 /// Texto de respuesta del juez falso para `usuario`.
 fn respuesta_falsa(usuario: &str) -> String {
     let ids = ids_pedidos(usuario);
-    let con_let = donde_let_guion(usuario);
+    let hallazgos_falsos = hallazgos_falsos(usuario);
     let items: Vec<Value> = ids
         .iter()
         .map(|id| {
-            let nivel = match (id.as_str(), &con_let) {
-                ("diseno.errores", Some(_)) => 1,
-                _ => 3,
+            let nivel = if hallazgos_falsos.iter().any(|h| h.item == id) {
+                1
+            } else {
+                3
             };
             json!({
                 "item": id,
@@ -587,21 +657,64 @@ fn respuesta_falsa(usuario: &str) -> String {
             })
         })
         .collect();
-    let hallazgos: Vec<Value> = con_let
+    let hallazgos: Vec<Value> = hallazgos_falsos
         .into_iter()
-        .map(|(archivo, linea, cita)| {
+        .map(|h| {
             json!({
-                "item": "diseno.errores",
+                "item": h.item,
                 "severidad": 2,
-                "archivo": archivo,
-                "linea": linea,
-                "cita": cita,
-                "detalle": "el error se traga con let _ =",
+                "archivo": h.archivo,
+                "linea": h.linea,
+                "cita": h.cita,
+                "detalle": h.detalle,
                 "impacto": ["R1"],
             })
         })
         .collect();
     json!({"items": items, "hallazgos": hallazgos}).to_string()
+}
+
+/// Hallazgo que el juez falso inventa para un patrón del prompt: ítem, lugar, cita y detalle.
+struct HallazgoFalso {
+    item: &'static str,
+    archivo: String,
+    linea: u32,
+    cita: String,
+    detalle: &'static str,
+}
+
+/// Un hallazgo por cada patrón de defecto que el prompt trae: `let _ =` (errores), el contador (estado) y la
+/// lectura de `ROOT_EFECTO` (efecto en el núcleo).
+fn hallazgos_falsos(usuario: &str) -> Vec<HallazgoFalso> {
+    let mut salida = Vec::new();
+    if let Some((archivo, linea, cita)) = donde_let_guion(usuario) {
+        salida.push(HallazgoFalso {
+            item: "diseno.errores",
+            archivo,
+            linea,
+            cita,
+            detalle: "el error se traga con let _ =",
+        });
+    }
+    if let Some((archivo, linea, cita)) = donde_contador(usuario) {
+        salida.push(HallazgoFalso {
+            item: "diseno.estado",
+            archivo,
+            linea,
+            cita,
+            detalle: "estado global mutable: un contador atómico compartido",
+        });
+    }
+    if let Some((archivo, linea, cita)) = donde_efecto(usuario) {
+        salida.push(HallazgoFalso {
+            item: "arquitectura.adecuacion",
+            archivo,
+            linea,
+            cita,
+            detalle: "efecto de lado en el núcleo: lee el entorno",
+        });
+    }
+    salida
 }
 
 /// Línea 1 de `src/lib.rs` del fixture: la cita que el juez falso usa para los ítems sin hallazgo.
@@ -619,9 +732,9 @@ fn ids_pedidos(usuario: &str) -> Vec<String> {
         .collect()
 }
 
-/// Archivo, línea y cita de la primera línea de los extractos que tiene `let _ =`. Los extractos vienen
+/// Archivo, línea y cita de la primera línea de los extractos que cumple `cumple`. Los extractos vienen
 /// como `--- <archivo> ---` seguido de `N: <texto>` por línea.
-fn donde_let_guion(usuario: &str) -> Option<(String, u32, String)> {
+fn primera_linea(usuario: &str, cumple: impl Fn(&str) -> bool) -> Option<(String, u32, String)> {
     let mut archivo = String::new();
     for linea in usuario.lines() {
         if let Some(nombre) = linea
@@ -633,10 +746,31 @@ fn donde_let_guion(usuario: &str) -> Option<(String, u32, String)> {
         }
         if let Some((numero, texto)) = linea.split_once(": ")
             && let Ok(n) = numero.parse::<u32>()
-            && texto.contains("let _ =")
+            && cumple(texto)
         {
             return Some((archivo, n, texto.trim().to_string()));
         }
     }
     None
+}
+
+/// Archivo, línea y cita de la primera línea que tiene `let _ =`. No cuentan el `fetch_add` del contador ni la
+/// lectura de `ROOT_EFECTO`: son de otros defectos.
+fn donde_let_guion(usuario: &str) -> Option<(String, u32, String)> {
+    primera_linea(usuario, |t| {
+        t.contains("let _ =") && !t.contains("fetch_add") && !t.contains("ROOT_EFECTO")
+    })
+}
+
+/// Archivo, línea y cita de la primera línea de los extractos que incrementa `ROOT_CONTADOR_CALIBRACION`.
+/// Es el `fetch_add`, no el `static`: así la cita es la línea que el inyector tocó.
+fn donde_contador(usuario: &str) -> Option<(String, u32, String)> {
+    primera_linea(usuario, |t| {
+        t.contains("ROOT_CONTADOR_CALIBRACION.fetch_add")
+    })
+}
+
+/// Archivo, línea y cita de la primera línea de los extractos que lee `ROOT_EFECTO`: la que pone `EfectoEnNucleo`.
+fn donde_efecto(usuario: &str) -> Option<(String, u32, String)> {
+    primera_linea(usuario, |t| t.contains("ROOT_EFECTO"))
 }

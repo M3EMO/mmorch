@@ -8,45 +8,23 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+
+#[path = "comun/ejecutable.rs"]
+mod ejecutable;
+use ejecutable::escribir_ejecutable;
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tools/test-seguro.sh");
 const PRE_COMMIT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/.githooks/pre-commit");
 
-/// Contador para que cada temporal de `escribir_ejecutable` tenga un nombre propio.
-static CONTADOR_TEMPORAL: AtomicU64 = AtomicU64::new(0);
-
-/// Escribe `texto` en `ruta` como ejecutable. Escribe un temporal único en la misma carpeta, le pone
-/// los permisos, lo cierra y recién después lo renombra a `ruta`. Así el archivo no queda abierto
-/// para escritura cuando se lo lanza (evita `ETXTBSY`).
-fn escribir_ejecutable(ruta: &Path, texto: &str) {
-    let nombre = ruta
-        .file_name()
-        .expect("la ruta tiene nombre")
-        .to_string_lossy();
-    let n = CONTADOR_TEMPORAL.fetch_add(1, Ordering::Relaxed);
-    let temporal = ruta.with_file_name(format!(".{nombre}.tmp-{}-{n}", std::process::id()));
-    {
-        let mut archivo = fs::File::create(&temporal).expect("crea el temporal del ejecutable");
-        archivo
-            .write_all(texto.as_bytes())
-            .expect("escribe el ejecutable");
-        archivo
-            .set_permissions(fs::Permissions::from_mode(0o755))
-            .expect("permisos del ejecutable");
-    }
-    fs::rename(&temporal, ruta).expect("renombra el ejecutable a su nombre final");
-}
-
 /// Un `cargo` falso: vuelca su entorno en `env.txt` y sus argumentos en `args.txt`, y sale con `codigo`.
+/// Es `#!/bin/sh` para que la sonda de `escribir_ejecutable` lo corte con la sentinela.
 fn falso(dir: &Path, codigo: u8) -> PathBuf {
     let ruta = dir.join(format!("cargo-falso-{codigo}.sh"));
     let texto = format!(
-        "#!/usr/bin/env bash\nenv > '{d}/env.txt'\nprintf '%s\\n' \"$@\" > '{d}/args.txt'\nexit {codigo}\n",
+        "#!/bin/sh\nenv > '{d}/env.txt'\nprintf '%s\\n' \"$@\" > '{d}/args.txt'\nexit {codigo}\n",
         d = dir.display()
     );
     escribir_ejecutable(&ruta, &texto);
@@ -278,7 +256,10 @@ fn copia_del_script(dir: &Path, repo: &str) -> PathBuf {
     fs::create_dir_all(&tools).expect("crea tools/ del worktree");
     let ruta = tools.join("test-seguro.sh");
     let texto = fs::read_to_string(SCRIPT).expect("lee el script");
-    escribir_ejecutable(&ruta, &texto);
+    // No usa `escribir_ejecutable`: el script es bash y no lleva sentinela. Su sonda lo correría entero.
+    // Siempre se lanza con `bash`, así que no hace falta el bit de ejecución ni hay `exec`.
+    fs::write(&ruta, texto).expect("escribe el script");
+    fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
     ruta
 }
 
@@ -339,7 +320,7 @@ fn test_seguro_target_tmpdir_y_root_home_van_bajo_la_carpeta_del_worktree() {
 fn falso_de_lock(dir: &Path) -> PathBuf {
     let ruta = dir.join("cargo-lock.sh");
     let texto = format!(
-        "#!/usr/bin/env bash\necho inicio >> '{d}/log.txt'\nsleep 2\necho fin >> '{d}/log.txt'\n",
+        "#!/bin/sh\necho inicio >> '{d}/log.txt'\nsleep 2\necho fin >> '{d}/log.txt'\n",
         d = dir.display()
     );
     escribir_ejecutable(&ruta, &texto);
@@ -433,7 +414,7 @@ fn test_seguro_lock_vive_en_base() {
 
 #[test]
 fn escribir_ejecutable_deja_solo_el_final_y_ejecutable() {
-    // Guarda: el temporal se renombra al nombre final y no queda ningún otro archivo en la carpeta.
+    // Guarda: escribir y sondear no dejan ningún otro archivo en la carpeta.
     let dir = dir_de_prueba();
     let ruta = dir.path().join("ejecutable.sh");
     escribir_ejecutable(&ruta, "#!/usr/bin/env bash\necho hola\n");
@@ -479,7 +460,7 @@ fn test_seguro_lanza_el_script_con_bash_y_los_falsos_con_sh() {
     let shim = dir.path().join("shim");
     fs::create_dir_all(&shim).expect("crea la carpeta del sh de prueba");
     let texto = format!(
-        "#!/usr/bin/env bash\necho \"$1\" >> '{d}/sh-calls.txt'\nexec bash \"$@\"\n",
+        "#!/bin/sh\necho \"$1\" >> '{d}/sh-calls.txt'\nexec bash \"$@\"\n",
         d = dir.path().display()
     );
     escribir_ejecutable(&shim.join("sh"), &texto);

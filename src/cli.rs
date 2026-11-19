@@ -46,6 +46,11 @@ pub enum Comando {
         #[command(subcommand)]
         accion: OraculoAccion,
     },
+    /// Prepara paquetes para correr el Oracle en Colab.
+    Colab {
+        #[command(subcommand)]
+        accion: ColabAccion,
+    },
     /// Registra y resume lo que pasa en una corrida.
     Observa {
         #[command(subcommand)]
@@ -61,15 +66,18 @@ pub enum Comando {
         #[arg(long)]
         replay: bool,
     },
-    /// Corre una tarea con una configuración.
+    /// Corre una tarea con una configuración, o revisa sus lecturas con `revisar-lectura`.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Corre {
         #[arg(long)]
-        tarea: String,
+        tarea: Option<String>,
         #[arg(long)]
-        config: String,
+        config: Option<String>,
         /// Retoma una corrida cortada: su id `corre-<tarea>-<config>-...`, con su carpeta en `$HOME`.
         #[arg(long)]
         reanuda: Option<String>,
+        #[command(subcommand)]
+        accion: Option<CorreAccion>,
     },
     /// Verifica o autoriza el GOAL.
     Goal {
@@ -165,6 +173,81 @@ impl From<ProveedorJuez> for crate::tipos::Proveedor {
             ProveedorJuez::Anthropic => crate::tipos::Proveedor::Anthropic,
         }
     }
+}
+
+/// Subcomandos de `corre`. Sin subcomando, `corre` corre una tarea.
+#[derive(Debug, Subcommand)]
+pub enum CorreAccion {
+    /// Cuenta las lecturas del oráculo en un transcript. Solo imprime conteos; no escribe nada.
+    #[command(name = "revisar-lectura")]
+    RevisarLectura {
+        #[arg(long)]
+        tarea: String,
+        /// Transcript de `claude -p --output-format stream-json`.
+        #[arg(long)]
+        transcript: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ColabAccion {
+    /// Arma el paquete de calibración para Colab: binario, herramientas, tareas y calibración.
+    Empaquetar {
+        /// Binario `r00t` para x86-64 que entra al paquete.
+        #[arg(long)]
+        binario: PathBuf,
+        /// Trabajos `tarea:dimension`, separados por coma.
+        #[arg(long, value_delimiter = ',', required = true)]
+        trabajos: Vec<String>,
+        /// Repo bueno de una tarea, como `tarea=ruta`. Se repite por cada tarea.
+        #[arg(long, num_args = 1, required = true)]
+        repo: Vec<String>,
+        /// SHA-256 en hexadecimal (64 caracteres) del instalador de rustup.
+        #[arg(long)]
+        rustup_sha256: String,
+        /// Archivo `.tar.gz` de salida.
+        #[arg(long)]
+        salida: PathBuf,
+        /// Repo de Root: de ahí sale `tools/colab/`. Por defecto, el directorio actual.
+        #[arg(long)]
+        raiz_root: Option<PathBuf>,
+        /// Repeticiones por defecto de cada trabajo.
+        #[arg(long, default_value_t = crate::colab_calibra::N_POR_DEFECTO)]
+        n: u32,
+        /// Semilla del sorteo.
+        #[arg(long, default_value_t = crate::colab_calibra::SEMILLA_POR_DEFECTO)]
+        semilla: u64,
+        /// Incluye las dimensiones con ítems del juez. Exige Colab Secrets. Fija el tope de gasto de S2.
+        #[arg(long)]
+        juez: bool,
+    },
+    /// Importa la vuelta de una calibración de Colab: revisa el paquete y agrega sus filas.
+    Importar {
+        /// Paquete `.tar.gz` de vuelta que trajo Colab.
+        archivo: PathBuf,
+        /// Repo de Root: de ahí sale el commit de la laptop. Por defecto, el directorio actual.
+        #[arg(long)]
+        raiz_root: Option<PathBuf>,
+        /// SHA-256 en hexadecimal (64 caracteres) del paquete. Si no coincide, no se importa nada.
+        #[arg(long)]
+        sha: Option<String>,
+        /// Paquete de ida. Con él, el archivo es la vuelta cruda del runtime. Exige `--sha`.
+        #[arg(long, requires = "sha")]
+        ida: Option<PathBuf>,
+    },
+    /// Calibra en Colab: corre cada paquete de `colab empaquetar` en su runtime de CPU e importa la vuelta.
+    Calibrar {
+        /// Paquete `.tar.gz` de `colab empaquetar`. Se repite: cada paquete va a su runtime.
+        #[arg(long, num_args = 1, required = true)]
+        paquete: Vec<PathBuf>,
+        /// Repo de Root: de ahí sale el commit de la laptop. Por defecto, el directorio actual.
+        #[arg(long)]
+        raiz_root: Option<PathBuf>,
+        /// No libera el runtime al terminar. Queda abierto y gasta unidades, cerca de 0,08 por hora.
+        /// Cierra el runtime con `colab stop` u `oraculo pendientes --liberar`.
+        #[arg(long)]
+        sin_stop: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -397,6 +480,11 @@ impl Comando {
                 OraculoAccion::Auditar { .. } => "oraculo auditar",
                 OraculoAccion::Capas { .. } => "oraculo capas",
             },
+            Comando::Colab { accion } => match accion {
+                ColabAccion::Empaquetar { .. } => "colab empaquetar",
+                ColabAccion::Importar { .. } => "colab importar",
+                ColabAccion::Calibrar { .. } => "colab calibrar",
+            },
             Comando::Observa { accion } => match accion {
                 ObservaAccion::Claude { .. } => "observa claude",
                 ObservaAccion::Uso => "observa uso",
@@ -410,7 +498,10 @@ impl Comando {
                 TrackAccion::Comparar { .. } => "track comparar",
             },
             Comando::Aprende { .. } => "aprende",
-            Comando::Corre { .. } => "corre",
+            Comando::Corre { accion, .. } => match accion {
+                Some(CorreAccion::RevisarLectura { .. }) => "corre revisar-lectura",
+                None => "corre",
+            },
             Comando::Goal { accion } => match accion {
                 GoalAccion::Verificar => "goal verificar",
                 GoalAccion::Autorizar => "goal autorizar",
@@ -602,5 +693,221 @@ mod tests {
             }
             otro => panic!("se esperaba oraculo capas, llegó {otro:?}"),
         }
+    }
+
+    /// Argumentos base de `colab empaquetar`, sin `--n` ni `--semilla`.
+    fn empaquetar_base() -> Vec<&'static str> {
+        vec![
+            "r00t",
+            "colab",
+            "empaquetar",
+            "--binario",
+            "b",
+            "--trabajos",
+            "t:d",
+            "--repo",
+            "t=r",
+            "--rustup-sha256",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--salida",
+            "s.tar.gz",
+        ]
+    }
+
+    #[test]
+    fn colab_empaquetar_parsea_n_y_semilla() {
+        let mut args = empaquetar_base();
+        args.extend(["--n", "8", "--semilla", "7"]);
+        let cli = Cli::try_parse_from(args).expect("colab empaquetar con --n y --semilla parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { n, semilla, .. },
+            } => {
+                assert_eq!(n, 8);
+                assert_eq!(semilla, 7);
+            }
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_empaquetar_parsea_juez() {
+        let mut args = empaquetar_base();
+        args.push("--juez");
+        let cli = Cli::try_parse_from(args).expect("colab empaquetar con --juez parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { juez, .. },
+            } => assert!(juez),
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_empaquetar_sin_juez_por_defecto() {
+        let cli = Cli::try_parse_from(empaquetar_base()).expect("colab empaquetar parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { juez, .. },
+            } => assert!(!juez),
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_empaquetar_sin_banderas_usa_defectos() {
+        let cli = Cli::try_parse_from(empaquetar_base()).expect("colab empaquetar sin --n parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { n, semilla, .. },
+            } => {
+                assert_eq!(n, crate::colab_calibra::N_POR_DEFECTO);
+                assert_eq!(semilla, crate::colab_calibra::SEMILLA_POR_DEFECTO);
+                assert_eq!(n, 4);
+                assert_eq!(semilla, 42);
+            }
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    /// Argumentos base de `colab importar`, con el paquete y sin banderas.
+    fn importar_base() -> Vec<&'static str> {
+        vec!["r00t", "colab", "importar", "paquete.tar.gz"]
+    }
+
+    #[test]
+    fn colab_importar_parsea_sha() {
+        let mut args = importar_base();
+        args.extend(["--sha", "abc"]);
+        let cli = Cli::try_parse_from(args).expect("colab importar con --sha parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Importar { sha, ida, .. },
+            } => {
+                assert_eq!(sha.as_deref(), Some("abc"));
+                assert!(ida.is_none());
+            }
+            otro => panic!("se esperaba colab importar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_importar_ida_sin_sha_es_error_de_clap() {
+        let mut args = importar_base();
+        args.extend(["--ida", "ida.tar.gz"]);
+        let error = Cli::try_parse_from(args).expect_err("--ida sin --sha debe fallar");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    /// Argumentos base de `colab calibrar`, con un paquete y sin banderas.
+    fn calibrar_base() -> Vec<&'static str> {
+        vec!["r00t", "colab", "calibrar", "--paquete", "x.tar.gz"]
+    }
+
+    #[test]
+    fn colab_calibrar_con_sin_stop_lo_activa() {
+        let mut args = calibrar_base();
+        args.push("--sin-stop");
+        let cli = Cli::try_parse_from(args).expect("colab calibrar con --sin-stop parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Calibrar { sin_stop, .. },
+            } => assert!(sin_stop),
+            otro => panic!("se esperaba colab calibrar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_calibrar_sin_la_bandera_da_falso() {
+        let cli = Cli::try_parse_from(calibrar_base()).expect("colab calibrar parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Calibrar { sin_stop, .. },
+            } => assert!(!sin_stop),
+            otro => panic!("se esperaba colab calibrar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_importar_ida_con_sha_parsea() {
+        let mut args = importar_base();
+        args.extend(["--sha", "abc", "--ida", "ida.tar.gz"]);
+        let cli = Cli::try_parse_from(args).expect("colab importar con --sha e --ida parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Importar { ida, .. },
+            } => assert_eq!(ida, Some(PathBuf::from("ida.tar.gz"))),
+            otro => panic!("se esperaba colab importar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn corre_revisar_lectura_parsea_tarea_y_transcript() {
+        let cli = Cli::try_parse_from([
+            "r00t",
+            "corre",
+            "revisar-lectura",
+            "--tarea",
+            "t",
+            "--transcript",
+            "p",
+        ])
+        .expect("corre revisar-lectura parsea");
+        match cli.comando {
+            Comando::Corre {
+                accion: Some(CorreAccion::RevisarLectura { tarea, transcript }),
+                ..
+            } => {
+                assert_eq!(tarea, "t");
+                assert_eq!(transcript, PathBuf::from("p"));
+            }
+            otro => panic!("se esperaba corre revisar-lectura, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn corre_con_tarea_y_config_sigue_parseando_igual() {
+        let cli = Cli::try_parse_from(["r00t", "corre", "--tarea", "t", "--config", "c"])
+            .expect("corre con tarea y config parsea");
+        match cli.comando {
+            Comando::Corre {
+                accion: None,
+                tarea: Some(tarea),
+                config: Some(config),
+                reanuda: None,
+            } => assert_eq!((tarea.as_str(), config.as_str()), ("t", "c")),
+            otro => panic!("se esperaba corre plano, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn corre_sin_nada_no_parsea_o_llega_sin_tarea_ni_config() {
+        match Cli::try_parse_from(["r00t", "corre"]) {
+            Err(_) => {}
+            Ok(cli) => match cli.comando {
+                Comando::Corre {
+                    accion: None,
+                    tarea: None,
+                    config: None,
+                    reanuda: None,
+                } => {}
+                otro => panic!("corre sin nada no debe llenar nada: {otro:?}"),
+            },
+        }
+    }
+
+    #[test]
+    fn corre_mezclar_flags_planos_con_revisar_lectura_es_conflicto() {
+        let error = Cli::try_parse_from([
+            "r00t",
+            "corre",
+            "--tarea",
+            "t",
+            "revisar-lectura",
+            "--transcript",
+            "p",
+        ])
+        .expect_err("los flags planos y el subcomando se excluyen");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 }
