@@ -522,7 +522,7 @@ fn ejecutar_bwrap(
 
 /// Mata el grupo de procesos del hijo con SIGKILL, y luego al hijo. Así no queda ningún nieto vivo.
 /// Usa el `kill` del sistema: sin `libc` no hay otra forma. Los errores se ignoran.
-fn matar_grupo(hijo: &mut Child) {
+pub(crate) fn matar_grupo(hijo: &mut Child) {
     let grupo = format!("-{}", hijo.id());
     let mut kill = Command::new("kill");
     kill.args(["-KILL", "--", grupo.as_str()]);

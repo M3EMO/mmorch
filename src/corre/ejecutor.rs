@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,7 +16,7 @@ use super::contenedor::{args_podman_builder, estado_de, fisica, validar_montajes
 use super::{ErrorCorre, copiar_sin_mcp, verificar_vigencia, vida_restante};
 use crate::oracle::ErrorOraculo;
 use crate::oracle::contenedor::{
-    Lectura, TOPE_SALIDA_BUILDER, esperar, leer_en_hilo_con, tamano_legible,
+    Lectura, TOPE_SALIDA_BUILDER, esperar, leer_en_hilo_con, matar_grupo, tamano_legible,
 };
 use crate::tipos::Rol;
 
@@ -347,13 +348,13 @@ pub fn terminar_por_senal(limpieza: impl FnOnce(Result<(), ErrorCorre>)) {
     limpieza(resultado);
 }
 
-/// Mata con SIGKILL un hijo que aún no se esperó y lo recoge. Devuelve el resultado del `kill`.
+/// Mata con SIGKILL el grupo de un hijo que aún no se esperó (y a los nietos que lo tengan) y lo recoge.
+/// Devuelve el resultado de la espera. Un hijo ya esperado no pasa por aquí.
 fn matar_y_recoger(hijo: &mut Child) -> io::Result<()> {
     #[cfg(test)]
     KILLS_DE_PRUEBA.fetch_add(1, Ordering::Relaxed);
-    let muerto = hijo.kill();
-    let _ = hijo.wait();
-    muerto
+    matar_grupo(hijo);
+    hijo.wait().map(|_| ())
 }
 
 /// Pid del hijo en curso, para los tests.
@@ -734,13 +735,15 @@ fn consultar(hijo: &mut Child) -> io::Result<Option<ExitStatus>> {
     hijo.try_wait()
 }
 
-/// Lanza `programa` con sus flujos de salida en pipe. Sin registro ni cerrojo.
+/// Lanza `programa` con sus flujos de salida en pipe y en grupo de procesos propio. Sin registro ni cerrojo.
+/// El grupo permite que `matar_grupo` mate también a los nietos del hijo.
 fn spawn_hijo(programa: &str, args: &[String]) -> Result<Child, ErrorCorre> {
     Command::new(programa)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| {
             ErrorCorre::Ejecutor(format!(
@@ -1165,6 +1168,81 @@ mod tests {
             Fin::Vencio { stdout, .. } => assert_eq!(stdout, b"parcial\n".to_vec()),
             otro => panic!("debe venir vencido: {otro:?}"),
         }
+    }
+
+    /// Lanza un corte vencido con un nieto (`sleep 30` en segundo plano) y devuelve el pid del nieto.
+    /// El shell escribe el pid en `archivo` antes de esperar al nieto.
+    fn corte_con_nieto(archivo: &Path, plazo: Duration) -> (Fin, u32) {
+        let script = format!("sleep 30 & echo $! > '{}'; wait", archivo.display());
+        let args = vec!["-c".to_string(), script];
+        let fin = correr_proceso("sh", &args, plazo).expect("corre");
+        let limite = Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Some(pid) = fs::read_to_string(archivo)
+                .ok()
+                .and_then(|t| t.trim().parse::<u32>().ok())
+            {
+                return (fin, pid);
+            }
+            assert!(
+                Instant::now() < limite,
+                "el shell no escribió el pid del nieto"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Un pid cuenta como muerto si no existe o si es un zombi (estado `Z` en /proc).
+    fn pid_vivo(pid: u32) -> bool {
+        match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => {
+                // El nombre va entre paréntesis y puede tener espacios: el estado es el campo tras el último `)`.
+                let tras = stat.rsplit(')').next().unwrap_or("");
+                let estado = tras.trim_start().chars().next();
+                estado != Some('Z')
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn corre_proceso_vencido_mata_al_nieto() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let archivo = tmp.path().join("pid-nieto");
+        let (fin, pid) = corte_con_nieto(&archivo, Duration::from_millis(100));
+        assert!(matches!(fin, Fin::Vencio { .. }), "debe vencer: {fin:?}");
+        let limite = Instant::now() + Duration::from_secs(1);
+        while pid_vivo(pid) && Instant::now() < limite {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if pid_vivo(pid) {
+            // Limpieza para no dejar el nieto vivo si el test falla.
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        assert!(!pid_vivo(pid), "el nieto {pid} sigue vivo tras el corte");
+    }
+
+    #[test]
+    fn corre_proceso_vencido_con_nieto_termina_rapido() {
+        let _serie = serie_de_pruebas();
+        let tmp = TempDir::new().expect("tmp");
+        let archivo = tmp.path().join("pid-nieto");
+        let inicio = Instant::now();
+        let (fin, pid) = corte_con_nieto(&archivo, Duration::from_millis(100));
+        let tardo = inicio.elapsed();
+        if pid_vivo(pid) {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        assert!(matches!(fin, Fin::Vencio { .. }), "debe vencer: {fin:?}");
+        assert!(
+            tardo < Duration::from_millis(1500),
+            "el corte con nieto tardó {tardo:?}"
+        );
     }
 
     #[test]
