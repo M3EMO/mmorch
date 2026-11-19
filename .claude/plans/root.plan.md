@@ -14997,3 +14997,93 @@ Cada tanda abre 4 runtimes de CPU a la vez. La siguiente arranca cuando termina 
 **La regla de carga.** Los pasos 2, 4, 7 y 10 usan podman en la laptop, de a uno. Los pasos 3, 5, 6 y 8 van en Colab.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-19 (89): por qué Seguridad sale calibrada
+
+**Estado.**
+- **El estado con el binario congelado.** Una evaluación de s2-t1 bueno, sin claves, sobre una copia del `ROOT_HOME` real, dio rc 3: sin veredicto, por falta de juez.
+  - Calibradas: Funciona, Seguridad, Eficiencia, Completitud y Pruebas.
+  - Sin calibrar: Estructura ("calibración de otro juez"), Arquitectura (sin motivo, con exactitud 1,0), Diseño ("ningún caso aplicable en las tareas medidas") y Entrega.
+- **Seguridad salió calibrada, y la vuelta (88) esperaba lo contrario.**
+- **La imagen `localhost/root-oraculo-rust:4` tiene el id** `3c6ea2830000d8e2d168bbc6c26c25e77d4a99f8a894d87f8abd28a049d93ce4`. Queda anotado como parte del congelamiento.
+- **El orquestador escribió `paso0-doce-2020ecc.sh`.** El usuario todavía no corrió ni ese guion ni `paso0-juez-2020ecc.sh`.
+
+## 1. Por qué Seguridad sale calibrada
+
+**Hay dos versiones de las sondas de Seguridad, y son constantes distintas.**
+- **`previos::VERSION_SONDAS_SEGURIDAD`,** en `src/oracle/previos.rs`, vale 4. Es la clave de la línea base de hallazgos del estado inicial. Sube cuando cambia una sonda, para no reusar una línea base vieja.
+- **`calibra::version_de_sondas(Seguridad)`,** en `src/oracle/calibra.rs`, vale 2. Esa es la que entra en la huella de la calibración, en `huella_con_version`.
+
+**Qué filas cuentan.** En el `ROOT_HOME` real, cada tarea de s2 tiene dos filas de Seguridad con la huella `6b15c7c7`, con n=4 y n=10. Esa es la huella actual: las rúbricas de Seguridad y "sondas v2". Su `tarea_hash` es el actual. Por eso cuentan, y Seguridad sale calibrada.
+
+**Un error mío.** En el brief de la 160 pedí subir `VERSION_SONDAS_SEGURIDAD`, y en la vuelta (88) escribí que eso dejaba a Seguridad sin calibrar. Mezclé las dos constantes. La que sube con la 160 es la de la línea base, no la de la huella.
+
+**¿Es correcto, o es un defecto? La calibración es correcta en el fondo, y el diseño tiene un hueco.**
+- **El cambio de la 159 no puede bajar lo que miden esas filas.** `configs-secretos` dejó de marcar `read`, `write` y `none`. Los defectos que inyecta la calibración son secretos literales, que siguen marcándose. Los limpios solo pueden ganar: un falso positivo menos.
+- **Las filas lo confirman.** Seguridad da exactitud 1,0: ningún limpio marcado. Si un limpio de s2 tuviera un permiso de GitHub Actions, la sonda vieja lo habría marcado, y la exactitud no sería 1,0.
+- **El hueco:** dos constantes con nombres parecidos, para un mismo hecho, "cambió una sonda de Seguridad". La próxima vez, alguien puede subir una y olvidar la otra.
+- **No lo arreglo ahora.** Arreglarlo cambia código y rompe el congelamiento. Las doce calibraciones de la sección 2 miden Seguridad con el binario congelado, que trae el cambio de la 159. Eso cierra la duda con datos.
+- **Queda una tarea para después de la validez:** una sola fuente para las dos versiones, o un test que las ate.
+
+## 2. ¿Siguen haciendo falta las doce calibraciones? Sí, las doce
+
+**Por la regla de P102 a, las cuatro dimensiones ya están calibradas.** Sus filas tienen la huella y el `tarea_hash` actuales.
+
+**Pero la huella no cubre todo lo que cambió.** Solo cubre las rúbricas, el prompt del juez y la versión de las sondas. Las filas de oráculo se midieron el 2026-11-14, con binarios anteriores a la mezcla. Después cambiaron cosas que pueden mover un resultado sin mover la huella:
+- la 159 cambió el reintento de los tests inestables en Rust, que toca Funciona y Pruebas;
+- la 159 también cambió `configs-secretos`, que toca Seguridad;
+- la 163 a la 165 cambiaron la decisión ante un corte de la descarga, y la 164 cambió `rompe_la_compilacion`.
+
+**Las doce las miden con el binario congelado.** Sus filas nuevas se suman a las viejas en `Version`. Si el binario congelado empeora algo, la dimensión deja de estar calibrada, y se ve.
+
+**El costo es bajo:** 0 de API, de 0,5 a 1,5 unidades, y de 4 a 6 horas en Colab. No frenan P107 a.
+
+**`paso0-doce-2020ecc.sh` sigue haciendo falta.**
+
+## 3. Estructura, Diseño y Arquitectura
+
+**Estructura, "calibración de otro juez".** Sus filas de s2 no tienen huella: se midieron antes de que la fila la guardara. `huella_actual` exige la huella. Sin ella, la fila no cuenta. **P107 a lo resuelve:** mide Estructura en s2-t1 a s2-t3 con n=12, con la huella actual.
+
+**Diseño, "ningún caso aplicable en las tareas medidas".** Sus filas de s2 con la huella `f9a29a19` tienen n de 1 o 2, y ninguna trae un defecto que aplique. Una fila de s2-t1 es inestable. Son de antes de la Tarea 129, que sumó defectos para los ítems del juez de Diseño. **P107 a lo resuelve,** si esos defectos aplican: mide Diseño en s2-t1 con n=2, y después en s2-t1 a s2-t3 con n=12.
+
+**Arquitectura, sin motivo y con exactitud 1,0.** Sus filas cuentan y aciertan. Pero son pocas, y la cota de Wilson de 0,8 pide unos 16 defectos detectados y 16 limpios bien. **P107 a lo resuelve:** mide Arquitectura en s2-t1 a s2-t3 con n=12.
+
+**Entrega, sin calibrar.** Ninguna tarea calibrada tiene `[entrega]`. P107 a no la mide. Por P103 a, "listo" pide un veredicto en cada dimensión que aplica, y Entrega aplica solo a una tarea con `[entrega]`. Queda como está hasta que una tarea así entre a la calibración.
+
+## 4. `paso0-doce-2020ecc.sh`
+
+**Hace lo que pide la vuelta (88).** Revisa el SHA-256 del binario y que la laptop esté libre. Lleva `reparto/wt` a 2020ecc. Arma los 12 paquetes, uno por trabajo, sin claves, con `--n 4 --semilla 42`.
+
+**Un cambio: el paquete se escribe aparte y después se renombra.**
+- Hoy, `--salida` apunta al nombre final, y el guion salta un archivo que ya existe y no está vacío.
+- Si `colab empaquetar` se corta a mitad, queda un archivo a medias. La próxima corrida lo salta, y ese paquete roto llega a Colab.
+- **El arreglo:** `--salida "$f.parcial"`, y `mv "$f.parcial" "$f"` solo si `empaquetar` sale con 0. Al empezar, se borra todo `*.parcial` que haya quedado.
+
+**Dos notas, sin cambio:**
+- `paso0-juez-2020ecc.sh` y este guion llevan `reparto/wt` al mismo commit. Se pueden correr uno después del otro, en la misma sesión.
+- Los 12 paquetes ocupan cerca de 2 GB. Sobra disco.
+
+**Falta el guion de las tandas.** Lo escribe el orquestador: un `colab calibrar` por tanda, con los 4 paquetes de la vuelta (88), sobre una copia del `ROOT_HOME` real. Después de cada tanda, revisa las filas con las reglas de P102 a y las importa al real.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | El cambio de `.parcial` en `paso0-doce-2020ecc.sh`, y el guion de las tandas | — | Laptop, el orquestador | No | No |
+| 2 | `paso0-juez-2020ecc.sh` y `paso0-doce-2020ecc.sh`, en la misma sesión | El paso 1 | Laptop y el usuario | No | **Sí** |
+| 3 | El arrastre del paquete del juez a Drive | El paso 2 | El usuario | No | **Sí** |
+| 4 | La etapa 1 de P107 a | El paso 3 | Colab, notebook | Cerca de 0,35 USD | No |
+| 5 | Las cinco etapas de P107 a | El paso 4 | Colab, notebook | Cerca de 18 USD | No |
+| 6 | Las doce calibraciones, en tres tandas de 4 | El paso 2 | Colab, CPU | No. De 0,5 a 1,5 unidades | No |
+| 7 | El estado de cada dimensión otra vez, con las filas nuevas | Los pasos 5 y 6 | Laptop, podman | No | No |
+| 8 | La pregunta de presupuesto de D3: cupo y tiempo | El paso 7 | — | No | **Sí** |
+| 9 | D3: `corre` sobre las tareas del dataset | El paso 8 | Laptop, podman | Casi nada. Cerca de 31 USD de lista por cupo por pasada | No |
+| 10 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 7 | Laptop | Según la regla del final | No |
+| 11 | La validez sobre el final sellado | Los pasos 1 a 10 | Colab, notebook si usa el juez | Según el final | No |
+| 12 | Después de la validez: una sola fuente para las dos versiones de las sondas de Seguridad | El paso 11 | Laptop, builder | No | No |
+
+**El paso 7 es nuevo.** Con las filas de P107 a y de las doce, el estado debe dar calibradas todas las dimensiones, salvo Entrega. Si alguna no lo da, va a la vuelta siguiente antes de D3.
+
+**La regla de carga.** Los pasos 2, 7 y 9 usan podman en la laptop, de a uno. Los pasos 4, 5 y 6 van en Colab.
+
+**Preguntas al usuario:** ninguna nueva.
