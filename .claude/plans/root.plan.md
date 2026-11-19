@@ -14760,3 +14760,99 @@ Brief: `docs/builds/brief-local-166.md`.
 **La regla de carga.** El paso 5 usa podman en la laptop. Los pasos 6 y 7 solo leen.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-19 (87): la 166 aceptada, y la mezcla
+
+**Estado.**
+- **La 166 está construida en Colab,** en `laptop/tarea-166`: 3 commits sobre 372af94, con el informe en 1b632ba. Costó 0,65 USD y 1360 segundos de runtime high-mem.
+- **La suite con podman de la cadena 166 dio verde:** 4046 verdes, 0 fallas y 5 ignorados. El release compiló.
+- **`revisar-lectura`, con el binario de la 166, dio 0 marcas en los 15 transcripts:** b8d0db4058, las dos corridas de memora y s2-t1 a s2-t3.
+- **El orquestador clasificó las marcas viejas, sin imprimir citas:**
+  - las 2 de s2-t1 citaban líneas de contexto del diff oculto, es decir, código del padre;
+  - la de memora, con motivo `ruta`, era la línea de comando del builder, con `--disallowedTools Read(.../oraculos/**)`. El código actual ya no la marca.
+- **El builder dejó 2 preguntas.**
+
+**Las corridas viejas quedan como válidas.** Sus marcas eran falsas, por la regla vieja. El orquestador ya lo anotó en `registro.md`, y las filas no se reescriben.
+
+## 1. La 166: aceptada
+
+**Cumple el brief en sus dos puntos.**
+- **Punto 1 (4402270):** un diff oculto se lee como diff, y los `use` de Rust no son huella. Tiene seis tests vistos en rojo, uno por caso del brief, y la guarda de un archivo que no es diff.
+- **Punto 2 (f72d45d):** `r00t corre revisar-lectura` imprime solo conteos y no escribe nada. Su prueba real ya corrió: 15 transcripts, 0 marcas.
+- **El diff toca solo los archivos de la tabla,** más `docs/interfaces.md`, regenerado.
+
+**Una reserva menor.** Los 4 tests de clap del punto 2 no se vieron en rojo: el subagente cableó la variante antes de correrlos. Quedan como guardas. Es aceptable: prueban el parseo, y el comportamiento tiene sus tests en rojo.
+
+## 2. Las 2 preguntas de la 166
+
+1. **El comando también cuenta `ruta`.** Acepto la decisión. Sin ese conteo, un transcript que lee el oráculo por ruta daría "sin marcas". Sería un falso negativo, y un conteo no revela nada del oráculo.
+2. **`r00t corre` sin argumentos da un error de uso, con código 2, en vez del de clap.** Acepto la decisión. El sentido del mensaje es el mismo.
+
+Ninguna va al usuario.
+
+## 3. La cadena 110 a 166 queda lista para la mezcla
+
+**Lo que la deja lista:**
+- la suite con podman en verde: 4046 verdes, 0 fallas y 5 ignorados;
+- la corrida real de `corre` sobre b8d0db4058: cupo, sin API, sin procesos vivos;
+- `revisar-lectura`: 0 marcas falsas en todas las corridas guardadas;
+- cada tarea de la 110 a la 166 revisada y aceptada en su vuelta.
+
+**Lo que hay que saber antes:**
+- **No es un avance rápido.** `claude/root-e7813e` tiene commits del plan que la cadena no tiene. La mezcla pide un commit de mezcla.
+- **El tamaño:** 216 commits, 175 archivos, con 38630 líneas agregadas y 18696 quitadas.
+- **Los conflictos son poco probables.** Los builders no tocan `.claude/plans/root.plan.md`, y los briefs y los informes tienen nombres distintos.
+- **Después de mezclar, la suite con podman corre otra vez sobre el commit de mezcla.** Si da rojo, la mezcla se revierte con un solo `git revert -m 1`.
+
+La pregunta está en la sección 6, como P123.
+
+## 4. El congelamiento, y el orden después de la mezcla
+
+**Al congelamiento no le falta código.** Le falta la mezcla, y después se fija.
+
+**Qué fija:** el commit de la mezcla. Desde ahí, las rúbricas, el prompt del juez y la versión de las sondas no cambian. Toda medición siguiente usa el binario de ese commit.
+
+**El orden exacto:**
+1. **La mezcla,** si el usuario la ordena.
+2. **La suite con podman sobre el commit de mezcla, y su release.** Es el binario congelado.
+3. **El congelamiento:** el orquestador anota el commit y el SHA-256 del binario en `registro.md`.
+4. **El estado de cada dimensión con el binario congelado.** Eficiencia debe seguir calibrada con la v6, porque su huella no cambió. Si no lo está, se repite la v6, por cerca de 0,5 unidades.
+5. **P107 a y las doce calibraciones de oráculo, a la vez, en Colab.**
+   - P107 a corre en el notebook, con el juez. Espera `paso0-juez.sh`, que corre el usuario con el binario congelado, y el arrastre a Drive.
+   - Las doce corren en cuatro runtimes de la CLI. No esperan a P107 a.
+   - Si las dos coinciden, el orquestador revisa el cupo de runtimes de la cuenta.
+6. **La pregunta de presupuesto de D3,** cuando las doce terminen. Es de cupo y de tiempo, no de API.
+7. **D3,** con lo que decida el usuario.
+8. **P98 c:** el final, con 16 reales y el tope de P115 a.
+9. **La validez.**
+
+**Por qué P107 a va después de congelar, y no antes.** Así mide el prompt del juez que queda. Si P107 a encontrara un defecto en el juez, arreglarlo pediría una versión nueva y otro congelamiento. Eso sería una decisión aparte, con sus costos a la vista.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | P123: la mezcla de la cadena 110 a 166 | — | — | No | **Sí** |
+| 2 | La suite con podman sobre el commit de mezcla, y el release | El paso 1 | Laptop, podman | No | No |
+| 3 | Congelar: el commit y el SHA-256 del binario | El paso 2 | Laptop | No | No |
+| 4 | El estado de cada dimensión con el binario congelado | El paso 3 | Laptop | No | No |
+| 5 | `paso0-juez.sh` con el binario congelado, y el arrastre a Drive | El paso 3 | Laptop y el usuario | No | **Sí** |
+| 6 | La etapa 1 de P107 a | El paso 5 | Colab, notebook | Cerca de 0,35 USD | No |
+| 7 | Las cinco etapas de P107 a | El paso 6 | Colab, notebook | Cerca de 18 USD | No |
+| 8 | Las doce calibraciones de oráculo | El paso 3 | Colab, cuatro runtimes | No | No |
+| 9 | La pregunta de presupuesto de D3 | El paso 8 | — | No | **Sí** |
+| 10 | D3: `corre` sobre las tareas del dataset | El paso 9 | Laptop, podman | Casi nada. Cerca de 31 USD de lista por cupo por pasada | No |
+| 11 | P98 c: abrir el final, con 16 reales y el tope de P115 a | Los pasos 7 y 8 | Laptop | Según la regla del final | No |
+| 12 | La validez sobre el final sellado | Los pasos 1 a 11 | Colab, notebook si usa el juez | Según el final | No |
+
+**La regla de carga.** Los pasos 2 y 10 usan podman en la laptop. Los pasos 6, 7 y 8 van en Colab.
+
+## 6. Pregunta al usuario
+
+**P123. ¿Mezclo la cadena 110 a 166 en `claude/root-e7813e`?** Trae las Tareas 110 a 166: el backend de bwrap y el transporte de Colab, Eficiencia con memoria por proceso, el juez en el notebook, la vuelta de instalación y el arreglo de las huellas del oráculo. La suite con podman dio 4046 verdes y 0 fallas. Son 216 commits y 175 archivos. No es un avance rápido, porque la rama tiene commits del plan. Después de mezclar, la suite corre otra vez sobre el commit de mezcla. Si da rojo, la mezcla se revierte con un commit.
+
+- **a) Sí, con un PR, como la mezcla de la vuelta (32).** El PR deja el resumen y los commits a la vista, y la mezcla queda en un solo commit. *(recomendada)*
+- **b) Sí, con una mezcla local, sin PR.** Es más rápida, pero no deja la revisión a la vista.
+- **c) Todavía no.** El congelamiento, P107 a y las doce calibraciones esperan.
+
+Recomiendo la (a). Cada tarea de la 110 a la 166 pasó su revisión, y la suite está en verde. Un PR deja todo a la vista con el mismo costo.
