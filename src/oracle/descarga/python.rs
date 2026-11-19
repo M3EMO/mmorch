@@ -18,8 +18,8 @@ use super::inventario::{
     requisitos_pip, textos_de_requisitos,
 };
 use super::{
-    ARCHIVO_REQUIREMENTS, CARPETA_CACHE, CARPETA_PYTHON, Diagnostico, PLAZO_CORTO, Paso,
-    Preparacion, Registro, borrar_en_home, corte, diagnosticar, entorno_descarga, error_de,
+    ARCHIVO_REQUIREMENTS, CARPETA_CACHE, CARPETA_PYTHON, Corte, Diagnostico, PLAZO_CORTO, Paso,
+    Preparacion, Registro, borrar_en_home, corte_de, diagnosticar, entorno_descarga, error_de,
     hallazgo, hash_corto, limpiar_parcial, parcial_de, temporal_de, truncar_linea,
 };
 use crate::borrado;
@@ -614,6 +614,18 @@ enum Fin {
     Corta(Hallazgo, &'static str),
 }
 
+/// Tipo del corte de Python según su motivo estático. Tabla:
+/// - `no-instala` => `NoInstala`: el producto no instala.
+/// - `git-no-seguro`, `url-no-soportada`, `indice-propio-sdist` => `FuenteNoAceptada`: la regla de fuentes la rechaza.
+/// - `sin-version-fijada`, `solo-sdist`, `dependencias-dinamicas` y cualquier otro => `Otro`: no dice que no compile.
+fn corte_de_motivo(motivo: &str) -> Corte {
+    match motivo {
+        "no-instala" => Corte::NoInstala,
+        "git-no-seguro" | "url-no-soportada" | "indice-propio-sdist" => Corte::FuenteNoAceptada,
+        _ => Corte::Otro,
+    }
+}
+
 /// Descarga de Python para `requirements.txt`. Cache por hash del archivo (`<hash>.parcial` y luego el nombre final).
 /// `registros` son los `[[registro]]` de `root.toml`: los que coinciden con un índice del requirements
 /// reciben su credencial en un `netrc` de pip (decisión 29).
@@ -735,7 +747,7 @@ fn preparar_python_con(
                 avisos,
                 ..Registro::corte("python", Some(hash), motivo)
             };
-            Ok(corte(aviso, registro))
+            Ok(corte_de(corte_de_motivo(motivo), aviso, registro))
         }
         Fin::Lista {
             paquetes,
@@ -791,7 +803,9 @@ fn hallazgo_no_instala_python(linea: &str) -> Hallazgo {
         0,
         &linea,
         3,
-        format!("el producto no instala: {linea}"),
+        format!(
+            "el producto no instala: {linea}. Arreglo: una dependencia de los requirements no existe, o no tiene esa versión: corregí el archivo de dependencias"
+        ),
     )
 }
 
@@ -2956,6 +2970,125 @@ mod tests {
         let (_preparacion, registro) = resultado.expect("la descarga corre");
         let registro = registro.expect("hay registro de la descarga");
         assert_eq!(registro.motivo, Some("no-instala"));
+    }
+
+    #[test]
+    fn descarga_python_corte_no_instala_da_tipo_no_instala() {
+        // Un requisito de build que pip no encuentra es `no-instala`: el tipo del corte lo dice.
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_sdist(r#"{"foo-1.0.tar.gz": []}"#, &indice);
+        let falla = build_que_falla(
+            &mundo,
+            "ERROR: No matching distribution found for hatchling==9.9\n",
+        );
+        let ejecutor = EjecutorSimulado {
+            simular: &falla,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
+        let (preparacion, _) = resultado.expect("la descarga corre");
+        let Preparacion::SinVeredicto(_, corte) = preparacion else {
+            panic!("debía dar corte sin veredicto: {preparacion:?}");
+        };
+        assert_eq!(corte, Corte::NoInstala);
+        assert!(
+            corte.no_compila(),
+            "un no instala deja el producto sin compilar"
+        );
+    }
+
+    #[test]
+    fn descarga_python_git_no_seguro_da_fuente_no_aceptada() {
+        // Una referencia git sin commit corta antes de cualquier red: ningún contenedor corre.
+        let simular = |_: &Ejecucion, _: &Path| respuesta(0, "");
+        let ejecutor = EjecutorSimulado {
+            simular: &simular,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("git+https://github.com/x/y#egg=y\n", &ejecutor);
+        let (preparacion, registro) = resultado.expect("la descarga corre");
+        let Preparacion::SinVeredicto(_, corte) = preparacion else {
+            panic!("debía dar corte sin veredicto: {preparacion:?}");
+        };
+        assert_eq!(corte, Corte::FuenteNoAceptada);
+        assert!(
+            ejecutor.ejecuciones.borrow().is_empty(),
+            "el corte va antes de pip"
+        );
+        let registro = registro.expect("hay registro de la descarga");
+        assert_eq!(registro.motivo, Some("git-no-seguro"));
+    }
+
+    #[test]
+    fn descarga_python_solo_sdist_da_corte_otro() {
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_sdist(r#"{"foo-1.0.tar.gz": ["dep-solo-sdist==1.0"]}"#, &indice);
+        let falla = build_que_falla(
+            &mundo,
+            "ERROR: No matching distribution found for dep-solo-sdist==1.0\n",
+        );
+        let ejecutor = EjecutorSimulado {
+            simular: &falla,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
+        let (preparacion, _) = resultado.expect("la descarga corre");
+        let Preparacion::SinVeredicto(_, corte) = preparacion else {
+            panic!("debía dar corte sin veredicto: {preparacion:?}");
+        };
+        assert_eq!(corte, Corte::Otro);
+        assert!(!corte.no_compila());
+    }
+
+    #[test]
+    fn descarga_python_sin_version_fijada_da_corte_otro() {
+        // Un requisito directo sin versión fijada que pip no baja: `sin-version-fijada`, tipo `Otro`.
+        let simular = |_: &Ejecucion, _: &Path| {
+            respuesta(1, "ERROR: No matching distribution found for foo\n")
+        };
+        let ejecutor = EjecutorSimulado {
+            simular: &simular,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("foo\n", &ejecutor);
+        let (preparacion, registro) = resultado.expect("la descarga corre");
+        let Preparacion::SinVeredicto(_, corte) = preparacion else {
+            panic!("debía dar corte sin veredicto: {preparacion:?}");
+        };
+        assert_eq!(corte, Corte::Otro);
+        let registro = registro.expect("hay registro de la descarga");
+        assert_eq!(registro.motivo, Some("sin-version-fijada"));
+    }
+
+    #[test]
+    fn descarga_python_hallazgo_no_instala_dice_como_arreglar() {
+        let h = hallazgo_no_instala_python("ERROR: No matching distribution found for x==1");
+        assert!(
+            h.detalle.ends_with(
+                ". Arreglo: una dependencia de los requirements no existe, o no tiene esa versión: corregí el archivo de dependencias"
+            ),
+            "{}",
+            h.detalle
+        );
+        assert!(
+            h.detalle.contains("No matching distribution"),
+            "{}",
+            h.detalle
+        );
+    }
+
+    #[test]
+    fn descarga_python_hallazgo_no_instala_truncado_conserva_el_arreglo() {
+        // El largo máximo va sobre la línea. El arreglo siempre entra completo.
+        let linea = "x".repeat(500);
+        let h = hallazgo_no_instala_python(&linea);
+        assert!(h.detalle.contains(&"x".repeat(300)), "{}", h.detalle);
+        assert!(!h.detalle.contains(&"x".repeat(301)), "{}", h.detalle);
+        assert!(
+            h.detalle.ends_with("corregí el archivo de dependencias"),
+            "{}",
+            h.detalle
+        );
     }
 
     #[test]

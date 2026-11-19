@@ -312,16 +312,32 @@ fn hallazgo_en(
     }
 }
 
-/// Hallazgo del producto que no instala. Un lock que no cuadra va sobre `Cargo.lock`.
+/// Hallazgo del producto que no instala. Un lock que no cuadra va sobre `Cargo.lock`. Cada caso dice cómo arreglarlo.
 fn hallazgo_no_instala(linea: &str) -> Hallazgo {
+    let minuscula = linea.to_lowercase();
     // El lock no cuadra: `--locked` impide actualizarlo. Va sobre el lock, no sobre el manifiesto.
-    if linea.to_lowercase().contains("cannot update the lock file") {
+    if minuscula.contains("cannot update the lock file") {
         return hallazgo(
             ARCHIVO_LOCK,
             0,
             linea,
             3,
-            format!("el producto no instala: Cargo.lock no cuadra con Cargo.toml: {linea}"),
+            format!(
+                "el producto no instala: Cargo.lock no cuadra con Cargo.toml: {linea}. Arreglo: `Cargo.lock` no cuadra con `Cargo.toml`: corré `cargo update --workspace` y subí el lock"
+            ),
+        );
+    }
+    // Una dependencia sin esa versión o sin paquete: el error está en el manifiesto.
+    if minuscula.contains("no matching package") || minuscula.contains("failed to select a version")
+    {
+        return hallazgo(
+            "Cargo.toml",
+            0,
+            linea,
+            3,
+            format!(
+                "el producto no instala: {linea}. Arreglo: una dependencia de `Cargo.toml` no existe, o no tiene esa versión: corregí `Cargo.toml`"
+            ),
         );
     }
     hallazgo(
@@ -329,7 +345,9 @@ fn hallazgo_no_instala(linea: &str) -> Hallazgo {
         0,
         linea,
         3,
-        format!("el producto no instala: {linea}"),
+        format!(
+            "el producto no instala: {linea}. Arreglo: `cargo vendor` falló: revisá `Cargo.toml` y `Cargo.lock`"
+        ),
     )
 }
 
@@ -349,7 +367,9 @@ fn hallazgo_lock_invalido(error: &str) -> Hallazgo {
         0,
         "",
         3,
-        format!("Cargo.lock inválido: {error}"),
+        format!(
+            "Cargo.lock inválido: {error}. Arreglo: `Cargo.lock` no se puede leer: regeneralo con `cargo generate-lockfile` y subilo"
+        ),
     )
 }
 
@@ -784,11 +804,7 @@ fn preparar_rust(
     Ok((preparacion, Some(registro)))
 }
 
-fn corte(hallazgo: Hallazgo, registro: Registro) -> Paso {
-    corte_de(Corte::Otro, hallazgo, registro)
-}
-
-/// Corte de la descarga con su tipo. `corte` lo deja en `Corte::Otro`.
+/// Corte de la descarga con su tipo.
 fn corte_de(tipo: Corte, hallazgo: Hallazgo, registro: Registro) -> Paso {
     (
         Preparacion::SinVeredicto(vec![hallazgo], tipo),
@@ -1790,12 +1806,70 @@ location searched: crates.io index";
             let h = hallazgo_no_instala(linea);
             assert_eq!(h.archivo, "Cargo.toml", "{linea}");
             assert_eq!(h.severidad, 3, "{linea}");
-            assert_eq!(
-                h.detalle,
-                format!("el producto no instala: {linea}"),
-                "{linea}"
+            assert!(
+                h.detalle
+                    .starts_with(&format!("el producto no instala: {linea}")),
+                "{}",
+                h.detalle
             );
+            assert!(h.detalle.contains("corregí `Cargo.toml`"), "{}", h.detalle);
         }
+    }
+
+    #[test]
+    fn descarga_hallazgo_lock_no_cuadra_dice_como_arreglar() {
+        let linea = "error: cannot update the lock file /repo/Cargo.lock because --locked was passed to prevent this";
+        let h = hallazgo_no_instala(linea);
+        assert!(
+            h.detalle.contains("corré `cargo update --workspace`"),
+            "{}",
+            h.detalle
+        );
+        assert!(h.detalle.contains(linea), "{}", h.detalle);
+    }
+
+    #[test]
+    fn descarga_hallazgo_sin_paquete_dice_como_arreglar() {
+        let linea = "error: no matching package named `x` found";
+        let h = hallazgo_no_instala(linea);
+        assert!(h.detalle.contains("corregí `Cargo.toml`"), "{}", h.detalle);
+        assert!(h.detalle.contains(linea), "{}", h.detalle);
+    }
+
+    #[test]
+    fn descarga_hallazgo_version_sin_seleccion_dice_como_arreglar() {
+        let linea = "error: failed to select a version for `y`";
+        let h = hallazgo_no_instala(linea);
+        assert!(h.detalle.contains("corregí `Cargo.toml`"), "{}", h.detalle);
+        assert!(h.detalle.contains(linea), "{}", h.detalle);
+    }
+
+    #[test]
+    fn descarga_hallazgo_generico_dice_como_arreglar() {
+        let linea = "error: algo raro al vendorizar";
+        let h = hallazgo_no_instala(linea);
+        assert!(
+            h.detalle.contains("revisá `Cargo.toml` y `Cargo.lock`"),
+            "{}",
+            h.detalle
+        );
+        assert!(h.detalle.contains(linea), "{}", h.detalle);
+    }
+
+    #[test]
+    fn descarga_hallazgo_lock_invalido_dice_como_arreglar() {
+        let h = hallazgo_lock_invalido("expected a table at line 3");
+        assert_eq!(h.archivo, "Cargo.lock");
+        assert!(
+            h.detalle.contains("cargo generate-lockfile"),
+            "{}",
+            h.detalle
+        );
+        assert!(
+            h.detalle.contains("expected a table at line 3"),
+            "{}",
+            h.detalle
+        );
     }
 
     #[test]

@@ -391,7 +391,7 @@ fn descarga_dependencia_inexistente_sin_lock_da_no_instala() {
 
     let v = evaluar_con(home.path(), &repo, &tarea);
 
-    assert_eq!(v.estado, Estado::SinVeredicto);
+    assert_eq!(v.estado, Estado::Rojo);
     assert_eq!(v.contrato, Conteo::default());
     assert!(
         v.hallazgos
