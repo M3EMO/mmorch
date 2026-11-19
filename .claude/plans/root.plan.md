@@ -14534,3 +14534,118 @@ ROOT_HOME=<copia> <binario de la cadena> corre --tarea d-watchexec-b8d0db4058-lo
 **La regla de carga.** Los pasos 4, 7 y 8 usan podman en la laptop, de a uno.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-19 (85): la 165 aceptada, la corrida de `corre` lista, y la mezcla
+
+**Estado.**
+- **La suite con podman de la cadena 164 dio verde:** 4024 verdes, 0 fallas y 5 ignorados. El release compiló.
+- **El orquestador unió `codegraph callers` y `grep -w`** sobre las firmas de la 164. Ningún llamador vive fuera de los archivos del diff.
+- **La 165 está construida en Colab,** en `laptop/tarea-165`: 3 commits sobre 53fd716, con el informe en 372af94. Costó 0,54 USD y 1439 segundos de runtime high-mem. Sin podman, da 4030 verdes y 0 fallas.
+- **La suite con podman de la cadena 165 corre ahora en la laptop.**
+- **El builder dejó 3 preguntas.**
+
+## 1. La 165: aceptada
+
+**Cumple el brief en sus dos puntos.**
+- **Punto 1 (c23e491):** un rol con código distinto de 0 ante un corte de instalación deja `pide_humano`, con el motivo del código. El aviso usa el singular.
+- **Punto 2 (d256bbf):** un `Cargo.lock` ilegible ya no da un rechazo en el inventario. Llega a `preparar_rust`, que da "lock inválido", `NoListo` y rojo.
+- **El diff toca también `src/oracle/mod.rs`,** pero solo en `mod tests`: es el test de punta a punta del punto 2. El brief permite editar tests de otros archivos.
+
+**Un detalle del informe que está bien.** El aviso "después de N vueltas" solo puede salir con 2, porque el bucle sale sin motivo solo al agotarlas. El singular solo se ve en el aviso "la vuelta no terminó", y tiene su test.
+
+## 2. Las 3 preguntas de la 165
+
+1. **Una dependencia git sin `rev` da un aviso, no un rechazo.** Acepto que el código quede así. El error fue mío: el brief dijo "rechazo", y el código da el aviso `sin_commit`, por la decisión 21. Una dependencia sin commit fijo hace el build no reproducible, pero Root la puede bajar. El rechazo es para una fuente que Root no acepta, como `ssh://`. La guarda del builder cubre los dos casos.
+2. **El motivo nombra el rol con `nombre_rol`.** Acepto la decisión.
+3. **El motivo nombra solo el primer rol fallido.** Acepto la decisión. Un humano va a mirar la corrida entera, y la fila ya guarda el código de cada lanzamiento.
+
+Ninguna va al usuario.
+
+## 3. Una corrección: `corre` gasta cupo, no API
+
+**En la vuelta (84) escribí que esta corrida costaría de 1 a 1,5 USD de API, contra el tope de S2. Es falso.**
+- Todos los eventos `llamada` de las corridas `corre-*` tienen `via = cupo`. El `cost_usd` es el precio de lista del cupo, no un gasto de API.
+- `gasto_api_desde`, que cuenta para el tope de S2, solo suma `via == Api`. Una corrida de `corre` no lo toca.
+- **La estimación vieja de D3 estaba bien:** cerca de 1 USD de lista por cupo por corrida, y casi nada de API.
+
+**Por lo mismo, en la vuelta (64) leí mal un número.** Los 181 USD de `corre-memora-*` también eran cupo, no API. P112 a no cambia, porque su regla ya cuenta solo `via == Api`.
+
+## 4. La corrida de `corre` sobre b8d0db4058
+
+**Corre después de la suite de la cadena 165, con el release de esa cadena.** El orquestador lo arma igual que el release de la 164.
+
+**La copia del `ROOT_HOME`: sale de `home-160`, no del real.**
+- `colab-pruebas/home-160` ya tiene la tarea `d-watchexec-b8d0db4058` con el `Cargo.lock` real del padre. Lo usó verif-160, y verif-163 dio rojo con él.
+- **El lock real es el del padre db427ba30ae3.** Comprobé, solo leyendo, que el `bootstrap/Cargo.lock` de `home-160` tiene el mismo SHA-256 que `git show db427ba30ae3:Cargo.lock` en el clon de watchexec. Empieza con `9ecd5073764a0ba9`.
+- El `ROOT_HOME` real tiene el lock arreglado, que empieza con `3cf40554c2595169`. No se toca.
+- `home-160` trae también `configs/ecc-haiku.toml`.
+
+**La tarea conserva su nombre.** En la copia no hace falta una variante: `d-watchexec-b8d0db4058` ya lleva el lock real. Retiro el nombre `-lockreal` de la vuelta (84).
+
+**Los comandos:**
+
+```sh
+P=~/.cache/root-wt/colab-pruebas
+cp -a --reflink=auto $P/home-160 $P/home-corre-b8d0
+sha256sum $P/home-corre-b8d0/oraculos/d-watchexec-b8d0db4058/bootstrap/Cargo.lock   # debe empezar con 9ecd5073764a0ba9
+date +%s > $P/corre-b8d0.inicio
+timeout 7200 env -u DEEPSEEK_API_KEY -u ANTHROPIC_API_KEY ROOT_HOME=$P/home-corre-b8d0 \
+  <release de la cadena 165> corre --tarea d-watchexec-b8d0db4058 --config ecc-haiku > $P/corre-b8d0.out 2>&1
+echo "rc=$?" >> $P/corre-b8d0.out
+```
+
+**El tope de gasto.**
+- **API: 0.** Sin claves en el entorno, el juez no se arma, y Arquitectura y Diseño quedan sin veredicto, como en las verificaciones.
+- **Cupo:** cerca de 1 a 1,5 USD de lista, por la vuelta de instalación.
+- **Tiempo:** `timeout 7200` corta a las 2 horas.
+- `corre` no tiene un tope de gasto propio, ni en la línea de comandos ni en `ecc-haiku.toml`. El tope práctico es el tiempo.
+
+**Si el `timeout` corta,** manda SIGTERM a `corre`. Desde el punto 0 de la 164, una señal mata el grupo del builder. Ese corte también prueba el camino de señales. La corrida se puede retomar con `--reanuda`.
+
+**Qué mirar:**
+1. **La primera evaluación** da el corte "no instala", y su hallazgo trae "corré `cargo update --workspace`".
+2. **La última fila de `runs.jsonl` en la copia trae `vuelta_instalacion`.**
+   - Si el builder arregló el lock: al menos 1 vuelta, `instalo` verdadero y `pide_humano` falso.
+   - Si no lo arregló en 2 vueltas: `pide_humano` verdadero y el aviso.
+3. **Ninguna lectura del oráculo:** `revisar_transcripts` no deja eventos `oraculo_leido` nuevos en la copia.
+4. **Si instaló,** corren el contrato y el oculto, y la decisión ya no es `SinDecision`.
+5. **Ningún proceso vivo al terminar:** `ps -eo pid,etimes,comm` no muestra ningún `claude`, `node`, `cargo` ni `sleep` con menos segundos de vida que la corrida. `podman ps -a` no muestra contenedores de la corrida.
+6. **Ningún evento con `via = Api`** desde la hora de inicio, en `eventos.jsonl` de la copia.
+
+## 5. ¿Queda lista la cadena para pedir la mezcla?
+
+**Casi. Faltan dos cosas, en este orden:**
+1. **La suite con podman de la cadena 165 en verde.** Corre ahora.
+2. **La corrida de `corre` sobre b8d0db4058.** No bloquea el código, pero puede encontrar un defecto en la vuelta de instalación. Conviene encontrarlo antes de mezclar.
+
+**Con las dos en verde, el orquestador le pide la mezcla al usuario,** con el resumen de las cadenas 110 a 165.
+
+**Qué le falta al congelamiento, además de la mezcla:**
+- **P107 a,** las cinco etapas del juez. Esperan `paso0-juez.sh` y el arrastre a Drive, que hace el usuario. Las calibraciones del juez fijan la huella del prompt. Después de congelar, ese prompt no cambia.
+- **Nada más de código.** Eficiencia ya cumple P102 a con la v6, y ninguna tarea posterior cambió su medición. La versión de las sondas de Seguridad subió a 4 en la 160, antes de congelar.
+
+**El congelamiento fija un commit:** el de la mezcla. Las doce calibraciones de oráculo y D3 corren con el binario de ese commit.
+
+## 6. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | La suite con podman de la cadena 165 | Nada; corre ahora | Laptop, podman | No | No |
+| 5 | El release de la cadena 165 | El paso 4 | Laptop | No | No |
+| 6 | La corrida de `corre` sobre b8d0db4058 | El paso 5 | Laptop, podman | No. Cerca de 1 a 1,5 USD de lista por cupo | No |
+| 7 | Pedir la mezcla de la cadena 110 a 165 | Los pasos 4 y 6 | — | No | **Sí** |
+| 8 | Congelar la versión | Los pasos 3 y 7 | — | No | No |
+| 9 | Las doce calibraciones de oráculo con la versión congelada | El paso 8 | Colab, cuatro runtimes | No | No |
+| 10 | La pregunta de presupuesto de D3 | El paso 8 | — | No | **Sí** |
+| 11 | D3: `corre` sobre las tareas del dataset | El paso 10 | Laptop, podman | Casi nada. Cerca de 31 USD de lista por cupo por pasada | No |
+| 12 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 8 | Laptop | Según la regla del final | No |
+| 13 | La validez sobre el final sellado | Los pasos 1 a 12 | Colab, notebook si usa el juez | Según el final | No |
+
+**La pregunta de D3 cambia de tema.** No es de API: es de cupo y de tiempo. 31 tareas, de 20 a 40 minutos cada una, dan de 10 a 20 horas de laptop con podman por pasada.
+
+**La regla de carga.** Los pasos 4, 6 y 11 usan podman en la laptop, de a uno.
+
+**Preguntas al usuario:** ninguna nueva.
