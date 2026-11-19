@@ -28,10 +28,11 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 | 1, la vuelta de instalación | `src/corre/corrida.rs`, `src/tipos.rs` |
 | 2, el arreglo concreto y los cortes de Python | `src/oracle/descarga.rs`, `src/oracle/descarga/python.rs` |
 | 3, la calibración y el motivo del corte | `src/oracle/calibra.rs`, `src/oracle/mod.rs` |
+| 4, `apt-get` con reintentos en el runtime | `tools/colab/preparar-runtime.sh`, `tests/colab_preparar.rs` |
 
-- Los tres puntos no comparten archivos. Corren en paralelo. El punto 1 necesita el texto del arreglo del punto 2 solo en sus tests: usá un hallazgo falso.
+- Los cuatro puntos no comparten archivos. Corren en paralelo. El punto 1 necesita el texto del arreglo del punto 2 solo en sus tests: usá un hallazgo falso.
 - **Tests de otros archivos.** Podés editar un test de cualquier archivo si lee un literal o una firma que esta tarea cambia. Solo el test, no código de producción. Anotá cada uno en el informe.
-- **No toques:** `src/oracle/informe.rs`, `src/oracle/contenedor.rs`, `src/colab_calibra.rs`, el resto de `src/`, `tools/`, `imagenes/`, `rubricas/` y `$ROOT_HOME/`.
+- **No toques:** `src/oracle/informe.rs`, `src/oracle/contenedor.rs`, `src/colab_calibra.rs`, el resto de `src/`, el resto de `tools/`, `imagenes/`, `rubricas/` y `$ROOT_HOME/`.
 - **No cambies `bloqueos`, `no_listo` ni `sin_decision`.**
 - **El esquema cambia solo por adición.** `Fila.vuelta_instalacion` es `Option<…>` con `#[serde(default)]`, como `vuelta_eficiencia`. Si `r00t esquema` o `docs/interfaces.md` muestran `Fila`, regeneralos.
 - **Sin dependencias nuevas** en `Cargo.toml`.
@@ -44,7 +45,7 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 - **No llames a podman real, a la CLI `colab` real ni a ningún builder real.** Los tests de `corre` usan sus lanzadores falsos.
 - Corré la suite con `tools/test-seguro.sh`.
 - No exportes `DEEPSEEK_API_KEY` ni `ANTHROPIC_API_KEY`.
-- **Codegraph.** En esta laptop el comando es `codegraph`. Corré `codegraph init .` y `codegraph sync` en tu worktree antes de buscar llamadores. Uní siempre sus llamadores con los de `grep -w <nombre>`.
+- **Codegraph.** Esta tarea se construye en Colab, donde `codegraph` no está instalado. Buscá los llamadores con `grep -w <nombre>`, y anotá en el informe que no usaste `codegraph`. Al revisar el informe, el orquestador corre `codegraph callers` en la laptop y une los dos resultados.
 
 ## Por qué
 
@@ -57,6 +58,8 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 **Los cortes de Python caen en `Corte::Otro`.** No marcan `no_compila`, así que un "no instala" de Python sigue en `SinDecision`. P121 (a) no separó lenguajes.
 
 **`rompe_la_compilacion`, en `calibra.rs`, lee `no_compila`.** Desde la 163, un corte de la descarga puede marcarlo. Una calibración de Seguridad que inyecta una dependencia que no se baja daría un corte. Ese caso contaría como "rompe la compilación", y antes quedaba sin veredicto. Un corte no lo causa el código inyectado.
+
+**`preparar-runtime.sh` no reintenta `apt-get`.** En la primera corrida del paso 7, `apt-get` no llegó a `archive.ubuntu.com`, por timeouts. El guion salió con 100, y `colab calibrar` dio rc 3 a los 617 segundos. La repetición anduvo. Un corte de red pasajero no debe tirar una calibración de horas.
 
 ## Tarea
 
@@ -119,6 +122,20 @@ La regla que manda: **un producto que no instala vuelve al builder con el arregl
 - Unitario: el motivo de cada tipo de corte hace ida y vuelta.
 - Guarda: los tests de `rompe_la_compilacion` de hoy siguen verdes.
 
+### 4. `apt-get` con reintentos en el runtime
+
+1. **Si `bwrap` ya existe,** `instalar_bubblewrap` no llama a `apt-get`. Lo dice en una línea.
+2. **`apt-get update` y `apt-get install` llevan** `-o Acquire::Retries=5` y `-o Acquire::http::Timeout=30`.
+3. **Un bucle reintenta el par entero hasta 3 veces,** con una espera de 30 segundos entre intentos. La espera se puede cambiar con una variable, así los tests no duermen.
+4. **Después del tercer fallo, el paso sale con su código,** como hoy, con un mensaje que dice cuántos intentos hizo.
+5. **No cambies el espejo de Ubuntu.** Los reintentos cubren un corte pasajero, sin depender de otro servidor.
+
+**Tests en rojo primero, en `tests/colab_preparar.rs`:**
+- Integración: con un `apt-get` falso que falla dos veces y anda a la tercera, el paso `bubblewrap` sale con 0. Hoy sale con el código del primer fallo.
+- Integración: con un `bwrap` falso en el PATH, el paso no llama a `apt-get`.
+- Integración: con un `apt-get` que falla siempre, el paso sale distinto de 0 y dice "3 intentos".
+- Guarda: los tests de `colab_preparar.rs` de hoy siguen verdes.
+
 No corras la validez, `corre`, `calibrar` ni la pasada reales. Las corre el orquestador.
 
 ## Tests con podman que quedan sin probar
@@ -146,7 +163,7 @@ Al terminar, escribí `docs/builds/informe-local-164.md` con estas secciones:
 2. **Commits**: una tabla con punto, defecto, tests vistos en rojo y commit.
 3. **Qué falló o quedó incompleto**: cada punto sin hacer o sin probar, con su motivo.
 4. **El prompt de la vuelta de instalación**: un ejemplo con un hallazgo falso.
-5. **Los tipos de corte de Python**: cada corte de `python.rs`, y el tipo que da ahora.
+5. **Los tipos de corte de Python**: cada corte de `python.rs`, y el tipo que da ahora. Además, el mensaje de `apt-get` después de 3 intentos.
 6. **Tests que cambiaron de valor**, con su motivo, y cada test de otro archivo que editaste.
 7. **Llamadores revisados**: por cada firma cambiada, los llamadores de codegraph y de grep.
 8. **Preguntas para el planner**: numeradas, con la decisión que tomó el organizador.

@@ -14259,3 +14259,94 @@ Brief: `docs/builds/brief-local-164.md`.
 **La regla de carga.** Los pasos 4, 6, 7, 9 y 10 usan podman, y el paso 8 compila. Corren de a uno en la laptop.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-19 (82): el paso 7 anduvo, apt sin reintentos, y el builder en Colab
+
+**Estado.**
+- **verif-163:** b8d0db4058 da rojo en `con_tests` y en `bootstrap`, como pide P121 a.
+- **El usuario movió dos cosas a Colab,** para que la suspensión de la laptop no frene las corridas: los builders y el binario del paso 0. Prefirió no usar `systemd-inhibit`.
+  - El binario de la 161 se compiló en Colab high-mem, con 8 núcleos y 51 GB, en 2 minutos (sha 7c3e10ac…).
+  - El paquete se armó en la laptop, con la imagen local `root-oraculo-rust:4`. Así las calibraciones y el final usan la misma imagen. Lo corrió el usuario, porque el clasificador frenó al orquestador.
+  - El lanzador de builders en Colab está en `orquestador/colab/`. Falta el token del usuario. El token sube con `colab upload`, porque `--env` queda en texto plano en el log de la CLI.
+- **El paso 7, primera corrida:** rc 3 a los 617 segundos. `preparar-runtime.sh` salió con 100, porque `apt-get` no llegó a `archive.ubuntu.com`. El runtime ahora es Ubuntu 24.04.5, con Python 3.13.
+- **El paso 7, repetición:** rc 0 en 3286 segundos.
+  - Entró 1 fila, y el trabajo dio código 0.
+  - El trabajo tardó 3114 segundos, según `trabajo-0.estado`.
+  - El runtime se cerró con `stop` rc 0, y ninguna consulta falló.
+- **La 164 espera.** Su pedido está listo, con base `laptop/tarea-163`. Corre en Colab cuando el usuario cargue el token.
+
+## 1. El paso 7 queda bueno, y cierra la duda de la vuelta (77)
+
+**El paso 7 queda bueno.** La repetición cumple los seis puntos de la vuelta (78):
+1. rc 0, con la fila nueva;
+2. el trabajo se lanzó aparte, y ninguna consulta falló;
+3. el estado trae código 0 y sus horas;
+4. la duración real: 3114 segundos;
+5. sin avisos de clave;
+6. el runtime se cerró.
+
+La primera corrida falló por la red de Ubuntu, no por la 161. Su arreglo va en la sección 2.
+
+**La duda de la vuelta (77) queda cerrada: fue el cliente de `colab exec`.**
+- En la 157c, Root esperó 11072 segundos, y el paquete de vuelta no llegó.
+- Ahora, el mismo trabajo, en un runtime nuevo y compilando desde cero, tardó 3114 segundos.
+- El trabajo de la 157c terminó mucho antes del plazo. El cliente no volvió.
+- **Un matiz:** cambió la imagen del runtime, y cambió el binario. El trabajo es el mismo, y la diferencia es de casi cuatro veces. La lectura es firme.
+- **La 161 resuelve justo ese caso:** ningún exec dura más que unos segundos.
+
+## 2. El fallo de `apt-get`
+
+**El defecto.** `instalar_bubblewrap`, en `tools/colab/preparar-runtime.sh`, corre `apt-get update -qq` y `apt-get install -y bubblewrap` una sola vez. Un corte de red de unos segundos tira el paso, y con él una calibración de horas.
+
+**El arreglo:**
+1. **Si `bwrap` ya existe, no llama a `apt-get`.** Un runtime que ya lo trae no depende de la red.
+2. **`-o Acquire::Retries=5` y `-o Acquire::http::Timeout=30`** en los dos comandos. `apt` reintenta cada descarga.
+3. **Un bucle reintenta el par entero hasta 3 veces,** con 30 segundos entre intentos. Cubre un `update` que falla entero.
+4. **Después del tercer fallo, el paso sale con su código,** y el mensaje dice cuántos intentos hizo.
+
+**Otro espejo: no.** Cambiar el espejo de Ubuntu suma un servidor más del que depender. Los reintentos cubren un corte pasajero, que es lo que pasó.
+
+**Va en la 164, como punto 4.** Toca `tools/colab/preparar-runtime.sh` y `tests/colab_preparar.rs`, que ningún otro punto toca. La 164 no arrancó todavía, así que no hace falta otra tarea. Actualicé `docs/builds/brief-local-164.md`.
+
+## 3. El builder en Colab, comparado con la laptop
+
+**Lo que está igual, y está bien:**
+- **La configuración.** El lanzador corre `claude` con `--setting-sources project --strict-mcp-config`. Tampoco en la laptop carga la configuración del usuario. El guard `never-edit` viaja y queda en la ruta que espera el `settings.json` del proyecto.
+- **Rust 1.99.1,** `ROOT_SIN_PODMAN=1`, el tope de 14400 segundos y el patrón de lanzar aparte y consultar.
+- **El token** sube como archivo, no por `--env`. La salida pasa por `oculta`, y el guion avisa si aparece algo con forma de clave.
+
+**Lo que falta:**
+1. **`codegraph`.** Cada brief pide unir los llamadores de `codegraph` y de `grep -w`. En Colab no está. En la laptop es un paquete de 286 MB, con su propio node. Subirlo en cada build cuesta, y un archivo así de grande ya falló en `colab upload` sin trozos.
+   - **Propuesta:** en un build de Colab, el builder usa solo `grep -w`, y lo anota en el informe. Al leer el informe, **el orquestador corre `codegraph callers` en la laptop** sobre las firmas cambiadas, y une los dos resultados. La regla se cumple en la revisión.
+   - El brief de un build en Colab lo dice en su sección de entorno.
+2. **El token queda en el runtime.** `/content/claude-token` sigue ahí hasta que el runtime muere. Si el `stop` falla, queda hasta que Colab lo recicle. `trabajo-builder.sh` debe borrarlo apenas termina `claude`, antes de armar el resultado.
+3. **El token está en el entorno de todo lo que corre el builder.** `CLAUDE_CODE_OAUTH_TOKEN` lo heredan `cargo`, los tests y los `build.rs` de las dependencias. En la laptop, el builder usa la sesión guardada del usuario, que un proceso del mismo usuario también puede leer. El riesgo es parecido. Lo anoto, sin cambio por ahora.
+4. **Las unidades de Colab.** Un runtime high-mem cuesta más unidades por hora que uno de CPU común. El tope de Colab es de 50 unidades. `builder-colab.sh` debe anotar el saldo antes y después de cada build en `registro.md`.
+
+**Nada de esto toca código de Root.** Son cambios del orquestador en `orquestador/colab/`, y una línea en el brief.
+
+## 4. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | Cargar el token en `~/.config/root-colab/claude-token`, en modo 600 | — | Laptop, el usuario | No | **Sí** |
+| 5 | Los tres cambios de `orquestador/colab/`: `codegraph` en la revisión, el borrado del token y las unidades | Nada; puede hacerse ya | Laptop, el orquestador | No | No |
+| 6 | La Tarea 164, con su punto 4 | Los pasos 4 y 5 | Colab, builder high-mem | Lo que use el builder | No |
+| 7 | Armar la cadena con la 164, y su suite con podman | El paso 6 | Laptop, podman | No | No |
+| 8 | Una corrida de `corre` sobre b8d0db4058 con su lock real | El paso 7 | Laptop, podman y builder | Cerca de 0,1 USD, más el cupo de una corrida | No |
+| 9 | La mezcla de la cadena 110 a 164 | — | — | No | **Sí** |
+| 10 | Congelar la versión | Los pasos 3 y 7 | — | No | No |
+| 11 | Las doce calibraciones de oráculo con la versión congelada | El paso 10 | Colab, cuatro runtimes | No | No |
+| 12 | La pregunta de presupuesto de D3 | El paso 10 | — | No | **Sí** |
+| 13 | D3: `corre` sobre las tareas del dataset | El paso 12 | Laptop y API | Según la respuesta del paso 12 | No |
+| 14 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 10 | Laptop | Según la regla del final | No |
+| 15 | La validez sobre el final sellado | Los pasos 1 a 14 | Colab, notebook si usa el juez | Según el final | No |
+
+**Salen de la lista:** el paso 0 de la 161 y el paso 7. Los dos están hechos.
+
+**La regla de carga.** Con el builder en Colab, la laptop solo carga podman: los pasos 7 y 8. Los pasos 2, 3, 6 y 11 van en Colab. El paso 6 usa un runtime high-mem. Si coincide con las doce calibraciones, el orquestador revisa el cupo de la cuenta.
+
+**Preguntas al usuario:** ninguna nueva.
