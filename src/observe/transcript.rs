@@ -8,8 +8,9 @@
 //! - `nombre`: un archivo o una función `def test_...` del oráculo oculto que no aparece en
 //!   `contrato/` ni en `bootstrap/`. Lo que ve el builder no cuenta.
 //! - `huella`: una línea larga y única de un archivo oculto, recortada, que aparece en la entrada o
-//!   en la salida. Se descartan los imports, los comentarios y las líneas que también están en
-//!   `contrato/` o en `bootstrap/`. Lo que el builder ya ve no es una huella.
+//!   en la salida. Se descartan los imports, los `use`, los comentarios y las líneas que también
+//!   están en `contrato/` o en `bootstrap/`. Lo que el builder ya ve no es una huella. En un diff
+//!   (`.diff` o `.patch`) solo cuentan las líneas agregadas, sin el `+`.
 //!
 //! Cada motivo da como mucho un `OraculoLeido` por llamada. La cita es el fragmento que coincidió,
 //! recortado a 200 caracteres: nunca más que la línea que coincidió.
@@ -214,8 +215,9 @@ impl HuellasOraculo {
         let mut conteo: BTreeMap<String, usize> = BTreeMap::new();
         for archivo in &ocultos {
             nombres.insert(nombre_de(archivo));
-            for linea in leer_lossy(archivo)?.lines() {
-                if let Some(nombre) = nombre_de_test(linea) {
+            let texto = leer_lossy(archivo)?;
+            for linea in lineas_que_cuentan(archivo, &texto) {
+                if let Some(nombre) = nombre_de_test(&linea) {
                     nombres.insert(nombre);
                 }
                 let limpia = linea.trim();
@@ -292,6 +294,26 @@ fn nombre_de(ruta: &Path) -> String {
     ruta.file_name()
         .map(|nombre| nombre.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// Un archivo oculto es diff si su nombre termina en `.diff` o `.patch`.
+fn es_diff(archivo: &Path) -> bool {
+    let nombre = nombre_de(archivo);
+    nombre.ends_with(".diff") || nombre.ends_with(".patch")
+}
+
+/// Líneas de un archivo oculto que cuentan para nombres y huellas. En un diff solo cuentan las
+/// líneas agregadas, sin el `+`. Cabeceras, contexto y líneas quitadas no cuentan.
+fn lineas_que_cuentan(archivo: &Path, texto: &str) -> Vec<String> {
+    if !es_diff(archivo) {
+        return texto.lines().map(str::to_string).collect();
+    }
+    texto
+        .lines()
+        .filter(|linea| !linea.starts_with("+++ "))
+        .filter_map(|linea| linea.strip_prefix('+'))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Revisa un transcript y devuelve un `OraculoLeido` por hallazgo.
@@ -582,11 +604,13 @@ fn nombre_de_test(linea: &str) -> Option<String> {
     nombre.starts_with("test_").then_some(nombre)
 }
 
-/// Una línea del oráculo oculto sirve de huella si es larga y no es import ni comentario.
+/// Una línea del oráculo oculto sirve de huella si es larga y no es import, `use` ni comentario.
 fn es_huella_candidata(linea: &str) -> bool {
     const PREFIJOS_COMENTARIO: [&str; 6] = ["#", "//", "/*", "*", "\"\"\"", "'''"];
     linea.chars().count() >= LARGO_HUELLA
         && !linea.starts_with("import ")
+        && !linea.starts_with("use ")
+        && !linea.starts_with("pub use ")
         && !(linea.starts_with("from ") && linea.contains(" import "))
         && !PREFIJOS_COMENTARIO
             .iter()
@@ -869,5 +893,148 @@ mod tests {
             "{:?}",
             huellas.lineas
         );
+    }
+
+    /// Oráculo con `oculto/<nombre>` de contenido `contenido`. Devuelve `ROOT_HOME`.
+    fn oraculo_con_oculto(tmp: &tempfile::TempDir, nombre: &str, contenido: &str) -> PathBuf {
+        let base = tmp.path().canonicalize().expect("canónica");
+        let root = base.join("home/.local/share/root");
+        escribir_archivo(&root.join("oraculos/x/oculto").join(nombre), contenido);
+        root
+    }
+
+    /// Transcript de una sola llamada `Bash` cuya salida es `salida`.
+    fn transcript_con_salida(tmp: &tempfile::TempDir, salida: &str) -> PathBuf {
+        escribir_transcript(
+            tmp,
+            &[
+                json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "d1", "name": "Bash", "input": {"command": "cat cambios"}}]}}).to_string(),
+                json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "d1", "content": salida}]}}).to_string(),
+            ],
+        )
+    }
+
+    #[test]
+    fn diff_cabecera_diff_git_no_es_huella() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_con_oculto(
+            &tmp,
+            "tests.diff",
+            "diff --git a/src/modulo_largo/archivo_produccion.rs b/src/modulo_largo/archivo_produccion.rs\n+    assert_eq!(calcular_total(&pedido_de_prueba), 1234);\n",
+        );
+        let ruta = transcript_con_salida(
+            &tmp,
+            "diff --git a/src/modulo_largo/archivo_produccion.rs b/src/modulo_largo/archivo_produccion.rs",
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        let eventos = revisar_transcript(&ruta, "c1", &huellas).expect("revisa");
+        assert!(eventos.is_empty(), "{eventos:?}");
+    }
+
+    #[test]
+    fn diff_cabeceras_menos_y_mas_y_hunk_no_son_huella() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_con_oculto(
+            &tmp,
+            "tests.diff",
+            "--- a/src/modulo_largo/archivo_produccion.rs\n+++ b/src/modulo_largo/archivo_produccion.rs\n@@ -10,6 +10,20 @@ fn nombre_de_funcion_muy_larga_aqui()\n",
+        );
+        let ruta = transcript_con_salida(
+            &tmp,
+            "--- a/src/modulo_largo/archivo_produccion.rs\n+++ b/src/modulo_largo/archivo_produccion.rs\n@@ -10,6 +10,20 @@ fn nombre_de_funcion_muy_larga_aqui()",
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        let eventos = revisar_transcript(&ruta, "c1", &huellas).expect("revisa");
+        assert!(eventos.is_empty(), "{eventos:?}");
+    }
+
+    #[test]
+    fn diff_linea_agregada_larga_es_huella() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_con_oculto(
+            &tmp,
+            "tests.diff",
+            "diff --git a/src/x.rs b/src/x.rs\n+    assert_eq!(calcular_total(&pedido_de_prueba), 1234);\n",
+        );
+        let ruta = transcript_con_salida(
+            &tmp,
+            "    assert_eq!(calcular_total(&pedido_de_prueba), 1234);",
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        let eventos = revisar_transcript(&ruta, "c1", &huellas).expect("revisa");
+        assert_eq!(eventos.len(), 1, "{eventos:?}");
+        assert_eq!(eventos[0].extra["motivo"], "huella");
+    }
+
+    #[test]
+    fn diff_linea_de_contexto_larga_no_es_huella() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_con_oculto(
+            &tmp,
+            "tests.diff",
+            "diff --git a/src/x.rs b/src/x.rs\n     assert_eq!(calcular_total(&pedido_de_contexto), 1234);\n",
+        );
+        let ruta = transcript_con_salida(
+            &tmp,
+            "     assert_eq!(calcular_total(&pedido_de_contexto), 1234);",
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        let eventos = revisar_transcript(&ruta, "c1", &huellas).expect("revisa");
+        assert!(eventos.is_empty(), "{eventos:?}");
+    }
+
+    #[test]
+    fn diff_linea_quitada_larga_no_es_huella() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_con_oculto(
+            &tmp,
+            "tests.diff",
+            "diff --git a/src/x.rs b/src/x.rs\n-    assert_eq!(calcular_total(&pedido_de_antes), 999);\n",
+        );
+        let ruta = transcript_con_salida(
+            &tmp,
+            "-    assert_eq!(calcular_total(&pedido_de_antes), 999);",
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        let eventos = revisar_transcript(&ruta, "c1", &huellas).expect("revisa");
+        assert!(eventos.is_empty(), "{eventos:?}");
+    }
+
+    #[test]
+    fn use_largo_de_rust_no_es_huella() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let uso = "use paquete::modulo::TipoConNombreLargoParaPasar40;";
+        let root = oraculo_con_oculto(&tmp, "t.rs", &format!("{uso}\n"));
+        let ruta = transcript_con_salida(&tmp, uso);
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        let eventos = revisar_transcript(&ruta, "c1", &huellas).expect("revisa");
+        assert!(eventos.is_empty(), "{eventos:?}");
+        assert!(!es_huella_candidata(&format!("pub {uso}")));
+    }
+
+    #[test]
+    fn guarda_archivo_que_no_es_diff_se_lee_como_hoy() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let linea_rs = "    assert_eq!(calcular_total(&pedido_de_prueba), 1234);";
+        let root = oraculo_con_oculto(&tmp, "t.rs", &format!("{linea_rs}\n"));
+        escribir_archivo(
+            &root.join("oraculos/x/oculto/t.py"),
+            &format!("{LINEA_UNICA}\n"),
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        assert!(
+            huellas.lineas.contains(&linea_rs.trim().to_string()),
+            "{:?}",
+            huellas.lineas
+        );
+        assert!(
+            huellas.lineas.contains(&LINEA_UNICA.to_string()),
+            "{:?}",
+            huellas.lineas
+        );
+        let ruta = transcript_con_salida(&tmp, linea_rs);
+        let eventos = revisar_transcript(&ruta, "c1", &huellas).expect("revisa");
+        assert_eq!(eventos.len(), 1, "{eventos:?}");
+        assert_eq!(eventos[0].extra["motivo"], "huella");
     }
 }
