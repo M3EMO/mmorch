@@ -79,7 +79,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t track listar [--tarea t]` | Lista las filas, opcionalmente de una tarea. | lista de `Fila` | construido |
 | `r00t track comparar --a <c1> --b <c2> --tarea <t>` | Compara dos corridas de una tarea. | comparación | construido |
 | `r00t aprende [--replay]` | Recalcula `politica.json`. Con `--replay`, mide la política sin escribirla. | `Politica`, o `Replay` | construido |
-| `r00t corre --tarea <t> --config <c> [--reanuda <id>]` | Corre una tarea con una configuración (con `--json` global, imprime la fila completa): rutea todos los roles, los lanza por el contenedor del builder, registra sus sesiones y lecturas, evalúa y agrega una fila a `runs.jsonl`. Sin GOAL autorizado no arranca. Con `--reanuda <id>`, retoma una corrida cortada: su id empieza con `corre-<t>-<c>-` y su carpeta en `$HOME/.cache/root/corridas/<id>` trae `repo/`. Si no, sale con `2` y no lanza nada. Los roles que terminaron no se lanzan otra vez. El primer rol sin `result` exitoso retoma con `--resume` si tenía sesión. La fila lleva `reanudada: true` y `vueltas`, con todos los lanzamientos. Si hubo vuelta de eficiencia, la fila lleva `vuelta_eficiencia`. | `Fila` | construido (Tareas 16 y 26, capa 1). Lanza cada rol en el contenedor `root-builder:1`, sin `ROOT_HOME` y con la credencial de Claude en solo lectura. Sin credencial, sale con `3` y no lanza nada. |
+| `r00t corre --tarea <t> --config <c> [--reanuda <id>]` | Corre una tarea con una configuración (con `--json` global, imprime la fila completa): rutea todos los roles, los lanza por el contenedor del builder, registra sus sesiones y lecturas, evalúa y agrega una fila a `runs.jsonl`. Sin GOAL autorizado no arranca. Con `--reanuda <id>`, retoma una corrida cortada: su id empieza con `corre-<t>-<c>-` y su carpeta en `$HOME/.cache/root/corridas/<id>` trae `repo/`. Si no, sale con `2` y no lanza nada. Los roles que terminaron no se lanzan otra vez. El primer rol sin `result` exitoso retoma con `--resume` si tenía sesión. La fila lleva `reanudada: true` y `vueltas`, con todos los lanzamientos. Si hubo vuelta de eficiencia, la fila lleva `vuelta_eficiencia`. Si hubo vuelta de instalación, la fila lleva `vuelta_instalacion`. | `Fila` | construido (Tareas 16 y 26, capa 1). Lanza cada rol en el contenedor `root-builder:1`, sin `ROOT_HOME` y con la credencial de Claude en solo lectura. Sin credencial, sale con `3` y no lanza nada. |
 | `r00t goal verificar` | Verifica que `GOAL.md` coincida con `GOAL.hash`. | `{ok, hash}` | construido |
 | `r00t goal autorizar` | Autoriza un cambio al GOAL. Exige una TTY y una confirmación tecleada. | sin salida JSON | construido |
 | `r00t importar-mmorch --desde <metrics.jsonl>` | Copia en solo lectura el log de métricas de mmorch. | resumen de la importación | construido |
@@ -2438,6 +2438,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "default": null
     },
+    "vuelta_instalacion": {
+      "description": "Vuelta de instalación: solo la lleva una corrida con corte de instalación. Las filas anteriores la leen en `None`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VueltaInstalacion"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "vueltas": {
       "description": "Lanzamientos de `claude` de la corrida, sumando los de antes de reanudarla. Las filas anteriores la leen en 0.",
       "type": "integer",
@@ -3639,6 +3651,38 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "required": [
         "regresiones",
         "corrio"
+      ]
+    },
+    "VueltaInstalacion": {
+      "description": "La vuelta de instalación de una corrida: el builder vuelve con el arreglo si el producto no instala.",
+      "type": "object",
+      "properties": {
+        "instalo": {
+          "description": "Verdadero si el último veredicto ya no es un corte de instalación.",
+          "type": "boolean"
+        },
+        "motivo": {
+          "description": "Por qué una vuelta no corrió o no terminó. `None` si la vuelta corrió hasta el final.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pide_humano": {
+          "description": "Verdadero si una persona debe mirar la tarea: el producto sigue sin instalar.",
+          "type": "boolean"
+        },
+        "vueltas": {
+          "description": "Vueltas del builder que se lanzaron. Como mucho, dos.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "vueltas",
+        "instalo",
+        "pide_humano"
       ]
     }
   }

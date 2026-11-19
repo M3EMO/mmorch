@@ -395,6 +395,19 @@ pub struct VueltaEficiencia {
     pub motivo: Option<String>,
 }
 
+/// La vuelta de instalación de una corrida: el builder vuelve con el arreglo si el producto no instala.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct VueltaInstalacion {
+    /// Vueltas del builder que se lanzaron. Como mucho, dos.
+    pub vueltas: u32,
+    /// Verdadero si el último veredicto ya no es un corte de instalación.
+    pub instalo: bool,
+    /// Por qué una vuelta no corrió o no terminó. `None` si la vuelta corrió hasta el final.
+    pub motivo: Option<String>,
+    /// Verdadero si una persona debe mirar la tarea: el producto sigue sin instalar.
+    pub pide_humano: bool,
+}
+
 /// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del
 /// `Veredicto`, salvo `evidencia_visible`, que también lee la tarea.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -663,6 +676,9 @@ pub struct Fila {
     /// Una corrida sin vuelta, y las filas anteriores a este campo, la leen en `None`.
     #[serde(default)]
     pub vuelta_eficiencia: Option<VueltaEficiencia>,
+    /// Vuelta de instalación: solo la lleva una corrida con corte de instalación. Las filas anteriores la leen en `None`.
+    #[serde(default)]
+    pub vuelta_instalacion: Option<VueltaInstalacion>,
 }
 
 impl Default for Fila {
@@ -682,6 +698,7 @@ impl Default for Fila {
             vueltas: 0,
             commit_binario: String::new(),
             vuelta_eficiencia: None,
+            vuelta_instalacion: None,
         }
     }
 }
@@ -826,6 +843,7 @@ mod tests {
             vueltas: 0,
             commit_binario: String::new(),
             vuelta_eficiencia: None,
+            vuelta_instalacion: None,
         }
     }
 
@@ -1360,6 +1378,35 @@ mod tests {
         let json = serde_json::to_value(&fila).expect("serializa");
         let leida: Fila = serde_json::from_value(json).expect("lee");
         assert_eq!(leida.vuelta_eficiencia, Some(vuelta));
+    }
+
+    /// Fila anterior a `vuelta_instalacion`: se lee con `None` (Tarea 117).
+    #[test]
+    fn fila_vieja_sin_vuelta_instalacion_se_lee() {
+        let mut json = serde_json::to_value(Fila::default()).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("vuelta_instalacion");
+        let vieja: Fila = serde_json::from_value(json).expect("lee");
+        assert_eq!(vieja.vuelta_instalacion, None);
+    }
+
+    /// La vuelta de instalación sale y vuelve completa en el JSON de la fila.
+    #[test]
+    fn fila_con_vuelta_instalacion_hace_round_trip() {
+        let vuelta = VueltaInstalacion {
+            vueltas: 2,
+            instalo: false,
+            motivo: Some("sin cupo".into()),
+            pide_humano: true,
+        };
+        let fila = Fila {
+            vuelta_instalacion: Some(vuelta.clone()),
+            ..Fila::default()
+        };
+        let json = serde_json::to_value(&fila).expect("serializa");
+        let leida: Fila = serde_json::from_value(json).expect("lee");
+        assert_eq!(leida.vuelta_instalacion, Some(vuelta));
     }
 
     /// Fila anterior a `commit_binario`: se lee con cadena vacía.

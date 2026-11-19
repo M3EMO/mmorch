@@ -32,13 +32,14 @@ use crate::goal::verificar_goal;
 use crate::observe::claude::registrar_sesion_claude;
 use crate::observe::transcript::{HuellasOraculo, registrar_lecturas};
 use crate::observe::{self, ErrorObserve};
+use crate::oracle::descarga::{self, Corte};
 use crate::oracle::tarea::{Tarea, cargar_en};
-use crate::oracle::{ErrorOraculo, OpcionesOraculo, comando_git};
+use crate::oracle::{ErrorOraculo, OpcionesOraculo, comando_git, corte_del_veredicto};
 use crate::route::comando::{etiqueta_via, rutear_en};
 use crate::route::politica::nombre_rol;
 use crate::tipos::{
-    Decision, Eleccion, Evento, Fila, MedidaEficiencia, Rol, TipoEvento, Veredicto, Via,
-    VueltaEficiencia,
+    Decision, Eleccion, Evento, Fila, Fuente, MedidaEficiencia, Rol, TipoEvento, Veredicto, Via,
+    VueltaEficiencia, VueltaInstalacion,
 };
 use crate::track;
 
@@ -75,6 +76,22 @@ const PROMPT_CONTINUACION: &str = "La vuelta anterior se cortó por tiempo. Revi
 const PROMPT_EFICIENCIA: &str = "La evaluación midió que tu cambio empeora la eficiencia. Bajá estas medidas sin cambiar el comportamiento y hacé commit:";
 /// Fase del `Gate` que anota por qué la vuelta de eficiencia no cambió la fila.
 const FASE_EFICIENCIA: &str = "eficiencia";
+/// Vueltas del builder cuando el producto no instala: una para el arreglo y otra para un arreglo a medias.
+const MAX_VUELTAS_INSTALACION: u32 = 2;
+/// Instrucción de la vuelta de instalación. Va antes de los hallazgos de la descarga, uno por línea.
+const PROMPT_INSTALACION: &str =
+    "El producto no instala. Arreglá lo siguiente y dejá el repo listo. Root vuelve a evaluar.";
+/// Fase del `Gate` que anota por qué la vuelta de instalación no cambió la fila.
+const FASE_INSTALACION: &str = "instalacion";
+
+/// Instrucción de la vuelta de instalación: la constante, una línea por hallazgo de la descarga y el prompt del rol.
+/// No trae nada más del oráculo: ni ids, ni citas, ni evidencia.
+fn prompt_de_instalacion(hallazgos: &[String], prompt_rol: &str) -> String {
+    let mut lineas = vec![PROMPT_INSTALACION.to_string()];
+    lineas.extend(hallazgos.iter().map(|detalle| format!("- {detalle}")));
+    lineas.push(prompt_rol.to_string());
+    lineas.join("\n")
+}
 
 /// Lo que `correr` necesita del mundo. Producción arma las de la CLI; los tests dan las suyas.
 pub struct DepsCorre<'a> {
@@ -188,6 +205,8 @@ struct ResultadoVuelta {
 /// y registra su sesión sin costo, con su duración y sus turnos (ver `registrar_corte`).
 /// Desde el segundo lanzamiento, la vigencia del login se espera antes de cada lanzamiento
 /// (ver `esperar_vigencia_del_rol`).
+/// Si la primera evaluación es un corte de instalación, hay hasta dos vueltas del builder con el arreglo
+/// (ver `vueltas_de_instalacion`).
 /// Si la primera evaluación marca regresión de eficiencia, hay una vuelta de eficiencia más
 /// (ver `correr_vuelta_eficiencia`). Su evaluación es la que cuenta.
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
@@ -382,7 +401,10 @@ fn correr_interno(
             }
         }
     };
+    // Vuelta de instalación: si el producto no instala, el builder vuelve con el arreglo, hasta dos veces.
+    let (primera, vuelta_instalacion) = vueltas_de_instalacion(&c, &mut av, primera)?;
     // Vuelta de eficiencia: si la evaluación marca regresión, un lanzamiento más y una evaluación más.
+    // Se mira el veredicto que quedó después de la instalación.
     let regresiones = regresiones_de_vuelta(&primera, &config_cargada.roles, &av.lanzados);
     let (veredicto, vuelta_eficiencia) = if regresiones.is_empty() {
         (primera, None)
@@ -420,6 +442,7 @@ fn correr_interno(
         vueltas: av.lanzamientos,
         reanudada: reanuda.is_some(),
         vuelta_eficiencia,
+        vuelta_instalacion,
         ..Fila::default()
     };
     track::agregar_en(&deps.home.join("runs.jsonl"), &fila).map_err(|fuente| ErrorCorre::Io {
@@ -661,6 +684,179 @@ fn quedarse_con_la_primera(
         corrio,
         motivo: Some(motivo),
     })
+}
+
+/// Resultado de una vuelta de instalación. `Evaluada` trae el veredicto nuevo. `Fallo` dice si hubo
+/// lanzamiento y por qué no dejó evaluación. El `Gate` de ese motivo ya quedó escrito.
+enum Intento {
+    Evaluada(Box<Veredicto>),
+    Fallo { corrio: bool, motivo: String },
+}
+
+/// Corte de instalación del veredicto: el producto no instala o el `Cargo.lock` no parsea.
+/// Con cualquier otro corte, `None`.
+fn corte_de_instalacion(veredicto: &Veredicto) -> Option<Corte> {
+    corte_del_veredicto(veredicto)
+        .filter(|corte| matches!(corte, Corte::NoInstala | Corte::LockInvalido))
+}
+
+/// Detalles de los hallazgos de la descarga del veredicto, en su orden. Son lo único del oráculo que va al builder.
+fn detalles_de_descarga(veredicto: &Veredicto) -> Vec<String> {
+    let descarga = Fuente::Sonda(descarga::SONDA_DESCARGA.to_string());
+    veredicto
+        .hallazgos
+        .iter()
+        .filter(|hallazgo| hallazgo.fuente == descarga)
+        .map(|hallazgo| hallazgo.detalle.clone())
+        .collect()
+}
+
+/// Vuelta de instalación: si la primera evaluación es un corte de instalación y los roles terminaron bien,
+/// relanza el último rol con los detalles de la descarga. Cada vuelta se evalúa otra vez. Hay como mucho
+/// `MAX_VUELTAS_INSTALACION` vueltas. Devuelve el veredicto que cuenta y su registro para la fila.
+/// Sin corte de instalación o sin roles bien, no hay registro y el veredicto sigue igual.
+/// Si la última vuelta no instala, el veredicto lleva el aviso de intervención humana.
+fn vueltas_de_instalacion(
+    c: &Lanza,
+    av: &mut Avance,
+    primera: Veredicto,
+) -> Result<(Veredicto, Option<VueltaInstalacion>), ErrorCorre> {
+    if corte_de_instalacion(&primera).is_none()
+        || !terminaron_bien(&c.config_cargada.roles, &av.lanzados)
+    {
+        return Ok((primera, None));
+    }
+    let rol = av.lanzados.last().map(|ultimo| ultimo.rol);
+    let mut veredicto = primera;
+    let mut vueltas: u32 = 0;
+    let (instalo, motivo) = loop {
+        if corte_de_instalacion(&veredicto).is_none() {
+            break (true, None);
+        }
+        if vueltas == MAX_VUELTAS_INSTALACION {
+            break (false, None);
+        }
+        let Some(rol) = rol else {
+            let motivo = "sin rol que relanzar para la vuelta de instalación".to_string();
+            gate(c.ruta_eventos, c.id, FASE_INSTALACION, motivo.clone(), None)?;
+            break (false, Some(motivo));
+        };
+        match intento_de_instalacion(c, av, rol, &veredicto, vueltas + 1)? {
+            Intento::Evaluada(nueva) => {
+                vueltas += 1;
+                veredicto = *nueva;
+            }
+            Intento::Fallo { corrio, motivo } => {
+                vueltas += u32::from(corrio);
+                break (false, Some(motivo));
+            }
+        }
+    };
+    if !instalo {
+        let detalle = primer_detalle_de_descarga(&veredicto);
+        let aviso = match &motivo {
+            None => format!(
+                "pide intervención humana: el producto no instala después de {vueltas} vueltas del builder: {detalle}"
+            ),
+            Some(_) => format!(
+                "pide intervención humana: el producto no instala y la vuelta del builder no terminó ({vueltas} vueltas corridas): {detalle}"
+            ),
+        };
+        veredicto.avisos.push(aviso);
+    }
+    let registro = VueltaInstalacion {
+        vueltas,
+        instalo,
+        motivo,
+        pide_humano: !instalo,
+    };
+    Ok((veredicto, Some(registro)))
+}
+
+/// Primer detalle de la descarga del veredicto. Sin hallazgos de la descarga, un texto fijo.
+fn primer_detalle_de_descarga(veredicto: &Veredicto) -> String {
+    detalles_de_descarga(veredicto)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "sin detalle de la descarga".to_string())
+}
+
+/// Una vuelta de instalación: relanza `rol` con la instrucción de los hallazgos del `veredicto` y evalúa el
+/// repo otra vez. Revisa solo sus transcripts nuevos y quita su copia de la credencial. Cualquier falla
+/// deja su `Gate` de fase `instalacion` y devuelve `Fallo`, con `corrio` si hubo lanzamiento.
+fn intento_de_instalacion(
+    c: &Lanza,
+    av: &mut Avance,
+    rol: Rol,
+    veredicto: &Veredicto,
+    n: u32,
+) -> Result<Intento, ErrorCorre> {
+    let prompt_rol = c
+        .config_cargada
+        .prompt
+        .get(&rol)
+        .cloned()
+        .unwrap_or_default();
+    let instruccion = prompt_de_instalacion(&detalles_de_descarga(veredicto), &prompt_rol);
+    let sesion = av
+        .lanzados
+        .last()
+        .and_then(|ultimo| sesion_de_transcript(ultimo.linea.as_bytes()));
+    // La vuelta tiene su propia copia de la credencial. La guardia la quita en todo camino de salida.
+    let guardia = GuardiaCredencial {
+        corrida: c.corrida,
+        hecho: false,
+    };
+    let desde = av.transcripts.len();
+    let antes = av.lanzamientos;
+    let fin = lanzar_rol(c, av, rol, &instruccion, sesion, false);
+    let corrio = av.lanzamientos > antes;
+    revisar_transcripts(c, &av.transcripts[desde..])?;
+    guardia.cerrar()?;
+    let motivo = match fin {
+        Ok(Fin::Codigo(0)) => None,
+        Ok(Fin::Codigo(codigo)) => Some(format!("rol {} salió con {codigo}", nombre_rol(rol))),
+        Ok(Fin::VueltasAgotadas) => Some(format!(
+            "rol {} agotó {MAX_VUELTAS} vueltas cortadas por plazo",
+            nombre_rol(rol)
+        )),
+        Ok(Fin::SinCupo) => Some(format!(
+            "sin cupo para la vuelta de instalación del rol {}",
+            nombre_rol(rol)
+        )),
+        Err(error) => Some(format!("la vuelta de instalación falló: {error}")),
+    };
+    if let Some(motivo) = motivo {
+        gate(
+            c.ruta_eventos,
+            c.id,
+            FASE_INSTALACION,
+            motivo.clone(),
+            Some(rol),
+        )?;
+        return Ok(Intento::Fallo { corrio, motivo });
+    }
+    // El estado final de la vuelta es un repo nuevo, como el de cada evaluación.
+    let repo_final = c.corrida.dir.join(format!("final-instalacion-{n}"));
+    let nueva = git_seguro::repo_limpio_desde(&c.corrida.repo, &repo_final, MENSAJE_ESTADO_FINAL)
+        .map_err(|error| format!("no se armó el estado final de la vuelta de instalación: {error}"))
+        .and_then(|()| {
+            evaluar_repo(c.deps, &repo_final, c.tarea_cargada)
+                .map_err(|error| format!("la segunda evaluación falló: {error}"))
+        });
+    match nueva {
+        Ok(veredicto) => Ok(Intento::Evaluada(Box::new(veredicto))),
+        Err(motivo) => {
+            gate(
+                c.ruta_eventos,
+                c.id,
+                FASE_INSTALACION,
+                motivo.clone(),
+                Some(rol),
+            )?;
+            Ok(Intento::Fallo { corrio, motivo })
+        }
+    }
 }
 
 /// Un transcript guardado de una corrida anterior: `<n>-<rol>.jsonl` en `transcripts/<id>/`.
@@ -933,6 +1129,15 @@ fn resultado_exitoso(stdout: &[u8]) -> Result<String, String> {
     }
 }
 
+/// Verdadero si cada rol tiene un lanzamiento y todos salieron con 0. Una vuelta de instalación agrega
+/// lanzamientos, así que no se compara la cantidad con la de roles.
+fn terminaron_bien(roles: &[Rol], lanzados: &[Lanzado]) -> bool {
+    lanzados.iter().all(|l| l.codigo == 0)
+        && roles
+            .iter()
+            .all(|rol| lanzados.iter().any(|l| l.rol == *rol))
+}
+
 /// Medidas de `eficiencia_auto` con regresión que justifican una vuelta. Vacío quiere decir: no hay vuelta.
 /// Una medida sin valor no entra: necesita regresión, razón, referencia y repo.
 fn regresiones_de_vuelta(
@@ -940,8 +1145,7 @@ fn regresiones_de_vuelta(
     roles: &[Rol],
     lanzados: &[Lanzado],
 ) -> Vec<MedidaEficiencia> {
-    let terminaron_bien = lanzados.len() == roles.len() && lanzados.iter().all(|l| l.codigo == 0);
-    if !terminaron_bien {
+    if !terminaron_bien(roles, lanzados) {
         return Vec::new();
     }
     if veredicto
@@ -1247,7 +1451,10 @@ mod tests {
     use crate::goal::{ErrorGoal, calcular_hash};
     use crate::oracle::ErrorOraculo;
     use crate::prueba_ejecutable::escribir_ejecutable;
-    use crate::tipos::{Confianza, Decision, Estado, Evento, Forma, Informe, Rol, TipoEvento, Via};
+    use crate::tipos::{
+        Confianza, Cumplimiento, Decision, Dimension, Estado, EstadoRequisito, Evento, Forma,
+        Hallazgo, Informe, Puntaje, Rol, TipoEvento, Via,
+    };
     use crate::track::{self, Filtro};
 
     const GOAL: &str = "# GOAL de prueba\n\nContenido de fixture.\n";
@@ -4490,5 +4697,407 @@ mod tests {
         let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
         assert_eq!(fila.vuelta_eficiencia, None);
         assert_eq!(fila.vueltas, 2, "sin vuelta no suma lanzamientos");
+    }
+
+    // ---- Vuelta de instalación ----
+
+    /// Detalle del hallazgo de la descarga que fabrican las pruebas de instalación.
+    const DETALLE_DESCARGA: &str =
+        "el producto no instala: error falso. Arreglo: corré `cargo update --workspace`";
+
+    /// Veredicto con un corte de la descarga: su motivo en `puntajes` y un hallazgo de la fuente `descarga`.
+    fn veredicto_de_corte(corte: Corte, marca: &str) -> Veredicto {
+        Veredicto {
+            commit: marca.into(),
+            informe: Some(informe()),
+            hallazgos: vec![Hallazgo {
+                dimension: Dimension::Funciona,
+                severidad: 3,
+                archivo: "Cargo.toml".into(),
+                linea: 1,
+                cita: "cita-de-la-descarga".into(),
+                detalle: DETALLE_DESCARGA.into(),
+                fuente: Fuente::Sonda(descarga::SONDA_DESCARGA.into()),
+                id: "hallazgo-descarga-1".into(),
+                impacto: Vec::new(),
+                previo: false,
+            }],
+            puntajes: vec![Puntaje {
+                dimension: Dimension::Funciona,
+                valor: 0.0,
+                calibrada: false,
+                exactitud_balanceada: None,
+                items: Vec::new(),
+                sin_veredicto: Some(format!(
+                    "descarga sin veredicto ({}): error falso",
+                    corte.texto()
+                )),
+                no_aplica: None,
+                faltantes: Vec::new(),
+                motivo_sin_calibrar: None,
+                inestables: Vec::new(),
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Evaluador de prueba: las primeras `hasta` llamadas traen el corte de `corte`. Las que siguen traen
+    /// un veredicto sano. Cada veredicto va marcado como `evaluacion-<n>`.
+    fn evaluador_con_corte_hasta(
+        llamadas: &Cell<u32>,
+        hasta: u32,
+        corte: Corte,
+    ) -> impl Fn(&Path, &Tarea, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + '_ {
+        move |_r: &Path, _t: &Tarea, _o: &OpcionesOraculo| {
+            llamadas.set(llamadas.get() + 1);
+            let n = llamadas.get();
+            let marca = format!("evaluacion-{n}");
+            if n <= hasta {
+                Ok(veredicto_de_corte(corte, &marca))
+            } else {
+                Ok(veredicto_marcado(&marca, false))
+            }
+        }
+    }
+
+    #[test]
+    fn corre_instalacion_el_corte_de_prueba_se_lee_como_no_instala() {
+        let veredicto = veredicto_de_corte(Corte::NoInstala, "evaluacion-1");
+        assert_eq!(corte_del_veredicto(&veredicto), Some(Corte::NoInstala));
+    }
+
+    #[test]
+    fn prompt_de_instalacion_lista_un_hallazgo_por_linea_y_cierra_con_el_rol() {
+        let texto = prompt_de_instalacion(&["uno".to_string(), "dos".to_string()], "haz hecho");
+        assert!(texto.starts_with(PROMPT_INSTALACION), "{texto}");
+        assert!(texto.contains("\n- uno\n- dos\n"), "{texto}");
+        assert!(texto.ends_with("haz hecho"), "{texto}");
+    }
+
+    #[test]
+    fn corre_instalacion_no_instala_relanza_el_ultimo_rol_con_el_detalle() {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_corte_hasta(&llamadas, 1, Corte::NoInstala);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(llamadas.get(), 2, "la primera y la de la vuelta");
+        assert_eq!(fila.vueltas, 3, "planifica, construye y la vuelta");
+        let lanzados = builder.lanzados.borrow();
+        let ultimo = lanzados.last().expect("un lanzamiento");
+        assert_eq!(ultimo.rol, Rol::Construye);
+        assert!(
+            ultimo.args[1].starts_with(PROMPT_INSTALACION),
+            "{:?}",
+            ultimo.args
+        );
+        assert!(
+            ultimo.args[1].contains(DETALLE_DESCARGA),
+            "{:?}",
+            ultimo.args
+        );
+        assert!(ultimo.args[1].ends_with("haz hecho"), "{:?}", ultimo.args);
+    }
+
+    #[test]
+    fn corre_instalacion_segunda_evaluacion_instala_y_la_fila_lleva_la_vuelta() {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_corte_hasta(&llamadas, 1, Corte::NoInstala);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(
+            fila.vuelta_instalacion,
+            Some(VueltaInstalacion {
+                vueltas: 1,
+                instalo: true,
+                motivo: None,
+                pide_humano: false,
+            })
+        );
+        assert_eq!(
+            fila.veredicto.commit, "evaluacion-2",
+            "la fila lleva la segunda"
+        );
+        assert_eq!(
+            fila.vuelta_eficiencia, None,
+            "sin regresión no hay vuelta de eficiencia"
+        );
+        let filas = track::filas_de(&e.home.join("runs.jsonl"), &Filtro::default()).expect("runs");
+        assert_eq!(filas[0].vuelta_instalacion, fila.vuelta_instalacion);
+    }
+
+    #[test]
+    fn corre_instalacion_tras_dos_vueltas_sin_instalar_pide_humano_con_el_aviso() {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_corte_hasta(&llamadas, u32::MAX, Corte::NoInstala);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(llamadas.get(), 3, "la primera evaluación y dos vueltas");
+        assert_eq!(fila.vueltas, 4, "planifica, construye y dos vueltas");
+        assert_eq!(
+            fila.vuelta_instalacion,
+            Some(VueltaInstalacion {
+                vueltas: 2,
+                instalo: false,
+                motivo: None,
+                pide_humano: true,
+            })
+        );
+        assert_eq!(
+            fila.veredicto.commit, "evaluacion-3",
+            "la fila lleva el último corte"
+        );
+        assert_eq!(corte_del_veredicto(&fila.veredicto), Some(Corte::NoInstala));
+        let aviso = format!(
+            "pide intervención humana: el producto no instala después de 2 vueltas del builder: {DETALLE_DESCARGA}"
+        );
+        assert!(
+            fila.veredicto.avisos.contains(&aviso),
+            "{:?}",
+            fila.veredicto.avisos
+        );
+    }
+
+    #[test]
+    fn corre_instalacion_fuente_no_aceptada_y_otro_corte_no_relanzan() {
+        for corte in [Corte::FuenteNoAceptada, Corte::Otro] {
+            let e = entorno();
+            let builder = Builder::default();
+            let llamadas = Cell::new(0);
+            let evaluar = evaluador_con_corte_hasta(&llamadas, u32::MAX, corte);
+            let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+            assert_eq!(llamadas.get(), 1, "{corte:?}: una sola evaluación");
+            assert_eq!(builder.lanzados.borrow().len(), 2, "{corte:?}: sin vuelta");
+            assert_eq!(fila.vuelta_instalacion, None, "{corte:?}");
+            assert!(gates(&e, FASE_INSTALACION).is_empty(), "{corte:?}");
+        }
+    }
+
+    #[test]
+    fn corre_instalacion_el_prompt_no_trae_ids_ni_citas_del_oraculo() {
+        let e = entorno();
+        let builder = Builder::default();
+        let mut primera = veredicto_de_corte(Corte::NoInstala, "evaluacion-1");
+        primera.hallazgos.push(Hallazgo {
+            dimension: Dimension::Pruebas,
+            severidad: 2,
+            archivo: "src/lib.rs".into(),
+            linea: 9,
+            cita: "cita-del-juez-secreta".into(),
+            detalle: "detalle-del-juez".into(),
+            fuente: Fuente::Juez {
+                modelo: "modelo-x".into(),
+            },
+            id: "hallazgo-juez-7".into(),
+            impacto: vec!["req-17".into()],
+            previo: false,
+        });
+        if let Some(informe) = primera.informe.as_mut() {
+            informe.requisitos.push(EstadoRequisito {
+                id: "req-17".into(),
+                titulo: "Requisito de prueba".into(),
+                peso: 1,
+                cumplimiento: Cumplimiento::Ausente,
+                evidencia: vec!["test_contrato_secreto".into()],
+                nivel: None,
+            });
+        }
+        let llamadas = Cell::new(0);
+        let evaluar = |_r: &Path, _t: &Tarea, _o: &OpcionesOraculo| {
+            llamadas.set(llamadas.get() + 1);
+            if llamadas.get() == 1 {
+                Ok(primera.clone())
+            } else {
+                Ok(veredicto_marcado("evaluacion-2", false))
+            }
+        };
+        correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        let lanzados = builder.lanzados.borrow();
+        let prompt = &lanzados.last().expect("la vuelta").args[1];
+        assert!(prompt.contains(DETALLE_DESCARGA), "{prompt}");
+        for prohibido in [
+            "hallazgo-descarga-1",
+            "cita-de-la-descarga",
+            "hallazgo-juez-7",
+            "cita-del-juez-secreta",
+            "detalle-del-juez",
+            "req-17",
+            "test_contrato_secreto",
+        ] {
+            assert!(!prompt.contains(prohibido), "{prohibido} en {prompt}");
+        }
+    }
+
+    #[test]
+    fn corre_instalacion_sin_cupo_para_la_vuelta_lleva_motivo_y_pide_humano() {
+        let e = entorno();
+        let builder = Builder::default();
+        let agota = AgotaCupoTrasLanzamiento {
+            interno: &builder,
+            home: &e.home,
+            tras: 2,
+            lanzamientos: Cell::new(0),
+        };
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_corte_hasta(&llamadas, u32::MAX, Corte::NoInstala);
+        let fila =
+            correr_con_eval(&e, &agota, &[], CONFIG, &evaluar).expect("la corrida llega a la fila");
+        assert_eq!(llamadas.get(), 1, "solo la primera evaluación");
+        assert_eq!(fila.vueltas, 2, "la vuelta no se lanza");
+        assert_eq!(fila.veredicto.commit, "evaluacion-1");
+        let vuelta = fila.vuelta_instalacion.expect("hubo corte de instalación");
+        assert_eq!(vuelta.vueltas, 0);
+        assert!(!vuelta.instalo);
+        assert!(vuelta.pide_humano);
+        assert!(
+            vuelta.motivo.as_deref().is_some_and(|m| {
+                m.contains("sin cupo para la vuelta de instalación") && m.contains("construye")
+            }),
+            "{:?}",
+            vuelta.motivo
+        );
+        let motivos = gates(&e, FASE_INSTALACION);
+        assert_eq!(motivos.len(), 1, "{motivos:?}");
+        assert_eq!(vuelta.motivo.as_deref(), Some(motivos[0].as_str()));
+    }
+
+    #[test]
+    fn corre_instalacion_instalo_y_luego_regresion_de_eficiencia_corre_las_dos_vueltas() {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar = |_r: &Path, _t: &Tarea, _o: &OpcionesOraculo| {
+            llamadas.set(llamadas.get() + 1);
+            match llamadas.get() {
+                1 => Ok(veredicto_de_corte(Corte::NoInstala, "evaluacion-1")),
+                2 => Ok(veredicto_marcado("evaluacion-2", true)),
+                n => Ok(veredicto_marcado(&format!("evaluacion-{n}"), false)),
+            }
+        };
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(
+            llamadas.get(),
+            3,
+            "la primera, la de instalación y la de eficiencia"
+        );
+        assert_eq!(
+            fila.vueltas, 4,
+            "planifica, construye, instalación y eficiencia"
+        );
+        assert_eq!(
+            fila.vuelta_instalacion,
+            Some(VueltaInstalacion {
+                vueltas: 1,
+                instalo: true,
+                motivo: None,
+                pide_humano: false,
+            })
+        );
+        let eficiencia = fila.vuelta_eficiencia.expect("hubo vuelta de eficiencia");
+        assert!(eficiencia.corrio, "{eficiencia:?}");
+        assert_eq!(eficiencia.motivo, None, "{eficiencia:?}");
+        assert_eq!(fila.veredicto.commit, "evaluacion-3");
+    }
+
+    #[test]
+    fn corre_instalacion_segunda_evaluacion_con_error_deja_el_corte_y_el_aviso() {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar = |_r: &Path, _t: &Tarea, _o: &OpcionesOraculo| {
+            llamadas.set(llamadas.get() + 1);
+            if llamadas.get() == 1 {
+                Ok(veredicto_de_corte(Corte::NoInstala, "evaluacion-1"))
+            } else {
+                Err(ErrorOraculo::Infra("segunda evaluación rota".into()))
+            }
+        };
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar)
+            .expect("la segunda evaluación rota no tira la corrida");
+        assert_eq!(
+            fila.veredicto.commit, "evaluacion-1",
+            "el último corte bueno"
+        );
+        let vuelta = fila.vuelta_instalacion.expect("hubo corte de instalación");
+        assert_eq!(vuelta.vueltas, 1);
+        assert!(!vuelta.instalo);
+        assert!(vuelta.pide_humano);
+        assert!(
+            vuelta
+                .motivo
+                .as_deref()
+                .is_some_and(|m| m.contains("segunda evaluación rota")),
+            "{:?}",
+            vuelta.motivo
+        );
+        let aviso = format!(
+            "pide intervención humana: el producto no instala y la vuelta del builder no terminó (1 vueltas corridas): {DETALLE_DESCARGA}"
+        );
+        assert!(
+            fila.veredicto.avisos.contains(&aviso),
+            "{:?}",
+            fila.veredicto.avisos
+        );
+    }
+
+    #[test]
+    fn corre_instalacion_vuelta_con_codigo_1_deja_el_corte_y_el_motivo() {
+        let e = entorno();
+        let builder = Builder {
+            falla_desde: Some(3),
+            ..Builder::default()
+        };
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_corte_hasta(&llamadas, u32::MAX, Corte::NoInstala);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar)
+            .expect("la vuelta que sale con 1 no tira la corrida");
+        assert_eq!(builder.lanzados.borrow().len(), 3, "la vuelta se lanza");
+        assert_eq!(llamadas.get(), 1, "no hay segunda evaluación");
+        assert_eq!(fila.veredicto.commit, "evaluacion-1");
+        let vuelta = fila.vuelta_instalacion.expect("hubo corte de instalación");
+        assert_eq!(vuelta.vueltas, 1);
+        assert!(!vuelta.instalo);
+        assert!(vuelta.pide_humano);
+        assert!(
+            vuelta
+                .motivo
+                .as_deref()
+                .is_some_and(|m| m.contains("salió con 1")),
+            "{:?}",
+            vuelta.motivo
+        );
+        assert_eq!(gates(&e, FASE_INSTALACION).len(), 1);
+    }
+
+    #[test]
+    fn corre_instalacion_sin_corte_la_fila_no_lleva_vuelta() {
+        let e = entorno();
+        let builder = Builder::default();
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_corte_hasta(&llamadas, 0, Corte::NoInstala);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(fila.vuelta_instalacion, None);
+        assert_eq!(fila.vueltas, 2);
+        assert_eq!(llamadas.get(), 1);
+    }
+
+    #[test]
+    fn corre_instalacion_rol_con_codigo_1_no_relanza_aunque_haya_corte_de_instalacion() {
+        let e = entorno();
+        let builder = Builder {
+            falla: Some(Rol::Planifica),
+            ..Builder::default()
+        };
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_corte_hasta(&llamadas, u32::MAX, Corte::NoInstala);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(builder.lanzados.borrow().len(), 1, "construye no corre");
+        assert_eq!(llamadas.get(), 1, "una sola evaluación");
+        assert_eq!(
+            fila.vuelta_instalacion, None,
+            "la condición del rol no se cumple"
+        );
     }
 }
