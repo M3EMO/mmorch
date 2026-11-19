@@ -14423,3 +14423,114 @@ Actualicé `docs/builds/brief-local-164.md`. También suma tres cosas:
 **La regla de carga.** Con el builder en Colab, la laptop solo carga podman: los pasos 5 y 6.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-19 (84): la 164 aceptada, y la prueba de punta a punta
+
+**Estado.**
+- **La 164 está construida en Colab,** en `laptop/tarea-164`: 6 commits sobre a88e0fb, con el informe en 53fd716. Costó 1,98 USD de API y 2874 segundos de runtime high-mem.
+- **El usuario `builder` sin privilegios anduvo,** y cada hook de pre-commit pasó.
+- **Sin podman, la suite da 4024 verdes, 0 fallas y 5 ignorados.**
+- **La suite con podman de `laptop/cadena-110-164` corre ahora en la laptop.**
+- **El builder cambió el orden** a 0, 2, 3, 1 y 4, y reemplazó el chequeo de roles de `regresiones_de_vuelta` por `terminaron_bien`. Dejó 8 preguntas.
+
+## 1. La 164: aceptada
+
+**Cumple el brief en los cinco puntos.** Cada uno tiene sus tests vistos en rojo, y sus guardas siguen verdes. El diff toca los archivos de la tabla, más `docs/interfaces.md`, regenerado, y `tests/descarga.rs`, un test que leía el literal viejo.
+
+**El orden 0, 2, 3, 1 y 4 vale.** El punto 0 fue primero, como pedía el brief. El punto 1 necesita el lector de cortes del punto 3, así que tenía que ir después.
+
+**`terminaron_bien` vale.** El chequeo viejo pedía tantos lanzamientos como roles. Con la vuelta de instalación hay un lanzamiento de más, y ese chequeo habría apagado la vuelta de Eficiencia después de una instalación arreglada. El nuevo pide dos cosas: que cada rol tenga un lanzamiento y que todos salgan con 0. En una corrida sin vueltas da lo mismo que antes.
+
+**Tres reservas:**
+1. **Falta correr con podman** `descarga_dependencia_inexistente_sin_lock_da_no_instala`. La suite de la cadena 164 lo corre ahora.
+2. **El builder no usó `codegraph`, como pedía el brief.** El orquestador corre `codegraph callers` en la laptop sobre las firmas de la sección 7 del informe, y une los resultados con los de `grep -w`. Son estas: `matar_grupo`, `corte_de_motivo`, `corte_del_veredicto`, `hallazgo_no_instala`, `hallazgo_no_instala_python`, `regresiones_de_vuelta`, `terminaron_bien` y `Fila.vuelta_instalacion`.
+3. **El Ctrl-C real no se probó a mano.** La corrida de la sección 4 lo cubre en parte: mira que no quede ningún proceso vivo.
+
+## 2. Las 8 preguntas de la 164
+
+Todas son técnicas. Ninguna va al usuario.
+
+1. **El lector del tipo de corte vive en `oracle/mod.rs`, junto a `motivo_de_corte`.** Acepto la decisión. El formato queda en un solo lugar.
+2. **Los cortes de Python `sin-version-fijada`, `solo-sdist` y `dependencias-dinamicas` quedan en `Otro`.** Acepto la decisión. Son límites de Root, no fallos del producto, y la vuelta del builder no los arregla. El dataset no tiene tareas de Python, así que el texto vago "(otro corte)" puede esperar a después de la validez.
+3. **`instalo` es verdadero si la evaluación nueva da otro corte.** Acepto la decisión. `instalo` dice que ya no hay un corte de instalación, y el veredicto dice el resto.
+4. **Pide un humano si la vuelta no corre.** Acepto la decisión. Sin cupo, o con el builder roto, nadie más arregla el producto.
+5. **Un rol con código distinto de 0 y un producto que no instala no dejan marca.** No acepto ese hueco. Es el mismo caso que la pregunta 4: el agente no pudo, así que, por P122 a, va a un humano. La fila suma `vuelta_instalacion` con 0 vueltas y `pide_humano` verdadero, con el motivo "el builder salió con código N". Va en la 165.
+6. **Las vueltas agotadas van en `avisos`, sin `Gate`.** Acepto la decisión. Un `Gate` marca un fallo de Root, y agotar las vueltas no lo es.
+7. **`ROOT_APT_ESPERA` no se valida.** Acepto la decisión. Es una variable solo para los tests.
+8. **`inventario.rs:1013` arma su propio "Cargo.lock inválido" sin el arreglo.** Es más que un texto, y va en la 165.
+   - El archivo es `src/oracle/descarga/inventario.rs`. Ahí, un `Cargo.lock` que no se puede leer se vuelve un `Rechazo`.
+   - Un rechazo da el corte "fuente no aceptada", que queda en `SinDecision`.
+   - Entonces, el mismo lock roto da `SinDecision` o `NoListo`, según qué camino lo vea primero. Eso contradice P121 a.
+   - Explica también el test viejo de `LOCK_ROTO`, que daba "fuente no aceptada".
+   - **El arreglo:** el inventario no rechaza un lock que no se puede leer. Sigue revisando las fuentes de `Cargo.toml`, y deja el lock a `preparar_rust`, que da el corte "lock inválido", con su arreglo y `NoListo`.
+
+**Además, un detalle de texto:** con 1 vuelta, el aviso dice "1 vueltas corridas". La 165 lo pasa a singular.
+
+## 3. La Tarea 165, antes de la mezcla
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | Un builder que sale con error ante un producto que no instala deja `pide_humano`, y el aviso dice "1 vuelta" en singular | `src/corre/corrida.rs` |
+| 2 | Un lock que no se puede leer deja de ser "fuente no aceptada" en el inventario, y llega a `preparar_rust` como "lock inválido" | `src/oracle/descarga/inventario.rs` |
+
+- **Base:** la punta de `laptop/tarea-164`.
+- **Corre en Colab,** como la 164.
+- **Va antes de la mezcla y de congelar.** D3 cuenta `pide_humano` en sus filas, y el hueco de la pregunta 5 cambiaría esa cuenta. Además, el punto 2 cambia la decisión de un lock roto.
+
+Brief: `docs/builds/brief-local-165.md`.
+
+## 4. La corrida de `corre` sobre b8d0db4058 con su lock real
+
+**Qué prueba:** la vuelta de instalación de punta a punta, con un builder real, y que el punto 0 no deje procesos vivos.
+
+**Va después de la 165,** con el binario de la cadena que la traiga. Si la 165 se demora, puede ir con la 164. La 165 solo agrega el caso del builder roto.
+
+**Cómo se arma:**
+1. Una copia del `ROOT_HOME` real, por ejemplo `colab-pruebas/home-corre-b8d0`. El `ROOT_HOME` real no se toca.
+2. En la copia, una variante de la tarea, `d-watchexec-b8d0db4058-lockreal`. Su `bootstrap` lleva el `Cargo.lock` real del padre, el mismo de verif-163, en vez del lock arreglado.
+3. El comando, sin claves de DeepSeek en el entorno:
+
+```sh
+ROOT_HOME=<copia> <binario de la cadena> corre --tarea d-watchexec-b8d0db4058-lockreal --config ecc-haiku
+```
+
+**Qué mirar:**
+1. **La primera evaluación** da el corte "no instala". Su hallazgo trae "corré `cargo update --workspace`".
+2. **La fila trae `vuelta_instalacion`.** Si el builder arregló el lock, trae al menos 1 vuelta, `instalo` verdadero y `pide_humano` falso. Si no lo arregló en 2 vueltas, trae `pide_humano` verdadero y el aviso. Los dos resultados son válidos, pero solo el primero muestra que la vuelta sirve.
+3. **El prompt de la vuelta no trae nada del oráculo.** `revisar_transcripts` ya marca una lectura del oráculo. Debe dar cero.
+4. **El veredicto final.** Si instaló, corren el contrato y el oculto, y la decisión ya no es `SinDecision`.
+5. **Ningún proceso vivo al terminar.**
+   - Antes de lanzar, el orquestador anota la hora.
+   - Al terminar, `ps -eo pid,lstart,comm` no debe mostrar ningún `claude`, `node`, `cargo` ni `sleep` lanzado después de esa hora.
+   - `podman ps -a` no debe mostrar contenedores de la corrida.
+6. **El costo,** según la fila y `eventos.jsonl`.
+
+**El costo esperado.** Una corrida de `corre` sobre una tarea de S2 costó de 0,7 a 1,2 USD de API. Con la vuelta de instalación, que suma un lanzamiento y una evaluación, serían **cerca de 1 a 1,5 USD**. Ese gasto cuenta contra el tope de S2, por P112 a. Tarda de 30 a 60 minutos de laptop con podman.
+
+**Corrijo un número mío.** En las vueltas (81) a (83) escribí "cerca de 0,1 USD" para esta corrida. Salió de la estimación vieja de D3, que suponía otro reparto entre API y cupo. Las corridas reales de `corre` sobre S2 costaron cerca de 1 USD de API cada una.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | La suite con podman de la cadena 164 | Nada; corre ahora | Laptop, podman | No | No |
+| 5 | `codegraph callers` sobre las firmas de la 164 | Nada | Laptop | No | No |
+| 6 | La Tarea 165 | El paso 4 | Colab, builder high-mem | Cerca de 1 USD | No |
+| 7 | Armar la cadena con la 165, y su suite con podman | El paso 6 | Laptop, podman | No | No |
+| 8 | La corrida de `corre` sobre b8d0db4058 con su lock real | El paso 7 | Laptop, podman | Cerca de 1 a 1,5 USD, contra el tope de S2 | No |
+| 9 | La mezcla de la cadena 110 a 165 | — | — | No | **Sí** |
+| 10 | Congelar la versión | Los pasos 3 y 7 | — | No | No |
+| 11 | Las doce calibraciones de oráculo con la versión congelada | El paso 10 | Colab, cuatro runtimes | No | No |
+| 12 | La pregunta de presupuesto de D3 | El paso 10 | — | No | **Sí** |
+| 13 | D3: `corre` sobre las tareas del dataset | El paso 12 | Laptop y API | Según la respuesta del paso 12 | No |
+| 14 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 10 | Laptop | Según la regla del final | No |
+| 15 | La validez sobre el final sellado | Los pasos 1 a 14 | Colab, notebook si usa el juez | Según el final | No |
+
+**El costo de D3 hay que estimarlo de nuevo.** Con cerca de 1 USD por corrida, 31 tareas dan cerca de 31 USD de API por corrida de cada una. La pregunta del paso 12 llega con esa estimación al día.
+
+**La regla de carga.** Los pasos 4, 7 y 8 usan podman en la laptop, de a uno.
+
+**Preguntas al usuario:** ninguna nueva.
