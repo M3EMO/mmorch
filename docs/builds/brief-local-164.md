@@ -1,6 +1,6 @@
 # Brief de la Tarea 164 para el builder local
 
-Este brief vale solo. No necesita otra conversación. La fuente de verdad es `.claude/plans/root.plan.md`, vuelta (81).
+Este brief vale solo. No necesita otra conversación. La fuente de verdad es `.claude/plans/root.plan.md`, vueltas (81), (82) y (83).
 
 ## Qué es Root
 
@@ -10,8 +10,10 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 ## Base, rama y roles
 
-- Arrancá desde la punta de `laptop/tarea-163`. Trae las Tareas 84 a 163 y la 162b.
-- **Arrancá cuando termine la suite con podman de la cadena 163 y la verificación de b8d0db4058.** No corras mientras el orquestador o el usuario usen podman.
+- Arrancá desde la punta de `laptop/tarea-163` (a88e0fb). Trae las Tareas 84 a 163 y la 162b.
+- **Esta tarea se construye en Colab,** en un runtime high-mem, como el usuario `builder`, sin uid 0. El hook de pre-commit corre la suite entera.
+- **La primera corrida de esta tarea frenó sin commit.** Un test de tiempo falla en Colab también sobre la base. Por eso el punto 0 va primero: sin él, ningún commit pasa el hook.
+- **No uses `--no-verify` ni saltees tests.** Si un test falla sobre la base por otro motivo, detenete y anotalo en el informe.
 - Ningún otro builder corre a la vez.
 - No uses `isolation: "worktree"` para tus subagentes.
 - Trabajá en tu propio worktree, en una rama nueva: `laptop/tarea-164`. Después de `git worktree add`, fijá `git config --worktree core.hooksPath .githooks`. Preguntale al orquestador qué worktree usar.
@@ -25,14 +27,15 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 | Punto | Podés tocar |
 |---|---|
+| 0, el grupo de procesos de `corre` | `src/corre/ejecutor.rs`, y `src/oracle/contenedor.rs` solo para reusar `matar_grupo` |
 | 1, la vuelta de instalación | `src/corre/corrida.rs`, `src/tipos.rs` |
 | 2, el arreglo concreto y los cortes de Python | `src/oracle/descarga.rs`, `src/oracle/descarga/python.rs` |
 | 3, la calibración y el motivo del corte | `src/oracle/calibra.rs`, `src/oracle/mod.rs` |
 | 4, `apt-get` con reintentos en el runtime | `tools/colab/preparar-runtime.sh`, `tests/colab_preparar.rs` |
 
-- Los cuatro puntos no comparten archivos. Corren en paralelo. El punto 1 necesita el texto del arreglo del punto 2 solo en sus tests: usá un hallazgo falso.
+- **El punto 0 va primero, solo.** Los puntos 1 a 4 no comparten archivos, y corren en paralelo después del commit del punto 0. El punto 1 necesita el texto del arreglo del punto 2 solo en sus tests: usá un hallazgo falso.
 - **Tests de otros archivos.** Podés editar un test de cualquier archivo si lee un literal o una firma que esta tarea cambia. Solo el test, no código de producción. Anotá cada uno en el informe.
-- **No toques:** `src/oracle/informe.rs`, `src/oracle/contenedor.rs`, `src/colab_calibra.rs`, el resto de `src/`, el resto de `tools/`, `imagenes/`, `rubricas/` y `$ROOT_HOME/`.
+- **No toques:** `src/oracle/informe.rs`, `src/colab_calibra.rs`, el resto de `src/`, el resto de `tools/`, `imagenes/`, `rubricas/` y `$ROOT_HOME/`. En `src/oracle/contenedor.rs`, solo la visibilidad de `matar_grupo`.
 - **No cambies `bloqueos`, `no_listo` ni `sin_decision`.**
 - **El esquema cambia solo por adición.** `Fila.vuelta_instalacion` es `Option<…>` con `#[serde(default)]`, como `vuelta_eficiencia`. Si `r00t esquema` o `docs/interfaces.md` muestran `Fila`, regeneralos.
 - **Sin dependencias nuevas** en `Cargo.toml`.
@@ -49,6 +52,11 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 ## Por qué
 
+**`corre` deja vivos los nietos de un proceso que vence.** `spawn_hijo`, en `src/corre/ejecutor.rs`, lanza sin grupo de procesos propio. Al vencer el plazo, `matar_y_recoger` mata solo al hijo directo. Un nieto sigue vivo, con las pipes abiertas. `lectura_tras_corte` espera 2 segundos por stdout y otros 2 por stderr.
+- El test `corre_proceso_vence_el_plazo_y_no_espera_el_fin` corre `sh -c "sleep 5"`. En Fedora, `/bin/sh` es bash, que hace `exec` del `sleep`, así que el kill le llega. En Ubuntu, en Colab, el `sleep` quedó como nieto. El test tardó 4,12 segundos, con un límite de 4.
+- **El defecto no es solo de Colab.** `corre` lanza `claude`, y `claude` lanza sus propios procesos: comandos, `cargo`, tests. Al vencer un plazo, esos procesos siguen corriendo en cualquier sistema.
+- `src/oracle/contenedor.rs` ya resuelve el mismo problema: lanza con `process_group(0)` y, al vencer, llama a `matar_grupo`.
+
 **El usuario decidió P121 (a) y P122 (a).** Un producto que no instala da `NoListo`. Un agente intenta arreglarlo, y si no puede, un humano. El agente es el builder: Root no toca el producto que evalúa.
 
 **`corre` ya tiene un molde.** Construye, evalúa y guarda una fila. Si la evaluación marca una regresión de Eficiencia, `regresiones_de_vuelta` pide una vuelta más. `correr_vuelta_eficiencia` relanza el último rol con un prompt que trae las regresiones, y Root evalúa otra vez. La fila guarda esa vuelta en `vuelta_eficiencia`. Falta lo mismo para un producto que no instala.
@@ -64,6 +72,22 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 ## Tarea
 
 La regla que manda: **un producto que no instala vuelve al builder con el arreglo concreto, y pide un humano si el builder no puede.** Hacé un commit por punto. Cada punto empieza con su test en rojo.
+
+### 0. El grupo de procesos de `corre`
+
+1. **`spawn_hijo` lanza con `process_group(0)`.** El hijo y todo lo que lance quedan en su propio grupo.
+2. **Al vencer el plazo, o si la espera falla, Root mata el grupo entero,** y después recoge al hijo. Reusá `matar_grupo` de `src/oracle/contenedor.rs`: hacela `pub(crate)` si hace falta. No escribas una segunda copia.
+3. **Una señal que corta a Root también mata el grupo.** Con un grupo propio, el Ctrl-C de la terminal ya no le llega al hijo. Revisá el camino de señales de `corre` y anotá cómo queda.
+4. **`KILLS_DE_PRUEBA` sigue contando** un kill por corte.
+
+**Tests en rojo primero:**
+- Unitario: `correr_proceso("sh", ["-c", "sleep 30 & echo $! > <archivo>; wait"], 100 ms)` vence. Después, el pid del archivo ya no vive. Hoy sigue vivo.
+- Unitario: ese mismo corte termina en menos de 1,5 segundos. Hoy tarda más de 4, porque el nieto retiene las pipes.
+- Guarda: `corre_proceso_vence_el_plazo_y_no_espera_el_fin` pasa, en Fedora y en Ubuntu.
+- Guarda: `corre_proceso_vencido_conserva_lo_que_alcanzo_a_dar` sigue verde.
+- Guarda: los tests de `contenedor.rs` que usan `matar_grupo` siguen verdes.
+
+**Commiteá este punto antes de empezar los demás.**
 
 ### 1. La vuelta de instalación
 
@@ -163,7 +187,7 @@ Al terminar, escribí `docs/builds/informe-local-164.md` con estas secciones:
 2. **Commits**: una tabla con punto, defecto, tests vistos en rojo y commit.
 3. **Qué falló o quedó incompleto**: cada punto sin hacer o sin probar, con su motivo.
 4. **El prompt de la vuelta de instalación**: un ejemplo con un hallazgo falso.
-5. **Los tipos de corte de Python**: cada corte de `python.rs`, y el tipo que da ahora. Además, el mensaje de `apt-get` después de 3 intentos.
+5. **Los tipos de corte de Python**: cada corte de `python.rs`, y el tipo que da ahora. Además, el mensaje de `apt-get` después de 3 intentos, y cómo quedó el camino de señales del punto 0.
 6. **Tests que cambiaron de valor**, con su motivo, y cada test de otro archivo que editaste.
 7. **Llamadores revisados**: por cada firma cambiada, los llamadores de codegraph y de grep.
 8. **Preguntas para el planner**: numeradas, con la decisión que tomó el organizador.

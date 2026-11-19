@@ -14350,3 +14350,76 @@ La primera corrida falló por la red de Ubuntu, no por la 161. Su arreglo va en 
 **La regla de carga.** Con el builder en Colab, la laptop solo carga podman: los pasos 7 y 8. Los pasos 2, 3, 6 y 11 van en Colab. El paso 6 usa un runtime high-mem. Si coincide con las doce calibraciones, el orquestador revisa el cupo de la cuenta.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-19 (83): los nietos que `corre` no mata
+
+**Estado.**
+- **El builder de la 164 corrió en Colab por primera vez.** El lanzador anduvo: la subida, el arranque, las consultas y el cierre. Duró 544 segundos de runtime high-mem y costó 0,57 USD.
+- **Sonnet construyó y revisó el punto 3, pero no commiteó, y frenó.** El hook de pre-commit corre la suite entera. Dos tests fallan en Colab también sobre la base a88e0fb:
+  - `oracle::tests::oraculo_guardar_target_que_falla_a_mitad_no_deja_destino` necesita un usuario sin privilegios, y el runtime corría como root;
+  - `corre::ejecutor::tests::corre_proceso_vence_el_plazo_y_no_espera_el_fin` tardó 4,12 segundos, con un límite de 4.
+- **El diff del punto 3 se perdió.** Sin commit no hubo bundle, y el runtime se cerró.
+- **El orquestador ya arregló el lanzador:**
+  - `trabajo-builder.sh` crea el usuario `builder` y corre `claude` con `setpriv`, sin uid 0. Eso resuelve el primer test.
+  - `trabajo-builder.sh` guarda `resultado.patch` con el diff sin commit, y `builder-colab.sh` lo baja.
+- **El builder pidió `--no-verify`, o una variable para saltear esos tests.** El orquestador no lo concedió. Hizo bien: saltear la suite saltea la barrera.
+
+## 1. El test de tiempo: el diagnóstico se confirma
+
+Leí `src/corre/ejecutor.rs` en `laptop/tarea-163`:
+- **`spawn_hijo` lanza sin grupo de procesos propio.** Es un `Command` con pipes, sin `process_group`.
+- **`matar_y_recoger` mata solo al hijo directo,** con `hijo.kill()` y `hijo.wait()`.
+- **`lectura_tras_corte` espera `GRACIA_LECTURA`, 2 segundos, por cada flujo.** Con un nieto vivo que retiene las pipes, eso da 2 segundos por stdout y 2 por stderr.
+- **El test corre `sh -c "sleep 5"`.** En Fedora, `/bin/sh` es bash, que hace `exec` del último comando, así que el kill le llega al `sleep`. En Ubuntu, `/bin/sh` es dash. Los 4,12 segundos medidos dicen que el `sleep` quedó como nieto, con las pipes abiertas.
+
+**El defecto no es solo de Colab.** `corre` lanza `claude`, y `claude` lanza sus comandos, `cargo` y tests. Al vencer un plazo, Root mata a `claude` y deja vivos a sus hijos, en cualquier sistema. El test de Ubuntu solo lo hizo visible.
+
+**El arreglo ya tiene molde en Root.** `src/oracle/contenedor.rs` lanza bwrap con `process_group(0)`, y al vencer llama a `matar_grupo`, que mata el grupo entero.
+
+## 2. La decisión: la (a), y es técnica
+
+**Va en la 164, como punto 0, primero de todos.**
+- **Es un defecto de Root,** con un arreglo conocido y un molde en el mismo crate. No cambia ninguna regla de producto.
+- **La (b), una tarea aparte, suma una vuelta entera** para un arreglo de un archivo. La 164 todavía no tiene ningún commit, así que puede empezar por ahí.
+- **La (c), bash como `/bin/sh` en Colab, esconde el defecto.** El test pasaría, y los nietos de `claude` seguirían vivos después de un plazo vencido.
+
+**Por qué va primero y solo.** El hook de pre-commit corre la suite entera. Mientras el test de tiempo falle en Colab, ningún commit pasa. El punto 0 se commitea primero, y los puntos 1 a 4 siguen en paralelo.
+
+**Un riesgo que el punto 0 cubre.** Con un grupo propio, el Ctrl-C de la terminal ya no le llega al hijo. Si Root muere por una señal sin matar el grupo, `claude` queda huérfano. El brief pide que el camino de señales de `corre` también mate el grupo, como en `contenedor.rs`.
+
+**El punto 0 en el brief:**
+- `spawn_hijo` lanza con `process_group(0)`;
+- al vencer el plazo, o si la espera falla, Root mata el grupo con `matar_grupo` de `contenedor.rs`, sin copiarla;
+- una señal que corta a Root también mata el grupo;
+- dos tests en rojo: el nieto de `sh -c "sleep 30 & ...; wait"` muere, y el corte tarda menos de 1,5 segundos.
+
+Actualicé `docs/builds/brief-local-164.md`. También suma tres cosas:
+- la tarea se construye en Colab como el usuario `builder`;
+- el builder no usa `--no-verify`;
+- si un test falla sobre la base por otro motivo, el builder se detiene y lo anota.
+
+**El orquestador repite la corrida en Colab desde a88e0fb.**
+
+## 3. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | La Tarea 164 otra vez, con el punto 0 primero | Nada; el token ya está | Colab, builder high-mem | Cerca de 1 USD | No |
+| 5 | Armar la cadena con la 164, y su suite con podman | El paso 4 | Laptop, podman | No | No |
+| 6 | Una corrida de `corre` sobre b8d0db4058 con su lock real | El paso 5 | Laptop, podman y builder | Cerca de 0,1 USD, más el cupo de una corrida | No |
+| 7 | La mezcla de la cadena 110 a 164 | — | — | No | **Sí** |
+| 8 | Congelar la versión | Los pasos 3 y 5 | — | No | No |
+| 9 | Las doce calibraciones de oráculo con la versión congelada | El paso 8 | Colab, cuatro runtimes | No | No |
+| 10 | La pregunta de presupuesto de D3 | El paso 8 | — | No | **Sí** |
+| 11 | D3: `corre` sobre las tareas del dataset | El paso 10 | Laptop y API | Según la respuesta del paso 10 | No |
+| 12 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 8 | Laptop | Según la regla del final | No |
+| 13 | La validez sobre el final sellado | Los pasos 1 a 12 | Colab, notebook si usa el juez | Según el final | No |
+
+**El paso 6 prueba también el punto 0.** Una corrida real de `corre` lanza `claude` con sus procesos. Si vence un plazo, ningún proceso debe quedar vivo después. El orquestador lo mira con `ps` al terminar.
+
+**La regla de carga.** Con el builder en Colab, la laptop solo carga podman: los pasos 5 y 6.
+
+**Preguntas al usuario:** ninguna nueva.
