@@ -14649,3 +14649,114 @@ echo "rc=$?" >> $P/corre-b8d0.out
 **La regla de carga.** Los pasos 4, 6 y 11 usan podman en la laptop, de a uno.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-19 (86): el falso "leyó el oráculo"
+
+**Estado.**
+- **La cadena 165 queda en verde con podman.** La suite dio 5 fallas en `tests/entrega.rs`, con "podman no pudo correr". Repetido solo, `tests/entrega.rs` dio 52 de 52. Esas fallas ya habían salido en las cadenas 115 y 119.
+- **La corrida de `corre` sobre b8d0db4058,** con el release de la 165 y el lock real:
+  - costó 0,95 USD de cupo y 0 de API, con 30 turnos, en 18 minutos;
+  - el veredicto es rojo: contrato 125 de 125, oculto 0 de 3;
+  - `vuelta_instalacion` es nulo: la primera evaluación instaló, así que la vuelta no corrió;
+  - no quedó ningún proceso vivo ni contenedor.
+- **Root marcó la corrida inválida, por "leyó el oráculo".** Hay 6 eventos `oraculo_leido`, todos con motivo `huella` y la misma cita: una cabecera `diff --git` de un archivo de producción, en líneas del transcript donde el builder corrió `git diff`.
+
+**Una nota sobre las 5 fallas de `tests/entrega.rs`.** Salen solo dentro de la suite entera, con podman ocupado, y pasan solas. Ya salieron tres veces. Son fallas de carga, no de código. Las anoto para revisarlas después de la validez, sin bloquear nada.
+
+## 1. El diagnóstico es correcto
+
+Leí `HuellasOraculo::armar` y `es_huella_candidata`, en `src/observe/transcript.rs`:
+- `armar` lee cada archivo de `oculto/` línea por línea. Cuenta cada línea recortada.
+- Una línea es huella si aparece **una sola vez**, si `es_huella_candidata` la acepta y si no está en el texto visible: el contrato y el `bootstrap`.
+- `es_huella_candidata` pide 40 caracteres o más, y deja fuera los `import` de Python y los comentarios. **No sabe nada de diffs.**
+- `huella_en_texto` busca cada huella como subcadena en cada línea del transcript.
+
+**Por qué falla con estas tareas.** Desde la vuelta (69), una tarea con tests en línea lleva en `oculto/` un `tests.diff`. Sus cabeceras —`diff --git a/x b/x`, `--- a/x` y `+++ b/x`— nombran archivos de producción. Pasan los 40 caracteres, aparecen una vez y no están en el `bootstrap`. Si el builder toca ese mismo archivo, su propio `git diff` imprime la misma cabecera. Eso da un falso "leyó el oráculo".
+
+**El problema es grande para D3.** En 22 de las 33 tareas del dataset, los tests ocultos están en archivos de producción. En esas tareas, cualquier builder que corra `git diff` sobre el archivo correcto quedaría inválido. D3 no se puede correr así.
+
+## 2. Otras líneas genéricas que pasan el filtro
+
+| Línea | ¿Pasa hoy? | Riesgo |
+|---|---|---|
+| Llaves solas, `#[test]`, `#[cfg(test)]`, `mod tests {` | No: tienen menos de 40 caracteres | Ninguno |
+| Cabeceras de diff: `diff --git`, `---`, `+++` | **Sí** | Alto: el builder las repite con su `git diff` |
+| Cabeceras de hunk: `@@ -10,6 +10,20 @@ fn nombre()` | **Sí,** si son largas | Medio: un hunk sobre la misma función puede repetirla |
+| `index <hash>..<hash> 100644` | A veces | Bajo: los hashes cambian, pero no conviene depender de eso |
+| Líneas de contexto de un diff, con un espacio adelante | **Sí,** si son largas | Bajo: recortadas, son código del padre, y ese código está en el `bootstrap` |
+| Líneas quitadas del diff, con `-` adelante | **Sí,** si son largas | Bajo: son código del padre, pero el `-` adelante hace que no coincidan con el `bootstrap` |
+| `use` de Rust largos, como `use paquete::modulo::Tipo;` | **Sí,** si pasan de 40 | Medio: un builder que usa la misma API escribe el mismo `use` |
+| Líneas agregadas del diff, con `+` adelante | Sí | Es la huella real: el código del test oculto |
+
+## 3. El arreglo
+
+**Root lee un diff como diff.** Para un archivo de `oculto/` que termina en `.diff` o `.patch`:
+1. Las cabeceras no cuentan: `diff --git`, `index`, `---`, `+++`, `@@`, `new file mode`, `deleted file mode`, `similarity index`, `rename from` y `rename to`.
+2. Las líneas de contexto y las quitadas no cuentan. Son código del padre.
+3. **Solo cuentan las líneas agregadas,** sin su `+`. Son el código del test oculto.
+
+**Los `use` de Rust no cuentan,** igual que los `import` de Python. Vale para `use ` y `pub use `. Un `use` dice qué API se llama, y un builder que hace bien la tarea escribe el mismo.
+
+**El resto del filtro no cambia:** 40 caracteres o más, una sola vez, y fuera del texto visible.
+
+**Un comando para revisar corridas viejas,** sin mostrar nada del oráculo: `r00t corre revisar-lectura --tarea <tarea> --transcript <ruta>`. Arma las huellas con la regla nueva, revisa el transcript e imprime solo conteos por motivo: huella y nombre. **Nunca imprime la cita,** porque una huella es una línea de un test oculto.
+
+**Toca algo que fije la versión congelada? No.** Rúbricas, prompt del juez y sondas no cambian. Pero entra antes de congelar, porque D3 depende de esta marca.
+
+Brief: `docs/builds/brief-local-166.md`.
+
+## 4. Las corridas inválidas viejas
+
+**Conviene revisarlas, porque cuestan poco y pueden cambiar una lectura.**
+- Las corridas de S2 de la vuelta (64) tuvieron marcas con otra cita, y no sabemos si eran reales.
+- Las de memora son más viejas, de antes del dataset.
+
+**Cómo, sin leer nada sellado:**
+1. El orquestador corre `revisar-lectura` sobre el transcript guardado de cada corrida, con el binario de la 166.
+2. El comando arma las huellas desde `oraculos/<tarea>/oculto/` del `ROOT_HOME` real. Root las lee, y el orquestador nunca las ve.
+3. La salida da solo conteos.
+4. **Si una corrida queda sin marcas,** el orquestador lo anota en `registro.md`: "la marca era falsa, por la regla vieja". No reescribe la fila. La fila es historia.
+5. **Si una corrida sigue con marcas,** queda inválida, y el orquestador anota el motivo, sin la cita.
+
+**Ninguna conclusión del plan depende hoy de esas corridas.** Las de S2 fueron un piloto, y las de memora son previas al dataset. La revisión es para saber, no para destrabar un paso.
+
+## 5. Cómo probar de verdad la vuelta de instalación
+
+**Por qué esta corrida instaló sola.** El builder compiló durante su trabajo. `cargo build`, sin `--locked`, reescribe el `Cargo.lock` que no cuadra. El árbol final llevó el lock ya arreglado. Root evalúa con `--locked`, y el producto instaló.
+
+**El orquestador lo puede confirmar sin código:** el `Cargo.lock` del árbol final de la corrida tiene otro SHA-256 que `9ecd5073…`.
+
+**Forzar la vuelta con una tarea real es difícil.** Casi todo defecto de `Cargo.toml` también rompe el `cargo build` del builder. Entonces el builder lo arregla solo, antes de terminar. La vuelta corre solo cuando el builder entrega algo que compila en su entorno y no instala con `--locked`.
+
+**No propongo una variante forzada.** Haría falta un interruptor de prueba en el código de producción, que fuerce el primer corte. Eso es superficie para el próximo lector, y no mide nada real.
+
+**Lo que sí queda probado:**
+- la vuelta, con los 8 tests `corre_instalacion_*` de la 164 y los de la 165, con lanzadores falsos;
+- el camino real de alrededor: la evaluación con `--locked`, el corte, el costo por cupo y la limpieza de procesos.
+
+**Lo que falta ver, y se ve solo:** D3 corre 31 tareas. Si algún builder entrega un producto que no instala, la vuelta corre de verdad. El informe de D3 cuenta cuántas vueltas hubo y cuántas pidieron un humano.
+
+## 6. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | `paso0-juez.sh` y el arrastre a Drive | — | Laptop y el usuario | No | **Sí** |
+| 2 | La etapa 1 de P107 a | El paso 1 | Colab, notebook | Cerca de 0,35 USD | No |
+| 3 | Las cinco etapas de P107 a | El paso 2 | Colab, notebook | Cerca de 18 USD | No |
+| 4 | La Tarea 166 | Nada; puede empezar ya | Colab, builder high-mem | Cerca de 1 USD | No |
+| 5 | Armar la cadena con la 166, su suite con podman y su release | El paso 4 | Laptop, podman | No | No |
+| 6 | `revisar-lectura` sobre la corrida de b8d0db4058: debe dar 0 marcas | El paso 5 | Laptop | No | No |
+| 7 | `revisar-lectura` sobre las corridas viejas de S2 y memora | El paso 5 | Laptop | No | No |
+| 8 | Pedir la mezcla de la cadena 110 a 166 | El paso 6 | — | No | **Sí** |
+| 9 | Congelar la versión | Los pasos 3 y 8 | — | No | No |
+| 10 | Las doce calibraciones de oráculo con la versión congelada | El paso 9 | Colab, cuatro runtimes | No | No |
+| 11 | La pregunta de presupuesto de D3: cupo y tiempo | El paso 9 | — | No | **Sí** |
+| 12 | D3: `corre` sobre las tareas del dataset | El paso 11 | Laptop, podman | Casi nada. Cerca de 31 USD de lista por cupo por pasada | No |
+| 13 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 9 | Laptop | Según la regla del final | No |
+| 14 | La validez sobre el final sellado | Los pasos 1 a 13 | Colab, notebook si usa el juez | Según el final | No |
+
+**El paso 6 reemplaza a otra corrida de `corre`.** El transcript de b8d0db4058 ya existe. Con la regla nueva, debe dar 0 marcas. Si da alguna, hay otra huella falsa que mirar.
+
+**La regla de carga.** El paso 5 usa podman en la laptop. Los pasos 6 y 7 solo leen.
+
+**Preguntas al usuario:** ninguna nueva.
