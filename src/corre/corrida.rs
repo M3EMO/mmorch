@@ -716,14 +716,36 @@ fn detalles_de_descarga(veredicto: &Veredicto) -> Vec<String> {
 /// `MAX_VUELTAS_INSTALACION` vueltas. Devuelve el veredicto que cuenta y su registro para la fila.
 /// Sin corte de instalación o sin roles bien, no hay registro y el veredicto sigue igual.
 /// Si la última vuelta no instala, el veredicto lleva el aviso de intervención humana.
+/// Si un rol salió con código distinto de 0, no hay vuelta: el veredicto lleva el aviso con el código y el rol,
+/// y el registro cuenta cero vueltas.
 fn vueltas_de_instalacion(
     c: &Lanza,
     av: &mut Avance,
     primera: Veredicto,
 ) -> Result<(Veredicto, Option<VueltaInstalacion>), ErrorCorre> {
-    if corte_de_instalacion(&primera).is_none()
-        || !terminaron_bien(&c.config_cargada.roles, &av.lanzados)
-    {
+    if corte_de_instalacion(&primera).is_none() {
+        return Ok((primera, None));
+    }
+    if let Some(lanzado) = av.lanzados.iter().find(|l| l.codigo != 0) {
+        let motivo = format!(
+            "el builder salió con código {} en el rol {}",
+            lanzado.codigo,
+            nombre_rol(lanzado.rol)
+        );
+        let mut veredicto = primera;
+        let detalle = primer_detalle_de_descarga(&veredicto);
+        veredicto
+            .avisos
+            .push(format!("pide intervención humana: {motivo}: {detalle}"));
+        let registro = VueltaInstalacion {
+            vueltas: 0,
+            instalo: false,
+            motivo: Some(motivo),
+            pide_humano: true,
+        };
+        return Ok((veredicto, Some(registro)));
+    }
+    if !terminaron_bien(&c.config_cargada.roles, &av.lanzados) {
         return Ok((primera, None));
     }
     let rol = av.lanzados.last().map(|ultimo| ultimo.rol);
@@ -756,10 +778,13 @@ fn vueltas_de_instalacion(
         let detalle = primer_detalle_de_descarga(&veredicto);
         let aviso = match &motivo {
             None => format!(
-                "pide intervención humana: el producto no instala después de {vueltas} vueltas del builder: {detalle}"
+                "pide intervención humana: el producto no instala después de {} del builder: {detalle}",
+                plural_vueltas(vueltas)
             ),
             Some(_) => format!(
-                "pide intervención humana: el producto no instala y la vuelta del builder no terminó ({vueltas} vueltas corridas): {detalle}"
+                "pide intervención humana: el producto no instala y la vuelta del builder no terminó ({} {}): {detalle}",
+                plural_vueltas(vueltas),
+                if vueltas == 1 { "corrida" } else { "corridas" }
             ),
         };
         veredicto.avisos.push(aviso);
@@ -771,6 +796,15 @@ fn vueltas_de_instalacion(
         pide_humano: !instalo,
     };
     Ok((veredicto, Some(registro)))
+}
+
+/// Cantidad de vueltas en singular o plural: "1 vuelta", "N vueltas".
+fn plural_vueltas(n: u32) -> String {
+    if n == 1 {
+        "1 vuelta".to_string()
+    } else {
+        format!("{n} vueltas")
+    }
 }
 
 /// Primer detalle de la descarga del veredicto. Sin hallazgos de la descarga, un texto fijo.
@@ -5033,7 +5067,7 @@ mod tests {
             vuelta.motivo
         );
         let aviso = format!(
-            "pide intervención humana: el producto no instala y la vuelta del builder no terminó (1 vueltas corridas): {DETALLE_DESCARGA}"
+            "pide intervención humana: el producto no instala y la vuelta del builder no terminó (1 vuelta corrida): {DETALLE_DESCARGA}"
         );
         assert!(
             fila.veredicto.avisos.contains(&aviso),
@@ -5096,8 +5130,102 @@ mod tests {
         assert_eq!(builder.lanzados.borrow().len(), 1, "construye no corre");
         assert_eq!(llamadas.get(), 1, "una sola evaluación");
         assert_eq!(
-            fila.vuelta_instalacion, None,
-            "la condición del rol no se cumple"
+            fila.vuelta_instalacion,
+            Some(VueltaInstalacion {
+                vueltas: 0,
+                instalo: false,
+                motivo: Some(format!(
+                    "el builder salió con código 1 en el rol {}",
+                    nombre_rol(Rol::Planifica)
+                )),
+                pide_humano: true,
+            })
+        );
+    }
+
+    #[test]
+    fn corre_instalacion_rol_con_codigo_1_pide_humano_con_el_motivo() {
+        let motivo = format!(
+            "el builder salió con código 1 en el rol {}",
+            nombre_rol(Rol::Planifica)
+        );
+        for corte in [Corte::NoInstala, Corte::LockInvalido] {
+            let e = entorno();
+            let builder = Builder {
+                falla: Some(Rol::Planifica),
+                ..Builder::default()
+            };
+            let llamadas = Cell::new(0);
+            let evaluar = evaluador_con_corte_hasta(&llamadas, u32::MAX, corte);
+            let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+            assert_eq!(llamadas.get(), 1, "{corte:?}: una sola evaluación");
+            assert_eq!(builder.lanzados.borrow().len(), 1, "{corte:?}: sin vuelta");
+            assert_eq!(
+                fila.vuelta_instalacion,
+                Some(VueltaInstalacion {
+                    vueltas: 0,
+                    instalo: false,
+                    motivo: Some(motivo.clone()),
+                    pide_humano: true,
+                }),
+                "{corte:?}"
+            );
+            assert!(
+                fila.veredicto
+                    .avisos
+                    .iter()
+                    .any(|a| a.starts_with("pide intervención humana") && a.contains(&motivo)),
+                "{corte:?}: {:?}",
+                fila.veredicto.avisos
+            );
+            assert!(gates(&e, FASE_INSTALACION).is_empty(), "{corte:?}");
+        }
+    }
+
+    #[test]
+    fn corre_instalacion_rol_con_codigo_1_y_producto_que_instala_no_lleva_vuelta() {
+        let e = entorno();
+        let builder = Builder {
+            falla: Some(Rol::Planifica),
+            ..Builder::default()
+        };
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_corte_hasta(&llamadas, 0, Corte::NoInstala);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        assert_eq!(llamadas.get(), 1, "una sola evaluación");
+        assert_eq!(fila.vuelta_instalacion, None);
+    }
+
+    #[test]
+    fn corre_instalacion_segunda_vuelta_con_codigo_1_dice_2_vueltas_corridas() {
+        let e = entorno();
+        let builder = Builder {
+            falla_desde: Some(4),
+            ..Builder::default()
+        };
+        let llamadas = Cell::new(0);
+        let evaluar = evaluador_con_corte_hasta(&llamadas, u32::MAX, Corte::NoInstala);
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar)
+            .expect("la vuelta que sale con 1 no tira la corrida");
+        assert_eq!(builder.lanzados.borrow().len(), 4, "dos vueltas se lanzan");
+        assert_eq!(llamadas.get(), 2, "la primera y la de la primera vuelta");
+        let vuelta = fila.vuelta_instalacion.expect("hubo corte de instalación");
+        assert_eq!(vuelta.vueltas, 2);
+        assert!(!vuelta.instalo);
+        assert!(vuelta.pide_humano);
+        assert!(
+            vuelta
+                .motivo
+                .as_deref()
+                .is_some_and(|m| m.contains("salió con 1")),
+            "{:?}",
+            vuelta.motivo
+        );
+        let prefijo = "pide intervención humana: el producto no instala y la vuelta del builder no terminó (2 vueltas corridas): ";
+        assert!(
+            fila.veredicto.avisos.iter().any(|a| a.starts_with(prefijo)),
+            "{:?}",
+            fila.veredicto.avisos
         );
     }
 }
