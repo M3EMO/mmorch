@@ -2298,6 +2298,29 @@ fn veredicto_de_corte(
     Ok(v)
 }
 
+/// Los cortes que `motivo_de_corte` puede escribir en un motivo.
+const CORTES: [descarga::Corte; 4] = [
+    descarga::Corte::NoInstala,
+    descarga::Corte::LockInvalido,
+    descarga::Corte::FuenteNoAceptada,
+    descarga::Corte::Otro,
+];
+
+/// El corte que escribió `motivo_de_corte` en `motivo`. Devuelve `None` si el motivo no lo tiene.
+/// El prefijo sale de `motivo_de_corte` con detalle vacío: no hay otro formato aquí.
+pub(crate) fn corte_de_motivo(motivo: &str) -> Option<descarga::Corte> {
+    CORTES
+        .into_iter()
+        .find(|c| motivo.starts_with(&motivo_de_corte(c.texto(), "")))
+}
+
+/// El primer corte de la descarga en `v`, leído de los motivos de sus puntajes. `None` si no hay ninguno.
+pub(crate) fn corte_del_veredicto(v: &Veredicto) -> Option<descarga::Corte> {
+    v.puntajes
+        .iter()
+        .find_map(|p| p.sin_veredicto.as_deref().and_then(corte_de_motivo))
+}
+
 /// Carga la tarea `nombre` de `ROOT_HOME` y la evalúa con las opciones por defecto.
 /// La usan `r00t oraculo evaluar` y la herramienta MCP `root_evaluar`.
 pub fn evaluar_por_nombre(nombre: &str, repo: &Path) -> Result<Veredicto, ErrorOraculo> {
@@ -8254,6 +8277,41 @@ mod tests {
                 assert!(motivo.contains("descarga"), "{corte:?}: {motivo}");
             }
         }
+    }
+
+    #[test]
+    fn corte_de_motivo_ida_y_vuelta_para_cada_variante() {
+        let cortes = [
+            descarga::Corte::NoInstala,
+            descarga::Corte::LockInvalido,
+            descarga::Corte::FuenteNoAceptada,
+            descarga::Corte::Otro,
+        ];
+        for c in cortes {
+            let motivo = motivo_de_corte(c.texto(), "detalle con (paréntesis): y dos puntos");
+            assert_eq!(corte_de_motivo(&motivo), Some(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn corte_de_motivo_motivo_ajeno_da_none() {
+        assert_eq!(corte_de_motivo("no compila"), None);
+        assert_eq!(corte_de_motivo(""), None);
+    }
+
+    #[test]
+    fn corte_del_veredicto_sin_cortes_da_none_y_con_corte_da_some() {
+        let base = tempfile::tempdir().expect("base");
+        assert_eq!(corte_del_veredicto(&veredicto_sano(base.path())), None);
+        let cortado = veredicto_de_corte_de_prueba(
+            base.path(),
+            descarga::Corte::LockInvalido,
+            vec![hallazgo_de_corte("detalle del corte")],
+        );
+        assert_eq!(
+            corte_del_veredicto(&cortado),
+            Some(descarga::Corte::LockInvalido)
+        );
     }
 
     #[test]

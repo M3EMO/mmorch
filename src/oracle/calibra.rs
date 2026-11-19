@@ -24,8 +24,8 @@ use super::rubrica::{Mide, Rubrica, cargar_embebidas};
 use super::tarea::{Equivalente, Tarea};
 use super::{
     AVISO_TARGET_FRIO, CARPETA_TEMPORALES, DuracionesSuites, ErrorOraculo, MOTIVO_SUITE_PLAZO,
-    OpcionesOraculo, Partes, PlazosSuites, Target, con_plazos_suites, partes_de, temporal,
-    tomar_duraciones_suites,
+    OpcionesOraculo, Partes, PlazosSuites, Target, con_plazos_suites, corte_del_veredicto,
+    partes_de, temporal, tomar_duraciones_suites,
 };
 use crate::borrado;
 use crate::config::Config;
@@ -3033,8 +3033,10 @@ const MOTIVOS_DE_CONSTRUCCION: [&str; 2] = ["no compila", "fallan sin mutaciones
 /// Si el defecto rompe la construcción: `dimension` queda sin veredicto, o con ítems faltantes, por un
 /// motivo de construcción fallida que la base no tiene. En Completitud y Funciona también cuenta un
 /// `no_compila` que la base no tiene: un build roto da 0 con veredicto y no trae marcador en el puntaje.
+/// Un corte de la descarga no cuenta: lo causa la descarga, no el código inyectado.
 fn rompe_la_compilacion(base: &Veredicto, veredicto: &Veredicto, dimension: Dimension) -> bool {
-    let sin_build = veredicto.no_compila && !base.no_compila;
+    let sin_build =
+        veredicto.no_compila && !base.no_compila && corte_del_veredicto(veredicto).is_none();
     if matches!(dimension, Dimension::Completitud | Dimension::Funciona) && sin_build {
         return true;
     }
@@ -8375,6 +8377,22 @@ mod tests {
             &veredicto,
             Dimension::Estructura
         ));
+    }
+
+    #[test]
+    fn rompe_la_compilacion_corte_de_descarga_no_cuenta() {
+        // Un corte de la descarga deja `no_compila`, pero no lo causa el código inyectado.
+        for dimension in [Dimension::Completitud, Dimension::Funciona] {
+            let base = veredicto_de(dimension, 1.0, None);
+            let veredicto = Veredicto {
+                no_compila: true,
+                ..con_motivo(&base, &crate::oracle::motivo_de_corte("no instala", "x"))
+            };
+            assert!(
+                !rompe_la_compilacion(&base, &veredicto, dimension),
+                "{dimension:?}"
+            );
+        }
     }
 
     fn mutante_estado(nombre: &str, estado: EstadoMutante) -> MutanteEstado {
