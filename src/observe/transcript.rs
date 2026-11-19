@@ -622,6 +622,38 @@ fn truncar(texto: &str) -> String {
     texto.chars().take(LARGO_CITA).collect()
 }
 
+/// Cuántas lecturas del oráculo hay en un transcript, por motivo. Solo números: nunca la cita.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ConteoLecturas {
+    pub ruta: usize,
+    pub huella: usize,
+    pub nombre: usize,
+}
+
+impl ConteoLecturas {
+    /// Dice si hubo al menos una lectura del oráculo.
+    pub fn marcado(&self) -> bool {
+        self.ruta + self.huella + self.nombre > 0
+    }
+}
+
+/// Revisa un transcript con `revisar_transcript` y cuenta sus eventos por motivo. No escribe nada.
+pub fn contar_lecturas(
+    transcript: &Path,
+    huellas: &HuellasOraculo,
+) -> Result<ConteoLecturas, ErrorObserve> {
+    let mut conteo = ConteoLecturas::default();
+    for evento in revisar_transcript(transcript, "revisar-lectura", huellas)? {
+        match evento.extra.get("motivo").and_then(Value::as_str) {
+            Some("ruta") => conteo.ruta += 1,
+            Some("huella") => conteo.huella += 1,
+            Some("nombre") => conteo.nombre += 1,
+            _ => {}
+        }
+    }
+    Ok(conteo)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

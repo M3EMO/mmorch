@@ -66,15 +66,18 @@ pub enum Comando {
         #[arg(long)]
         replay: bool,
     },
-    /// Corre una tarea con una configuración.
+    /// Corre una tarea con una configuración, o revisa sus lecturas con `revisar-lectura`.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Corre {
         #[arg(long)]
-        tarea: String,
+        tarea: Option<String>,
         #[arg(long)]
-        config: String,
+        config: Option<String>,
         /// Retoma una corrida cortada: su id `corre-<tarea>-<config>-...`, con su carpeta en `$HOME`.
         #[arg(long)]
         reanuda: Option<String>,
+        #[command(subcommand)]
+        accion: Option<CorreAccion>,
     },
     /// Verifica o autoriza el GOAL.
     Goal {
@@ -170,6 +173,20 @@ impl From<ProveedorJuez> for crate::tipos::Proveedor {
             ProveedorJuez::Anthropic => crate::tipos::Proveedor::Anthropic,
         }
     }
+}
+
+/// Subcomandos de `corre`. Sin subcomando, `corre` corre una tarea.
+#[derive(Debug, Subcommand)]
+pub enum CorreAccion {
+    /// Cuenta las lecturas del oráculo en un transcript. Solo imprime conteos; no escribe nada.
+    #[command(name = "revisar-lectura")]
+    RevisarLectura {
+        #[arg(long)]
+        tarea: String,
+        /// Transcript de `claude -p --output-format stream-json`.
+        #[arg(long)]
+        transcript: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -481,7 +498,10 @@ impl Comando {
                 TrackAccion::Comparar { .. } => "track comparar",
             },
             Comando::Aprende { .. } => "aprende",
-            Comando::Corre { .. } => "corre",
+            Comando::Corre { accion, .. } => match accion {
+                Some(CorreAccion::RevisarLectura { .. }) => "corre revisar-lectura",
+                None => "corre",
+            },
             Comando::Goal { accion } => match accion {
                 GoalAccion::Verificar => "goal verificar",
                 GoalAccion::Autorizar => "goal autorizar",
@@ -819,5 +839,75 @@ mod tests {
             } => assert_eq!(ida, Some(PathBuf::from("ida.tar.gz"))),
             otro => panic!("se esperaba colab importar, llegó {otro:?}"),
         }
+    }
+
+    #[test]
+    fn corre_revisar_lectura_parsea_tarea_y_transcript() {
+        let cli = Cli::try_parse_from([
+            "r00t",
+            "corre",
+            "revisar-lectura",
+            "--tarea",
+            "t",
+            "--transcript",
+            "p",
+        ])
+        .expect("corre revisar-lectura parsea");
+        match cli.comando {
+            Comando::Corre {
+                accion: Some(CorreAccion::RevisarLectura { tarea, transcript }),
+                ..
+            } => {
+                assert_eq!(tarea, "t");
+                assert_eq!(transcript, PathBuf::from("p"));
+            }
+            otro => panic!("se esperaba corre revisar-lectura, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn corre_con_tarea_y_config_sigue_parseando_igual() {
+        let cli = Cli::try_parse_from(["r00t", "corre", "--tarea", "t", "--config", "c"])
+            .expect("corre con tarea y config parsea");
+        match cli.comando {
+            Comando::Corre {
+                accion: None,
+                tarea: Some(tarea),
+                config: Some(config),
+                reanuda: None,
+            } => assert_eq!((tarea.as_str(), config.as_str()), ("t", "c")),
+            otro => panic!("se esperaba corre plano, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn corre_sin_nada_no_parsea_o_llega_sin_tarea_ni_config() {
+        match Cli::try_parse_from(["r00t", "corre"]) {
+            Err(_) => {}
+            Ok(cli) => match cli.comando {
+                Comando::Corre {
+                    accion: None,
+                    tarea: None,
+                    config: None,
+                    reanuda: None,
+                } => {}
+                otro => panic!("corre sin nada no debe llenar nada: {otro:?}"),
+            },
+        }
+    }
+
+    #[test]
+    fn corre_mezclar_flags_planos_con_revisar_lectura_es_conflicto() {
+        let error = Cli::try_parse_from([
+            "r00t",
+            "corre",
+            "--tarea",
+            "t",
+            "revisar-lectura",
+            "--transcript",
+            "p",
+        ])
+        .expect_err("los flags planos y el subcomando se excluyen");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 }

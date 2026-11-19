@@ -32,8 +32,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use cli::{
-    ColabAccion, Comando, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion, ProveedorJuez,
-    TrackAccion, ViaRegistro,
+    ColabAccion, Comando, CorreAccion, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion,
+    ProveedorJuez, TrackAccion, ViaRegistro,
 };
 use ficha::{ContextoRevision, ErrorFicha, JuezProveedor, Revision};
 use oracle::tarea::Tarea;
@@ -1073,10 +1073,18 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
         } => colab_calibrar(cli.json, paquete.clone(), raiz_root.clone(), *sin_stop),
         Comando::Observa { accion } => observa(cli.json, accion),
         Comando::Corre {
-            tarea,
-            config,
+            accion: Some(CorreAccion::RevisarLectura { tarea, transcript }),
+            ..
+        } => revisar_lectura_accion(cli.json, tarea, transcript),
+        Comando::Corre {
+            tarea: Some(tarea),
+            config: Some(config),
             reanuda,
+            accion: None,
         } => corre_accion(cli.json, tarea, config, reanuda.as_deref()),
+        Comando::Corre { .. } => Err(Error::Uso(
+            "corre exige --tarea y --config, o el subcomando revisar-lectura".into(),
+        )),
         Comando::Track { accion } => track_accion(cli.json, accion),
         Comando::Aprende { replay } => aprende_accion(cli.json, *replay),
         Comando::ImportarExterno { desde } => {
@@ -1376,6 +1384,78 @@ fn corre_accion(json: bool, tarea: &str, config: &str, reanuda: Option<&str>) ->
     Ok(())
 }
 
+/// `corre revisar-lectura`: cuenta las lecturas del oráculo en el transcript. Solo imprime conteos.
+fn revisar_lectura_accion(json: bool, tarea: &str, transcript: &Path) -> Result<(), Error> {
+    let home_usuario = std::env::var_os("HOME").map(PathBuf::from);
+    let conteo = revisar_lectura(
+        &config::root_home(),
+        home_usuario.as_deref(),
+        tarea,
+        transcript,
+    )?;
+    if json {
+        let objeto = json_revision_lectura(tarea, &conteo);
+        println!("{}", serde_json::to_string_pretty(&objeto)?);
+    } else {
+        println!("{}", texto_revision_lectura(tarea, &conteo));
+    }
+    Ok(())
+}
+
+/// Cuenta las lecturas del oráculo de `tarea` en `transcript`, con `home` como ROOT_HOME. Es error de
+/// uso si el transcript no existe o si la tarea no tiene `oraculos/<tarea>/oculto/`. No escribe nada.
+fn revisar_lectura(
+    home: &Path,
+    home_usuario: Option<&Path>,
+    tarea: &str,
+    transcript: &Path,
+) -> Result<observe::transcript::ConteoLecturas, Error> {
+    oracle::pendientes::nombre_de_tarea_valido(tarea).map_err(Error::Uso)?;
+    if !transcript.is_file() {
+        return Err(Error::Uso(format!(
+            "no existe el transcript: {}",
+            transcript.display()
+        )));
+    }
+    let oculto = home.join("oraculos").join(tarea).join("oculto");
+    if !oculto.is_dir() {
+        return Err(Error::Uso(format!(
+            "la tarea {tarea} no tiene oráculo oculto: falta {}",
+            oculto.display()
+        )));
+    }
+    let huellas = observe::transcript::HuellasOraculo::armar(home, home_usuario, tarea)?;
+    Ok(observe::transcript::contar_lecturas(transcript, &huellas)?)
+}
+
+/// Texto de `revisar-lectura`: los conteos y una línea de veredicto. Nunca la cita ni la huella.
+fn texto_revision_lectura(tarea: &str, conteo: &observe::transcript::ConteoLecturas) -> String {
+    let cuenta = format!(
+        "tarea {tarea}: huella {}, nombre {}, ruta {}",
+        conteo.huella, conteo.nombre, conteo.ruta
+    );
+    let veredicto = if conteo.marcado() {
+        "marcado"
+    } else {
+        "sin marcas"
+    };
+    format!("{cuenta}\n{veredicto}")
+}
+
+/// JSON de `revisar-lectura`: solo conteos y el veredicto.
+fn json_revision_lectura(
+    tarea: &str,
+    conteo: &observe::transcript::ConteoLecturas,
+) -> serde_json::Value {
+    serde_json::json!({
+        "tarea": tarea,
+        "huella": conteo.huella,
+        "nombre": conteo.nombre,
+        "ruta": conteo.ruta,
+        "marcado": conteo.marcado(),
+    })
+}
+
 /// Subcomandos `observa`: registran eventos y muestran el resumen de una corrida.
 fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
     match accion {
@@ -1514,6 +1594,7 @@ fn imprimir_registrados(json: bool, cuantos: usize) {
 mod tests {
     use super::*;
     use clap::Parser;
+    use serde_json::json;
 
     fn version_de(
         defectos: u32,
@@ -1838,5 +1919,121 @@ mod tests {
         colab_empaquetar_con(false, pedido_empaquetar(), n, semilla, &registrar)
             .expect("empaquetar sin banderas");
         assert_eq!(*recibidos.borrow(), vec![(4, 42)]);
+    }
+
+    /// Línea única del oráculo oculto. Nunca debe salir en la salida de `revisar-lectura`.
+    const LINEA_OCULTA_LIB: &str = "assert sincronizar(tmp, \"clave-secreta-42\") == [1, 2, 3]";
+
+    /// `ROOT_HOME` de prueba con `oraculos/x/oculto/t.py` que trae `LINEA_OCULTA_LIB`.
+    fn raiz_con_oculto_lib(tmp: &tempfile::TempDir) -> PathBuf {
+        let root = tmp.path().canonicalize().expect("canónica").join("root");
+        let oculto = root.join("oraculos/x/oculto");
+        fs::create_dir_all(&oculto).expect("carpeta oculta");
+        fs::write(
+            oculto.join("t.py"),
+            format!("def test_indice(tmp):\n    {LINEA_OCULTA_LIB}\n"),
+        )
+        .expect("escribe el oculto");
+        root
+    }
+
+    /// Transcript con una llamada `Bash` cuya salida es `salida`. Devuelve su ruta.
+    fn transcript_revision(tmp: &tempfile::TempDir, salida: &str) -> PathBuf {
+        let ruta = tmp.path().join("transcript.jsonl");
+        let llamada = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r1", "name": "Bash", "input": {"command": "cat oculto"}}]}});
+        let resultado = json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "r1", "content": salida}]}});
+        fs::write(&ruta, format!("{llamada}\n{resultado}\n")).expect("escribe el transcript");
+        ruta
+    }
+
+    /// Lista (ruta, bytes) de todos los archivos bajo `raiz`, ordenada.
+    fn archivos_con_bytes(raiz: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn recorre(dir: &Path, salida: &mut Vec<(PathBuf, Vec<u8>)>) {
+            for entrada in fs::read_dir(dir).expect("lee la carpeta") {
+                let ruta = entrada.expect("entrada").path();
+                if ruta.is_dir() {
+                    recorre(&ruta, salida);
+                } else {
+                    let bytes = fs::read(&ruta).expect("lee el archivo");
+                    salida.push((ruta, bytes));
+                }
+            }
+        }
+        let mut salida = Vec::new();
+        recorre(raiz, &mut salida);
+        salida.sort();
+        salida
+    }
+
+    #[test]
+    fn revisar_lectura_con_huella_real_da_una_lectura_y_no_imprime_la_linea() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = raiz_con_oculto_lib(&tmp);
+        let ruta = transcript_revision(&tmp, &format!("salida: {LINEA_OCULTA_LIB}"));
+        let conteo = revisar_lectura(&root, None, "x", &ruta).expect("revisa");
+        assert_eq!(conteo.huella, 1, "{conteo:?}");
+        assert!(conteo.marcado());
+        let texto = texto_revision_lectura("x", &conteo);
+        assert!(!texto.contains("clave-secreta-42"), "{texto}");
+        assert!(texto.contains("marcado"), "{texto}");
+        let json = json_revision_lectura("x", &conteo).to_string();
+        assert!(!json.contains("clave-secreta-42"), "{json}");
+        assert!(json.contains("\"huella\":1"), "{json}");
+    }
+
+    #[test]
+    fn revisar_lectura_transcript_limpio_da_cero_y_sin_marcas() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = raiz_con_oculto_lib(&tmp);
+        let ruta = transcript_revision(&tmp, "nada que ver con el oráculo");
+        let conteo = revisar_lectura(&root, None, "x", &ruta).expect("revisa");
+        assert_eq!(conteo, observe::transcript::ConteoLecturas::default());
+        assert!(!conteo.marcado());
+        let texto = texto_revision_lectura("x", &conteo);
+        assert!(texto.contains("sin marcas"), "{texto}");
+        let json = json_revision_lectura("x", &conteo);
+        assert_eq!(json["marcado"], false);
+    }
+
+    #[test]
+    fn revisar_lectura_transcript_inexistente_da_error_de_uso_con_la_ruta() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = raiz_con_oculto_lib(&tmp);
+        let falta = tmp.path().join("no-existe.jsonl");
+        let error = revisar_lectura(&root, None, "x", &falta).expect_err("debe fallar");
+        match error {
+            Error::Uso(mensaje) => {
+                assert!(mensaje.contains(&falta.display().to_string()), "{mensaje}")
+            }
+            otro => panic!("se esperaba Uso, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn revisar_lectura_tarea_sin_oculto_da_error_de_uso_con_la_ruta() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = raiz_con_oculto_lib(&tmp);
+        fs::create_dir_all(root.join("oraculos/y")).expect("tarea sin oculto");
+        let ruta = transcript_revision(&tmp, "x");
+        let esperada = root.join("oraculos/y/oculto");
+        let error = revisar_lectura(&root, None, "y", &ruta).expect_err("debe fallar");
+        match error {
+            Error::Uso(mensaje) => assert!(
+                mensaje.contains(&esperada.display().to_string()),
+                "{mensaje}"
+            ),
+            otro => panic!("se esperaba Uso, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn revisar_lectura_no_crea_ni_cambia_archivos_del_root_home() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = raiz_con_oculto_lib(&tmp);
+        let ruta = transcript_revision(&tmp, &format!("{LINEA_OCULTA_LIB}\ndef test_indice(tmp):"));
+        let antes = archivos_con_bytes(&root);
+        let conteo = revisar_lectura(&root, None, "x", &ruta).expect("revisa");
+        assert!(conteo.marcado(), "{conteo:?}");
+        assert_eq!(archivos_con_bytes(&root), antes);
     }
 }
