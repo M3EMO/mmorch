@@ -89,8 +89,8 @@ pub const EXCLUIDOS: &[(&str, &str)] = &[
 // Cifras del tope de S2: decisiones del usuario, no medidas del código.
 
 /// Tope de gasto de API de S2, en USD. Con `--juez`, el manifiesto guarda lo que queda de este tope.
-/// Decisión P107 a del usuario: el tope de S2 sube a 25 USD.
-pub const TOPE_S2_USD: f64 = 25.0;
+/// P124 a del usuario: el tope de S2 sube de 25 a 30 USD.
+pub const TOPE_S2_USD: f64 = 30.0;
 
 /// Gasto de API de S2 antes del corte. Es la suma del orquestador, corrida por corrida.
 /// Fuente: P112 a del usuario.
@@ -4135,8 +4135,13 @@ mod tests {
 
     #[test]
     fn tope_s2_restante_tiene_piso_cero() {
-        assert!((tope_s2_restante(6.55) - 18.45).abs() < 1e-9);
-        assert_eq!(tope_s2_restante(30.0), 0.0);
+        assert!((tope_s2_restante(6.55) - 23.45).abs() < 1e-9);
+        assert_eq!(tope_s2_restante(31.0), 0.0);
+    }
+
+    #[test]
+    fn tope_s2_restante_con_6_97_gastados_da_23_03() {
+        assert!((tope_s2_restante(6.97) - 23.03).abs() < 1e-9);
     }
 
     #[test]
@@ -4208,7 +4213,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let gastado = gastado_s2_usd(home.path()).expect("lee eventos");
         assert!((gastado - 6.55).abs() < 1e-9, "{gastado}");
-        assert!((tope_s2_restante(gastado) - 18.45).abs() < 1e-9);
+        assert!((tope_s2_restante(gastado) - 23.45).abs() < 1e-9);
     }
 
     #[test]
@@ -4280,15 +4285,15 @@ mod tests {
         let texto =
             fs::read_to_string(extraido.path().join("manifiesto.json")).expect("manifiesto");
         let m: Manifiesto = serde_json::from_str(&texto).expect("JSON del manifiesto");
-        // Previo 6.55 + 6.55 desde el corte = 13.10 gastados; 25.00 - 13.10 = 11.90 de tope.
+        // Previo 6.55 + 6.55 desde el corte = 13.10 gastados; 30.00 - 13.10 = 16.90 de tope.
         let tope = m.tope_s2_usd.expect("tope de S2");
-        assert!((tope - 11.90).abs() < 1e-9, "{tope}");
+        assert!((tope - 16.90).abs() < 1e-9, "{tope}");
         let con_juez = &m.trabajos[0].args;
         let i = con_juez
             .iter()
             .position(|a| a == "--tope-usd")
             .expect("el trabajo con juez lleva --tope-usd");
-        assert_eq!(con_juez[i + 1], "11.90");
+        assert_eq!(con_juez[i + 1], "16.90");
         assert!(
             !m.trabajos[1].args.iter().any(|a| a == "--tope-usd"),
             "{:?}",
@@ -4299,22 +4304,45 @@ mod tests {
     #[test]
     fn con_juez_y_tope_agotado_rechaza_el_paquete() {
         let e = Escenario::con_contrato("cargo test");
-        eventos_con_api(e.home.path(), 25.0);
+        eventos_con_api(e.home.path(), 30.0);
         let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
         paquete.juez = true;
         let Err(ErrorOraculo::Uso(m)) = empaquetar(&paquete, &Doble) else {
             panic!("con juez y tope agotado debe fallar con Uso");
         };
-        // Previo 6.55 + 25.00 desde el corte = 31.55 gastados, por encima del tope de 25.
-        assert!(m.contains("31.55"), "falta el gastado: {m}");
-        assert!(m.contains("25 USD"), "falta el tope: {m}");
+        // Previo 6.55 + 30.00 desde el corte = 36.55 gastados, por encima del tope de 30.
+        assert!(m.contains("36.55"), "falta el gastado: {m}");
+        assert!(m.contains("30 USD"), "falta el tope: {m}");
         assert!(m.contains("no se arma el paquete"), "{m}");
+    }
+
+    #[test]
+    fn con_juez_y_30_desde_el_corte_rechaza_el_paquete() {
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 30.0);
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+        paquete.juez = true;
+        let Err(ErrorOraculo::Uso(m)) = empaquetar(&paquete, &Doble) else {
+            panic!("con juez y 30 USD desde el corte debe fallar con Uso");
+        };
+        assert!(m.contains("no se arma el paquete"), "{m}");
+    }
+
+    #[test]
+    fn con_juez_con_23_desde_el_corte_no_rechaza_el_paquete() {
+        // Previo 6.55 + 23.00 desde el corte = 29.55 gastados, justo bajo el tope de 30.
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 23.0);
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+        paquete.juez = true;
+        let resumen = empaquetar(&paquete, &Doble);
+        assert!(resumen.is_ok(), "29.55 USD quedan bajo el tope de 30 USD");
     }
 
     #[test]
     fn sin_juez_y_tope_agotado_el_paquete_se_arma() {
         let e = Escenario::con_contrato("cargo test");
-        eventos_con_api(e.home.path(), 25.0);
+        eventos_con_api(e.home.path(), 30.0);
         let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble);
         assert!(resumen.is_ok(), "sin juez el tope no importa");
     }
@@ -4348,7 +4376,7 @@ mod tests {
         let linea = linea_gasto_s2(&gasto_s2(home.path()).expect("lee eventos"));
         assert_eq!(
             linea,
-            "gasto de S2: 6,55 USD previos + 1,00 USD desde 2026-11-14T00:00:00Z = 7,55 USD; quedan 17,45 USD de 25"
+            "gasto de S2: 6,55 USD previos + 1,00 USD desde 2026-11-14T00:00:00Z = 7,55 USD; quedan 22,45 USD de 30"
         );
     }
 
@@ -4370,7 +4398,7 @@ mod tests {
         assert!((g.total_usd - 13.10).abs() < 1e-9, "{g:?}");
         let tope = m.tope_s2_usd.expect("tope de S2");
         assert!((g.restante_usd - tope).abs() < 1e-9, "{g:?} vs {tope}");
-        assert!((g.restante_usd - 11.90).abs() < 1e-9, "{g:?}");
+        assert!((g.restante_usd - 16.90).abs() < 1e-9, "{g:?}");
     }
 
     #[test]
