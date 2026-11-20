@@ -15193,3 +15193,99 @@ Leí `correr_runtime`, en `src/colab_calibra.rs`, en 2020ecc. Un runtime hace es
 - **c) Mantener el tope y bajar `n` de 12 a 10 en las tres dimensiones.** Cuesta cerca de 17 % menos. La cota de Wilson de 0,8 queda más justa, y una dimensión puede no llegar.
 
 Recomiendo la (a). Los 5 USD extra no se gastan si no hacen falta. En cambio, quedarse corto pierde dinero ya gastado y deja una dimensión sin calibrar.
+
+## Vuelta del 2026-11-20 (91): el tope en 30, y el transporte sin execs largos
+
+**Estado.**
+- **P124, respuesta del usuario: la (a),** subir el tope de S2 a 30 USD. **Queda decidido.**
+- **La tanda 2** duró 4027 segundos, con rc 3.
+  - Entraron Seguridad de s2-t2 y s2-t3, y Funciona de s2-t2.
+  - **Funciona de s2-t1 falló:** "colab superó 3900 s; su paquete de vuelta no llegó".
+- **Por la regla de la vuelta (90), lo que queda corre de a 2 runtimes, en serie.** Ya corre:
+  - Pruebas de s2-t1 y s2-t2;
+  - Funciona de s2-t1 y s2-t3;
+  - Completitud de s2-t1 y s2-t2;
+  - Completitud de s2-t3.
+- **Van 6 de 12 filas** en la copia `home-doce-2020ecc`. Todavía no se importó nada al `ROOT_HOME` real.
+
+## 1. La falla de 3900 s: venció la preparación
+
+**Qué paso es.** 3900 es `SEG_PREPARAR_CALIBRAR`, 3600, más `MARGEN_EXEC`, 300. Es el plazo local del exec de `preparar.py`. La salida no trae línea de trabajo para Funciona de s2-t1, así que el trabajo nunca se lanzó. La subida en trozos tiene otro plazo, 3600 sin margen, así que no fue la subida.
+
+**La preparación tarda menos de un minuto.** Desempaca el paquete y corre `preparar-runtime.sh`. El exec no volvió en 65 minutos.
+
+**Ya son tres fallas, una en cada exec largo o sin reintento:**
+
+| Runtime | Paso | Plazo | Qué se perdió |
+|---|---|---|---|
+| Pruebas de s2-t1, tanda 1 | El cierre | 900 s | El trabajo, que ya había terminado con código 0 |
+| Pruebas de s2-t2, tanda 1 | El lanzamiento | 180 s | Todo: el trabajo nunca se lanzó |
+| Funciona de s2-t1, tanda 2 | La preparación | 3900 s | Todo: el trabajo nunca se lanzó |
+
+**¿Cambia la regla de las tandas? Sí, pero no alcanza sola.**
+- La tanda de a 2 baja la carga, y sigue.
+- **Pero el defecto es de Root.** Cualquier exec largo, o cualquier exec corto sin reintento, puede cortar un runtime entero. La 161 solo sacó del exec al trabajo. Con 3 de 8 runtimes perdidos, conviene arreglarlo antes de las doce que falten, y antes de usar Colab para algo más.
+
+## 2. La Tarea 167
+
+**Dos puntos, en serie, en `src/colab_calibra.rs`:**
+1. **`TOPE_S2_USD` pasa a 30,** por P124 a. Los textos lo leen de la constante. Los tests que suponen 25 pasan a 30: por ejemplo, con 6,55 USD gastados el saldo pasa de 18,45 a 23,45.
+2. **Ningún exec largo en el transporte.** Es lo que el pedido de la vuelta no mencionaba, y sí cambia:
+   - una sola función lanza un guion aparte y consulta su estado: la de la 161, generalizada a la preparación, al trabajo y al cierre;
+   - cada paso deja su archivo de estado, y el del cierre trae `ROOT_SHA_VUELTA`;
+   - el lanzamiento es idempotente, y se reintenta hasta 3 veces sin correr un paso dos veces;
+   - las consultas toleran 5 fallas, como ya hace el trabajo;
+   - los plazos totales y el formato de los paquetes no cambian.
+
+**Base:** 2020ecc, en `claude/root-e7813e`. **Rama:** `laptop/tarea-167`. **Corre en Colab,** como las anteriores.
+
+Brief: `docs/builds/brief-local-167.md`.
+
+## 3. Cómo queda el congelamiento
+
+**El binario que mide sigue siendo el congelado,** `congelado-2020ecc/r00t`, con SHA-256 `7718f4c9…5bda1f`. Viaja adentro de cada paquete con `--binario`. Las filas salen de él.
+
+**El binario de la 167 tiene dos papeles, y ninguno mide:**
+- **arma el paquete del juez,** con el tope de 30 en su manifiesto;
+- **maneja el transporte de `colab calibrar`** desde la laptop: subir, lanzar, consultar, cerrar y bajar.
+
+**Los guiones de `tools/colab`** salen del worktree en 2020ecc, como pide `--raiz-root`. La 167 no los toca.
+
+**El formato del paquete no cambia,** así que los 12 paquetes de las doce siguen sirviendo. Con la 167, la laptop los maneja con el transporte nuevo.
+
+**`paso0-juez-2020ecc-tope30.sh`, escrito sin correr.** Lo corre el usuario.
+1. Usa dos binarios: `ARMA`, el de la 167 en `colab-pruebas/tarea-167/r00t`, y `MIDE`, el congelado.
+2. Revisa los dos SHA-256. **El de la 167 lo completa el orquestador** en `SHA_ARMA`. Mientras diga `COMPLETAR`, el guion no corre.
+3. Lleva `reparto/wt` a 2020ecc.
+4. Arma los mismos trabajos de P107 a.
+5. Corre `ARMA colab empaquetar --juez --binario MIDE`, sin claves en el entorno.
+6. Escribe el paquete aparte y lo renombra solo si `empaquetar` sale bien.
+7. Comprueba que la línea de gasto diga "de 30".
+
+**El paquete del juez de la vuelta (89) queda sin usar.** Lleva el tope de 25. No se arrastra a Drive.
+
+## 4. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | Las seis calibraciones que quedan, de a 2, con el transporte de hoy | Nada; corre ahora | Colab, CPU | No | No |
+| 2 | La Tarea 167 | Nada; puede empezar ya | Colab, builder high-mem | Cerca de 1 USD | No |
+| 3 | La suite con podman de `laptop/tarea-167`, y su release | El paso 2 | Laptop, podman | No | No |
+| 4 | Completar `SHA_ARMA` en `paso0-juez-2020ecc-tope30.sh` | El paso 3 | Laptop, el orquestador | No | No |
+| 5 | `paso0-juez-2020ecc-tope30.sh` y el arrastre a Drive | El paso 4 | Laptop y el usuario | No | **Sí** |
+| 6 | La etapa 1 de P107 a | El paso 5 | Colab, notebook | Cerca de 0,35 USD | No |
+| 7 | Las cinco etapas de P107 a | El paso 6 | Colab, notebook | De 13,5 a 17 USD, con tope en 30 | No |
+| 8 | Repetir, con el transporte de la 167, las calibraciones que falten de las doce | Los pasos 1 y 3 | Colab, CPU | No | No |
+| 9 | Revisar las filas de las doce con P102 a, e importarlas al `ROOT_HOME` real | El paso 8 | Laptop | No | No |
+| 10 | El estado de cada dimensión otra vez, con las filas nuevas | Los pasos 7 y 9 | Laptop, podman | No | No |
+| 11 | La pregunta de presupuesto de D3: cupo y tiempo | El paso 10 | — | No | **Sí** |
+| 12 | D3: `corre` sobre las tareas del dataset | El paso 11 | Laptop, podman | Casi nada. Cerca de 31 USD de lista por cupo por pasada | No |
+| 13 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 10 | Laptop | Según la regla del final | No |
+| 14 | La validez sobre el final sellado | Los pasos 1 a 13 | Colab, notebook si usa el juez | Según el final | No |
+| 15 | Después de la validez: una sola fuente para las dos versiones de las sondas de Seguridad | El paso 14 | Laptop, builder | No | No |
+
+**Sobre el paso 1.** Si alguna de las seis falla otra vez, no se repite con el transporte de hoy: va al paso 8.
+
+**La regla de carga.** Los pasos 3, 5 y 10 usan podman en la laptop, de a uno. Los pasos 1, 2, 6, 7 y 8 van en Colab. P107 a corre junto con una tanda de 2.
+
+**Preguntas al usuario:** ninguna nueva.
