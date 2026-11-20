@@ -15289,3 +15289,112 @@ Brief: `docs/builds/brief-local-167.md`.
 **La regla de carga.** Los pasos 3, 5 y 10 usan podman en la laptop, de a uno. Los pasos 1, 2, 6, 7 y 8 van en Colab. P107 a corre junto con una tanda de 2.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-20 (92): la 167 aceptada, y cómo entran las doce filas
+
+**Estado.**
+- **La 167 está hecha.** El builder corrió en Colab y costó 1,33 USD. Dejó 3 commits en `laptop/tarea-167`:
+  - 9d280e1: el tope en 30;
+  - e49f0ae: ningún exec largo en el transporte;
+  - 4939980: el informe.
+- **La suite con podman de la 167 dio 4057 pasan, 0 fallan y 5 ignorados.** El release salió con 0. El binario está en `colab-pruebas/v167/r00t`, con sha `cda4692e…`.
+- **`paso0-juez-2020ecc-tope30.sh` ya tiene el SHA del binario de la 167.** Espera al usuario.
+- **Las tandas de a 2 terminaron.** Van 11 de 12 filas en la copia `home-doce-2020ecc`.
+- **Funciona de s2-t1 falló dos veces igual,** en la tanda 2 y en la 4b: "colab superó 3900 s". Funciona de s2-t3 entró en la misma tanda.
+- **El orquestador relanzó Funciona de s2-t1 solo,** con el binario de la 167 como transporte. El paquete lleva el binario congelado.
+
+## 1. La 167: aceptada, sin bloqueos
+
+**Lo que revisé en el diff contra 2020ecc.** Toca solo `src/colab_calibra.rs`, con 775 líneas agregadas y 133 quitadas, más el informe.
+
+- **El tope:** `TOPE_S2_USD` vale 30, y los textos lo leen de la constante.
+- **Los tres pasos usan las mismas dos funciones,** `lanzar_paso` y `esperar_paso`. La preparación, cada trabajo y el cierre se lanzan aparte y se consultan. Ningún exec usa ya `--timeout 3600` ni `--timeout 600`.
+- **El lanzamiento es idempotente, y está bien hecho.** El guion de lanzar mira primero si ya existe `<paso>.pid` o `<paso>.estado`. Si existe, devuelve ese pid y sale. Si no, lanza el proceso, escribe el pid en un temporal y lo renombra.
+  - **El caso que más importa está cubierto.** El kernel corre los exec de a uno. Si el primer exec queda en la cola y Root reintenta, el reintento corre después del primero. Encuentra el pid, y no lanza otro proceso.
+- **El estado trae el código, las horas y las marcas.** Con código distinto de 0, trae las últimas 20 líneas del log. El cierre trae `ROOT_SHA_VUELTA` en sus marcas, y Root lo compara con el tar.
+- **El formato de los paquetes no cambia.** La subida en trozos y la bajada tampoco.
+
+**Una reserva, que no bloquea.** La guarda del paquete de la base usa un paquete armado a mano, no uno del binario congelado. La corrida real de Funciona de s2-t1 con la 167 es esa prueba.
+
+## 2. Las tres preguntas de la 167
+
+1. **El error de lanzar nombra el paso, "trabajo-N", y no la tarea ni la dimensión.** Acepto la decisión por ahora. El estado y el log ya nombran el trabajo. Sumar la tarea al mensaje queda para después de la validez, con la limpieza de las sondas de Seguridad.
+2. **Un estado sin pid da pid 0.** Acepto la decisión. La consulta lee el estado primero, y con el estado presente no usa el pid. Un estado sin pid solo pasa si el paso terminó antes de guardar su pid.
+3. **El plazo de la preparación corre desde el lanzamiento, y sigue en 3600 segundos.** Acepto la decisión. Ahora el plazo mide la preparación, no la espera de un exec.
+
+Ninguna va al usuario.
+
+## 3. El transporte de la 167 no rompe el congelamiento
+
+**Lo que fija el congelamiento es el binario que mide.** Ese binario viaja adentro de cada paquete, y es el congelado. Las filas salen de él, en el runtime.
+
+**El binario de la 167 hace tres cosas en la laptop:** maneja el transporte, arma el paquete del juez con el tope de 30, e importa la vuelta. Su código de importación es el mismo de 2020ecc: la 167 no lo tocó.
+
+**El commit que guardan las filas** sale de `--raiz-root`, que sigue en 2020ecc.
+
+**Si Funciona de s2-t1 vuelve a fallar con la 167:**
+1. **El error ya no es un exec colgado.** Con la 167, la preparación corre aparte. Si falla, su estado trae el código y las últimas 20 líneas de su log.
+2. **El orquestador lee esas líneas.** Si es la red, como `apt` o `rustup`, repite una vez.
+3. **Si falla igual otra vez,** el problema es del paquete de Funciona de s2-t1. El orquestador lo arma de nuevo, con el mismo guion, y repite.
+4. **Si sigue fallando,** lo informa, con el log de la preparación.
+
+**Funciona no queda sin calibrar por esa fila.** La calibración de una dimensión suma las filas de todas las tareas. Las filas viejas de s2-t1 siguen contando, y las nuevas de s2-t2 y s2-t3 ya entraron. La fila nueva de s2-t1 suma evidencia, pero no es condición.
+
+## 4. La receta para revisar e importar las doce filas
+
+**Un dato que define la receta.** Las vueltas de Colab no se guardaron, así que `colab importar` no tiene qué leer. Pero el `ROOT_HOME` real no cambió desde la copia. El primer respaldo de esta corrida en la copia, `20261120-035547`, tiene el mismo SHA-256 que el `calibracion.json` real: empieza con `bb2f6de573522a48`.
+
+**Paso 1: revisar las filas nuevas, sin importar nada.** Un guion del orquestador lee `home-doce-2020ecc/calibracion.json`. Toma las filas que no están en el real. Por cada fila imprime solo estos campos, nunca nombres de tests:
+- `tarea`, `dimension`, `n` y `semilla`;
+- `huella` y `tarea_hash`;
+- `incompleta`, `no_aplica`, `inestable` y `base_sin_veredicto`;
+- `inyecciones_distintas`, `defectos`, `defectos_sin_veredicto`, `limpios` y `limpios_sin_veredicto`;
+- `sensibilidad` y `especificidad`.
+
+**Qué mira en cada fila:**
+1. **La huella es la misma que la de las filas viejas que ya cuentan** para esa dimensión. Por ejemplo, Seguridad debe dar `6b15c7c7`.
+2. **El `tarea_hash` es el mismo que el de las filas viejas de esa tarea.**
+3. **La fila cuenta:** no es incompleta, ni `no_aplica`, ni inestable, ni `base_sin_veredicto`, y trae `inyecciones_distintas`.
+4. **La especificidad es 1.** Ningún limpio quedó marcado.
+5. **La sensibilidad** se anota. No hace falta que sea 1 en cada fila.
+
+**Qué mira en cada dimensión,** con las filas viejas y las nuevas juntas, por P102 a para dimensiones de oráculo:
+1. al menos un defecto detectado;
+2. al menos un limpio con veredicto;
+3. todos los limpios con veredicto, bien;
+4. no más de 20 % de defectos sin veredicto, ni de limpios sin veredicto.
+
+**Si una fila falla un punto de la fila, o una dimensión falla P102 a,** el orquestador no importa nada. Informa la fila, con esos campos, y la vuelta siguiente decide. **No se importa una parte de las filas:** elegir cuáles entran sesga la calibración.
+
+**Paso 2: importar, si todo está bien.**
+1. **Comprobar otra vez que el real no cambió:** el SHA-256 del `calibracion.json` real sigue empezando con `bb2f6de573522a48`. Si cambió, el orquestador frena e informa.
+2. **Respaldar el real:** copiar `calibracion.json` y `calibracion/` a `~/.local/share/root/colab/respaldos/<fecha>-antes-de-las-doce/`.
+3. **Comprobar que la copia es el real más las filas nuevas:** las primeras filas de la copia son, una por una, las filas del real.
+4. **Copiar** el `calibracion.json` de la copia sobre el real, con `calibracion.lock` tomado. Copiar los `.casos.jsonl` nuevos de `calibracion/`, sin pisar ninguno que ya exista.
+5. **Anotar en `registro.md`:** cuántas filas entraron, el SHA-256 nuevo de `calibracion.json` y el respaldo.
+
+**Paso 3: el estado con las filas nuevas.** La misma evaluación de la vuelta (88), con el binario congelado, sobre una copia nueva del real. Funciona, Seguridad, Eficiencia, Completitud y Pruebas deben seguir calibradas.
+
+## 5. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | Funciona de s2-t1 con el transporte de la 167 | Nada; corre ahora | Colab, CPU | Cerca de 0,1 unidades | Cerca de 1 hora | No |
+| 2 | Revisar las filas nuevas | El paso 1 | Laptop | Nada | Minutos | No |
+| 3 | Importar las filas al `ROOT_HOME` real | El paso 2 | Laptop | Nada | Minutos | No |
+| 4 | El estado de cada dimensión, con las filas nuevas | El paso 3 | Laptop, podman | Nada | Cerca de 20 minutos | No |
+| 5 | `paso0-juez-2020ecc-tope30.sh` y el arrastre a Drive | — | Laptop y el usuario | Nada | Cerca de 15 minutos | **Sí** |
+| 6 | La etapa 1 de P107 a | El paso 5 | Colab, notebook | Cerca de 0,35 USD de API | Menos de 1 hora | No |
+| 7 | Las cinco etapas de P107 a | El paso 6 | Colab, notebook | De 13,5 a 17 USD de API, con tope en 30 | Varias horas, en una sesión | No |
+| 8 | El estado otra vez, con las filas del juez | El paso 7 | Laptop, podman | Nada | Cerca de 20 minutos | No |
+| 9 | La pregunta de presupuesto de D3 | El paso 8 | — | Nada | — | **Sí** |
+| 10 | D3: `corre` sobre las 31 tareas | El paso 9 | Laptop, podman | Cerca de 31 USD de lista por cupo por pasada, casi nada de API | De 10 a 20 horas por pasada | No |
+| 11 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 8 | Laptop | Según la regla del final | Según el final | No |
+| 12 | La validez sobre el final sellado | Los pasos 1 a 11 | Colab, notebook si usa el juez | Según el final | Según el final | No |
+| 13 | Después de la validez: las sondas de Seguridad con una sola versión, y la tarea en el error de lanzar | El paso 12 | Laptop, builder | Cerca de 1 USD | Menos de 1 hora | No |
+
+**Los pasos 1 a 4 y los pasos 5 a 7 corren a la vez.** Unos usan la laptop y Colab por CPU. Los otros usan el notebook.
+
+**La regla de carga.** Los pasos 4, 8 y 10 usan podman en la laptop, de a uno.
+
+**Preguntas al usuario:** ninguna nueva.
