@@ -2046,10 +2046,10 @@ const PLAZO_LOCAL_TRABAJO: Duration = Duration::from_secs(180);
 const PAUSA_CONSULTA_CALIBRAR: Duration = Duration::from_secs(60);
 /// Consultas seguidas que fallan antes de que el trabajo falle.
 const FALLAS_CONSULTA_MAX: u32 = 5;
+/// Intentos de lanzar un paso antes de fallar.
+const INTENTOS_LANZAR: u32 = 3;
 /// Tiempo del cierre que verifica y empaqueta la vuelta, en segundos.
 const SEG_CIERRE_CALIBRAR: u64 = 600;
-/// Margen que el laptop espera sobre el tiempo de un `exec` remoto.
-const MARGEN_EXEC: Duration = Duration::from_secs(300);
 /// Corrida que firma los `Gate` de cada runtime de calibración.
 const CORRIDA_CALIBRAR: &str = "colab-calibrar";
 /// Causa del `Gate` de liberación cuando el ciclo termina bien.
@@ -2417,58 +2417,70 @@ fn correr_runtime<C: ColabCli>(
     let sha = sha256_hex(&bytes);
     let trozos = colab::subir_en_trozos(cli, lim, sesion, paquete, tmp, TIMEOUT_CALIBRAR)?;
 
-    let guion = colab::escribir(tmp, "preparar.py", &script_preparar(trozos, &sha))?;
-    let preparado = ejecutar_guion(cli, lim, sesion, SEG_PREPARAR_CALIBRAR, &guion)?;
-    if preparado.codigo != 0 || colab::marcador(&preparado.stdout, "ROOT_OK=").is_none() {
+    let texto = script_paso("preparar", &script_preparar(trozos, &sha));
+    let (pid, lanzado) = lanzar_paso(cli, lim, sesion, tmp, "preparar", "la preparación", &texto)?;
+    let preparado = esperar_paso(
+        cli,
+        lim,
+        sesion,
+        tmp,
+        "preparar",
+        "la preparación",
+        pid,
+        SEG_PREPARAR_CALIBRAR,
+        lanzado,
+        espera,
+    )?;
+    if preparado.codigo != 0 || !preparado.marcas.contains_key("ROOT_OK") {
         return Err(ErrorOraculo::Infra(format!(
             "la preparación del runtime falló: {}",
-            preparado.detalle()
+            motivo_de_paso(&preparado)
         )));
     }
 
     for (indice, trabajo) in manifiesto.trabajos.iter().enumerate() {
         let (args, entorno) = trabajo_remoto(trabajo, &manifiesto.archivos);
-        // El guion se calcula antes de escribirlo: si falla, no queda `lanzar-N.py` a medias.
+        // El guion se calcula antes de lanzar: si falla, no queda ningún `.py` a medias.
         let texto = script_trabajo(indice, &args, &entorno)?;
-        let guion = colab::escribir(
-            tmp,
-            &format!("lanzar-{indice}.py"),
-            &script_lanzar(indice, &texto),
-        )?;
-        let lanzado_en = Instant::now();
-        let lanzado = ejecutar_guion_con_plazo(
+        let paso = format!("trabajo-{indice}");
+        let (pid, lanzado) = lanzar_paso(cli, lim, sesion, tmp, &paso, "el trabajo", &texto)?;
+        let estado = esperar_paso(
             cli,
             lim,
             sesion,
-            SEG_LANZAR_CALIBRAR,
-            PLAZO_LOCAL_TRABAJO,
-            &guion,
+            tmp,
+            &paso,
+            "el trabajo",
+            pid,
+            SEG_TRABAJO_CALIBRAR,
+            lanzado,
+            espera,
         )?;
-        let pid = colab::marcador(&lanzado.stdout, "ROOT_LANZADO=")
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|_| lanzado.codigo == 0);
-        let Some(pid) = pid else {
-            return Err(ErrorOraculo::Infra(format!(
-                "el trabajo {} {} no se lanzó: {}",
-                trabajo.tarea,
-                trabajo.dimension,
-                lanzado.detalle()
-            )));
-        };
-        let codigo = esperar_trabajo(cli, lim, sesion, tmp, indice, pid, lanzado_en, espera)?;
         codigos.push(CodigoTrabajo {
             tarea: trabajo.tarea.clone(),
             dimension: trabajo.dimension.clone(),
-            codigo,
+            codigo: estado.codigo,
         });
     }
 
-    let guion = colab::escribir(tmp, "cierre.py", &script_cierre())?;
-    let cierre = ejecutar_guion(cli, lim, sesion, SEG_CIERRE_CALIBRAR, &guion)?;
-    if cierre.codigo != 0 || colab::marcador(&cierre.stdout, "ROOT_OK=").is_none() {
+    let texto = script_paso("cierre", &script_cierre());
+    let (pid, lanzado) = lanzar_paso(cli, lim, sesion, tmp, "cierre", "el cierre", &texto)?;
+    let cierre = esperar_paso(
+        cli,
+        lim,
+        sesion,
+        tmp,
+        "cierre",
+        "el cierre",
+        pid,
+        SEG_CIERRE_CALIBRAR,
+        lanzado,
+        espera,
+    )?;
+    if cierre.codigo != 0 || !cierre.marcas.contains_key("ROOT_OK") {
         return Err(ErrorOraculo::Infra(format!(
             "el cierre de la vuelta falló: {}",
-            cierre.detalle()
+            motivo_de_paso(&cierre)
         )));
     }
 
@@ -2493,7 +2505,7 @@ fn correr_runtime<C: ColabCli>(
     }
     // Antes de abrir la vuelta: su SHA-256 debe coincidir con el que dijo el cierre.
     verificar_sha_de_la_vuelta(
-        colab::marcador(&cierre.stdout, "ROOT_SHA_VUELTA=").as_deref(),
+        cierre.marcas.get("ROOT_SHA_VUELTA").map(String::as_str),
         &vuelta,
     )?;
     verificar_vuelta_del_runtime(&vuelta, tmp)?;
@@ -2649,24 +2661,6 @@ fn llamar(
     colab::paso(cli, lim, args, plazo)
 }
 
-/// Corre un guion de Python en el runtime. El plazo de Root es el del guion más un margen.
-fn ejecutar_guion<C: ColabCli>(
-    cli: &C,
-    lim: &colab::Limites,
-    sesion: &str,
-    segundos: u64,
-    guion: &Path,
-) -> Result<SalidaColab, ErrorOraculo> {
-    ejecutar_guion_con_plazo(
-        cli,
-        lim,
-        sesion,
-        segundos,
-        Duration::from_secs(segundos) + MARGEN_EXEC,
-        guion,
-    )
-}
-
 /// Corre un guion de Python con `exec -f`. `segundos` es el `--timeout` remoto; `plazo`, el local.
 fn ejecutar_guion_con_plazo<C: ColabCli>(
     cli: &C,
@@ -2692,10 +2686,86 @@ fn ejecutar_guion_con_plazo<C: ColabCli>(
     )
 }
 
-/// Estado que el guion de `trabajo` escribe al terminar. Solo se lee el código.
+/// Estado que escribe un paso al terminar (`script_paso` o `script_trabajo`). `marcas` y `cola`
+/// faltan en el estado del trabajo: por eso tienen `default`.
 #[derive(Deserialize)]
-struct EstadoTrabajo {
+struct EstadoPaso {
     codigo: i32,
+    #[serde(default)]
+    marcas: BTreeMap<String, String>,
+    #[serde(default)]
+    cola: Option<String>,
+}
+
+/// Motivo de un paso que no terminó bien: su código o su falta de `ROOT_OK`, y la cola de su log si la hay.
+fn motivo_de_paso(estado: &EstadoPaso) -> String {
+    let motivo = if estado.codigo != 0 {
+        format!("código {}", estado.codigo)
+    } else {
+        "falta su marca ROOT_OK".to_string()
+    };
+    let cola = estado
+        .cola
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    match cola {
+        Some(cola) => format!("{motivo}; {cola}"),
+        None => motivo,
+    }
+}
+
+/// Lanza el paso `paso` con el guion `texto_paso` (escrito como `<paso>.py` en el runtime). Cada
+/// intento es un `exec` de `lanzar-<paso>.py` con `SEG_LANZAR_CALIBRAR` de tiempo remoto. Un intento
+/// falla si el `exec` da error, código distinto de cero o sin `ROOT_LANZADO=` numérico. Con el tope
+/// vencido o una señal, devuelve el error sin reintentar. Tras `INTENTOS_LANZAR` fallas, falla
+/// nombrando el paso. Devuelve el pid y el instante del lanzamiento que sí respondió.
+fn lanzar_paso<C: ColabCli>(
+    cli: &C,
+    lim: &colab::Limites,
+    sesion: &str,
+    tmp: &Path,
+    paso: &str,
+    etiqueta: &str,
+    texto_paso: &str,
+) -> Result<(u32, Instant), ErrorOraculo> {
+    let guion = colab::escribir(
+        tmp,
+        &format!("lanzar-{paso}.py"),
+        &script_lanzar_paso(paso, texto_paso),
+    )?;
+    let mut ultimo_motivo = String::new();
+    for _ in 0..INTENTOS_LANZAR {
+        let lanzado_en = Instant::now();
+        let respuesta = ejecutar_guion_con_plazo(
+            cli,
+            lim,
+            sesion,
+            SEG_LANZAR_CALIBRAR,
+            PLAZO_LOCAL_TRABAJO,
+            &guion,
+        );
+        ultimo_motivo = match respuesta {
+            Err(e) if lim.cancelar.recibida().is_some() || lim.vencido() => return Err(e),
+            Err(e) => motivo_de_error(&e, PLAZO_LOCAL_TRABAJO),
+            Ok(salida) if salida.codigo != 0 => format!(
+                "código {}: {}",
+                salida.codigo,
+                primera_linea_corta(&salida.detalle())
+            ),
+            Ok(salida) => {
+                match colab::marcador(&salida.stdout, "ROOT_LANZADO=")
+                    .and_then(|v| v.parse::<u32>().ok())
+                {
+                    Some(pid) => return Ok((pid, lanzado_en)),
+                    None => "sin ROOT_LANZADO numérico".to_string(),
+                }
+            }
+        };
+    }
+    Err(ErrorOraculo::Infra(format!(
+        "{etiqueta} ({paso}) no se lanzó tras {INTENTOS_LANZAR} intentos; último motivo: {ultimo_motivo}"
+    )))
 }
 
 /// Respuesta buena de una consulta de estado. Las que fallan no llegan aquí.
@@ -2706,28 +2776,31 @@ enum EstadoConsulta {
     Corriendo,
 }
 
-/// Consulta el estado de un trabajo lanzado hasta que termine. Devuelve su código de salida.
+/// Consulta el estado de un paso lanzado con `pid` hasta que termine. Devuelve su estado (`EstadoPaso`).
+/// `etiqueta` nombra el paso en los mensajes ("el trabajo", "la preparación", "el cierre").
 ///
 /// Una consulta que falla cuenta como falla: error de la CLI, código distinto de cero o salida
 /// sin marcador. Tras `FALLAS_CONSULTA_MAX` fallas seguidas, falla. Una respuesta buena pone la
-/// cuenta en cero. Entre dos consultas espera con `espera`. El plazo total usa `transcurrido`.
-/// Tope y señal cortan en cualquier momento.
+/// cuenta en cero. Entre dos consultas espera con `espera`. El plazo total es `plazo_total_seg`,
+/// acotado por lo que queda del tope. Tope y señal cortan en cualquier momento.
 #[allow(clippy::too_many_arguments)]
-fn esperar_trabajo<C: ColabCli>(
+fn esperar_paso<C: ColabCli>(
     cli: &C,
     lim: &colab::Limites,
     sesion: &str,
     tmp: &Path,
-    indice: usize,
+    paso: &str,
+    etiqueta: &str,
     pid: u32,
+    plazo_total_seg: u64,
     lanzado: Instant,
     espera: &(dyn Fn(Duration) + Sync),
-) -> Result<i32, ErrorOraculo> {
-    let plazo = Duration::from_secs(SEG_TRABAJO_CALIBRAR).min(lim.restante());
+) -> Result<EstadoPaso, ErrorOraculo> {
+    let plazo = Duration::from_secs(plazo_total_seg).min(lim.restante());
     let guion = colab::escribir(
         tmp,
-        &format!("estado-{indice}.py"),
-        &script_estado(indice, pid),
+        &format!("estado-{paso}.py"),
+        &script_estado_paso(paso, pid),
     )?;
     let mut esperado = Duration::ZERO;
     let mut fallas = 0;
@@ -2759,7 +2832,7 @@ fn esperar_trabajo<C: ColabCli>(
                 Some("corriendo") => Ok(EstadoConsulta::Corriendo),
                 Some("murio") => {
                     return Err(ErrorOraculo::Infra(format!(
-                        "el trabajo terminó sin estado: {}",
+                        "{etiqueta} terminó sin estado: {}",
                         texto_tras(&salida.stdout, "ROOT_ESTADO=")
                     )));
                 }
@@ -2769,11 +2842,11 @@ fn esperar_trabajo<C: ColabCli>(
         };
         match respuesta {
             Ok(EstadoConsulta::Fin(json)) => {
-                let estado: EstadoTrabajo = serde_json::from_str(json.lines().next().unwrap_or(""))
+                let estado: EstadoPaso = serde_json::from_str(json.lines().next().unwrap_or(""))
                     .map_err(|e| {
                         ErrorOraculo::Infra(format!("el estado no se lee ({e}): {json}"))
                     })?;
-                return Ok(estado.codigo);
+                return Ok(estado);
             }
             Ok(EstadoConsulta::Corriendo) => {
                 fallas = 0;
@@ -2793,7 +2866,7 @@ fn esperar_trabajo<C: ColabCli>(
         let llevaba = transcurrido(lanzado, esperado);
         if llevaba >= plazo {
             return Err(ErrorOraculo::Infra(format!(
-                "el trabajo superó {} s; llevaba {} s desde su inicio",
+                "{etiqueta} superó {} s; llevaba {} s desde su inicio",
                 plazo.as_secs(),
                 llevaba.as_secs()
             )));
@@ -3240,10 +3313,13 @@ os.replace(ruta_temporal, ruta_estado)
     ))
 }
 
-/// Script que escribe `trabajo-<indice>.py` en el runtime y lo lanza en segundo plano.
-/// El texto del trabajo va como literal. Imprime `ROOT_LANZADO=<pid>` y sale sin esperar al trabajo.
-fn script_lanzar(indice: usize, texto_trabajo: &str) -> String {
-    let texto = literal_python(texto_trabajo);
+/// Script que lanza el paso `paso` en el runtime. Si ya hay `<paso>.pid` o `<paso>.estado`, no lanza:
+/// imprime `ROOT_LANZADO=` con el pid guardado (0 si solo hay estado) y sale. Si no, escribe
+/// `<paso>.py` con `texto_paso` (como literal), lo lanza en segundo plano con `Popen` y sesión nueva,
+/// guarda su pid en `<paso>.pid` (temporal y luego `os.replace`) e imprime `ROOT_LANZADO=<pid>`.
+/// Sale sin esperar al paso.
+fn script_lanzar_paso(paso: &str, texto_paso: &str) -> String {
+    let texto = literal_python(texto_paso);
     format!(
         r#"import os
 import subprocess
@@ -3251,26 +3327,47 @@ import sys
 
 D = "{D_REMOTO}"
 TEXTO = {texto}
-ruta = os.path.join(D, "trabajo-{indice}.py")
+os.makedirs(D, exist_ok=True)
+ruta_pid = os.path.join(D, "{paso}.pid")
+ruta_estado = os.path.join(D, "{paso}.estado")
+if os.path.exists(ruta_pid) or os.path.exists(ruta_estado):
+    # Ya lanzado: no se lanza otro. Con solo `.estado`, el paso corrió y su pid no quedó guardado.
+    pid = 0
+    if os.path.exists(ruta_pid):
+        with open(ruta_pid) as archivo:
+            pid = int(archivo.read().strip())
+    print("ROOT_LANZADO=%d" % pid, flush=True)
+    sys.exit(0)
+ruta = os.path.join(D, "{paso}.py")
 with open(ruta, "w") as archivo:
     archivo.write(TEXTO)
-with open(os.path.join(D, "trabajo-{indice}.log"), "w") as log:
+with open(os.path.join(D, "{paso}.log"), "w") as log:
     proceso = subprocess.Popen([sys.executable, ruta], cwd=D, start_new_session=True, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+temporal = ruta_pid + ".tmp"
+with open(temporal, "w") as archivo:
+    archivo.write("%d\n" % proceso.pid)
+os.replace(temporal, ruta_pid)
 print("ROOT_LANZADO=%d" % proceso.pid, flush=True)
 "#
     )
 }
 
-/// Script que dice en qué estado va un trabajo lanzado con `pid`.
+/// `script_lanzar_paso` del trabajo `indice`: escribe `trabajo-<indice>.py` y lo lanza.
+#[cfg(test)]
+fn script_lanzar(indice: usize, texto_trabajo: &str) -> String {
+    script_lanzar_paso(&format!("trabajo-{indice}"), texto_trabajo)
+}
+
+/// Script que dice en qué estado va el paso `paso` lanzado con `pid`, leyendo `<paso>.estado` y `<paso>.log`.
 /// Si terminó, imprime `ROOT_ESTADO=fin` y en la línea siguiente su JSON.
 /// Si el proceso vive, imprime `ROOT_ESTADO=corriendo`. Si no, imprime `ROOT_ESTADO=murio` y las últimas 20 líneas del log.
-fn script_estado(indice: usize, pid: u32) -> String {
+fn script_estado_paso(paso: &str, pid: u32) -> String {
     format!(
         r#"import os
 
 D = "{D_REMOTO}"
-ruta_estado = os.path.join(D, "trabajo-{indice}.estado")
-ruta_log = os.path.join(D, "trabajo-{indice}.log")
+ruta_estado = os.path.join(D, "{paso}.estado")
+ruta_log = os.path.join(D, "{paso}.log")
 PID = {pid}
 
 
@@ -3300,6 +3397,55 @@ else:
     except OSError:
         lineas = []
     print("".join(lineas[-20:]), end="")
+"#
+    )
+}
+
+/// `script_estado_paso` del trabajo `indice`.
+#[cfg(test)]
+fn script_estado(indice: usize, pid: u32) -> String {
+    script_estado_paso(&format!("trabajo-{indice}"), pid)
+}
+
+/// Envuelve el `cuerpo` de un paso en un guion que lo corre y deja su estado. El guion escribe
+/// `<paso>-cuerpo.py`, lo corre con `sys.executable` en `D` y manda su salida a `<paso>.log`. Al
+/// terminar lee el log, saca las marcas `ROOT_X=valor` y escribe `<paso>.estado` (temporal y luego
+/// `os.replace`) con `{"codigo", "inicio", "fin", "marcas"}`. Con código distinto de cero agrega
+/// `cola`, las últimas 20 líneas del log. El código del cuerpo no hace fallar al guion.
+fn script_paso(paso: &str, cuerpo: &str) -> String {
+    let cuerpo = literal_python(cuerpo);
+    format!(
+        r#"import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+D = "{D_REMOTO}"
+CUERPO = {cuerpo}
+ruta_cuerpo = os.path.join(D, "{paso}-cuerpo.py")
+ruta_log = os.path.join(D, "{paso}.log")
+ruta_estado = os.path.join(D, "{paso}.estado")
+ruta_temporal = os.path.join(D, "{paso}.estado.tmp")
+os.makedirs(D, exist_ok=True)
+with open(ruta_cuerpo, "w") as archivo:
+    archivo.write(CUERPO)
+inicio = time.time()
+with open(ruta_log, "a") as log:
+    r = subprocess.run([sys.executable, ruta_cuerpo], cwd=D, stdout=log, stderr=subprocess.STDOUT)
+fin = time.time()
+with open(ruta_log, errors="replace") as archivo:
+    texto = archivo.read()
+marcas = {{}}
+for clave, valor in re.findall(r"^(ROOT_[A-Z_]+)=(.*)$", texto, re.M):
+    marcas[clave] = valor.strip()
+estado = {{"codigo": r.returncode, "inicio": inicio, "fin": fin, "marcas": marcas}}
+if r.returncode != 0:
+    estado["cola"] = "".join(texto.splitlines(True)[-20:])
+with open(ruta_temporal, "w") as archivo:
+    archivo.write(json.dumps(estado) + "\n")
+os.replace(ruta_temporal, ruta_estado)
 "#
     )
 }
@@ -5590,6 +5736,14 @@ mod tests_calibrar {
         falla_en_stdout: bool,
         /// Respuestas de las consultas de estado, en orden. Vacía: `fin` con código 0.
         estados: Mutex<VecDeque<Respuesta>>,
+        /// Respuestas de los lanzamientos (guiones con `Popen` y `start_new_session`), en orden.
+        /// Vacía: el lanzamiento da su pid.
+        lanzar_respuestas: Mutex<VecDeque<Respuesta>>,
+        /// Pid de cada paso lanzado, por `sesion/paso`. Un paso corre una sola vez: sus siguientes
+        /// lanzamientos devuelven este mismo pid.
+        lanzados: Mutex<BTreeMap<String, u32>>,
+        /// Paso de cada lanzamiento recibido, en orden. Cuenta los intentos.
+        lanzares: Mutex<Vec<String>>,
     }
 
     /// Lo que el `Falso` responde a una consulta de estado.
@@ -5599,6 +5753,25 @@ mod tests_calibrar {
         Salida(i32, String),
         /// La CLI no terminó en su plazo.
         Plazo,
+    }
+
+    /// Paso que lanza un guion: el nombre del `.py` que escribe (`preparar`, `cierre` o `trabajo-N`).
+    fn paso_de_lanzar(guion: &str) -> String {
+        for paso in ["preparar", "cierre"] {
+            if guion.contains(&format!("\"{paso}.py\"")) {
+                return paso.to_string();
+            }
+        }
+        let mut resto = guion;
+        while let Some(i) = resto.find("trabajo-") {
+            let tras = &resto[i + "trabajo-".len()..];
+            let digitos: String = tras.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digitos.is_empty() && tras[digitos.len()..].starts_with(".py\"") {
+                return format!("trabajo-{digitos}");
+            }
+            resto = tras;
+        }
+        "desconocido".to_string()
     }
 
     fn corriendo() -> Respuesta {
@@ -5627,6 +5800,9 @@ mod tests_calibrar {
                 upload_falla_en: None,
                 falla_en_stdout: false,
                 estados: Mutex::new(VecDeque::new()),
+                lanzar_respuestas: Mutex::new(VecDeque::new()),
+                lanzados: Mutex::new(BTreeMap::new()),
+                lanzares: Mutex::new(Vec::new()),
             }
         }
 
@@ -5635,13 +5811,82 @@ mod tests_calibrar {
             self
         }
 
-        /// Siguiente respuesta de la cola, si el `exec` es una consulta de estado.
+        fn con_lanzar(self, respuestas: Vec<Respuesta>) -> Self {
+            *self.lanzar_respuestas.lock().expect("lanzar") = respuestas.into();
+            self
+        }
+
+        /// Pasos de cada lanzamiento recibido, en orden.
+        fn pasos_lanzados(&self) -> Vec<String> {
+            self.lanzares.lock().expect("lanzares").clone()
+        }
+
+        /// Un `exec` cuyo guion lanza un paso. Registra el pid del paso la primera vez que lo recibe,
+        /// aunque la respuesta encolada sea `Plazo` (el paso ya corrió). Un `Plazo` no lleva pid.
+        /// Con `con_falla`, el lanzamiento de un trabajo falla (código 1).
+        fn lanzar(&self, sesion: &str, guion: &str) -> Espera {
+            let paso = paso_de_lanzar(guion);
+            self.lanzares.lock().expect("lanzares").push(paso.clone());
+            let respuesta = self.lanzar_respuestas.lock().expect("lanzar").pop_front();
+            if let Some(Respuesta::Salida(codigo, stdout)) = respuesta {
+                return Espera::Termino(salida(codigo, &stdout, ""));
+            }
+            if paso.starts_with("trabajo")
+                && self
+                    .exec_falla_en
+                    .as_deref()
+                    .is_some_and(|sufijo| sesion.ends_with(sufijo))
+            {
+                return Espera::Termino(salida(1, "", "fallo simulado"));
+            }
+            let clave = format!("{sesion}/{paso}");
+            let mut lanzados = self.lanzados.lock().expect("lanzados");
+            let pid = match lanzados.get(&clave).copied() {
+                Some(pid) => pid,
+                None => {
+                    let pid = 4242 + lanzados.len() as u32;
+                    lanzados.insert(clave, pid);
+                    pid
+                }
+            };
+            match respuesta {
+                Some(Respuesta::Plazo) => Espera::Plazo,
+                _ => Espera::Termino(salida(0, &format!("ROOT_LANZADO={pid}\n"), "")),
+            }
+        }
+
+        /// Siguiente respuesta de la cola, si el `exec` es una consulta de estado de un trabajo.
         fn estado_en_cola(&self, args: &[String]) -> Option<Respuesta> {
             let guion = fs::read_to_string(args.last()?).ok()?;
-            if !guion.contains("ROOT_ESTADO=") {
+            if !guion.contains("ROOT_ESTADO=") || !guion.contains("trabajo-") {
                 return None;
             }
             self.estados.lock().expect("estados").pop_front()
+        }
+
+        /// Primer `exec` de cada sesión: espera a la barrera, si la hay, y guarda `activo.json`.
+        fn primer_exec(&self, sesion: &str) {
+            let primera = self
+                .primer_exec
+                .lock()
+                .expect("primer exec")
+                .insert(sesion.to_string());
+            if let Some(barrera) = self.barrera.as_ref().filter(|_| primera) {
+                barrera.llegar();
+                let mut visto = self.activo_visto.lock().expect("visto");
+                if visto.is_none() {
+                    *visto = fs::read_to_string(self.home.join("colab/activo.json")).ok();
+                }
+            }
+        }
+
+        /// Si el `exec` es un lanzamiento: su guion usa `Popen` con sesión nueva.
+        fn es_lanzar(&self, args: &[String]) -> bool {
+            args.last()
+                .and_then(|ruta| fs::read_to_string(ruta).ok())
+                .is_some_and(|guion| {
+                    guion.contains("Popen(") && guion.contains("start_new_session")
+                })
         }
 
         fn con_falla_upload(mut self, sufijo: &str) -> Self {
@@ -5688,45 +5933,49 @@ mod tests_calibrar {
                 .collect()
         }
 
+        /// Consulta de estado que no es de un trabajo (`preparar.estado`, `cierre.estado`). Con
+        /// `con_falla_en_stdout`, la preparación termina con código 1 y su cola en el estado.
+        fn estado_de_paso(&self, sesion: &str, guion: &str) -> SalidaColab {
+            let fin = |codigo: i32, marcas: serde_json::Value, cola: Option<&str>| {
+                let mut estado = serde_json::json!({
+                    "codigo": codigo,
+                    "inicio": 1.0,
+                    "fin": 2.0,
+                    "marcas": marcas,
+                });
+                if let Some(cola) = cola {
+                    estado["cola"] = serde_json::Value::from(cola);
+                }
+                salida(0, &format!("ROOT_ESTADO=fin\n{estado}\n"), "")
+            };
+            if guion.contains("preparar.estado") {
+                let falla = self.falla_en_stdout
+                    && self
+                        .exec_falla_en
+                        .as_deref()
+                        .is_some_and(|sufijo| sesion.ends_with(sufijo));
+                return if falla {
+                    fin(1, serde_json::json!({}), Some("fallo simulado en stdout"))
+                } else {
+                    fin(0, serde_json::json!({"ROOT_OK": "preparar"}), None)
+                };
+            }
+            if guion.contains("cierre.estado") {
+                let real = sha256_hex(&fs::read(&self.vuelta).unwrap_or_default());
+                let sha = self.sha_de_cierre.clone().unwrap_or(real);
+                return fin(
+                    0,
+                    serde_json::json!({"ROOT_OK": "cierre", "ROOT_SHA_VUELTA": sha}),
+                    None,
+                );
+            }
+            fin(0, serde_json::json!({}), None)
+        }
+
         fn exec(&self, args: &[String]) -> SalidaColab {
             let sesion = valor_de(args, "-s").unwrap_or_default();
             let guion = fs::read_to_string(args.last().expect("ruta del guion")).expect("guion");
-            let primera = self
-                .primer_exec
-                .lock()
-                .expect("primer exec")
-                .insert(sesion.clone());
-            if let Some(barrera) = self.barrera.as_ref().filter(|_| primera) {
-                barrera.llegar();
-                let mut visto = self.activo_visto.lock().expect("visto");
-                if visto.is_none() {
-                    *visto = fs::read_to_string(self.home.join("colab/activo.json")).ok();
-                }
-            }
-            if self
-                .exec_falla_en
-                .as_deref()
-                .is_some_and(|sufijo| sesion.ends_with(sufijo))
-            {
-                return if self.falla_en_stdout {
-                    salida(1, "fallo simulado en stdout", "")
-                } else {
-                    salida(1, "", "fallo simulado")
-                };
-            }
-            // `lanzar` va antes: su guion embebe el de `trabajo`.
-            let stdout = if guion.contains("preparar-runtime.sh") {
-                "ROOT_OK=preparar\n".to_string()
-            } else if guion.contains("Popen(") && guion.contains("start_new_session") {
-                "ROOT_LANZADO=4242\n".to_string()
-            } else if guion.contains("ROOT_ESTADO=") {
-                "ROOT_ESTADO=fin\n{\"codigo\": 0, \"inicio\": 1.0, \"fin\": 2.0}\n".to_string()
-            } else {
-                let real = sha256_hex(&fs::read(&self.vuelta).unwrap_or_default());
-                let sha = self.sha_de_cierre.clone().unwrap_or(real);
-                format!("ROOT_OK=cierre\nROOT_SHA_VUELTA={sha}\n")
-            };
-            salida(0, &stdout, "")
+            self.estado_de_paso(&sesion, &guion)
         }
     }
 
@@ -5738,7 +5987,15 @@ mod tests_calibrar {
             _cancelar: &Senales,
         ) -> Result<Espera, ErrorOraculo> {
             self.llamadas.lock().expect("llamadas").push(args.to_vec());
+            if args.first().is_some_and(|c| c == "exec") {
+                self.primer_exec(&valor_de(args, "-s").unwrap_or_default());
+            }
             let salida = match args.first().map(String::as_str) {
+                Some("exec") if self.es_lanzar(args) => {
+                    let guion = fs::read_to_string(args.last().expect("ruta")).expect("guion");
+                    let sesion = valor_de(args, "-s").unwrap_or_default();
+                    return Ok(self.lanzar(&sesion, &guion));
+                }
                 Some("exec") => match self.estado_en_cola(args) {
                     Some(Respuesta::Plazo) => return Ok(Espera::Plazo),
                     Some(Respuesta::Salida(codigo, stdout)) => salida(codigo, &stdout, ""),
@@ -5910,13 +6167,26 @@ mod tests_calibrar {
         assert_eq!(sesiones.len(), 2, "{sesiones:?}");
         let llamadas = cli.llamadas();
         for sesion in &sesiones {
+            // Preparar, el trabajo y el cierre se lanzan y se consultan: entre la subida y la
+            // bajada solo hay `exec`, y al menos seis (lanzar y consultar cada paso).
+            let comandos = comandos_de(&llamadas, sesion);
+            let n = comandos.len();
             assert_eq!(
-                comandos_de(&llamadas, sesion),
-                [
-                    "new", "upload", "exec", "exec", "exec", "exec", "download", "stop"
-                ],
+                comandos.first().map(String::as_str),
+                Some("new"),
                 "sesión {sesion}"
             );
+            assert_eq!(
+                comandos.get(1).map(String::as_str),
+                Some("upload"),
+                "sesión {sesion}"
+            );
+            assert!(n >= 10, "sesión {sesion}: {comandos:?}");
+            assert!(
+                comandos[2..n - 2].iter().all(|c| c == "exec"),
+                "sesión {sesion}: {comandos:?}"
+            );
+            assert_eq!(&comandos[n - 2..], ["download", "stop"], "sesión {sesion}");
             let nuevo = llamadas
                 .iter()
                 .find(|a| a[0] == "new" && valor_de(a, "-s").as_deref() == Some(sesion.as_str()))
@@ -6219,6 +6489,123 @@ mod tests_calibrar {
         ] {
             assert!(texto.contains(marca), "falta {marca}: {texto}");
         }
+    }
+
+    #[test]
+    fn preparar_se_lanza_aparte_y_no_usa_timeout_3600() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let _resultado = correr(&cli, home.path(), &[p0], TOPE_PRUEBA);
+
+        let pasos = cli.pasos_lanzados();
+        assert!(pasos.iter().any(|p| p == "preparar"), "{pasos:?}");
+        let timeouts = timeouts_de_exec(&cli.llamadas());
+        assert!(!timeouts.iter().any(|t| t == "3600"), "{timeouts:?}");
+    }
+
+    #[test]
+    fn cierre_se_lanza_aparte_y_no_usa_timeout_600() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let _resultado = correr(&cli, home.path(), &[p0], TOPE_PRUEBA);
+
+        let pasos = cli.pasos_lanzados();
+        assert!(pasos.iter().any(|p| p == "cierre"), "{pasos:?}");
+        let timeouts = timeouts_de_exec(&cli.llamadas());
+        assert!(!timeouts.iter().any(|t| t == "600"), "{timeouts:?}");
+    }
+
+    #[test]
+    fn lanzar_que_no_vuelve_se_reintenta_y_el_paso_corre_una_vez() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_lanzar(vec![Respuesta::Plazo]);
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let runtime = &resumen.runtimes[0];
+        assert!(runtime.resultado.is_ok(), "{:?}", runtime.resultado);
+        let pasos = cli.pasos_lanzados();
+        let primero = pasos.first().expect("un lanzamiento").clone();
+        assert_eq!(
+            pasos.iter().filter(|p| **p == primero).count(),
+            2,
+            "el paso {primero} debía lanzarse dos veces: {pasos:?}"
+        );
+        let lanzados = cli.lanzados.lock().expect("lanzados").clone();
+        let clave = format!("{}/{primero}", runtime.sesion);
+        assert!(lanzados.contains_key(&clave), "{lanzados:?}");
+        let del_paso = lanzados
+            .keys()
+            .filter(|k| k.ends_with(&format!("/{primero}")))
+            .count();
+        assert_eq!(del_paso, 1, "{lanzados:?}");
+    }
+
+    #[test]
+    fn tres_lanzamientos_fallidos_nombran_el_paso_y_los_tres_intentos() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_lanzar(vec![Respuesta::Plazo; 3]);
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let motivo = resumen.runtimes[0]
+            .resultado
+            .as_ref()
+            .expect_err("tres lanzamientos fallidos no dejan correr el runtime");
+        assert!(motivo.contains("preparar"), "{motivo}");
+        assert!(motivo.contains("3 intentos"), "{motivo}");
+    }
+
+    #[test]
+    fn el_estado_del_cierre_trae_root_sha_vuelta_y_root_lo_compara() {
+        let guion = script_paso("cierre", &script_cierre());
+        assert!(guion.contains("ROOT_SHA_VUELTA"), "{guion}");
+        assert!(guion.contains("marcas"), "{guion}");
+
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_sha_de_cierre("0000");
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let motivo = resumen.runtimes[0]
+            .resultado
+            .as_ref()
+            .expect_err("un SHA de la vuelta distinto no se abre");
+        assert!(
+            motivo.contains("su paquete de vuelta llegó con otro SHA-256 y no se abrió"),
+            "{motivo}"
+        );
+    }
+
+    #[test]
+    fn paquete_armado_con_el_binario_de_la_base_corre_con_el_de_esta_tarea() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let resultado = &resumen.runtimes[0].resultado;
+        assert!(resultado.is_ok(), "la vuelta debía importar: {resultado:?}");
     }
 
     #[test]
@@ -7579,6 +7966,154 @@ mod tests_calibrar {
         assert!(!texto.contains("linea-4\n"), "{texto}");
     }
 
+    /// Espera a que el estado de `paso` diga `fin` (máx 10 s) y devuelve el texto de la consulta.
+    fn esperar_fin_de_paso(caja: &Path, paso: &str, estado: &str) -> String {
+        let limite = Instant::now() + Duration::from_secs(10);
+        loop {
+            let salida = correr_guion_python(caja, &format!("estado-{paso}.py"), estado);
+            let texto = String::from_utf8_lossy(&salida.stdout).to_string();
+            match colab::marcador(&texto, "ROOT_ESTADO=").as_deref() {
+                Some("fin") => return texto,
+                Some("murio") => panic!("el paso {paso} murió antes de dejar su estado: {texto}"),
+                _ => {}
+            }
+            assert!(
+                Instant::now() < limite,
+                "el paso {paso} no terminó en 10 s: {texto}"
+            );
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    #[test]
+    fn guiones_de_cada_paso_lanzan_consultan_y_dan_corriendo_fin_y_murio() {
+        if let Err(e) = Command::new("python3").arg("--version").output() {
+            eprintln!("sin python3 ({e}): se salta el test de los guiones de cada paso");
+            return;
+        }
+        let caja = tempfile::tempdir().expect("caja");
+        let d = caja.path().join("paquete");
+        fs::create_dir_all(&d).expect("carpeta D");
+        let ruta_d = d.to_str().expect("ruta");
+        let con_d = |texto: String| texto.replace(D_REMOTO, ruta_d);
+        let cuerpos = [
+            ("preparar", "import time\ntime.sleep(1)\nprint(\"ROOT_OK=x\")\n".to_string()),
+            ("trabajo-0", "import time\ntime.sleep(1)\nprint(\"ROOT_OK=x\")\n".to_string()),
+            (
+                "cierre",
+                "import time\ntime.sleep(1)\nprint(\"ROOT_OK=x\")\nprint(\"ROOT_SHA_VUELTA=abc\")\n"
+                    .to_string(),
+            ),
+        ];
+
+        for (paso, cuerpo) in &cuerpos {
+            let lanzar = con_d(script_lanzar_paso(paso, &con_d(script_paso(paso, cuerpo))));
+            let salida = correr_guion_python(caja.path(), &format!("lanzar-{paso}.py"), &lanzar);
+            assert!(
+                salida.status.success(),
+                "{}",
+                String::from_utf8_lossy(&salida.stderr)
+            );
+            let lanzado = String::from_utf8_lossy(&salida.stdout).to_string();
+            let pid: u32 = colab::marcador(&lanzado, "ROOT_LANZADO=")
+                .unwrap_or_else(|| panic!("{paso}: falta ROOT_LANZADO: {lanzado}"))
+                .parse()
+                .expect("pid numérico");
+
+            let estado = con_d(script_estado_paso(paso, pid));
+            let vivo = correr_guion_python(caja.path(), &format!("estado-{paso}.py"), &estado);
+            let texto = String::from_utf8_lossy(&vivo.stdout).to_string();
+            assert_eq!(
+                colab::marcador(&texto, "ROOT_ESTADO=").as_deref(),
+                Some("corriendo"),
+                "{paso}: {texto}"
+            );
+
+            let fin = esperar_fin_de_paso(caja.path(), paso, &estado);
+            let json: serde_json::Value =
+                serde_json::from_str(&texto_tras(&fin, "ROOT_ESTADO=")).expect("json del estado");
+            assert_eq!(json["codigo"], 0, "{paso}: {json}");
+            assert!(json["inicio"].as_f64().is_some(), "{paso}: {json}");
+            assert!(json["fin"].as_f64().is_some(), "{paso}: {json}");
+            assert!(json["marcas"].is_object(), "{paso}: {json}");
+            if *paso == "cierre" {
+                assert_eq!(json["marcas"]["ROOT_SHA_VUELTA"], "abc", "{json}");
+            }
+        }
+
+        // Murio: sin archivo de estado y con un pid ya muerto.
+        fs::remove_file(d.join("trabajo-0.estado")).expect("quita el estado");
+        let mut hijo = Command::new("true").spawn().expect("true");
+        let muerto = hijo.id();
+        hijo.wait().expect("espera al hijo");
+        let estado = con_d(script_estado_paso("trabajo-0", muerto));
+        let salida = correr_guion_python(caja.path(), "estado-muerto.py", &estado);
+        let texto = String::from_utf8_lossy(&salida.stdout).to_string();
+        assert_eq!(
+            colab::marcador(&texto, "ROOT_ESTADO=").as_deref(),
+            Some("murio"),
+            "{texto}"
+        );
+    }
+
+    #[test]
+    fn lanzar_repetido_devuelve_el_mismo_pid_y_no_lanza_otro() {
+        if let Err(e) = Command::new("python3").arg("--version").output() {
+            eprintln!("sin python3 ({e}): se salta el test de lanzar repetido");
+            return;
+        }
+        let caja = tempfile::tempdir().expect("caja");
+        let d = caja.path().join("paquete");
+        fs::create_dir_all(&d).expect("carpeta D");
+        let ruta_d = d.to_str().expect("ruta");
+        let con_d = |texto: String| texto.replace(D_REMOTO, ruta_d);
+        let contador = caja.path().join("contador.txt");
+        let contador_py = literal_python(contador.to_str().expect("ruta"));
+        let cuerpo = format!(
+            "import time\nopen({contador_py}, 'a').write('a\\n')\ntime.sleep(1)\nprint('ROOT_OK=x')\n"
+        );
+        let lanzar = con_d(script_lanzar_paso(
+            "preparar",
+            &con_d(script_paso("preparar", &cuerpo)),
+        ));
+
+        let primera = correr_guion_python(caja.path(), "lanzar-1.py", &lanzar);
+        let segunda = correr_guion_python(caja.path(), "lanzar-2.py", &lanzar);
+        let pid_de = |salida: &std::process::Output| -> u32 {
+            let texto = String::from_utf8_lossy(&salida.stdout).to_string();
+            colab::marcador(&texto, "ROOT_LANZADO=")
+                .unwrap_or_else(|| panic!("falta ROOT_LANZADO: {texto}"))
+                .parse()
+                .expect("pid numérico")
+        };
+        let pid = pid_de(&primera);
+        assert_eq!(
+            pid,
+            pid_de(&segunda),
+            "el segundo lanzar debía dar el mismo pid"
+        );
+
+        let estado = con_d(script_estado_paso("preparar", pid));
+        esperar_fin_de_paso(caja.path(), "preparar", &estado);
+        let escrituras = fs::read_to_string(&contador).expect("contador");
+        assert_eq!(escrituras.matches('a').count(), 1, "{escrituras:?}");
+
+        // Con `<paso>.estado` y sin `.pid`, el paso ya corrió: no lanza otro.
+        let cierre = con_d(script_lanzar_paso(
+            "cierre",
+            &con_d(script_paso("cierre", &cuerpo)),
+        ));
+        fs::write(
+            d.join("cierre.estado"),
+            "{\"codigo\": 0, \"inicio\": 1.0, \"fin\": 2.0, \"marcas\": {}}\n",
+        )
+        .expect("estado previo");
+        let _salida = correr_guion_python(caja.path(), "lanzar-cierre.py", &cierre);
+        thread::sleep(Duration::from_secs(2));
+        let escrituras = fs::read_to_string(&contador).expect("contador");
+        assert_eq!(escrituras.matches('a').count(), 1, "{escrituras:?}");
+    }
+
     /// Corre un paquete con cinco respuestas `respuestas` y devuelve el error del runtime.
     fn error_de_cinco_consultas(respuestas: Vec<Respuesta>) -> String {
         let caja = tempfile::tempdir().expect("caja");
@@ -7621,7 +8156,11 @@ mod tests_calibrar {
         let vuelta = vuelta_minima(caja.path());
         // El guion lleva el marcador de estado: así el `Falso` responde con `Plazo`.
         let guion = caja.path().join("consulta.py");
-        fs::write(&guion, "print('ROOT_ESTADO=corriendo')\n").expect("guion");
+        fs::write(
+            &guion,
+            "# trabajo-0.estado\nprint('ROOT_ESTADO=corriendo')\n",
+        )
+        .expect("guion");
         let cli = Falso::nuevo(home.path(), &vuelta).con_estados(vec![Respuesta::Plazo]);
         let sin_senal = Senales::default();
         let lim = colab::Limites {
