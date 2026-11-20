@@ -15087,3 +15087,109 @@ Cada tanda abre 4 runtimes de CPU a la vez. La siguiente arranca cuando termina 
 **La regla de carga.** Los pasos 2, 7 y 9 usan podman en la laptop, de a uno. Los pasos 4, 5 y 6 van en Colab.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-20 (90): dos execs que no volvieron, y el saldo de S2
+
+**Estado.**
+- **El usuario corrió los dos guiones de empaquetado.**
+  - El paquete del juez pesa 395 MB (sha 6606d0a5…). El gasto de S2 va en 6,97 USD, con 18,03 USD de saldo. Todavía no está en Drive.
+  - Los 12 paquetes pesan de 182 a 202 MB cada uno.
+- **La tanda 1** corrió con 4 runtimes a la vez, en una copia del `ROOT_HOME`: Pruebas de s2-t1 a s2-t3, y Seguridad de s2-t1. Duró 1973 segundos, con rc 3.
+  - Pruebas de s2-t3 y Seguridad de s2-t1 entraron, con 1 fila cada una.
+  - **Pruebas de s2-t1 falló:** "colab superó 900 s; su paquete de vuelta no llegó". El trabajo dio código 0.
+  - **Pruebas de s2-t2 falló:** "colab superó 180 s; su paquete de vuelta no llegó", sin línea de trabajo.
+  - La laptop no se suspendió, y los runtimes quedaron cerrados.
+- **La tanda 2 corre ahora:** Seguridad de s2-t2 y s2-t3, y Funciona de s2-t1 y s2-t2.
+
+## 1. Las dos fallas
+
+Leí `correr_runtime`, en `src/colab_calibra.rs`, en 2020ecc. Un runtime hace estos pasos: pide el runtime, sube los trozos, prepara, **lanza** cada trabajo, lo consulta hasta el fin, **cierra la vuelta** y la baja.
+
+**Pruebas de s2-t1: venció el cierre.**
+- El trabajo terminó con código 0, y su estado llegó por las consultas.
+- Después, Root corre `cierre.py` con `ejecutar_guion` y `SEG_CIERRE_CALIBRAR = 600`. El plazo local es de 600 más `MARGEN_EXEC`, que vale 300: **900 segundos.**
+- El cierre corre `verificar-versiones.sh`, calcula los SHA-256 y arma el tar. Normalmente tarda menos de un minuto.
+- **Es un exec largo, de los que la 161 no cambió.** Es lo mismo que colgó en la 157b y la 157c: el cliente no vuelve.
+
+**Pruebas de s2-t2: venció el lanzamiento.**
+- No hay línea de trabajo, así que el trabajo nunca se lanzó.
+- Una consulta que falla no corta nada: Root tolera hasta 5 seguidas. Entonces no fue una consulta.
+- El único paso con 180 segundos que corta todo es `lanzar-N.py`, por `ejecutar_guion_con_plazo` con `PLAZO_LOCAL_TRABAJO`. Ese guion solo escribe un archivo y lanza un proceso: tarda menos de un segundo.
+
+**¿Defecto de Root o carga del CLI? Las dos cosas.**
+- **La carga:** en las corridas con un solo runtime, ningún exec corto falló. Con 4 runtimes a la vez, fallaron 2 de 4. El cliente de `colab exec` se cuelga más con varias sesiones en paralelo.
+- **El defecto de Root:** dos pasos siguen sin tolerar un exec que no vuelve.
+  - El lanzamiento no se reintenta. Una sola falla corta el runtime entero.
+  - El cierre es un exec largo, de hasta 600 segundos, y no corre aparte como el trabajo.
+  - Las consultas ya toleran 5 fallas, gracias a la 161. Los otros dos pasos no.
+
+## 2. Cómo repetir Pruebas de s2-t1 y s2-t2
+
+**Primero, sin tocar Root:**
+1. **La tanda 3 corre como estaba:** Funciona de s2-t3, y Completitud de s2-t1 a s2-t3.
+2. **Si la tanda 2 o la tanda 3 pierden otro trabajo,** lo que queda corre de a 2 runtimes, no de a 4. Así se ve si la carga es la causa.
+3. **Pruebas de s2-t1 y s2-t2 van en una tanda 4, de a 2.** Usan los mismos paquetes, que siguen sirviendo.
+4. **Si la tanda 4 falla otra vez en el lanzamiento o en el cierre,** va la Tarea 167.
+
+**La Tarea 167, si hace falta:**
+- **El lanzamiento se reintenta,** hasta 3 veces. El guion es idempotente: si ya hay un pid o un estado de ese trabajo, devuelve ese pid y no lanza otro.
+- **El cierre corre aparte, como el trabajo.** Un exec corto lo lanza. Root consulta su estado, con la misma tolerancia de 5 fallas. Al terminar, el estado trae `ROOT_SHA_VUELTA`.
+- Toca solo `src/colab_calibra.rs`.
+
+**¿Rompe el congelamiento? No.**
+- **Lo que mide es el binario de adentro del paquete,** y ese es el congelado. `colab empaquetar` lo metió con `--binario`.
+- La 167 cambiaría solo el binario de la laptop que maneja el transporte: subir, lanzar, consultar, cerrar y bajar.
+- Los 12 paquetes no se vuelven a armar. El formato del manifiesto no cambia.
+- **Toda fila sigue saliendo del binario congelado,** que es lo que fija el congelamiento.
+
+**No escribo el brief de la 167 todavía.** Repetir cuesta cerca de 0,2 unidades y no toca Root. La tanda 4 dice si la carga alcanza para explicar las fallas.
+
+## 3. El saldo de S2 para P107 a
+
+**Los números.** El saldo es de 18,03 USD. La vuelta (52) estimó P107 a en cerca de 13,5 USD si nada falla, y en cerca de 17 USD con casos sin veredicto y repeticiones. El margen sobre la estimación con fallas es de 1 USD.
+
+**Qué pasa si una calibración queda sin saldo.** Antes de cada caso, Root reserva el peor caso posible. Si el gasto más esa reserva no entra en el tope, la calibración se detiene, registra un `Gate` y marca `incompleta` sus filas.
+- **Una fila incompleta no cuenta para calibrar,** por `cuenta`, en `calibra.rs`.
+- Entonces, el dinero que esa dimensión ya gastó **no sirve para nada.**
+- **La reserva es por el peor caso, no por el caso real.** Root puede detenerse con saldo real de sobra.
+
+**El riesgo:** con 1 USD de margen, la última etapa puede quedar incompleta. La dimensión de esa etapa quedaría sin calibrar, y lo gastado en ella se perdería.
+
+**Es una decisión del usuario:** el tope de S2 es suyo, de P107 a. Va en P124.
+
+## 4. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | API | ¿Espera al usuario? |
+|---|---|---|---|---|---|
+| 1 | La tanda 2 | Nada; corre ahora | Colab, 4 runtimes | No | No |
+| 2 | La tanda 3, de a 4, o de a 2 si la tanda 2 pierde un trabajo | El paso 1 | Colab, CPU | No | No |
+| 3 | La tanda 4: Pruebas de s2-t1 y s2-t2, de a 2 | El paso 2 | Colab, CPU | No | No |
+| 4 | La Tarea 167, solo si la tanda 4 falla en el lanzamiento o en el cierre | El paso 3 | Colab, builder | Cerca de 1 USD | No |
+| 5 | P124: el tope de S2 | — | — | No | **Sí** |
+| 6 | El arrastre del paquete del juez a Drive | — | El usuario | No | **Sí** |
+| 7 | La etapa 1 de P107 a | Los pasos 5 y 6 | Colab, notebook | Cerca de 0,35 USD | No |
+| 8 | Las cinco etapas de P107 a | El paso 7 | Colab, notebook | De 13,5 a 17 USD | No |
+| 9 | El estado de cada dimensión otra vez, con las filas nuevas | Los pasos 3 y 8 | Laptop, podman | No | No |
+| 10 | La pregunta de presupuesto de D3: cupo y tiempo | El paso 9 | — | No | **Sí** |
+| 11 | D3: `corre` sobre las tareas del dataset | El paso 10 | Laptop, podman | Casi nada. Cerca de 31 USD de lista por cupo por pasada | No |
+| 12 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 9 | Laptop | Según la regla del final | No |
+| 13 | La validez sobre el final sellado | Los pasos 1 a 12 | Colab, notebook si usa el juez | Según el final | No |
+| 14 | Después de la validez: una sola fuente para las dos versiones de las sondas de Seguridad | El paso 13 | Laptop, builder | No | No |
+
+**Si el usuario elige mantener el tope en P124,** el paquete del juez no se rearma: ya lleva el saldo de hoy.
+
+**Si elige subirlo,** hacen falta dos cosas:
+- **Cambiar `TOPE_S2_USD`,** en `src/colab_calibra.rs`. Es una constante, no un parámetro: hoy vale 25, por P107 a. Va en una tarea de una línea, con su test.
+- **Rearmar el paquete del juez** con el binario de esa tarea en la laptop, y con `--binario` en el congelado. Así el binario que mide sigue siendo el congelado, como en la sección 2.
+
+**La regla de carga.** El paso 9 usa podman en la laptop. Los pasos 1 a 3, 7 y 8 van en Colab. P107 a puede correr junto con una tanda de 2. Con una tanda de 4, espera.
+
+## 5. Pregunta al usuario
+
+**P124. ¿Subo el tope de S2 para P107 a?** El saldo es de 18,03 USD, de un tope de 25. P107 a cuesta cerca de 13,5 USD si nada falla, y cerca de 17 USD con fallas. Antes de cada caso, Root reserva el peor caso. Si no entra, la calibración se detiene, y sus filas quedan incompletas: no cuentan, y lo que esa dimensión ya gastó se pierde.
+
+- **a) Subir el tope a 30 USD.** Quedan cerca de 23 USD de saldo, con margen para el peor caso. Root gasta solo lo que usa: lo que sobre queda sin gastar. Pide cambiar una línea, la constante `TOPE_S2_USD`, en el binario que arma el paquete, y rearmar el paquete del juez. El binario que mide, adentro del paquete, sigue siendo el congelado. *(recomendada)*
+- **b) Mantener el tope en 25 USD.** El paquete de hoy sirve. Si la última etapa no entra, su dimensión queda sin calibrar, y lo gastado en ella se pierde.
+- **c) Mantener el tope y bajar `n` de 12 a 10 en las tres dimensiones.** Cuesta cerca de 17 % menos. La cota de Wilson de 0,8 queda más justa, y una dimensión puede no llegar.
+
+Recomiendo la (a). Los 5 USD extra no se gastan si no hacen falta. En cambio, quedarse corto pierde dinero ya gastado y deja una dimensión sin calibrar.
