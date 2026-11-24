@@ -47,7 +47,7 @@ const CONTEXTO: usize = 40;
 pub const MAX_ENTRADA_JUEZ_BYTES: u64 = 256 * 1024;
 /// Prompt fijo del juez. Refuta por default y pide solo un objeto JSON.
 const PROMPT_SISTEMA: &str = "Sos un PM técnico que revisa el diseño y la arquitectura de un repo contra su spec.
-REFUTA POR DEFAULT: el nivel de cada ítem parte en 0 y solo sube con evidencia citada textual.
+REFUTA POR DEFAULT: ningún nivel vale sin una cita textual que cumpla su ancla.
 No juzgás estilo, nombres ni formato, salvo lo que pide el ancla de un ítem. Solo revisás si el diseño sirve a la spec.
 Respondé estas tres preguntas con evidencia:
 - ¿Qué requisito queda difícil de extender o de mantener con esta estructura?
@@ -56,7 +56,10 @@ Respondé estas tres preguntas con evidencia:
 Cada evidencia tiene archivo, linea y cita. La cita es texto textual del archivo, con los mismos caracteres.
 El juez responde CADA id de la lista IDS OBLIGATORIOS una sola vez, en ese orden.
 Cada ítem trae evidencia que cumple el ancla de su nivel.
-Sin evidencia para un ítem, responde \"nivel\":null, \"motivo\":\"sin_evidencia\" y \"evidencia\":[].
+Para cada ítem, buscá primero en los EXTRACTOS el código que nombran sus anclas: por ejemplo, una llamada de E/S y su error, o un lock y su alcance.
+Revisá las anclas en orden, de 0 a 3. El nivel es la primera ancla que el código citado cumple.
+Si el código del tema está y no muestra el defecto de las anclas 0, 1 ni 2, el nivel es 3, y la cita es ese código.
+Solo si ningún extracto trae código del tema del ítem, responde \"nivel\":null, \"motivo\":\"sin_evidencia\" y \"evidencia\":[].
 Un id sin respuesta, repetido, o sin nivel ni sin_evidencia rompe el contrato.
 Un hallazgo exige impacto con ids de requisitos reales. Sin requisito afectado, no reportes el hallazgo.
 Respondé SOLO un objeto JSON con esta forma exacta:
@@ -3269,6 +3272,110 @@ mod tests {
         assert_ne!(huella_del_prompt(), vieja);
     }
 
+    /// Bytes (sistema + usuario) del prompt de `caso().entrada()` antes del cambio de la Tarea 169.
+    const BASE_BYTES: u64 = 2618;
+
+    #[test]
+    fn juez_p169_huella_cambia_respecto_de_la_base() {
+        assert_ne!(huella_del_prompt(), "9263145aa4df4c7a");
+    }
+
+    #[test]
+    fn juez_p169_sistema_no_dice_parte_en_0() {
+        let c = caso();
+        let p = construir_prompt(&c.entrada(), &LimitesPrompt::default());
+        let sistema = p.sistema.expect("tiene sistema");
+        assert!(!sistema.contains("parte en 0"), "{sistema}");
+    }
+
+    #[test]
+    fn juez_p169_sistema_dice_escala_de_0_a_3_y_regla_del_tema() {
+        let c = caso();
+        let p = construir_prompt(&c.entrada(), &LimitesPrompt::default());
+        let sistema = p.sistema.expect("tiene sistema");
+        assert!(sistema.contains("de 0 a 3"), "{sistema}");
+        assert!(
+            sistema.contains("Solo si ningún extracto trae código del tema"),
+            "{sistema}"
+        );
+    }
+
+    #[test]
+    fn juez_p169_nivel_3_con_cita_real_llega_al_veredicto() {
+        let c = caso();
+        let texto = respuesta(
+            json!([item_nivel(MODULARIDAD, 3, json!([real()]))]),
+            json!([]),
+        );
+        let r = juzgar_con(&c, texto);
+        assert_eq!(r.estado, EstadoJuez::Ok);
+        assert_eq!(r.niveles.get(MODULARIDAD), Some(&3));
+    }
+
+    #[test]
+    fn juez_p169_nivel_3_sin_evidencia_no_da_nivel() {
+        let c = caso();
+        let texto = respuesta(json!([item_nivel(MODULARIDAD, 3, json!([]))]), json!([]));
+        let r = juzgar_con(&c, texto);
+        assert!(!r.niveles.contains_key(MODULARIDAD), "{:?}", r.niveles);
+        assert!(r.faltantes.contains(&MODULARIDAD.to_string()));
+    }
+
+    #[test]
+    fn juez_p169_sin_evidencia_va_a_faltantes_con_su_descarte() {
+        let c = caso();
+        let texto = respuesta(json!([sin_evidencia_json(MODULARIDAD)]), json!([]));
+        let r = juzgar_con(&c, texto);
+        assert_eq!(r.estado, EstadoJuez::Ok);
+        assert!(!r.niveles.contains_key(MODULARIDAD));
+        assert!(r.faltantes.contains(&MODULARIDAD.to_string()));
+        assert!(
+            r.descartes
+                .iter()
+                .any(|d| d.que == "ítem diseno.modularidad" && d.motivo.contains("sin_evidencia")),
+            "{:?}",
+            r.descartes
+        );
+    }
+
+    #[test]
+    fn juez_p169_truncada_da_sin_veredicto_con_la_causa_del_tope() {
+        let c = caso();
+        let r = juzgar(
+            &c.entrada(),
+            &Falso::truncada_con(respuesta(json!([]), json!([]))),
+            MODELO,
+            &LimitesPrompt::default(),
+        );
+        match &r.estado {
+            EstadoJuez::SinVeredicto(causa) => {
+                assert!(causa.starts_with("tope de salida alcanzado"), "{causa}");
+            }
+            otro => panic!("esperaba SinVeredicto, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn juez_p169_construir_prompt_es_determinista() {
+        let c = caso();
+        let limites = LimitesPrompt::default();
+        let a = construir_prompt(&c.entrada(), &limites);
+        let b = construir_prompt(&c.entrada(), &limites);
+        assert_eq!(a.sistema, b.sistema);
+        assert_eq!(a.usuario, b.usuario);
+    }
+
+    #[test]
+    fn juez_p169_prompt_crece_menos_de_1024_bytes() {
+        let c = caso();
+        let p = construir_prompt(&c.entrada(), &LimitesPrompt::default());
+        let len_nuevo = bytes_de_prompt(&p);
+        assert!(
+            len_nuevo < BASE_BYTES + 1024,
+            "{len_nuevo} vs base {BASE_BYTES}"
+        );
+    }
+
     /// Texto que solo existe fuera de la raíz del repo.
     const AFUERA: &str = "secreto fuera de la raiz";
 
@@ -3543,14 +3650,14 @@ mod tests {
 
     #[test]
     fn huella_del_juez_no_cambia_con_el_reintento() {
-        assert_eq!(huella_del_prompt(), "9263145aa4df4c7a");
+        assert_eq!(huella_del_prompt(), "542f79459012b68d");
         assert_eq!(
             crate::oracle::calibra::huella_de(Dimension::Diseno),
-            "19b81dea4119d429"
+            "9b2a621ebb5c4632"
         );
         assert_eq!(
             crate::oracle::calibra::huella_de(Dimension::Arquitectura),
-            "60c5fb9b0d576398"
+            "0f151f7fa43547c3"
         );
     }
 
