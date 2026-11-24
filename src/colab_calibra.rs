@@ -1273,6 +1273,17 @@ pub struct Entrada<'a> {
     pub ya_estaba: bool,
     /// `None`: la laptop no tiene fila para comparar. `Err`: faltan casos de esos lados.
     pub base: Option<Result<Valores, Vec<&'static str>>>,
+    /// Hay al menos un `.casos.jsonl` de Colab para la fila y todos están en el paquete extraído.
+    pub casos_de_colab_completos: bool,
+}
+
+/// Aviso que va al resumen por cada fila de una dimensión con juez que entra.
+pub fn aviso_de_juez(fila: &Fila) -> String {
+    format!(
+        "{} de {}: dimensión con juez; la base no se compara, porque el juez varía entre corridas",
+        fila.dimension.clave(),
+        fila.tarea
+    )
 }
 
 /// Decide si una fila entra. Un motivo por cada caso que no entra.
@@ -1288,6 +1299,14 @@ pub fn decidir_fila(e: &Entrada) -> Decision {
     }
     if e.ya_estaba {
         return no("ya estaba en la laptop");
+    }
+    // Con juez, la base no se compara: el juez varía entre corridas. Solo cuentan los casos de Colab.
+    if tiene_items_de_juez(e.fila.dimension) {
+        return if e.casos_de_colab_completos {
+            Decision::Entra
+        } else {
+            no("faltan los casos de Colab")
+        };
     }
     match &e.base {
         None => no("sin base de la laptop para comparar"),
@@ -1585,6 +1604,10 @@ fn importar_desde(
     let mut entran: Vec<&Fila> = Vec::new();
     let mut nombres_a_copiar: BTreeSet<String> = BTreeSet::new();
     let mut rechazadas = Vec::new();
+    let mut avisos = Vec::new();
+    if !filas.is_empty() {
+        avisos.push(AVISO_MUTANTES.to_string());
+    }
     for fila in &filas {
         let vuelta = manifiesto.filas.iter().find(|v| coincide_vuelta(v, fila));
         let casos_colab: &[String] = match vuelta {
@@ -1596,20 +1619,34 @@ fn importar_desde(
             .filas
             .iter()
             .any(|f| misma_medicion(f, fila) && f.ts == fila.ts);
-        let base = mejor_base(&calibracion, fila, &huella);
+        let juez = tiene_items_de_juez(fila.dimension);
+        // Con juez no se lee la base: la decisión no la mira.
+        let base = if juez {
+            None
+        } else {
+            mejor_base(&calibracion, fila, &huella)
+        };
         let valores = match base {
             Some(b) => Some(valores_de_base(home, dir, casos_colab, b)?),
             None => None,
         };
+        let casos_colab_completos = !casos_colab.is_empty()
+            && casos_colab
+                .iter()
+                .all(|n| dir.join(CARPETA_CALIBRACION).join(n).is_file());
         let decision = decidir_fila(&Entrada {
             fila,
             huella_laptop: &huella,
             tarea_hash_laptop: tarea_hash_de(home, &fila.tarea).as_deref(),
             ya_estaba,
             base: valores,
+            casos_de_colab_completos: casos_colab_completos,
         });
         match decision {
             Decision::Entra => {
+                if juez {
+                    avisos.push(aviso_de_juez(fila));
+                }
                 entran.push(fila);
                 nombres_a_copiar.extend(casos_colab.iter().cloned());
             }
@@ -1621,10 +1658,6 @@ fn importar_desde(
         }
     }
 
-    let mut avisos = Vec::new();
-    if !filas.is_empty() {
-        avisos.push(AVISO_MUTANTES.to_string());
-    }
     let hay_gasto_nuevo = if gasto.is_empty() {
         false
     } else {
@@ -5157,6 +5190,43 @@ mod tests_importar {
     }
 
     #[test]
+    fn juez_entra_sin_base_y_oraculo_sin_base_se_rechaza_con_aviso() {
+        let e = laptop_sin_base();
+        let home = e.home.path();
+        let hash = tarea_hash(home);
+        let arq = fila_en(
+            "arquitectura",
+            TS_COLAB,
+            &huella_de(Dimension::Arquitectura),
+            &hash,
+        );
+        let fun = fila_en("funciona", TS_OTRO, &huella_de(Dimension::Funciona), &hash);
+        let v = vuelta(vec![
+            fp(
+                arq.clone(),
+                &nombre_casos_en("arquitectura", TS_COLAB),
+                &linea_caso(0.5),
+            ),
+            fp(fun, &nombre_casos_en("funciona", TS_OTRO), &linea_caso(0.5)),
+        ]);
+        let (_caja, tgz) = armar_paquete(&v, None);
+
+        let resumen = importar(home, &tgz, "abc123").expect("importa");
+
+        assert_eq!(resumen.entraron, 1, "{resumen:?}");
+        assert_eq!(resumen.rechazadas.len(), 1, "{resumen:?}");
+        assert_eq!(resumen.rechazadas[0].dimension, "funciona");
+        assert_eq!(
+            resumen.rechazadas[0].motivo,
+            "sin base de la laptop para comparar"
+        );
+        assert!(resumen.avisos.contains(&aviso_de_juez(&arq)), "{resumen:?}");
+        let cal = calibra::Calibraciones::cargar(home).expect("calibracion");
+        assert!(cal.filas.iter().any(|f| f.ts == TS_COLAB));
+        assert!(!cal.filas.iter().any(|f| f.ts == TS_OTRO));
+    }
+
+    #[test]
     fn verificacion_con_linea_mal_frena_sin_escribir_nada() {
         let e = laptop_con_base(0.5);
         let home = e.home.path();
@@ -5310,11 +5380,164 @@ mod tests_importar {
                 colab: Vec::new(),
                 laptop: Vec::new(),
             })),
+            casos_de_colab_completos: true,
         };
         assert_eq!(
             decidir_fila(&e),
             Decision::NoEntra("sin valores de base para comparar".into())
         );
+    }
+
+    /// Fila de la dimensión `dimension` (clave) de la tarea de prueba. Como `fila_de`, sin fijar la dimensión.
+    fn fila_en(dimension: &str, ts: f64, huella: &str, tarea_hash: &str) -> Fila {
+        serde_json::from_value(serde_json::json!({
+            "tarea": "tarea-prueba",
+            "dimension": dimension,
+            "n": 4,
+            "semilla": 7,
+            "ts": ts,
+            "huella": huella,
+            "tarea_hash": tarea_hash,
+        }))
+        .expect("fila de prueba")
+    }
+
+    fn nombre_casos_en(dimension: &str, ts: f64) -> String {
+        format!("tarea-prueba-{dimension}-{}.casos.jsonl", ts as u64)
+    }
+
+    /// Entrada con la huella y el hash de la laptop dados, sin base y con los casos de Colab completos.
+    fn entrada_sin_base<'a>(
+        fila: &'a Fila,
+        huella_laptop: &'a str,
+        tarea_hash_laptop: &'a str,
+    ) -> Entrada<'a> {
+        Entrada {
+            fila,
+            huella_laptop,
+            tarea_hash_laptop: Some(tarea_hash_laptop),
+            ya_estaba: false,
+            base: None,
+            casos_de_colab_completos: true,
+        }
+    }
+
+    #[test]
+    fn arquitectura_con_juez_entra_sin_base_en_la_laptop() {
+        let h = huella_de(Dimension::Arquitectura);
+        let fila = fila_en("arquitectura", TS_COLAB, &h, "hash");
+        let e = entrada_sin_base(&fila, &h, "hash");
+        assert_eq!(decidir_fila(&e), Decision::Entra);
+    }
+
+    #[test]
+    fn diseno_con_juez_entra_aunque_la_base_difiera() {
+        let h = huella_de(Dimension::Diseno);
+        let fila = fila_en("diseno", TS_COLAB, &h, "hash");
+        let e = Entrada {
+            base: Some(Ok(Valores {
+                colab: vec![0.5],
+                laptop: vec![0.9],
+            })),
+            ..entrada_sin_base(&fila, &h, "hash")
+        };
+        assert_eq!(decidir_fila(&e), Decision::Entra);
+    }
+
+    #[test]
+    fn estructura_con_juez_sin_casos_de_colab_no_entra() {
+        let h = huella_de(Dimension::Estructura);
+        let fila = fila_en("estructura", TS_COLAB, &h, "hash");
+        let e = Entrada {
+            casos_de_colab_completos: false,
+            ..entrada_sin_base(&fila, &h, "hash")
+        };
+        assert_eq!(
+            decidir_fila(&e),
+            Decision::NoEntra("faltan los casos de Colab".into())
+        );
+    }
+
+    #[test]
+    fn funciona_oraculo_sin_base_no_entra() {
+        let h = huella_de(Dimension::Funciona);
+        let fila = fila_en("funciona", TS_COLAB, &h, "hash");
+        let e = entrada_sin_base(&fila, &h, "hash");
+        assert_eq!(
+            decidir_fila(&e),
+            Decision::NoEntra("sin base de la laptop para comparar".into())
+        );
+    }
+
+    #[test]
+    fn seguridad_oraculo_con_base_distinta_no_entra() {
+        let h = huella_de(Dimension::Seguridad);
+        let fila = fila_en("seguridad", TS_COLAB, &h, "hash");
+        let e = Entrada {
+            base: Some(Ok(Valores {
+                colab: vec![0.5],
+                laptop: vec![0.9],
+            })),
+            ..entrada_sin_base(&fila, &h, "hash")
+        };
+        match decidir_fila(&e) {
+            Decision::NoEntra(motivo) => {
+                assert!(motivo.starts_with("la base de Colab difiere"), "{motivo}")
+            }
+            otra => panic!("debía no entrar: {otra:?}"),
+        }
+    }
+
+    #[test]
+    fn arquitectura_con_juez_huella_hash_o_ya_estaba_no_entra() {
+        let h = huella_de(Dimension::Arquitectura);
+        let fila = fila_en("arquitectura", TS_COLAB, &h, "hash");
+        let otra_huella = fila_en("arquitectura", TS_COLAB, "otra", "hash");
+        let otro_hash = fila_en("arquitectura", TS_COLAB, &h, "otro");
+        assert_eq!(
+            decidir_fila(&entrada_sin_base(&otra_huella, &h, "hash")),
+            Decision::NoEntra("la huella no coincide con la de la laptop".into())
+        );
+        assert_eq!(
+            decidir_fila(&entrada_sin_base(&otro_hash, &h, "hash")),
+            Decision::NoEntra("el tarea_hash no coincide con el de la laptop".into())
+        );
+        let ya = Entrada {
+            ya_estaba: true,
+            ..entrada_sin_base(&fila, &h, "hash")
+        };
+        assert_eq!(
+            decidir_fila(&ya),
+            Decision::NoEntra("ya estaba en la laptop".into())
+        );
+    }
+
+    #[test]
+    fn aviso_de_juez_nombra_dimension_y_tarea() {
+        let h = huella_de(Dimension::Arquitectura);
+        let fila = fila_en("arquitectura", TS_COLAB, &h, "hash");
+        assert_eq!(
+            aviso_de_juez(&fila),
+            "arquitectura de tarea-prueba: dimensión con juez; la base no se compara, porque el juez varía entre corridas"
+        );
+    }
+
+    #[test]
+    fn huellas_de_las_nueve_dimensiones_son_fijas() {
+        let esperadas = [
+            (Dimension::Funciona, "b4ec060a4cdeb4dc"),
+            (Dimension::Seguridad, "6b15c7c7291f637e"),
+            (Dimension::Eficiencia, "5aa7d3c6dcb51df4"),
+            (Dimension::Estructura, "afbc695e7b008336"),
+            (Dimension::Arquitectura, "60c5fb9b0d576398"),
+            (Dimension::Diseno, "19b81dea4119d429"),
+            (Dimension::Completitud, "ce508b6314e2b5ca"),
+            (Dimension::Entrega, "8a9975311af332d3"),
+            (Dimension::Pruebas, "cd85103d4cfb9aa1"),
+        ];
+        for (dimension, esperada) in esperadas {
+            assert_eq!(huella_de(dimension), esperada, "{}", dimension.clave());
+        }
     }
 
     #[test]
