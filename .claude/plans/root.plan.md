@@ -15522,3 +15522,228 @@ Una cobertura parcial suele salir de una respuesta cortada o mal armada, no de u
 - **c) Solo Arquitectura.** Está más cerca: detecta 11 de 16, y ya pasa en los limpios. Diseño queda sin calibrar.
 
 Recomiendo la (a), si el diagnóstico apunta al juez. Una cobertura de 4 de 13 no mide el producto: mide una respuesta incompleta. Si el diagnóstico muestra que el juez no ve los defectos, la pregunta vuelve con esos datos, antes de gastar.
+
+## Vuelta del 2026-11-24 (94): el juez no repite su nivel, y la versión nueva del juez
+
+**Estado.**
+- **El plan de la vuelta 93 está en el commit 73410ce.**
+- **El diagnóstico del paso 1 terminó,** sin gasto: `colab-pruebas/juez-p107/diagnostico.txt`. Dice 12 defectos del grupo 1, 4 del grupo 3, 0 del grupo 2, y 3 sin veredicto por cobertura.
+- **La respuesta del usuario a P125, literal: "a) Sí, tope 8 USD (Recommended)".**
+- **Los logs crudos del juez se perdieron con el runtime.** En la laptop quedan la vuelta extraída y `registro.md`.
+
+## 1. Por qué el juez no da nivel a un ítem
+
+### Lo que leí
+
+- **El diagnóstico,** `juez-p107/diagnostico.txt`.
+- **Los casos de la vuelta,** `vuelta-extraida/calibracion/*.casos.jsonl`. Imprimí solo ítems, niveles, booleanos y conteos.
+- **Los 18 limpios de la vuelta,** `vuelta-extraida/calibracion/limpios/*.json`: faltantes y motivos.
+- **Las causas de inestables** de cada fila, en `vuelta-extraida/calibracion.json`.
+- **`gasto.jsonl` de la vuelta:** tokens de entrada y de salida de las 108 llamadas.
+- **El código del juez en 2020ecc:**
+  - `src/oracle/juez.rs`: el prompt, el reintento, el parser y el gate;
+  - `src/proveedores/deepseek.rs` y `MAX_TOKENS_JUEZ`;
+  - `src/oracle/calibra/inestables.rs`;
+  - `rubricas/diseno.toml` y `rubricas/arquitectura.toml`.
+
+### Una corrección al diagnóstico: el grupo 1 es casi todo grupo 2
+
+**El guion del diagnóstico leyó `niveles` de cada caso.** Pero Root ya sacó de `niveles` los ítems inestables de la base. Por eso un ítem inestable aparece como "sin nivel", y el grupo 2 dio 0.
+
+**Las causas de inestables, en las filas de P107 a:**
+
+| Tarea | Ítem | Causa |
+|---|---|---|
+| s2-t1 | `arquitectura.adecuacion` | falta en el juicio 2: el juez no encontró evidencia |
+| s2-t3 | `arquitectura.adecuacion` | varía de 0 a 3 |
+| s2-t2 | `diseno.errores` | varía de 0 a 3 |
+| s2-t3 | `diseno.errores` | varía de 1 a 3 |
+
+**Los defectos que cuentan en las filas,** sin los 4 casos de s2-t3 que la fila no cuenta con `n=10`:
+
+| Grupo | Arquitectura | Diseño | Total |
+|---|---|---|---|
+| Detectado | 10 (9 por la sonda de `dependencias`, 1 por el juez) | 1 | 11 |
+| No detectado: el ítem es inestable en la base | 3 | 5 | **8** |
+| No detectado: el mismo nivel que la base | 2 | 2 | 4 |
+| Sin veredicto, sobre un ítem inestable | 1 | 1 | 2 |
+| Sin veredicto, por cobertura baja | 0 | 1 | 1 |
+
+**El diagnóstico contó 4 casos más** en el grupo 1. Son los casos 6 y 10 de s2-t3, en las dos dimensiones. Esos casos no tienen extractos guardados, y la fila no los cuenta.
+
+**Arquitectura detecta casi solo por la sonda.** Sin `dependencias`, el juez detectó 1 de los 7 defectos que cuentan de `adecuacion`.
+
+**Una corrección a la vuelta 93: Arquitectura detecta 10 de 15, no 11 de 16.** La fila de s2-t3 trae 4 defectos, y 1 de ellos sin veredicto. Su sensibilidad de 1,0 es 3 de 3. La cota de Wilson es 0,417, no 0,444. La conclusión no cambia: Arquitectura no calibra.
+
+### La causa más probable
+
+**El juez no repite su propio nivel sobre el mismo código limpio.** La base se juzga tres veces. Si un ítem varía dos niveles, o falta en un juicio, sale de la dimensión. Un defecto sobre ese ítem ya no se puede detectar.
+
+**El mecanismo más probable es una contradicción entre el prompt, las anclas y el gate.**
+- El prompt dice: "el nivel de cada ítem parte en 0 y solo sube con evidencia citada textual".
+- El ancla 0 de `errores`, `estado` y `adecuacion` pide citar un defecto.
+- El ancla 3 describe una ausencia: "ningún error se traga", "sin riesgo citado".
+- El gate exige una cita válida para cualquier nivel, también para el 3.
+
+Sobre código sin defecto, el juez no tiene un camino estable. Puede citar algo y dar 3. Puede dar 0 por "parte en 0". Puede decir `sin_evidencia`. Las tres salidas aparecen en la base.
+
+### La evidencia que lo confirma
+
+- **Los saltos son de 0 a 3, o de 1 a 3.** No son de un nivel. El juez duda entre "hay defecto" y "no hay", no entre dos grados.
+- **Los faltantes de los limpios son todos "el juez no encontró evidencia".** Es la respuesta `sin_evidencia` del propio juez, no un descarte del parser. En 18 juicios limpios, faltan:
+  - `operabilidad`, en 8 juicios;
+  - `estado`, en 6;
+  - `robustez`, en 5;
+  - `errores`, en 4.
+- **Los ítems que faltan más son los de ancla 3 por ausencia.** `documentacion` no falta nunca, y `modularidad` falta una vez.
+- **El defecto está a la vista del juez.** En los 26 casos que cuentan, la línea del defecto cae dentro de un extracto del prompt.
+- **El tope de tokens no es la causa.** Las 108 llamadas usaron de 2184 a 18186 tokens de salida, de un tope de 32 000. Ninguna salió truncada.
+- **El parser no es la causa.** Ninguna respuesta dio JSON inválido.
+- **El defecto es viejo.** `registro.md` ya anotó en P80: "diseno.errores 3,0,0,0" sobre el mismo código.
+- **El modelo es `deepseek-v4-pro`, con razonamiento prendido.** Con razonamiento, DeepSeek no acepta una temperatura. No hay una perilla de azar para fijar.
+
+### Lo que falta medir
+
+- **Los textos crudos del juez se perdieron.** Sin ellos, no se puede confirmar qué leyó el juez antes de decir `sin_evidencia`.
+- **Si el prompt nuevo estabiliza la base.** Lo mide el primer trabajo de la medición nueva, sin gasto extra: sección 4.
+- **Si el prompt nuevo arregla el grupo 3.** Ahí el juez ve el defecto y no baja el nivel. El prompt nuevo puede ayudar, pero no lo apunta. Lo mide la sensibilidad.
+- **Los casos 6 y 10 de s2-t3 sin extractos.** Hay que mirarlos en la medición nueva.
+
+## 2. La Tarea 168: la compuerta, el tope del paquete y la fila de cada trabajo
+
+Escribí `docs/builds/brief-local-168.md`. Parte de la punta de `laptop/tarea-167`. Tiene tres puntos:
+1. **La compuerta.** Para una dimensión con juez, `decidir_fila` no exige una base de la laptop y no compara `valor_base`. Exige los casos de Colab. La huella, el `tarea_hash` y "ya estaba" siguen iguales. Las dimensiones de oráculo no cambian.
+2. **El tope del paquete.** Encontré un defecto al leer el código. `oraculo calibrar --tope-usd` es el tope de una calibración, no del paquete. Cada uno de los 10 trabajos de P107 a podía gastar 23,03 USD. La 168 suma `colab empaquetar --tope-usd`, y el notebook descuenta lo gastado antes de cada trabajo.
+3. **La fila de cada trabajo.** `_coincide` ya no compara `n`. El notebook guarda los `ts` antes de cada trabajo, y escribe `hechos.json` al terminarlo.
+
+**`_coincide` no era solo cosmético.** Al retomar una sesión cortada, `ya_calibrado` no veía un trabajo hecho con otro `n`, y lo corría otra vez. Eso gasta API.
+
+**En la vuelta 93 dije que la compuerta compararía las partes de sonda.** Al leer el código, eso no se puede. `valor_base` mezcla los ítems del juez y los de sonda en un número. Lo saco del brief. Este es el riesgo que acepto: un defecto de entorno en Colab que solo toca la sonda de Arquitectura no se nota al importar.
+
+**La 168 no cambia lo que Root mide.** Ninguna huella cambia, y un test lo guarda. Su binario puede importar la vuelta de P107 a con el congelado de 2020ecc.
+
+## 3. La Tarea 169: la versión nueva del juez
+
+Escribí `docs/builds/brief-local-169.md`. Va en otra tarea que la 168, por tres razones:
+- **La 168 no cambia lo que Root mide, y la 169 sí.** La 169 abre una versión nueva y pide congelar de nuevo.
+- **La 168 sirve antes:** importa las 10 filas de P107 a, y prueba su compuerta con datos reales.
+- **Las dos corren en serie,** porque un solo builder corre a la vez. La 169 parte de la punta de la 168. Así el congelamiento nuevo trae las dos.
+
+**Lo que cambia la 169:**
+1. **Tres cambios al prompt fijo del juez,** con el texto exacto en el brief:
+   - "parte en 0" sale;
+   - el juez busca primero el código del tema, revisa las anclas de 0 a 3, y cita lo que encontró, también para el nivel 3;
+   - `sin_evidencia` vale solo si ningún extracto trae código del tema.
+2. **`FASE` pasa a `"juez"`.** Una llamada puntúa Estructura, Arquitectura y Diseño juntas.
+3. **Tests de las huellas.** Las seis de oráculo quedan iguales, y las tres del juez cambian.
+
+**Lo que no cambia:** las rúbricas, las anclas, las sondas, el modelo, el tope de tokens, el gate, la regla de inestables y la regla de cobertura.
+
+**Los tests que prueban el arreglo sin gastar API,** todos con un `ModeloJuez` falso:
+- el prompt no dice "parte en 0", y sí dice el orden de 0 a 3;
+- `huella_del_prompt` cambia, y las seis huellas de oráculo quedan iguales;
+- un nivel 3 con una cita real pasa el gate, y un nivel 3 sin cita no pasa;
+- `sin_evidencia`, una respuesta truncada y el JSON reparado se leen como hoy;
+- el prompt sigue siendo determinista, y crece menos de 1024 bytes;
+- el `Prompt` lleva la fase `"juez"`;
+- una fila de Diseño con la huella de 2020ecc ya no calibra.
+
+**Ningún test sin API prueba que el juez se vuelva estable.** Eso solo lo mide la medición nueva.
+
+**Un costo que P125 no nombró: Estructura.** Una llamada del juez puntúa las tres dimensiones juntas. Por eso el prompt nuevo cambia también la huella de Estructura. Sus 3 filas de P107 a dejan de calibrar. Va a P126.
+
+## 4. La receta: congelar y medir de nuevo
+
+### Paso A: importar las 10 filas de P107 a con la 168
+
+Es gratis, y prueba la compuerta nueva con datos reales.
+1. El orquestador corre la suite con podman de `laptop/tarea-168`. Arma el release y lo copia a `colab-pruebas/v168/r00t`, con su SHA.
+2. Deja el worktree de reparto en 2020ecc: `colab importar` compara el commit del paquete con el `HEAD` de `--raiz-root`.
+3. Importa en una copia del `ROOT_HOME`:
+   `v168/r00t colab importar --archivo juez-p107/vuelta-p107.tar.gz --ida congelado-2020ecc/p-juez-2020ecc-tope30.tar.gz --sha 462d4dbc… --raiz-root ~/.cache/root-wt/reparto/wt`
+4. **Lo esperado:** entran 10 filas. Salen 10 avisos de "dimensión con juez".
+5. Corre el estado sobre la copia con el congelado. Estructura queda calibrada, y Arquitectura y Diseño no.
+6. Repite la importación en el `ROOT_HOME` real.
+
+### Paso B: congelar la versión nueva
+
+1. **El usuario ordena la mezcla** de las Tareas 167, 168 y 169 en `claude/root-e7813e`. Llamo X a ese commit.
+2. **El orquestador corre la suite con podman en X.** Arma el release y lo copia a `colab-pruebas/congelado-X/r00t`, con su SHA.
+3. **Revisa que solo cambió el juez:**
+   - `git diff 2020ecc X -- rubricas imagenes tools/colab/versiones.env` sale vacío;
+   - en `src/oracle/`, solo cambian `juez.rs` y tests;
+   - la imagen sigue siendo `localhost/root-oraculo-rust:4`, con el id 3c6ea283….
+4. **Corre el estado en una copia del real** con `congelado-X/r00t`. Lo esperado:
+   - Funciona, Seguridad, Eficiencia, Completitud y Pruebas siguen calibradas;
+   - Arquitectura, Diseño y Estructura quedan sin calibrar, por la huella.
+5. **Anota en `registro.md`:** X, el SHA del binario, el id de la imagen y las nueve huellas.
+
+**Qué queda fijo en la versión X:** el binario de X, la imagen, las rúbricas, el prompt nuevo, las versiones de sondas, `versiones.env` y los `tarea.toml`.
+
+### Qué filas viejas dejan de contar
+
+- **Todas las filas de Arquitectura, Diseño y Estructura con las huellas de 2020ecc** (60c5fb9b, 19b81dea y afbc695e):
+  - las 10 filas de P107 a;
+  - la fila vieja de Arquitectura de s2-t1, con `n=10`.
+- **Las filas de oráculo siguen contando,** entre ellas las 143 de las doce. Su huella no lleva el prompt.
+- **Ninguna fila se borra.** Quedan en el real como registro. `Version::calibrada` ya no las cuenta.
+
+### Paso C: el paquete y la medición por la CLI de Colab
+
+1. **El paquete.** Es el guion `paso0-juez-2020ecc-tope30.sh`, con cinco cambios:
+   - `ARMA` y `MIDE` son el mismo binario, `congelado-X/r00t`;
+   - `COMMIT` es X;
+   - suma `--tope-usd 8`, por P125 a;
+   - la salida es `congelado-X/p-juez-X.tar.gz`;
+   - los trabajos van en este orden, con `n=12`:
+     `s2-t1:diseno, s2-t1:arquitectura, s2-t2:diseno, s2-t3:diseno, s2-t2:arquitectura, s2-t3:arquitectura`.
+2. **El orden aprovecha la regla de parada del notebook.** El primer trabajo de cada dimensión forma su propia etapa. Si detecta menos de 0,85, el notebook salta los otros dos trabajos de esa dimensión. Con 6 defectos, 0,85 pide detectarlos todos.
+3. **Por qué conviene parar ahí.** Con P102 a y tres tareas, una dimensión con juez calibra solo si:
+   - detecta todos los defectos con veredicto;
+   - no tiene más de 2 defectos sin veredicto;
+   - no tiene más de 2 limpios sin veredicto.
+   Con 17 de 18 detectados, la cota de Wilson es 0,742, y no pasa. Un fallo en s2-t1 ya deja esa dimensión sin calibrar.
+4. **La corrida.** Es `juez-p107/juez-p107.sh`, con el SHA del paquete nuevo en el guion y en `juez-cli.py`, y otra sesión: `juez-x`. La subida va en trozos de 40 MiB. El estado se consulta cada 240 s.
+5. **La clave.** Viaja como en P107 a: `lanza-juez.py` la recibe por `colab exec --env`, y la pasa a un proceso hijo. Es la excepción del usuario para la CLI. Esta receta la usa porque el usuario pidió la CLI.
+6. **La vuelta.** Se baja con su SHA, y se importa con `congelado-X/r00t`, que ya trae la compuerta de la 168. Primero se importa en una copia, y después en el real.
+7. **El estado** se corre sobre el real.
+
+**Costo y tiempo:**
+- **Con los 6 trabajos, de 5 a 7,3 USD de API.** P107 a gastó 7,95 USD en 10 trabajos. El prompt nuevo puede alargar la salida hasta un 30 %.
+- **Si para una dimensión en s2-t1, cerca de 1,5 USD menos.**
+- **Con el tope de la 168, el paquete nunca pasa de 8 USD.**
+- **De 5 a 7 horas de runtime,** más cerca de 1 hora para subir, bajar e importar.
+
+## 5. Pregunta al usuario
+
+**P126. ¿Cuándo se mide Estructura con la versión nueva del juez?** Una llamada del juez puntúa las tres dimensiones juntas. El prompt nuevo cambia la huella de Estructura, aunque Estructura ya detectaba 18 de 18 defectos. Medirla de nuevo cuesta de 2 a 3,3 USD de API y de 2 a 3 horas.
+
+- **a) En un paquete aparte, después de ver Diseño y Arquitectura.** Si el prompt nuevo no sirve, se puede volver al prompt de 2020ecc. Las filas viejas de Estructura vuelven a contar, sin gasto. *(recomendada)*
+- **b) En el mismo paquete, al final,** con un tope total de 11 USD. Es una corrida menos, pero Estructura se paga aunque el prompt nuevo no sirva.
+- **c) No se mide.** Estructura queda sin calibrar hasta después de la validez.
+
+Recomiendo la (a). Solo gasta en Estructura cuando el prompt nuevo ya probó que sirve.
+
+## 6. Lo que falta
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | La Tarea 168 | Nada | Colab, builder | Cerca de 1 USD | Cerca de 2 horas | No |
+| 2 | La suite con podman de la 168, y el paso A: importar las 10 filas | El paso 1 | Laptop, orquestador | 0 USD | Cerca de 40 minutos | No |
+| 3 | La Tarea 169 | El paso 1 | Colab, builder | Cerca de 1 USD | Cerca de 1,5 horas | No |
+| 4 | La suite con podman de la 169 | El paso 3 | Laptop, orquestador | 0 USD | Cerca de 20 minutos | No |
+| 5 | P126 | Nada | — | — | — | **Sí** |
+| 6 | La mezcla de las Tareas 167, 168 y 169 | El paso 4 | — | — | — | **Sí: la orden de mezcla** |
+| 7 | El paso B: congelar la versión X | El paso 6 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 8 | El paso C: medir Diseño y Arquitectura | El paso 7 | Colab, CLI | De 5 a 7,3 USD de API, con tope de 8 | De 6 a 8 horas | No |
+| 9 | Estructura, según P126 | Los pasos 5 y 8 | Colab, CLI | De 2 a 3,3 USD de API | De 2 a 3 horas | No |
+| 10 | Si Diseño o Arquitectura no calibran: una pregunta nueva, con los datos | El paso 8 | — | — | — | **Sí** |
+| 11 | La pregunta de presupuesto de D3 | Los pasos 8 y 9 | — | — | — | **Sí** |
+| 12 | D3: `corre` sobre las 31 tareas | El paso 11 | Laptop, podman | Cerca de 31 USD de lista por cupo por pasada | De 10 a 20 horas por pasada | No |
+| 13 | P98 c: abrir el final | El paso 12 | Laptop | Según la regla del final | Según el final | No |
+| 14 | La validez sobre el final sellado | El paso 13 | Colab | Según el final | Según el final | No |
+| 15 | Después de la validez: una sola fuente de las versiones de Seguridad, y la tarea en el error de lanzar | El paso 14 | Laptop, builder | Cerca de 1 USD | Menos de 1 hora | No |
+
+**El saldo de S2:** cerca de 15,08 USD. Después del paso 8 quedan, como mínimo, cerca de 7 USD. Después del paso 9 quedan, como mínimo, cerca de 3,8 USD.
+
+**La fase de los eventos y `_coincide` salen de la lista de después de la validez.** Los resuelven la 169 y la 168.
