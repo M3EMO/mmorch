@@ -15398,3 +15398,127 @@ Ninguna va al usuario.
 **La regla de carga.** Los pasos 4, 8 y 10 usan podman en la laptop, de a uno.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-24 (93): el juez midió, y la compuerta no lo deja entrar
+
+**Estado.**
+- **Las doce entraron al real** (vuelta 92): 143 filas, con el SHA de `calibracion.json` en 4a199711…. Funciona, Seguridad, Eficiencia, Completitud y Pruebas están calibradas.
+- **P107 a corrió por la CLI de Colab, no por el notebook.** El usuario lo pidió. Una sesión de la CLI no lee Colab Secrets.
+- **Decisión del usuario, literal: "Excepción por CLI --env".** La clave de DeepSeek fue por `colab exec --env` a un proceso hijo. Es una excepción a la regla de las claves, solo para esta corrida.
+- **Los guiones están en `colab-pruebas/juez-p107/`.** `juez-cli.py` corre las celdas 1, 3 y 4 del notebook de 2020ecc, sin Drive. El paquete subió en trozos de 40 MiB.
+- **Los 10 trabajos terminaron en cerca de 9 horas.** El gasto de API fue de 7,95 USD, en 108 llamadas. La vuelta tiene SHA 462d4dbc…, y la verificación de versiones dio toda "ok".
+- **`colab importar` no aceptó ninguna fila:** "entraron 0 filas; no entraron 10". En la copia sí entraron 216 líneas de gasto. El real no cambió.
+- **Dos detalles cosméticos:**
+  - el notebook dice "sin fila nueva" cuando la fila sale con otro `n`, porque `_coincide` compara `n`;
+  - todos los eventos de gasto dicen fase `juez-diseno`, también en Arquitectura y en Estructura.
+
+**El saldo de S2:** 30 menos 6,97 menos 7,95 da cerca de 15,08 USD.
+
+## 1. Las filas, con sus conteos
+
+Leí los conteos de la vuelta, sin nombres de tests:
+
+| Tarea | Dimensión | n | Defectos con veredicto | Detectados | Defectos sin veredicto | Limpios | Limpios sin veredicto | Cuenta |
+|---|---|---|---|---|---|---|---|---|
+| s2-t1 | Arquitectura | 12 | 6 | 3 | 0 | 6 | 1 | Sí |
+| s2-t2 | Arquitectura | 12 | 6 | 4 | 0 | 6 | 0 | Sí |
+| s2-t3 | Arquitectura | 10 | 4 | 4 | 1 | 6 | 1 | Sí |
+| s2-t1 | Diseño, n=2 | 0 | — | — | — | — | — | No: inestable |
+| s2-t1 | Diseño, n=12 | 0 | — | — | — | — | — | No: base sin veredicto |
+| s2-t2 | Diseño | 12 | 6 | 1 | 0 | 6 | 0 | Sí |
+| s2-t3 | Diseño | 10 | 4 | 0 | 2 | 6 | 3 | Sí |
+| s2-t1 a s2-t3 | Estructura | 12 cada una | 6 cada una | 6 cada una | 0 | 6 cada una | 0 | Sí |
+
+## 2. Qué queda calibrado, con P102 a
+
+P102 a pide, para una dimensión con juez, una cota de Wilson de 0,8 o más en cada clase, con las tareas juntas. Además, no más de 20 % sin veredicto en cada clase.
+
+| Dimensión | Defectos detectados | Cota de Wilson | Limpios bien | Cota de Wilson | ¿Calibrada? |
+|---|---|---|---|---|---|
+| Estructura | 18 de 18 | 0,824 | 18 de 18 | 0,824 | **Sí** |
+| Arquitectura | 11 de 16 | 0,444 | 16 de 16 | 0,806 | No: los defectos |
+| Diseño | 1 de 10 | 0,018 | 9 de 9 | 0,701 | No: las dos clases |
+
+- **Estructura queda calibrada,** cuando sus filas entren al real. Sus filas viejas de s2 no tienen huella, así que no se suman.
+- **Arquitectura no:** los limpios pasan, pero detecta 11 de 16 defectos. La fila vieja de s2-t1, con la misma huella, no alcanza para llegar a 0,8.
+- **Diseño no:** detecta 1 de 10, y en s2-t3 la mitad de los limpios queda sin veredicto.
+- **Por P103 a, Arquitectura y Diseño igual dan veredicto,** pero no entran al global ni a los mínimos.
+
+## 3. Por qué la compuerta rechaza las filas
+
+**`decidir_fila`, en `src/colab_calibra.rs`, compara la base de Colab con la de la laptop.** Para una dimensión de oráculo, la base es determinista: la misma tarea, en dos máquinas, da el mismo número. Así encontró el defecto de bwrap de la vuelta (63), con una base de 0,111 contra 1,0.
+
+**Con el juez, esa comparación no sirve.**
+- **La laptop no tiene base para la mayoría de las 10 filas.** Nadie corrió el juez en la laptop con la huella de hoy.
+- **El juez varía entre corridas.** Revisé la base de Arquitectura de s2-t1, solo con ids de ítems y niveles. En la laptop trae `adecuacion` en 3 e `interfaces` en 1. En Colab trae solo `interfaces` en 1: `adecuacion` quedó sin nivel en sus tres juicios de base. **La diferencia sale de un ítem del juez, no de una sonda.**
+
+## 4. Cómo entran las 10 filas
+
+| Opción | Costo | Riesgo |
+|---|---|---|
+| **a) Revisión a mano,** como las doce, saltando la compuerta | 0 USD, minutos | Una regla que solo vive en un guion. La próxima corrida del juez pide lo mismo, sin registro en Root |
+| **b) Una tarea de Root:** la compuerta trata distinto a las dimensiones con juez | Cerca de 1 USD de builder, más la suite: cerca de 2 horas | Afloja una guarda. Pero la deja intacta para las de oráculo, que es donde encontró un defecto real |
+| **c) Medir la base del juez en la laptop** y comparar | Cerca de 2,25 USD de API: 9 tareas por dimensión, a cerca de 0,25 USD cada una | El juez varía. Dos bases del juez casi nunca coinciden, así que la compuerta seguiría rechazando |
+
+**Elijo la (b). Es una decisión técnica:** cambia una regla del transporte, no qué mide Root.
+
+**Lo que haría la tarea, la 168:**
+- **Para una dimensión con ítems del juez,** la compuerta no exige la base de la laptop.
+- **Si la dimensión también tiene sondas,** como Arquitectura y Estructura, compara solo los ítems de sonda de la base. Esos sí son deterministas.
+- **Guarda la base de Colab como está,** con sus juicios.
+- **Para las dimensiones de oráculo, nada cambia.**
+
+**No rompe el congelamiento,** por la misma razón que la 167: `decidir_fila` corre en la laptop, en `colab importar`. Las filas siguen saliendo del binario congelado.
+
+**No escribo su brief en esta vuelta.** El pedido no lo incluye, y antes conviene el diagnóstico de la sección 5: puede sumar puntos a la misma tarea.
+
+## 5. Diseño y Arquitectura: primero un diagnóstico, sin API
+
+**Lo que ya se ve, y apunta al juez:**
+- **Diseño de s2-t1,** con n=12, quedó sin base: "juicio 3 de la base sin veredicto: cobertura 4 de 13 de peso". Una respuesta del juez cubrió solo 4 de los 13 de peso de la rúbrica.
+- **Diseño de s2-t1,** con n=2, quedó inestable: un ítem varía de 0 a 2, otros dos salieron sin evidencia, y otro no pasó el gate.
+- **Arquitectura de s2-t1:** `adecuacion` quedó sin nivel en la base.
+- **Diseño de s2-t3:** la mitad de sus limpios quedó sin veredicto.
+
+Una cobertura parcial suele salir de una respuesta cortada o mal armada, no de un defecto que el juez no ve. Pero eso hay que medirlo.
+
+**El diagnóstico:** el orquestador lee los casos de la vuelta. Imprime solo ids de ítems, niveles y motivos, nunca código ni nombres de tests. Clasifica cada defecto no detectado en uno de cuatro grupos:
+1. **el juez no dio nivel al ítem del defecto:** cobertura o respuesta cortada;
+2. **el ítem quedó inestable entre juicios;**
+3. **el juez dio nivel, pero el mismo que en la base:** el juez no ve el defecto;
+4. **otro motivo.**
+
+**Cuesta 0 USD y cerca de una hora del orquestador.**
+
+**Qué sigue según el resultado:**
+- **Si dominan los grupos 1 o 2,** es un defecto del juez o de cómo se lo llama. Por ejemplo, un tope de tokens corto con `deepseek-reasoner`, que gasta tokens en razonar. Arreglarlo cambia cómo mide el juez. **Eso es una versión nueva del juez, y lo decide el usuario: P125.**
+- **Si domina el grupo 3,** el juez no ve esos defectos. Un arreglo sería cambiar la rúbrica o los defectos inyectados. También es una versión nueva.
+- **En los dos casos, las dimensiones de oráculo no se tocan.** Sus huellas no dependen del prompt del juez, así que sus filas siguen valiendo.
+
+**El costo de medir otra vez,** si P125 lo pide: Diseño y Arquitectura en s2-t1 a s2-t3. P107 a gastó 7,95 USD en tres dimensiones. Dos dimensiones costarían de 5 a 6 USD, y entran en el saldo de cerca de 15 USD.
+
+## 6. Lo que falta para que Root esté calibrado del todo
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | El diagnóstico de Diseño y Arquitectura | Nada | Laptop, el orquestador | 0 USD | Cerca de 1 hora | No |
+| 2 | La Tarea 168: la compuerta del juez, y lo que sume el diagnóstico | El paso 1 | Colab, builder | Cerca de 1 USD | Cerca de 1 hora, más la suite | No |
+| 3 | Importar las 10 filas del juez con el binario de la 168 | El paso 2 | Laptop | 0 USD | Minutos | No |
+| 4 | El estado de cada dimensión | El paso 3 | Laptop, podman | 0 USD | Cerca de 20 minutos | No |
+| 5 | P125: versión nueva del juez, o no | El paso 1 | — | — | — | **Sí** |
+| 6 | Si P125 lo pide: arreglar el juez, congelar de nuevo y medir Diseño y Arquitectura | El paso 5 | Colab, builder y CLI | De 5 a 7 USD de API, más cerca de 1 USD de builder | De 6 a 8 horas | No |
+| 7 | La pregunta de presupuesto de D3 | El paso 4, o el 6 | — | — | — | **Sí** |
+| 8 | D3: `corre` sobre las 31 tareas | El paso 7 | Laptop, podman | Cerca de 31 USD de lista por cupo por pasada, casi nada de API | De 10 a 20 horas por pasada | No |
+| 9 | P98 c: abrir el final, con 16 reales y el tope de P115 a | El paso 4, o el 6 | Laptop | Según la regla del final | Según el final | No |
+| 10 | La validez sobre el final sellado | Los pasos 1 a 9 | Colab | Según el final | Según el final | No |
+| 11 | Después de la validez: una sola versión de las sondas de Seguridad, la tarea en el error de lanzar, la fase de los eventos del juez y `_coincide` | El paso 10 | Laptop, builder | Cerca de 1 USD | Menos de 1 hora | No |
+
+## 7. Pregunta al usuario
+
+**P125. Si el diagnóstico muestra un defecto del juez en Diseño o Arquitectura, ¿abro una versión nueva solo para el juez?** Con la versión congelada, Estructura queda calibrada. Arquitectura detecta 11 de 16 defectos, y Diseño 1 de 10. Las dos dan veredicto, pero no entran al global ni a los mínimos. Arreglar el juez cambia cómo mide, así que es una versión nueva. Las dimensiones de oráculo no cambian.
+
+- **a) Sí, con un tope de 8 USD para la medición nueva.** Se arregla el juez, se congela de nuevo, y se miden otra vez Diseño y Arquitectura en s2-t1 a s2-t3. Entra en el saldo de cerca de 15 USD. *(recomendada)*
+- **b) No.** Root sigue con la versión congelada. Arquitectura y Diseño quedan sin calibrar hasta después de la validez.
+- **c) Solo Arquitectura.** Está más cerca: detecta 11 de 16, y ya pasa en los limpios. Diseño queda sin calibrar.
+
+Recomiendo la (a), si el diagnóstico apunta al juez. Una cobertura de 4 de 13 no mide el producto: mide una respuesta incompleta. Si el diagnóstico muestra que el juez no ve los defectos, la pregunta vuelve con esos datos, antes de gastar.
