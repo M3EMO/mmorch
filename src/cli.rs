@@ -220,6 +220,9 @@ pub enum ColabAccion {
         /// Incluye las dimensiones con ítems del juez. Exige Colab Secrets. Fija el tope de gasto de S2.
         #[arg(long)]
         juez: bool,
+        /// Tope de gasto de API del paquete, en USD. Exige `--juez`. Con él, el tope es el menor entre el saldo de S2 y este valor.
+        #[arg(long)]
+        tope_usd: Option<f64>,
     },
     /// Importa la vuelta de una calibración de Colab: revisa el paquete y agrega sus filas.
     Importar {
@@ -739,6 +742,30 @@ mod tests {
             Comando::Colab {
                 accion: ColabAccion::Empaquetar { juez, .. },
             } => assert!(juez),
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_empaquetar_parsea_tope_usd() {
+        let mut args = empaquetar_base();
+        args.extend(["--juez", "--tope-usd", "8"]);
+        let cli = Cli::try_parse_from(args).expect("colab empaquetar con --tope-usd parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { tope_usd, .. },
+            } => assert_eq!(tope_usd, Some(8.0)),
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_empaquetar_sin_tope_usd_por_defecto() {
+        let cli = Cli::try_parse_from(empaquetar_base()).expect("colab empaquetar parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Empaquetar { tope_usd, .. },
+            } => assert_eq!(tope_usd, None),
             otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
         }
     }

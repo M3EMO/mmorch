@@ -89,8 +89,8 @@ pub const EXCLUIDOS: &[(&str, &str)] = &[
 // Cifras del tope de S2: decisiones del usuario, no medidas del código.
 
 /// Tope de gasto de API de S2, en USD. Con `--juez`, el manifiesto guarda lo que queda de este tope.
-/// Decisión P107 a del usuario: el tope de S2 sube a 25 USD.
-pub const TOPE_S2_USD: f64 = 25.0;
+/// P124 a del usuario: el tope de S2 sube de 25 a 30 USD.
+pub const TOPE_S2_USD: f64 = 30.0;
 
 /// Gasto de API de S2 antes del corte. Es la suma del orquestador, corrida por corrida.
 /// Fuente: P112 a del usuario.
@@ -237,6 +237,8 @@ pub struct Paquete {
     pub semilla: u64,
     /// Con `--juez`, entran las dimensiones con ítems del juez y el manifiesto fija el tope de S2.
     pub juez: bool,
+    /// Tope de gasto del paquete, en USD. Con `--juez`, el tope es el menor entre el saldo de S2 y este valor.
+    pub tope_usd: Option<f64>,
 }
 
 /// Pedido tal como llega de la línea de comandos.
@@ -250,6 +252,8 @@ pub struct PedidoEmpaquetar {
     pub raiz_root: Option<PathBuf>,
     /// Con `--juez`, entran las dimensiones con ítems del juez.
     pub juez: bool,
+    /// Tope de gasto del paquete, en USD. Exige `--juez`.
+    pub tope_usd: Option<f64>,
 }
 
 /// Lo que devuelve el comando: dónde quedó el paquete y qué trae.
@@ -368,6 +372,7 @@ pub fn empaquetar_cli_con(
         commit_root,
         semilla,
         juez,
+        tope_usd: pedido.tope_usd,
     };
     let imagen = PodmanReal {
         binario: binario_podman(),
@@ -381,6 +386,16 @@ pub fn empaquetar(paquete: &Paquete, imagen: &dyn Imagen) -> Result<Resumen, Err
         return Err(ErrorOraculo::Uso(
             "--rustup-sha256 debe tener 64 caracteres hexadecimales".into(),
         ));
+    }
+    if let Some(tope) = paquete.tope_usd {
+        if !paquete.juez {
+            return Err(ErrorOraculo::Uso("--tope-usd exige --juez".into()));
+        }
+        if !(tope.is_finite() && tope > 0.0) {
+            return Err(ErrorOraculo::Uso(
+                "--tope-usd debe ser un número finito mayor que 0".into(),
+            ));
+        }
     }
     let bytes = fs::read(&paquete.binario)
         .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", paquete.binario.display())))?;
@@ -413,10 +428,11 @@ pub fn empaquetar(paquete: &Paquete, imagen: &dyn Imagen) -> Result<Resumen, Err
     }
     validar_trabajos(&trabajos, paquete.juez)?;
     // Con juez, sin tope de S2 no hay gasto para calibrar. Se revisa antes de armar nada.
-    // Se calcula el gasto una sola vez: sirve al rechazo y al manifiesto.
+    // Se calcula el gasto una sola vez: sirve al rechazo, a la línea de stderr y al manifiesto.
     let gasto = if paquete.juez {
         let gasto = gasto_s2(&paquete.home)?;
-        eprintln!("{}", linea_gasto_s2(&gasto));
+        let tope = tope_del_paquete(gasto.restante_usd, paquete.tope_usd);
+        eprintln!("{}", linea_gasto_s2(&gasto, tope));
         if gasto.restante_usd <= 0.0 {
             return Err(ErrorOraculo::Uso(format!(
                 "con --juez no se arma el paquete: no queda tope de S2. \
@@ -592,7 +608,9 @@ fn armar_y_empaquetar(
         binario_sha256,
         trabajos,
         imagenes,
-        tope_s2_usd: gasto.map(|g| g.restante_usd),
+        tope_s2_usd: gasto
+            .as_ref()
+            .map(|g| tope_del_paquete(g.restante_usd, paquete.tope_usd)),
         gasto_s2: gasto.cloned(),
     };
     let manifiesto = armar_manifiesto(&datos, archivos);
@@ -663,15 +681,21 @@ pub fn gastado_s2_usd(home: &Path) -> Result<f64, ErrorOraculo> {
     Ok(gasto_s2(home)?.total_usd)
 }
 
-/// Línea de stderr con el gasto de S2: previo, desde el corte, total y lo que queda.
-pub fn linea_gasto_s2(g: &GastoS2) -> String {
+/// Tope del paquete: el saldo de S2, o el menor entre ese saldo y `tope_usd` si lo hay.
+pub fn tope_del_paquete(saldo: f64, tope_usd: Option<f64>) -> f64 {
+    tope_usd.map_or(saldo, |tope| tope.min(saldo))
+}
+
+/// Línea de stderr con el gasto de S2: previo, desde el corte, total, lo que queda y el tope del paquete.
+pub fn linea_gasto_s2(g: &GastoS2, tope_paquete: f64) -> String {
     format!(
-        "gasto de S2: {} USD previos + {} USD desde {} = {} USD; quedan {} USD de {TOPE_S2_USD:.0}",
+        "gasto de S2: {} USD previos + {} USD desde {} = {} USD; quedan {} USD de {TOPE_S2_USD:.0}; tope del paquete: {} USD",
         cifra_usd(g.previo_usd),
         cifra_usd(g.desde_corte_usd),
         g.corte,
         cifra_usd(g.total_usd),
         cifra_usd(g.restante_usd),
+        cifra_usd(tope_paquete),
     )
 }
 
@@ -1273,6 +1297,17 @@ pub struct Entrada<'a> {
     pub ya_estaba: bool,
     /// `None`: la laptop no tiene fila para comparar. `Err`: faltan casos de esos lados.
     pub base: Option<Result<Valores, Vec<&'static str>>>,
+    /// Hay al menos un `.casos.jsonl` de Colab para la fila y todos están en el paquete extraído.
+    pub casos_de_colab_completos: bool,
+}
+
+/// Aviso que va al resumen por cada fila de una dimensión con juez que entra.
+pub fn aviso_de_juez(fila: &Fila) -> String {
+    format!(
+        "{} de {}: dimensión con juez; la base no se compara, porque el juez varía entre corridas",
+        fila.dimension.clave(),
+        fila.tarea
+    )
 }
 
 /// Decide si una fila entra. Un motivo por cada caso que no entra.
@@ -1288,6 +1323,14 @@ pub fn decidir_fila(e: &Entrada) -> Decision {
     }
     if e.ya_estaba {
         return no("ya estaba en la laptop");
+    }
+    // Con juez, la base no se compara: el juez varía entre corridas. Solo cuentan los casos de Colab.
+    if tiene_items_de_juez(e.fila.dimension) {
+        return if e.casos_de_colab_completos {
+            Decision::Entra
+        } else {
+            no("faltan los casos de Colab")
+        };
     }
     match &e.base {
         None => no("sin base de la laptop para comparar"),
@@ -1585,6 +1628,10 @@ fn importar_desde(
     let mut entran: Vec<&Fila> = Vec::new();
     let mut nombres_a_copiar: BTreeSet<String> = BTreeSet::new();
     let mut rechazadas = Vec::new();
+    let mut avisos = Vec::new();
+    if !filas.is_empty() {
+        avisos.push(AVISO_MUTANTES.to_string());
+    }
     for fila in &filas {
         let vuelta = manifiesto.filas.iter().find(|v| coincide_vuelta(v, fila));
         let casos_colab: &[String] = match vuelta {
@@ -1596,20 +1643,34 @@ fn importar_desde(
             .filas
             .iter()
             .any(|f| misma_medicion(f, fila) && f.ts == fila.ts);
-        let base = mejor_base(&calibracion, fila, &huella);
+        let juez = tiene_items_de_juez(fila.dimension);
+        // Con juez no se lee la base: la decisión no la mira.
+        let base = if juez {
+            None
+        } else {
+            mejor_base(&calibracion, fila, &huella)
+        };
         let valores = match base {
             Some(b) => Some(valores_de_base(home, dir, casos_colab, b)?),
             None => None,
         };
+        let casos_colab_completos = !casos_colab.is_empty()
+            && casos_colab
+                .iter()
+                .all(|n| dir.join(CARPETA_CALIBRACION).join(n).is_file());
         let decision = decidir_fila(&Entrada {
             fila,
             huella_laptop: &huella,
             tarea_hash_laptop: tarea_hash_de(home, &fila.tarea).as_deref(),
             ya_estaba,
             base: valores,
+            casos_de_colab_completos: casos_colab_completos,
         });
         match decision {
             Decision::Entra => {
+                if juez {
+                    avisos.push(aviso_de_juez(fila));
+                }
                 entran.push(fila);
                 nombres_a_copiar.extend(casos_colab.iter().cloned());
             }
@@ -1621,10 +1682,6 @@ fn importar_desde(
         }
     }
 
-    let mut avisos = Vec::new();
-    if !filas.is_empty() {
-        avisos.push(AVISO_MUTANTES.to_string());
-    }
     let hay_gasto_nuevo = if gasto.is_empty() {
         false
     } else {
@@ -2046,10 +2103,10 @@ const PLAZO_LOCAL_TRABAJO: Duration = Duration::from_secs(180);
 const PAUSA_CONSULTA_CALIBRAR: Duration = Duration::from_secs(60);
 /// Consultas seguidas que fallan antes de que el trabajo falle.
 const FALLAS_CONSULTA_MAX: u32 = 5;
+/// Intentos de lanzar un paso antes de fallar.
+const INTENTOS_LANZAR: u32 = 3;
 /// Tiempo del cierre que verifica y empaqueta la vuelta, en segundos.
 const SEG_CIERRE_CALIBRAR: u64 = 600;
-/// Margen que el laptop espera sobre el tiempo de un `exec` remoto.
-const MARGEN_EXEC: Duration = Duration::from_secs(300);
 /// Corrida que firma los `Gate` de cada runtime de calibración.
 const CORRIDA_CALIBRAR: &str = "colab-calibrar";
 /// Causa del `Gate` de liberación cuando el ciclo termina bien.
@@ -2417,58 +2474,70 @@ fn correr_runtime<C: ColabCli>(
     let sha = sha256_hex(&bytes);
     let trozos = colab::subir_en_trozos(cli, lim, sesion, paquete, tmp, TIMEOUT_CALIBRAR)?;
 
-    let guion = colab::escribir(tmp, "preparar.py", &script_preparar(trozos, &sha))?;
-    let preparado = ejecutar_guion(cli, lim, sesion, SEG_PREPARAR_CALIBRAR, &guion)?;
-    if preparado.codigo != 0 || colab::marcador(&preparado.stdout, "ROOT_OK=").is_none() {
+    let texto = script_paso("preparar", &script_preparar(trozos, &sha));
+    let (pid, lanzado) = lanzar_paso(cli, lim, sesion, tmp, "preparar", "la preparación", &texto)?;
+    let preparado = esperar_paso(
+        cli,
+        lim,
+        sesion,
+        tmp,
+        "preparar",
+        "la preparación",
+        pid,
+        SEG_PREPARAR_CALIBRAR,
+        lanzado,
+        espera,
+    )?;
+    if preparado.codigo != 0 || !preparado.marcas.contains_key("ROOT_OK") {
         return Err(ErrorOraculo::Infra(format!(
             "la preparación del runtime falló: {}",
-            preparado.detalle()
+            motivo_de_paso(&preparado)
         )));
     }
 
     for (indice, trabajo) in manifiesto.trabajos.iter().enumerate() {
         let (args, entorno) = trabajo_remoto(trabajo, &manifiesto.archivos);
-        // El guion se calcula antes de escribirlo: si falla, no queda `lanzar-N.py` a medias.
+        // El guion se calcula antes de lanzar: si falla, no queda ningún `.py` a medias.
         let texto = script_trabajo(indice, &args, &entorno)?;
-        let guion = colab::escribir(
-            tmp,
-            &format!("lanzar-{indice}.py"),
-            &script_lanzar(indice, &texto),
-        )?;
-        let lanzado_en = Instant::now();
-        let lanzado = ejecutar_guion_con_plazo(
+        let paso = format!("trabajo-{indice}");
+        let (pid, lanzado) = lanzar_paso(cli, lim, sesion, tmp, &paso, "el trabajo", &texto)?;
+        let estado = esperar_paso(
             cli,
             lim,
             sesion,
-            SEG_LANZAR_CALIBRAR,
-            PLAZO_LOCAL_TRABAJO,
-            &guion,
+            tmp,
+            &paso,
+            "el trabajo",
+            pid,
+            SEG_TRABAJO_CALIBRAR,
+            lanzado,
+            espera,
         )?;
-        let pid = colab::marcador(&lanzado.stdout, "ROOT_LANZADO=")
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|_| lanzado.codigo == 0);
-        let Some(pid) = pid else {
-            return Err(ErrorOraculo::Infra(format!(
-                "el trabajo {} {} no se lanzó: {}",
-                trabajo.tarea,
-                trabajo.dimension,
-                lanzado.detalle()
-            )));
-        };
-        let codigo = esperar_trabajo(cli, lim, sesion, tmp, indice, pid, lanzado_en, espera)?;
         codigos.push(CodigoTrabajo {
             tarea: trabajo.tarea.clone(),
             dimension: trabajo.dimension.clone(),
-            codigo,
+            codigo: estado.codigo,
         });
     }
 
-    let guion = colab::escribir(tmp, "cierre.py", &script_cierre())?;
-    let cierre = ejecutar_guion(cli, lim, sesion, SEG_CIERRE_CALIBRAR, &guion)?;
-    if cierre.codigo != 0 || colab::marcador(&cierre.stdout, "ROOT_OK=").is_none() {
+    let texto = script_paso("cierre", &script_cierre());
+    let (pid, lanzado) = lanzar_paso(cli, lim, sesion, tmp, "cierre", "el cierre", &texto)?;
+    let cierre = esperar_paso(
+        cli,
+        lim,
+        sesion,
+        tmp,
+        "cierre",
+        "el cierre",
+        pid,
+        SEG_CIERRE_CALIBRAR,
+        lanzado,
+        espera,
+    )?;
+    if cierre.codigo != 0 || !cierre.marcas.contains_key("ROOT_OK") {
         return Err(ErrorOraculo::Infra(format!(
             "el cierre de la vuelta falló: {}",
-            cierre.detalle()
+            motivo_de_paso(&cierre)
         )));
     }
 
@@ -2493,7 +2562,7 @@ fn correr_runtime<C: ColabCli>(
     }
     // Antes de abrir la vuelta: su SHA-256 debe coincidir con el que dijo el cierre.
     verificar_sha_de_la_vuelta(
-        colab::marcador(&cierre.stdout, "ROOT_SHA_VUELTA=").as_deref(),
+        cierre.marcas.get("ROOT_SHA_VUELTA").map(String::as_str),
         &vuelta,
     )?;
     verificar_vuelta_del_runtime(&vuelta, tmp)?;
@@ -2649,24 +2718,6 @@ fn llamar(
     colab::paso(cli, lim, args, plazo)
 }
 
-/// Corre un guion de Python en el runtime. El plazo de Root es el del guion más un margen.
-fn ejecutar_guion<C: ColabCli>(
-    cli: &C,
-    lim: &colab::Limites,
-    sesion: &str,
-    segundos: u64,
-    guion: &Path,
-) -> Result<SalidaColab, ErrorOraculo> {
-    ejecutar_guion_con_plazo(
-        cli,
-        lim,
-        sesion,
-        segundos,
-        Duration::from_secs(segundos) + MARGEN_EXEC,
-        guion,
-    )
-}
-
 /// Corre un guion de Python con `exec -f`. `segundos` es el `--timeout` remoto; `plazo`, el local.
 fn ejecutar_guion_con_plazo<C: ColabCli>(
     cli: &C,
@@ -2692,10 +2743,86 @@ fn ejecutar_guion_con_plazo<C: ColabCli>(
     )
 }
 
-/// Estado que el guion de `trabajo` escribe al terminar. Solo se lee el código.
+/// Estado que escribe un paso al terminar (`script_paso` o `script_trabajo`). `marcas` y `cola`
+/// faltan en el estado del trabajo: por eso tienen `default`.
 #[derive(Deserialize)]
-struct EstadoTrabajo {
+struct EstadoPaso {
     codigo: i32,
+    #[serde(default)]
+    marcas: BTreeMap<String, String>,
+    #[serde(default)]
+    cola: Option<String>,
+}
+
+/// Motivo de un paso que no terminó bien: su código o su falta de `ROOT_OK`, y la cola de su log si la hay.
+fn motivo_de_paso(estado: &EstadoPaso) -> String {
+    let motivo = if estado.codigo != 0 {
+        format!("código {}", estado.codigo)
+    } else {
+        "falta su marca ROOT_OK".to_string()
+    };
+    let cola = estado
+        .cola
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    match cola {
+        Some(cola) => format!("{motivo}; {cola}"),
+        None => motivo,
+    }
+}
+
+/// Lanza el paso `paso` con el guion `texto_paso` (escrito como `<paso>.py` en el runtime). Cada
+/// intento es un `exec` de `lanzar-<paso>.py` con `SEG_LANZAR_CALIBRAR` de tiempo remoto. Un intento
+/// falla si el `exec` da error, código distinto de cero o sin `ROOT_LANZADO=` numérico. Con el tope
+/// vencido o una señal, devuelve el error sin reintentar. Tras `INTENTOS_LANZAR` fallas, falla
+/// nombrando el paso. Devuelve el pid y el instante del lanzamiento que sí respondió.
+fn lanzar_paso<C: ColabCli>(
+    cli: &C,
+    lim: &colab::Limites,
+    sesion: &str,
+    tmp: &Path,
+    paso: &str,
+    etiqueta: &str,
+    texto_paso: &str,
+) -> Result<(u32, Instant), ErrorOraculo> {
+    let guion = colab::escribir(
+        tmp,
+        &format!("lanzar-{paso}.py"),
+        &script_lanzar_paso(paso, texto_paso),
+    )?;
+    let mut ultimo_motivo = String::new();
+    for _ in 0..INTENTOS_LANZAR {
+        let lanzado_en = Instant::now();
+        let respuesta = ejecutar_guion_con_plazo(
+            cli,
+            lim,
+            sesion,
+            SEG_LANZAR_CALIBRAR,
+            PLAZO_LOCAL_TRABAJO,
+            &guion,
+        );
+        ultimo_motivo = match respuesta {
+            Err(e) if lim.cancelar.recibida().is_some() || lim.vencido() => return Err(e),
+            Err(e) => motivo_de_error(&e, PLAZO_LOCAL_TRABAJO),
+            Ok(salida) if salida.codigo != 0 => format!(
+                "código {}: {}",
+                salida.codigo,
+                primera_linea_corta(&salida.detalle())
+            ),
+            Ok(salida) => {
+                match colab::marcador(&salida.stdout, "ROOT_LANZADO=")
+                    .and_then(|v| v.parse::<u32>().ok())
+                {
+                    Some(pid) => return Ok((pid, lanzado_en)),
+                    None => "sin ROOT_LANZADO numérico".to_string(),
+                }
+            }
+        };
+    }
+    Err(ErrorOraculo::Infra(format!(
+        "{etiqueta} ({paso}) no se lanzó tras {INTENTOS_LANZAR} intentos; último motivo: {ultimo_motivo}"
+    )))
 }
 
 /// Respuesta buena de una consulta de estado. Las que fallan no llegan aquí.
@@ -2706,28 +2833,31 @@ enum EstadoConsulta {
     Corriendo,
 }
 
-/// Consulta el estado de un trabajo lanzado hasta que termine. Devuelve su código de salida.
+/// Consulta el estado de un paso lanzado con `pid` hasta que termine. Devuelve su estado (`EstadoPaso`).
+/// `etiqueta` nombra el paso en los mensajes ("el trabajo", "la preparación", "el cierre").
 ///
 /// Una consulta que falla cuenta como falla: error de la CLI, código distinto de cero o salida
 /// sin marcador. Tras `FALLAS_CONSULTA_MAX` fallas seguidas, falla. Una respuesta buena pone la
-/// cuenta en cero. Entre dos consultas espera con `espera`. El plazo total usa `transcurrido`.
-/// Tope y señal cortan en cualquier momento.
+/// cuenta en cero. Entre dos consultas espera con `espera`. El plazo total es `plazo_total_seg`,
+/// acotado por lo que queda del tope. Tope y señal cortan en cualquier momento.
 #[allow(clippy::too_many_arguments)]
-fn esperar_trabajo<C: ColabCli>(
+fn esperar_paso<C: ColabCli>(
     cli: &C,
     lim: &colab::Limites,
     sesion: &str,
     tmp: &Path,
-    indice: usize,
+    paso: &str,
+    etiqueta: &str,
     pid: u32,
+    plazo_total_seg: u64,
     lanzado: Instant,
     espera: &(dyn Fn(Duration) + Sync),
-) -> Result<i32, ErrorOraculo> {
-    let plazo = Duration::from_secs(SEG_TRABAJO_CALIBRAR).min(lim.restante());
+) -> Result<EstadoPaso, ErrorOraculo> {
+    let plazo = Duration::from_secs(plazo_total_seg).min(lim.restante());
     let guion = colab::escribir(
         tmp,
-        &format!("estado-{indice}.py"),
-        &script_estado(indice, pid),
+        &format!("estado-{paso}.py"),
+        &script_estado_paso(paso, pid),
     )?;
     let mut esperado = Duration::ZERO;
     let mut fallas = 0;
@@ -2759,7 +2889,7 @@ fn esperar_trabajo<C: ColabCli>(
                 Some("corriendo") => Ok(EstadoConsulta::Corriendo),
                 Some("murio") => {
                     return Err(ErrorOraculo::Infra(format!(
-                        "el trabajo terminó sin estado: {}",
+                        "{etiqueta} terminó sin estado: {}",
                         texto_tras(&salida.stdout, "ROOT_ESTADO=")
                     )));
                 }
@@ -2769,11 +2899,11 @@ fn esperar_trabajo<C: ColabCli>(
         };
         match respuesta {
             Ok(EstadoConsulta::Fin(json)) => {
-                let estado: EstadoTrabajo = serde_json::from_str(json.lines().next().unwrap_or(""))
+                let estado: EstadoPaso = serde_json::from_str(json.lines().next().unwrap_or(""))
                     .map_err(|e| {
                         ErrorOraculo::Infra(format!("el estado no se lee ({e}): {json}"))
                     })?;
-                return Ok(estado.codigo);
+                return Ok(estado);
             }
             Ok(EstadoConsulta::Corriendo) => {
                 fallas = 0;
@@ -2793,7 +2923,7 @@ fn esperar_trabajo<C: ColabCli>(
         let llevaba = transcurrido(lanzado, esperado);
         if llevaba >= plazo {
             return Err(ErrorOraculo::Infra(format!(
-                "el trabajo superó {} s; llevaba {} s desde su inicio",
+                "{etiqueta} superó {} s; llevaba {} s desde su inicio",
                 plazo.as_secs(),
                 llevaba.as_secs()
             )));
@@ -3240,10 +3370,13 @@ os.replace(ruta_temporal, ruta_estado)
     ))
 }
 
-/// Script que escribe `trabajo-<indice>.py` en el runtime y lo lanza en segundo plano.
-/// El texto del trabajo va como literal. Imprime `ROOT_LANZADO=<pid>` y sale sin esperar al trabajo.
-fn script_lanzar(indice: usize, texto_trabajo: &str) -> String {
-    let texto = literal_python(texto_trabajo);
+/// Script que lanza el paso `paso` en el runtime. Si ya hay `<paso>.pid` o `<paso>.estado`, no lanza:
+/// imprime `ROOT_LANZADO=` con el pid guardado (0 si solo hay estado) y sale. Si no, escribe
+/// `<paso>.py` con `texto_paso` (como literal), lo lanza en segundo plano con `Popen` y sesión nueva,
+/// guarda su pid en `<paso>.pid` (temporal y luego `os.replace`) e imprime `ROOT_LANZADO=<pid>`.
+/// Sale sin esperar al paso.
+fn script_lanzar_paso(paso: &str, texto_paso: &str) -> String {
+    let texto = literal_python(texto_paso);
     format!(
         r#"import os
 import subprocess
@@ -3251,26 +3384,47 @@ import sys
 
 D = "{D_REMOTO}"
 TEXTO = {texto}
-ruta = os.path.join(D, "trabajo-{indice}.py")
+os.makedirs(D, exist_ok=True)
+ruta_pid = os.path.join(D, "{paso}.pid")
+ruta_estado = os.path.join(D, "{paso}.estado")
+if os.path.exists(ruta_pid) or os.path.exists(ruta_estado):
+    # Ya lanzado: no se lanza otro. Con solo `.estado`, el paso corrió y su pid no quedó guardado.
+    pid = 0
+    if os.path.exists(ruta_pid):
+        with open(ruta_pid) as archivo:
+            pid = int(archivo.read().strip())
+    print("ROOT_LANZADO=%d" % pid, flush=True)
+    sys.exit(0)
+ruta = os.path.join(D, "{paso}.py")
 with open(ruta, "w") as archivo:
     archivo.write(TEXTO)
-with open(os.path.join(D, "trabajo-{indice}.log"), "w") as log:
+with open(os.path.join(D, "{paso}.log"), "w") as log:
     proceso = subprocess.Popen([sys.executable, ruta], cwd=D, start_new_session=True, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+temporal = ruta_pid + ".tmp"
+with open(temporal, "w") as archivo:
+    archivo.write("%d\n" % proceso.pid)
+os.replace(temporal, ruta_pid)
 print("ROOT_LANZADO=%d" % proceso.pid, flush=True)
 "#
     )
 }
 
-/// Script que dice en qué estado va un trabajo lanzado con `pid`.
+/// `script_lanzar_paso` del trabajo `indice`: escribe `trabajo-<indice>.py` y lo lanza.
+#[cfg(test)]
+fn script_lanzar(indice: usize, texto_trabajo: &str) -> String {
+    script_lanzar_paso(&format!("trabajo-{indice}"), texto_trabajo)
+}
+
+/// Script que dice en qué estado va el paso `paso` lanzado con `pid`, leyendo `<paso>.estado` y `<paso>.log`.
 /// Si terminó, imprime `ROOT_ESTADO=fin` y en la línea siguiente su JSON.
 /// Si el proceso vive, imprime `ROOT_ESTADO=corriendo`. Si no, imprime `ROOT_ESTADO=murio` y las últimas 20 líneas del log.
-fn script_estado(indice: usize, pid: u32) -> String {
+fn script_estado_paso(paso: &str, pid: u32) -> String {
     format!(
         r#"import os
 
 D = "{D_REMOTO}"
-ruta_estado = os.path.join(D, "trabajo-{indice}.estado")
-ruta_log = os.path.join(D, "trabajo-{indice}.log")
+ruta_estado = os.path.join(D, "{paso}.estado")
+ruta_log = os.path.join(D, "{paso}.log")
 PID = {pid}
 
 
@@ -3300,6 +3454,55 @@ else:
     except OSError:
         lineas = []
     print("".join(lineas[-20:]), end="")
+"#
+    )
+}
+
+/// `script_estado_paso` del trabajo `indice`.
+#[cfg(test)]
+fn script_estado(indice: usize, pid: u32) -> String {
+    script_estado_paso(&format!("trabajo-{indice}"), pid)
+}
+
+/// Envuelve el `cuerpo` de un paso en un guion que lo corre y deja su estado. El guion escribe
+/// `<paso>-cuerpo.py`, lo corre con `sys.executable` en `D` y manda su salida a `<paso>.log`. Al
+/// terminar lee el log, saca las marcas `ROOT_X=valor` y escribe `<paso>.estado` (temporal y luego
+/// `os.replace`) con `{"codigo", "inicio", "fin", "marcas"}`. Con código distinto de cero agrega
+/// `cola`, las últimas 20 líneas del log. El código del cuerpo no hace fallar al guion.
+fn script_paso(paso: &str, cuerpo: &str) -> String {
+    let cuerpo = literal_python(cuerpo);
+    format!(
+        r#"import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+D = "{D_REMOTO}"
+CUERPO = {cuerpo}
+ruta_cuerpo = os.path.join(D, "{paso}-cuerpo.py")
+ruta_log = os.path.join(D, "{paso}.log")
+ruta_estado = os.path.join(D, "{paso}.estado")
+ruta_temporal = os.path.join(D, "{paso}.estado.tmp")
+os.makedirs(D, exist_ok=True)
+with open(ruta_cuerpo, "w") as archivo:
+    archivo.write(CUERPO)
+inicio = time.time()
+with open(ruta_log, "a") as log:
+    r = subprocess.run([sys.executable, ruta_cuerpo], cwd=D, stdout=log, stderr=subprocess.STDOUT)
+fin = time.time()
+with open(ruta_log, errors="replace") as archivo:
+    texto = archivo.read()
+marcas = {{}}
+for clave, valor in re.findall(r"^(ROOT_[A-Z_]+)=(.*)$", texto, re.M):
+    marcas[clave] = valor.strip()
+estado = {{"codigo": r.returncode, "inicio": inicio, "fin": fin, "marcas": marcas}}
+if r.returncode != 0:
+    estado["cola"] = "".join(texto.splitlines(True)[-20:])
+with open(ruta_temporal, "w") as archivo:
+    archivo.write(json.dumps(estado) + "\n")
+os.replace(ruta_temporal, ruta_estado)
 "#
     )
 }
@@ -3584,6 +3787,7 @@ mod tests {
                 commit_root: "abc123".into(),
                 semilla: SEMILLA_POR_DEFECTO,
                 juez: false,
+                tope_usd: None,
             }
         }
     }
@@ -4135,8 +4339,13 @@ mod tests {
 
     #[test]
     fn tope_s2_restante_tiene_piso_cero() {
-        assert!((tope_s2_restante(6.55) - 18.45).abs() < 1e-9);
-        assert_eq!(tope_s2_restante(30.0), 0.0);
+        assert!((tope_s2_restante(6.55) - 23.45).abs() < 1e-9);
+        assert_eq!(tope_s2_restante(31.0), 0.0);
+    }
+
+    #[test]
+    fn tope_s2_restante_con_6_97_gastados_da_23_03() {
+        assert!((tope_s2_restante(6.97) - 23.03).abs() < 1e-9);
     }
 
     #[test]
@@ -4208,7 +4417,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let gastado = gastado_s2_usd(home.path()).expect("lee eventos");
         assert!((gastado - 6.55).abs() < 1e-9, "{gastado}");
-        assert!((tope_s2_restante(gastado) - 18.45).abs() < 1e-9);
+        assert!((tope_s2_restante(gastado) - 23.45).abs() < 1e-9);
     }
 
     #[test]
@@ -4280,15 +4489,15 @@ mod tests {
         let texto =
             fs::read_to_string(extraido.path().join("manifiesto.json")).expect("manifiesto");
         let m: Manifiesto = serde_json::from_str(&texto).expect("JSON del manifiesto");
-        // Previo 6.55 + 6.55 desde el corte = 13.10 gastados; 25.00 - 13.10 = 11.90 de tope.
+        // Previo 6.55 + 6.55 desde el corte = 13.10 gastados; 30.00 - 13.10 = 16.90 de tope.
         let tope = m.tope_s2_usd.expect("tope de S2");
-        assert!((tope - 11.90).abs() < 1e-9, "{tope}");
+        assert!((tope - 16.90).abs() < 1e-9, "{tope}");
         let con_juez = &m.trabajos[0].args;
         let i = con_juez
             .iter()
             .position(|a| a == "--tope-usd")
             .expect("el trabajo con juez lleva --tope-usd");
-        assert_eq!(con_juez[i + 1], "11.90");
+        assert_eq!(con_juez[i + 1], "16.90");
         assert!(
             !m.trabajos[1].args.iter().any(|a| a == "--tope-usd"),
             "{:?}",
@@ -4299,22 +4508,113 @@ mod tests {
     #[test]
     fn con_juez_y_tope_agotado_rechaza_el_paquete() {
         let e = Escenario::con_contrato("cargo test");
-        eventos_con_api(e.home.path(), 25.0);
+        eventos_con_api(e.home.path(), 30.0);
         let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
         paquete.juez = true;
         let Err(ErrorOraculo::Uso(m)) = empaquetar(&paquete, &Doble) else {
             panic!("con juez y tope agotado debe fallar con Uso");
         };
-        // Previo 6.55 + 25.00 desde el corte = 31.55 gastados, por encima del tope de 25.
-        assert!(m.contains("31.55"), "falta el gastado: {m}");
-        assert!(m.contains("25 USD"), "falta el tope: {m}");
+        // Previo 6.55 + 30.00 desde el corte = 36.55 gastados, por encima del tope de 30.
+        assert!(m.contains("36.55"), "falta el gastado: {m}");
+        assert!(m.contains("30 USD"), "falta el tope: {m}");
         assert!(m.contains("no se arma el paquete"), "{m}");
+    }
+
+    #[test]
+    fn con_juez_y_30_desde_el_corte_rechaza_el_paquete() {
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 30.0);
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+        paquete.juez = true;
+        let Err(ErrorOraculo::Uso(m)) = empaquetar(&paquete, &Doble) else {
+            panic!("con juez y 30 USD desde el corte debe fallar con Uso");
+        };
+        assert!(m.contains("no se arma el paquete"), "{m}");
+    }
+
+    #[test]
+    fn con_juez_con_23_desde_el_corte_no_rechaza_el_paquete() {
+        // Previo 6.55 + 23.00 desde el corte = 29.55 gastados, justo bajo el tope de 30.
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 23.0);
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+        paquete.juez = true;
+        let resumen = empaquetar(&paquete, &Doble);
+        assert!(resumen.is_ok(), "29.55 USD quedan bajo el tope de 30 USD");
+    }
+
+    fn tope_s2_del_manifiesto(paquete: &Paquete) -> Manifiesto {
+        let resumen = empaquetar(paquete, &Doble).expect("empaqueta con juez");
+        let extraido = extraer(&resumen.salida);
+        let texto =
+            fs::read_to_string(extraido.path().join("manifiesto.json")).expect("manifiesto");
+        serde_json::from_str(&texto).expect("JSON del manifiesto")
+    }
+
+    #[test]
+    fn tope_usd_menor_que_el_saldo_fija_el_tope_del_paquete() {
+        // Previo 6.55 + 8.37 desde el corte = 14.92 gastados: saldo de 15,08.
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 8.37);
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+        paquete.juez = true;
+        paquete.tope_usd = Some(8.0);
+        let m = tope_s2_del_manifiesto(&paquete);
+        let tope = m.tope_s2_usd.expect("tope de S2");
+        assert!((tope - 8.0).abs() < 1e-9, "{tope}");
+        let i = m.trabajos[0]
+            .args
+            .iter()
+            .position(|a| a == "--tope-usd")
+            .expect("el trabajo lleva --tope-usd");
+        assert_eq!(m.trabajos[0].args[i + 1], "8.00");
+        // El saldo no cambia: `gasto_s2` sigue diciendo lo que queda de los 30.
+        let g = m.gasto_s2.expect("gasto de S2");
+        assert!((g.restante_usd - 15.08).abs() < 1e-9, "{g:?}");
+    }
+
+    #[test]
+    fn tope_usd_mayor_que_el_saldo_deja_el_saldo() {
+        // Previo 6.55 + 18.45 desde el corte = 25.00 gastados: saldo de 5,00.
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 18.45);
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+        paquete.juez = true;
+        paquete.tope_usd = Some(8.0);
+        let m = tope_s2_del_manifiesto(&paquete);
+        let tope = m.tope_s2_usd.expect("tope de S2");
+        assert!((tope - 5.0).abs() < 1e-9, "{tope}");
+    }
+
+    #[test]
+    fn tope_usd_invalido_rechaza_con_uso() {
+        for valor in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let e = Escenario::con_contrato("cargo test");
+            let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+            paquete.juez = true;
+            paquete.tope_usd = Some(valor);
+            let Err(ErrorOraculo::Uso(m)) = empaquetar(&paquete, &Doble) else {
+                panic!("--tope-usd {valor} debe fallar con Uso");
+            };
+            assert!(m.contains("--tope-usd"), "{valor}: {m}");
+        }
+    }
+
+    #[test]
+    fn tope_usd_sin_juez_rechaza_con_uso() {
+        let e = Escenario::con_contrato("cargo test");
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Funciona)]);
+        paquete.tope_usd = Some(8.0);
+        let Err(ErrorOraculo::Uso(m)) = empaquetar(&paquete, &Doble) else {
+            panic!("--tope-usd sin --juez debe fallar con Uso");
+        };
+        assert!(m.contains("--tope-usd exige --juez"), "{m}");
     }
 
     #[test]
     fn sin_juez_y_tope_agotado_el_paquete_se_arma() {
         let e = Escenario::con_contrato("cargo test");
-        eventos_con_api(e.home.path(), 25.0);
+        eventos_con_api(e.home.path(), 30.0);
         let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble);
         assert!(resumen.is_ok(), "sin juez el tope no importa");
     }
@@ -4345,11 +4645,15 @@ mod tests {
     fn linea_gasto_s2_trae_las_cinco_cifras() {
         let home = tempfile::tempdir().expect("home");
         eventos_con_api(home.path(), 1.0);
-        let linea = linea_gasto_s2(&gasto_s2(home.path()).expect("lee eventos"));
-        assert_eq!(
-            linea,
-            "gasto de S2: 6,55 USD previos + 1,00 USD desde 2026-11-14T00:00:00Z = 7,55 USD; quedan 17,45 USD de 25"
+        let g = gasto_s2(home.path()).expect("lee eventos");
+        let linea = linea_gasto_s2(&g, 8.0);
+        assert!(
+            linea.starts_with(
+                "gasto de S2: 6,55 USD previos + 1,00 USD desde 2026-11-14T00:00:00Z = 7,55 USD; quedan 22,45 USD de 30"
+            ),
+            "{linea}"
         );
+        assert!(linea.ends_with("; tope del paquete: 8,00 USD"), "{linea}");
     }
 
     #[test]
@@ -4370,7 +4674,7 @@ mod tests {
         assert!((g.total_usd - 13.10).abs() < 1e-9, "{g:?}");
         let tope = m.tope_s2_usd.expect("tope de S2");
         assert!((g.restante_usd - tope).abs() < 1e-9, "{g:?} vs {tope}");
-        assert!((g.restante_usd - 11.90).abs() < 1e-9, "{g:?}");
+        assert!((g.restante_usd - 16.90).abs() < 1e-9, "{g:?}");
     }
 
     #[test]
@@ -4983,6 +5287,43 @@ mod tests_importar {
     }
 
     #[test]
+    fn juez_entra_sin_base_y_oraculo_sin_base_se_rechaza_con_aviso() {
+        let e = laptop_sin_base();
+        let home = e.home.path();
+        let hash = tarea_hash(home);
+        let arq = fila_en(
+            "arquitectura",
+            TS_COLAB,
+            &huella_de(Dimension::Arquitectura),
+            &hash,
+        );
+        let fun = fila_en("funciona", TS_OTRO, &huella_de(Dimension::Funciona), &hash);
+        let v = vuelta(vec![
+            fp(
+                arq.clone(),
+                &nombre_casos_en("arquitectura", TS_COLAB),
+                &linea_caso(0.5),
+            ),
+            fp(fun, &nombre_casos_en("funciona", TS_OTRO), &linea_caso(0.5)),
+        ]);
+        let (_caja, tgz) = armar_paquete(&v, None);
+
+        let resumen = importar(home, &tgz, "abc123").expect("importa");
+
+        assert_eq!(resumen.entraron, 1, "{resumen:?}");
+        assert_eq!(resumen.rechazadas.len(), 1, "{resumen:?}");
+        assert_eq!(resumen.rechazadas[0].dimension, "funciona");
+        assert_eq!(
+            resumen.rechazadas[0].motivo,
+            "sin base de la laptop para comparar"
+        );
+        assert!(resumen.avisos.contains(&aviso_de_juez(&arq)), "{resumen:?}");
+        let cal = calibra::Calibraciones::cargar(home).expect("calibracion");
+        assert!(cal.filas.iter().any(|f| f.ts == TS_COLAB));
+        assert!(!cal.filas.iter().any(|f| f.ts == TS_OTRO));
+    }
+
+    #[test]
     fn verificacion_con_linea_mal_frena_sin_escribir_nada() {
         let e = laptop_con_base(0.5);
         let home = e.home.path();
@@ -5136,11 +5477,164 @@ mod tests_importar {
                 colab: Vec::new(),
                 laptop: Vec::new(),
             })),
+            casos_de_colab_completos: true,
         };
         assert_eq!(
             decidir_fila(&e),
             Decision::NoEntra("sin valores de base para comparar".into())
         );
+    }
+
+    /// Fila de la dimensión `dimension` (clave) de la tarea de prueba. Como `fila_de`, sin fijar la dimensión.
+    fn fila_en(dimension: &str, ts: f64, huella: &str, tarea_hash: &str) -> Fila {
+        serde_json::from_value(serde_json::json!({
+            "tarea": "tarea-prueba",
+            "dimension": dimension,
+            "n": 4,
+            "semilla": 7,
+            "ts": ts,
+            "huella": huella,
+            "tarea_hash": tarea_hash,
+        }))
+        .expect("fila de prueba")
+    }
+
+    fn nombre_casos_en(dimension: &str, ts: f64) -> String {
+        format!("tarea-prueba-{dimension}-{}.casos.jsonl", ts as u64)
+    }
+
+    /// Entrada con la huella y el hash de la laptop dados, sin base y con los casos de Colab completos.
+    fn entrada_sin_base<'a>(
+        fila: &'a Fila,
+        huella_laptop: &'a str,
+        tarea_hash_laptop: &'a str,
+    ) -> Entrada<'a> {
+        Entrada {
+            fila,
+            huella_laptop,
+            tarea_hash_laptop: Some(tarea_hash_laptop),
+            ya_estaba: false,
+            base: None,
+            casos_de_colab_completos: true,
+        }
+    }
+
+    #[test]
+    fn arquitectura_con_juez_entra_sin_base_en_la_laptop() {
+        let h = huella_de(Dimension::Arquitectura);
+        let fila = fila_en("arquitectura", TS_COLAB, &h, "hash");
+        let e = entrada_sin_base(&fila, &h, "hash");
+        assert_eq!(decidir_fila(&e), Decision::Entra);
+    }
+
+    #[test]
+    fn diseno_con_juez_entra_aunque_la_base_difiera() {
+        let h = huella_de(Dimension::Diseno);
+        let fila = fila_en("diseno", TS_COLAB, &h, "hash");
+        let e = Entrada {
+            base: Some(Ok(Valores {
+                colab: vec![0.5],
+                laptop: vec![0.9],
+            })),
+            ..entrada_sin_base(&fila, &h, "hash")
+        };
+        assert_eq!(decidir_fila(&e), Decision::Entra);
+    }
+
+    #[test]
+    fn estructura_con_juez_sin_casos_de_colab_no_entra() {
+        let h = huella_de(Dimension::Estructura);
+        let fila = fila_en("estructura", TS_COLAB, &h, "hash");
+        let e = Entrada {
+            casos_de_colab_completos: false,
+            ..entrada_sin_base(&fila, &h, "hash")
+        };
+        assert_eq!(
+            decidir_fila(&e),
+            Decision::NoEntra("faltan los casos de Colab".into())
+        );
+    }
+
+    #[test]
+    fn funciona_oraculo_sin_base_no_entra() {
+        let h = huella_de(Dimension::Funciona);
+        let fila = fila_en("funciona", TS_COLAB, &h, "hash");
+        let e = entrada_sin_base(&fila, &h, "hash");
+        assert_eq!(
+            decidir_fila(&e),
+            Decision::NoEntra("sin base de la laptop para comparar".into())
+        );
+    }
+
+    #[test]
+    fn seguridad_oraculo_con_base_distinta_no_entra() {
+        let h = huella_de(Dimension::Seguridad);
+        let fila = fila_en("seguridad", TS_COLAB, &h, "hash");
+        let e = Entrada {
+            base: Some(Ok(Valores {
+                colab: vec![0.5],
+                laptop: vec![0.9],
+            })),
+            ..entrada_sin_base(&fila, &h, "hash")
+        };
+        match decidir_fila(&e) {
+            Decision::NoEntra(motivo) => {
+                assert!(motivo.starts_with("la base de Colab difiere"), "{motivo}")
+            }
+            otra => panic!("debía no entrar: {otra:?}"),
+        }
+    }
+
+    #[test]
+    fn arquitectura_con_juez_huella_hash_o_ya_estaba_no_entra() {
+        let h = huella_de(Dimension::Arquitectura);
+        let fila = fila_en("arquitectura", TS_COLAB, &h, "hash");
+        let otra_huella = fila_en("arquitectura", TS_COLAB, "otra", "hash");
+        let otro_hash = fila_en("arquitectura", TS_COLAB, &h, "otro");
+        assert_eq!(
+            decidir_fila(&entrada_sin_base(&otra_huella, &h, "hash")),
+            Decision::NoEntra("la huella no coincide con la de la laptop".into())
+        );
+        assert_eq!(
+            decidir_fila(&entrada_sin_base(&otro_hash, &h, "hash")),
+            Decision::NoEntra("el tarea_hash no coincide con el de la laptop".into())
+        );
+        let ya = Entrada {
+            ya_estaba: true,
+            ..entrada_sin_base(&fila, &h, "hash")
+        };
+        assert_eq!(
+            decidir_fila(&ya),
+            Decision::NoEntra("ya estaba en la laptop".into())
+        );
+    }
+
+    #[test]
+    fn aviso_de_juez_nombra_dimension_y_tarea() {
+        let h = huella_de(Dimension::Arquitectura);
+        let fila = fila_en("arquitectura", TS_COLAB, &h, "hash");
+        assert_eq!(
+            aviso_de_juez(&fila),
+            "arquitectura de tarea-prueba: dimensión con juez; la base no se compara, porque el juez varía entre corridas"
+        );
+    }
+
+    #[test]
+    fn huellas_de_las_nueve_dimensiones_son_fijas() {
+        let esperadas = [
+            (Dimension::Funciona, "b4ec060a4cdeb4dc"),
+            (Dimension::Seguridad, "6b15c7c7291f637e"),
+            (Dimension::Eficiencia, "5aa7d3c6dcb51df4"),
+            (Dimension::Estructura, "814e3901efc1c7cf"),
+            (Dimension::Arquitectura, "0f151f7fa43547c3"),
+            (Dimension::Diseno, "9b2a621ebb5c4632"),
+            (Dimension::Completitud, "ce508b6314e2b5ca"),
+            (Dimension::Entrega, "8a9975311af332d3"),
+            (Dimension::Pruebas, "cd85103d4cfb9aa1"),
+        ];
+        for (dimension, esperada) in esperadas {
+            assert_eq!(huella_de(dimension), esperada, "{}", dimension.clave());
+        }
     }
 
     #[test]
@@ -5562,6 +6056,14 @@ mod tests_calibrar {
         falla_en_stdout: bool,
         /// Respuestas de las consultas de estado, en orden. Vacía: `fin` con código 0.
         estados: Mutex<VecDeque<Respuesta>>,
+        /// Respuestas de los lanzamientos (guiones con `Popen` y `start_new_session`), en orden.
+        /// Vacía: el lanzamiento da su pid.
+        lanzar_respuestas: Mutex<VecDeque<Respuesta>>,
+        /// Pid de cada paso lanzado, por `sesion/paso`. Un paso corre una sola vez: sus siguientes
+        /// lanzamientos devuelven este mismo pid.
+        lanzados: Mutex<BTreeMap<String, u32>>,
+        /// Paso de cada lanzamiento recibido, en orden. Cuenta los intentos.
+        lanzares: Mutex<Vec<String>>,
     }
 
     /// Lo que el `Falso` responde a una consulta de estado.
@@ -5571,6 +6073,25 @@ mod tests_calibrar {
         Salida(i32, String),
         /// La CLI no terminó en su plazo.
         Plazo,
+    }
+
+    /// Paso que lanza un guion: el nombre del `.py` que escribe (`preparar`, `cierre` o `trabajo-N`).
+    fn paso_de_lanzar(guion: &str) -> String {
+        for paso in ["preparar", "cierre"] {
+            if guion.contains(&format!("\"{paso}.py\"")) {
+                return paso.to_string();
+            }
+        }
+        let mut resto = guion;
+        while let Some(i) = resto.find("trabajo-") {
+            let tras = &resto[i + "trabajo-".len()..];
+            let digitos: String = tras.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digitos.is_empty() && tras[digitos.len()..].starts_with(".py\"") {
+                return format!("trabajo-{digitos}");
+            }
+            resto = tras;
+        }
+        "desconocido".to_string()
     }
 
     fn corriendo() -> Respuesta {
@@ -5599,6 +6120,9 @@ mod tests_calibrar {
                 upload_falla_en: None,
                 falla_en_stdout: false,
                 estados: Mutex::new(VecDeque::new()),
+                lanzar_respuestas: Mutex::new(VecDeque::new()),
+                lanzados: Mutex::new(BTreeMap::new()),
+                lanzares: Mutex::new(Vec::new()),
             }
         }
 
@@ -5607,13 +6131,82 @@ mod tests_calibrar {
             self
         }
 
-        /// Siguiente respuesta de la cola, si el `exec` es una consulta de estado.
+        fn con_lanzar(self, respuestas: Vec<Respuesta>) -> Self {
+            *self.lanzar_respuestas.lock().expect("lanzar") = respuestas.into();
+            self
+        }
+
+        /// Pasos de cada lanzamiento recibido, en orden.
+        fn pasos_lanzados(&self) -> Vec<String> {
+            self.lanzares.lock().expect("lanzares").clone()
+        }
+
+        /// Un `exec` cuyo guion lanza un paso. Registra el pid del paso la primera vez que lo recibe,
+        /// aunque la respuesta encolada sea `Plazo` (el paso ya corrió). Un `Plazo` no lleva pid.
+        /// Con `con_falla`, el lanzamiento de un trabajo falla (código 1).
+        fn lanzar(&self, sesion: &str, guion: &str) -> Espera {
+            let paso = paso_de_lanzar(guion);
+            self.lanzares.lock().expect("lanzares").push(paso.clone());
+            let respuesta = self.lanzar_respuestas.lock().expect("lanzar").pop_front();
+            if let Some(Respuesta::Salida(codigo, stdout)) = respuesta {
+                return Espera::Termino(salida(codigo, &stdout, ""));
+            }
+            if paso.starts_with("trabajo")
+                && self
+                    .exec_falla_en
+                    .as_deref()
+                    .is_some_and(|sufijo| sesion.ends_with(sufijo))
+            {
+                return Espera::Termino(salida(1, "", "fallo simulado"));
+            }
+            let clave = format!("{sesion}/{paso}");
+            let mut lanzados = self.lanzados.lock().expect("lanzados");
+            let pid = match lanzados.get(&clave).copied() {
+                Some(pid) => pid,
+                None => {
+                    let pid = 4242 + lanzados.len() as u32;
+                    lanzados.insert(clave, pid);
+                    pid
+                }
+            };
+            match respuesta {
+                Some(Respuesta::Plazo) => Espera::Plazo,
+                _ => Espera::Termino(salida(0, &format!("ROOT_LANZADO={pid}\n"), "")),
+            }
+        }
+
+        /// Siguiente respuesta de la cola, si el `exec` es una consulta de estado de un trabajo.
         fn estado_en_cola(&self, args: &[String]) -> Option<Respuesta> {
             let guion = fs::read_to_string(args.last()?).ok()?;
-            if !guion.contains("ROOT_ESTADO=") {
+            if !guion.contains("ROOT_ESTADO=") || !guion.contains("trabajo-") {
                 return None;
             }
             self.estados.lock().expect("estados").pop_front()
+        }
+
+        /// Primer `exec` de cada sesión: espera a la barrera, si la hay, y guarda `activo.json`.
+        fn primer_exec(&self, sesion: &str) {
+            let primera = self
+                .primer_exec
+                .lock()
+                .expect("primer exec")
+                .insert(sesion.to_string());
+            if let Some(barrera) = self.barrera.as_ref().filter(|_| primera) {
+                barrera.llegar();
+                let mut visto = self.activo_visto.lock().expect("visto");
+                if visto.is_none() {
+                    *visto = fs::read_to_string(self.home.join("colab/activo.json")).ok();
+                }
+            }
+        }
+
+        /// Si el `exec` es un lanzamiento: su guion usa `Popen` con sesión nueva.
+        fn es_lanzar(&self, args: &[String]) -> bool {
+            args.last()
+                .and_then(|ruta| fs::read_to_string(ruta).ok())
+                .is_some_and(|guion| {
+                    guion.contains("Popen(") && guion.contains("start_new_session")
+                })
         }
 
         fn con_falla_upload(mut self, sufijo: &str) -> Self {
@@ -5660,45 +6253,49 @@ mod tests_calibrar {
                 .collect()
         }
 
+        /// Consulta de estado que no es de un trabajo (`preparar.estado`, `cierre.estado`). Con
+        /// `con_falla_en_stdout`, la preparación termina con código 1 y su cola en el estado.
+        fn estado_de_paso(&self, sesion: &str, guion: &str) -> SalidaColab {
+            let fin = |codigo: i32, marcas: serde_json::Value, cola: Option<&str>| {
+                let mut estado = serde_json::json!({
+                    "codigo": codigo,
+                    "inicio": 1.0,
+                    "fin": 2.0,
+                    "marcas": marcas,
+                });
+                if let Some(cola) = cola {
+                    estado["cola"] = serde_json::Value::from(cola);
+                }
+                salida(0, &format!("ROOT_ESTADO=fin\n{estado}\n"), "")
+            };
+            if guion.contains("preparar.estado") {
+                let falla = self.falla_en_stdout
+                    && self
+                        .exec_falla_en
+                        .as_deref()
+                        .is_some_and(|sufijo| sesion.ends_with(sufijo));
+                return if falla {
+                    fin(1, serde_json::json!({}), Some("fallo simulado en stdout"))
+                } else {
+                    fin(0, serde_json::json!({"ROOT_OK": "preparar"}), None)
+                };
+            }
+            if guion.contains("cierre.estado") {
+                let real = sha256_hex(&fs::read(&self.vuelta).unwrap_or_default());
+                let sha = self.sha_de_cierre.clone().unwrap_or(real);
+                return fin(
+                    0,
+                    serde_json::json!({"ROOT_OK": "cierre", "ROOT_SHA_VUELTA": sha}),
+                    None,
+                );
+            }
+            fin(0, serde_json::json!({}), None)
+        }
+
         fn exec(&self, args: &[String]) -> SalidaColab {
             let sesion = valor_de(args, "-s").unwrap_or_default();
             let guion = fs::read_to_string(args.last().expect("ruta del guion")).expect("guion");
-            let primera = self
-                .primer_exec
-                .lock()
-                .expect("primer exec")
-                .insert(sesion.clone());
-            if let Some(barrera) = self.barrera.as_ref().filter(|_| primera) {
-                barrera.llegar();
-                let mut visto = self.activo_visto.lock().expect("visto");
-                if visto.is_none() {
-                    *visto = fs::read_to_string(self.home.join("colab/activo.json")).ok();
-                }
-            }
-            if self
-                .exec_falla_en
-                .as_deref()
-                .is_some_and(|sufijo| sesion.ends_with(sufijo))
-            {
-                return if self.falla_en_stdout {
-                    salida(1, "fallo simulado en stdout", "")
-                } else {
-                    salida(1, "", "fallo simulado")
-                };
-            }
-            // `lanzar` va antes: su guion embebe el de `trabajo`.
-            let stdout = if guion.contains("preparar-runtime.sh") {
-                "ROOT_OK=preparar\n".to_string()
-            } else if guion.contains("Popen(") && guion.contains("start_new_session") {
-                "ROOT_LANZADO=4242\n".to_string()
-            } else if guion.contains("ROOT_ESTADO=") {
-                "ROOT_ESTADO=fin\n{\"codigo\": 0, \"inicio\": 1.0, \"fin\": 2.0}\n".to_string()
-            } else {
-                let real = sha256_hex(&fs::read(&self.vuelta).unwrap_or_default());
-                let sha = self.sha_de_cierre.clone().unwrap_or(real);
-                format!("ROOT_OK=cierre\nROOT_SHA_VUELTA={sha}\n")
-            };
-            salida(0, &stdout, "")
+            self.estado_de_paso(&sesion, &guion)
         }
     }
 
@@ -5710,7 +6307,15 @@ mod tests_calibrar {
             _cancelar: &Senales,
         ) -> Result<Espera, ErrorOraculo> {
             self.llamadas.lock().expect("llamadas").push(args.to_vec());
+            if args.first().is_some_and(|c| c == "exec") {
+                self.primer_exec(&valor_de(args, "-s").unwrap_or_default());
+            }
             let salida = match args.first().map(String::as_str) {
+                Some("exec") if self.es_lanzar(args) => {
+                    let guion = fs::read_to_string(args.last().expect("ruta")).expect("guion");
+                    let sesion = valor_de(args, "-s").unwrap_or_default();
+                    return Ok(self.lanzar(&sesion, &guion));
+                }
                 Some("exec") => match self.estado_en_cola(args) {
                     Some(Respuesta::Plazo) => return Ok(Espera::Plazo),
                     Some(Respuesta::Salida(codigo, stdout)) => salida(codigo, &stdout, ""),
@@ -5882,13 +6487,26 @@ mod tests_calibrar {
         assert_eq!(sesiones.len(), 2, "{sesiones:?}");
         let llamadas = cli.llamadas();
         for sesion in &sesiones {
+            // Preparar, el trabajo y el cierre se lanzan y se consultan: entre la subida y la
+            // bajada solo hay `exec`, y al menos seis (lanzar y consultar cada paso).
+            let comandos = comandos_de(&llamadas, sesion);
+            let n = comandos.len();
             assert_eq!(
-                comandos_de(&llamadas, sesion),
-                [
-                    "new", "upload", "exec", "exec", "exec", "exec", "download", "stop"
-                ],
+                comandos.first().map(String::as_str),
+                Some("new"),
                 "sesión {sesion}"
             );
+            assert_eq!(
+                comandos.get(1).map(String::as_str),
+                Some("upload"),
+                "sesión {sesion}"
+            );
+            assert!(n >= 10, "sesión {sesion}: {comandos:?}");
+            assert!(
+                comandos[2..n - 2].iter().all(|c| c == "exec"),
+                "sesión {sesion}: {comandos:?}"
+            );
+            assert_eq!(&comandos[n - 2..], ["download", "stop"], "sesión {sesion}");
             let nuevo = llamadas
                 .iter()
                 .find(|a| a[0] == "new" && valor_de(a, "-s").as_deref() == Some(sesion.as_str()))
@@ -6191,6 +6809,123 @@ mod tests_calibrar {
         ] {
             assert!(texto.contains(marca), "falta {marca}: {texto}");
         }
+    }
+
+    #[test]
+    fn preparar_se_lanza_aparte_y_no_usa_timeout_3600() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let _resultado = correr(&cli, home.path(), &[p0], TOPE_PRUEBA);
+
+        let pasos = cli.pasos_lanzados();
+        assert!(pasos.iter().any(|p| p == "preparar"), "{pasos:?}");
+        let timeouts = timeouts_de_exec(&cli.llamadas());
+        assert!(!timeouts.iter().any(|t| t == "3600"), "{timeouts:?}");
+    }
+
+    #[test]
+    fn cierre_se_lanza_aparte_y_no_usa_timeout_600() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let _resultado = correr(&cli, home.path(), &[p0], TOPE_PRUEBA);
+
+        let pasos = cli.pasos_lanzados();
+        assert!(pasos.iter().any(|p| p == "cierre"), "{pasos:?}");
+        let timeouts = timeouts_de_exec(&cli.llamadas());
+        assert!(!timeouts.iter().any(|t| t == "600"), "{timeouts:?}");
+    }
+
+    #[test]
+    fn lanzar_que_no_vuelve_se_reintenta_y_el_paso_corre_una_vez() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_lanzar(vec![Respuesta::Plazo]);
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let runtime = &resumen.runtimes[0];
+        assert!(runtime.resultado.is_ok(), "{:?}", runtime.resultado);
+        let pasos = cli.pasos_lanzados();
+        let primero = pasos.first().expect("un lanzamiento").clone();
+        assert_eq!(
+            pasos.iter().filter(|p| **p == primero).count(),
+            2,
+            "el paso {primero} debía lanzarse dos veces: {pasos:?}"
+        );
+        let lanzados = cli.lanzados.lock().expect("lanzados").clone();
+        let clave = format!("{}/{primero}", runtime.sesion);
+        assert!(lanzados.contains_key(&clave), "{lanzados:?}");
+        let del_paso = lanzados
+            .keys()
+            .filter(|k| k.ends_with(&format!("/{primero}")))
+            .count();
+        assert_eq!(del_paso, 1, "{lanzados:?}");
+    }
+
+    #[test]
+    fn tres_lanzamientos_fallidos_nombran_el_paso_y_los_tres_intentos() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_lanzar(vec![Respuesta::Plazo; 3]);
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let motivo = resumen.runtimes[0]
+            .resultado
+            .as_ref()
+            .expect_err("tres lanzamientos fallidos no dejan correr el runtime");
+        assert!(motivo.contains("preparar"), "{motivo}");
+        assert!(motivo.contains("3 intentos"), "{motivo}");
+    }
+
+    #[test]
+    fn el_estado_del_cierre_trae_root_sha_vuelta_y_root_lo_compara() {
+        let guion = script_paso("cierre", &script_cierre());
+        assert!(guion.contains("ROOT_SHA_VUELTA"), "{guion}");
+        assert!(guion.contains("marcas"), "{guion}");
+
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta).con_sha_de_cierre("0000");
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let motivo = resumen.runtimes[0]
+            .resultado
+            .as_ref()
+            .expect_err("un SHA de la vuelta distinto no se abre");
+        assert!(
+            motivo.contains("su paquete de vuelta llegó con otro SHA-256 y no se abrió"),
+            "{motivo}"
+        );
+    }
+
+    #[test]
+    fn paquete_armado_con_el_binario_de_la_base_corre_con_el_de_esta_tarea() {
+        let caja = tempfile::tempdir().expect("caja");
+        let home = tempfile::tempdir().expect("home");
+        let vuelta = vuelta_minima(caja.path());
+        let p0 = paquete_de_ida(caja.path(), "ida-0", "{\"v\":1,\"filas\":[]}\n");
+        let cli = Falso::nuevo(home.path(), &vuelta);
+
+        let resumen = correr(&cli, home.path(), &[p0], TOPE_PRUEBA).expect("calibra");
+
+        let resultado = &resumen.runtimes[0].resultado;
+        assert!(resultado.is_ok(), "la vuelta debía importar: {resultado:?}");
     }
 
     #[test]
@@ -7551,6 +8286,154 @@ mod tests_calibrar {
         assert!(!texto.contains("linea-4\n"), "{texto}");
     }
 
+    /// Espera a que el estado de `paso` diga `fin` (máx 10 s) y devuelve el texto de la consulta.
+    fn esperar_fin_de_paso(caja: &Path, paso: &str, estado: &str) -> String {
+        let limite = Instant::now() + Duration::from_secs(10);
+        loop {
+            let salida = correr_guion_python(caja, &format!("estado-{paso}.py"), estado);
+            let texto = String::from_utf8_lossy(&salida.stdout).to_string();
+            match colab::marcador(&texto, "ROOT_ESTADO=").as_deref() {
+                Some("fin") => return texto,
+                Some("murio") => panic!("el paso {paso} murió antes de dejar su estado: {texto}"),
+                _ => {}
+            }
+            assert!(
+                Instant::now() < limite,
+                "el paso {paso} no terminó en 10 s: {texto}"
+            );
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    #[test]
+    fn guiones_de_cada_paso_lanzan_consultan_y_dan_corriendo_fin_y_murio() {
+        if let Err(e) = Command::new("python3").arg("--version").output() {
+            eprintln!("sin python3 ({e}): se salta el test de los guiones de cada paso");
+            return;
+        }
+        let caja = tempfile::tempdir().expect("caja");
+        let d = caja.path().join("paquete");
+        fs::create_dir_all(&d).expect("carpeta D");
+        let ruta_d = d.to_str().expect("ruta");
+        let con_d = |texto: String| texto.replace(D_REMOTO, ruta_d);
+        let cuerpos = [
+            ("preparar", "import time\ntime.sleep(1)\nprint(\"ROOT_OK=x\")\n".to_string()),
+            ("trabajo-0", "import time\ntime.sleep(1)\nprint(\"ROOT_OK=x\")\n".to_string()),
+            (
+                "cierre",
+                "import time\ntime.sleep(1)\nprint(\"ROOT_OK=x\")\nprint(\"ROOT_SHA_VUELTA=abc\")\n"
+                    .to_string(),
+            ),
+        ];
+
+        for (paso, cuerpo) in &cuerpos {
+            let lanzar = con_d(script_lanzar_paso(paso, &con_d(script_paso(paso, cuerpo))));
+            let salida = correr_guion_python(caja.path(), &format!("lanzar-{paso}.py"), &lanzar);
+            assert!(
+                salida.status.success(),
+                "{}",
+                String::from_utf8_lossy(&salida.stderr)
+            );
+            let lanzado = String::from_utf8_lossy(&salida.stdout).to_string();
+            let pid: u32 = colab::marcador(&lanzado, "ROOT_LANZADO=")
+                .unwrap_or_else(|| panic!("{paso}: falta ROOT_LANZADO: {lanzado}"))
+                .parse()
+                .expect("pid numérico");
+
+            let estado = con_d(script_estado_paso(paso, pid));
+            let vivo = correr_guion_python(caja.path(), &format!("estado-{paso}.py"), &estado);
+            let texto = String::from_utf8_lossy(&vivo.stdout).to_string();
+            assert_eq!(
+                colab::marcador(&texto, "ROOT_ESTADO=").as_deref(),
+                Some("corriendo"),
+                "{paso}: {texto}"
+            );
+
+            let fin = esperar_fin_de_paso(caja.path(), paso, &estado);
+            let json: serde_json::Value =
+                serde_json::from_str(&texto_tras(&fin, "ROOT_ESTADO=")).expect("json del estado");
+            assert_eq!(json["codigo"], 0, "{paso}: {json}");
+            assert!(json["inicio"].as_f64().is_some(), "{paso}: {json}");
+            assert!(json["fin"].as_f64().is_some(), "{paso}: {json}");
+            assert!(json["marcas"].is_object(), "{paso}: {json}");
+            if *paso == "cierre" {
+                assert_eq!(json["marcas"]["ROOT_SHA_VUELTA"], "abc", "{json}");
+            }
+        }
+
+        // Murio: sin archivo de estado y con un pid ya muerto.
+        fs::remove_file(d.join("trabajo-0.estado")).expect("quita el estado");
+        let mut hijo = Command::new("true").spawn().expect("true");
+        let muerto = hijo.id();
+        hijo.wait().expect("espera al hijo");
+        let estado = con_d(script_estado_paso("trabajo-0", muerto));
+        let salida = correr_guion_python(caja.path(), "estado-muerto.py", &estado);
+        let texto = String::from_utf8_lossy(&salida.stdout).to_string();
+        assert_eq!(
+            colab::marcador(&texto, "ROOT_ESTADO=").as_deref(),
+            Some("murio"),
+            "{texto}"
+        );
+    }
+
+    #[test]
+    fn lanzar_repetido_devuelve_el_mismo_pid_y_no_lanza_otro() {
+        if let Err(e) = Command::new("python3").arg("--version").output() {
+            eprintln!("sin python3 ({e}): se salta el test de lanzar repetido");
+            return;
+        }
+        let caja = tempfile::tempdir().expect("caja");
+        let d = caja.path().join("paquete");
+        fs::create_dir_all(&d).expect("carpeta D");
+        let ruta_d = d.to_str().expect("ruta");
+        let con_d = |texto: String| texto.replace(D_REMOTO, ruta_d);
+        let contador = caja.path().join("contador.txt");
+        let contador_py = literal_python(contador.to_str().expect("ruta"));
+        let cuerpo = format!(
+            "import time\nopen({contador_py}, 'a').write('a\\n')\ntime.sleep(1)\nprint('ROOT_OK=x')\n"
+        );
+        let lanzar = con_d(script_lanzar_paso(
+            "preparar",
+            &con_d(script_paso("preparar", &cuerpo)),
+        ));
+
+        let primera = correr_guion_python(caja.path(), "lanzar-1.py", &lanzar);
+        let segunda = correr_guion_python(caja.path(), "lanzar-2.py", &lanzar);
+        let pid_de = |salida: &std::process::Output| -> u32 {
+            let texto = String::from_utf8_lossy(&salida.stdout).to_string();
+            colab::marcador(&texto, "ROOT_LANZADO=")
+                .unwrap_or_else(|| panic!("falta ROOT_LANZADO: {texto}"))
+                .parse()
+                .expect("pid numérico")
+        };
+        let pid = pid_de(&primera);
+        assert_eq!(
+            pid,
+            pid_de(&segunda),
+            "el segundo lanzar debía dar el mismo pid"
+        );
+
+        let estado = con_d(script_estado_paso("preparar", pid));
+        esperar_fin_de_paso(caja.path(), "preparar", &estado);
+        let escrituras = fs::read_to_string(&contador).expect("contador");
+        assert_eq!(escrituras.matches('a').count(), 1, "{escrituras:?}");
+
+        // Con `<paso>.estado` y sin `.pid`, el paso ya corrió: no lanza otro.
+        let cierre = con_d(script_lanzar_paso(
+            "cierre",
+            &con_d(script_paso("cierre", &cuerpo)),
+        ));
+        fs::write(
+            d.join("cierre.estado"),
+            "{\"codigo\": 0, \"inicio\": 1.0, \"fin\": 2.0, \"marcas\": {}}\n",
+        )
+        .expect("estado previo");
+        let _salida = correr_guion_python(caja.path(), "lanzar-cierre.py", &cierre);
+        thread::sleep(Duration::from_secs(2));
+        let escrituras = fs::read_to_string(&contador).expect("contador");
+        assert_eq!(escrituras.matches('a').count(), 1, "{escrituras:?}");
+    }
+
     /// Corre un paquete con cinco respuestas `respuestas` y devuelve el error del runtime.
     fn error_de_cinco_consultas(respuestas: Vec<Respuesta>) -> String {
         let caja = tempfile::tempdir().expect("caja");
@@ -7593,7 +8476,11 @@ mod tests_calibrar {
         let vuelta = vuelta_minima(caja.path());
         // El guion lleva el marcador de estado: así el `Falso` responde con `Plazo`.
         let guion = caja.path().join("consulta.py");
-        fs::write(&guion, "print('ROOT_ESTADO=corriendo')\n").expect("guion");
+        fs::write(
+            &guion,
+            "# trabajo-0.estado\nprint('ROOT_ESTADO=corriendo')\n",
+        )
+        .expect("guion");
         let cli = Falso::nuevo(home.path(), &vuelta).con_estados(vec![Respuesta::Plazo]);
         let sin_senal = Senales::default();
         let lim = colab::Limites {
