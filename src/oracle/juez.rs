@@ -29,7 +29,7 @@ const MODULARIDAD: &str = "diseno.modularidad";
 /// Id de la sonda de arquitectura. Su hallazgo de ciclo fija el tope de `diseno.modularidad`.
 const SONDA_ARQUITECTURA: &str = "arquitectura-nativa";
 /// Fase del flujo que va al `Evento` de la llamada.
-const FASE: &str = "juez-diseno";
+const FASE: &str = "juez";
 /// Marca que se agrega al final de un extracto recortado.
 const MARCA_RECORTE: &str = "…[recortado]";
 /// Sonda que reporta secretos. Su línea es un secreto: no sale al prompt.
@@ -4272,5 +4272,50 @@ mod tests {
         // `diseno.ciclos` es de sonda: el juez no lo responde, y `puntuar_con_juez` lo lista igual.
         assert_eq!(p.faltantes, vec![CICLOS.to_string(), TOPE.to_string()]);
         assert!(p.items.iter().all(|i| i.item != TOPE), "{:?}", p.items);
+    }
+
+    #[test]
+    fn juez_p169_fase_prompt_es_juez() {
+        let c = caso();
+        let p = construir_prompt(&c.entrada(), &LimitesPrompt::default());
+        assert_eq!(p.fase, "juez");
+    }
+
+    #[test]
+    fn juez_p169_fase_gasto_s2_cuenta_la_llamada_por_via() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let ts = crate::colab_calibra::corte_s2_epoch(crate::colab_calibra::CORTE_S2)
+            .expect("corte válido")
+            + 1.0;
+        let evento = |fase: &str| crate::tipos::Evento {
+            ts,
+            corrida: "corre-s2".into(),
+            tipo: crate::tipos::TipoEvento::Llamada,
+            via: Some(Via::Api),
+            cost_usd: 1.5,
+            fase: fase.into(),
+            ..Default::default()
+        };
+        let escribir = |eventos: &[crate::tipos::Evento]| {
+            let texto: String = eventos
+                .iter()
+                .map(|ev| format!("{}\n", serde_json::to_string(ev).expect("evento")))
+                .collect();
+            fs::write(home.path().join("eventos.jsonl"), texto).expect("escribe");
+        };
+        let desde_corte = || {
+            crate::colab_calibra::gasto_s2(home.path())
+                .expect("gasto de S2")
+                .desde_corte_usd
+        };
+
+        escribir(&[evento("juez")]);
+        assert!((desde_corte() - 1.5).abs() < 1e-9);
+
+        escribir(&[evento("juez-diseno")]);
+        assert!((desde_corte() - 1.5).abs() < 1e-9);
+
+        escribir(&[evento("juez"), evento("juez-diseno")]);
+        assert!((desde_corte() - 3.0).abs() < 1e-9);
     }
 }
