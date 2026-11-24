@@ -19,6 +19,7 @@ PAQUETE_LOCAL = "/content/paquete.tar.gz"
 CARPETA_DRIVE = "/content/drive/MyDrive/root-colab"
 ARCHIVO_GASTO = "gasto.jsonl"
 MANIFIESTO_VUELTA = "manifiesto-vuelta.json"
+HECHOS = "hechos.json"
 UMBRAL_PARADA = 0.85
 TIPOS_DE_GASTO = ("llamada", "reserva")
 PREFIJO_EVENTOS = "eventos.jsonl."
@@ -87,18 +88,46 @@ def _lineas_de(ruta):
 
 
 def _coincide(fila, trabajo):
-    return all(fila.get(c) == trabajo.get(c) for c in ("tarea", "dimension", "n", "semilla"))
+    # No se compara `n`: la fila trae el n de los casos que cuentan, no el del trabajo.
+    return all(fila.get(c) == trabajo.get(c) for c in ("tarea", "dimension", "semilla"))
 
 
-def fila_de_trabajo(trabajo, filas, ts_de_ida):
-    """Devuelve la última fila nueva del trabajo. Una fila del paquete de ida no cuenta."""
-    nuevas = [f for f in filas if _coincide(f, trabajo) and f.get("ts") not in ts_de_ida]
+def fila_de_trabajo(trabajo, filas, ts_excluidos):
+    """Devuelve la última fila nueva del trabajo.
+
+    `ts_excluidos` son los ts de las filas que no cuentan: las del paquete de ida y las que
+    ya existían antes del trabajo.
+    """
+    nuevas = [f for f in filas if _coincide(f, trabajo) and f.get("ts") not in ts_excluidos]
     return nuevas[-1] if nuevas else None
 
 
-def ya_calibrado(trabajo, filas_runtime, ts_de_ida):
-    """Dice si el trabajo ya tiene su fila nueva. Sirve para retomar una sesión cortada."""
-    return fila_de_trabajo(trabajo, filas_runtime, ts_de_ida) is not None
+def fila_por_ts(filas, ts):
+    """Devuelve la última fila con ese `ts`, o None."""
+    coincidentes = [f for f in filas if f.get("ts") == ts]
+    return coincidentes[-1] if coincidentes else None
+
+
+def leer_hechos(ruta):
+    """Devuelve los trabajos ya calibrados: {"<indice>": ts de su fila}. Dict vacío si no existe."""
+    if not os.path.isfile(ruta):
+        return {}
+    return _leer_json(ruta)
+
+
+def anotar_hecho(ruta, indice, ts):
+    """Agrega un trabajo a `hechos` y reemplaza el archivo de forma atómica."""
+    hechos = leer_hechos(ruta)
+    hechos[str(indice)] = ts
+    temporal = ruta + ".tmp"
+    _escribir_json(temporal, hechos)
+    os.replace(temporal, ruta)
+
+
+def ya_calibrado(indice, hechos, filas):
+    """Dice si el trabajo `indice` ya corrió y su fila sigue en `filas`. Sirve para retomar."""
+    ts = hechos.get(str(indice))
+    return ts is not None and fila_por_ts(filas, ts) is not None
 
 
 def regla_de_parada(filas_de_etapa, umbral=UMBRAL_PARADA):
@@ -269,6 +298,8 @@ def armar_vuelta(d, destino):
         partes.append("calibracion.json")
     if os.path.isdir(os.path.join(d, "calibracion")):
         partes.append("calibracion")
+    if os.path.isfile(os.path.join(d, HECHOS)):
+        partes.append(HECHOS)
     archivos = _sha_de_partes(d, partes)
     _escribir_json(os.path.join(d, MANIFIESTO_VUELTA), {"v": 1, "archivos": archivos})
     partes.append(MANIFIESTO_VUELTA)
@@ -348,9 +379,11 @@ def celda_3():
         ruta_ida = os.path.join(D, "filas-de-ida.json")
         if not os.path.isfile(ruta_ida):
             raise RuntimeError("falta filas-de-ida.json: corre la celda 1 primero")
-        ts_de_ida = _leer_json(ruta_ida)
+        ts_de_ida = set(_leer_json(ruta_ida))
         tope_paquete = manifiesto.get("tope_s2_usd")
         ruta_calibracion = os.path.join(D, "calibracion.json")
+        ruta_hechos = os.path.join(D, HECHOS)
+        hechos = leer_hechos(ruta_hechos)
         filas_previas = {}
         fallos = []
         saltos = []
@@ -364,9 +397,14 @@ def celda_3():
             for indice, trabajo in etapa["trabajos"]:
                 nombre = f"{trabajo['tarea']} {dimension} n={trabajo['n']} semilla={trabajo['semilla']}"
                 gasto = 0.0
-                if ya_calibrado(trabajo, leer_filas(ruta_calibracion), ts_de_ida):
+                fila = None
+                filas = leer_filas(ruta_calibracion)
+                if ya_calibrado(indice, hechos, filas):
                     print(f"ya calibrado, se salta: {nombre}")
+                    fila = fila_por_ts(filas, hechos[str(indice)])
                 else:
+                    # ts_antes: las filas que ya existen justo antes de decidir o correr este trabajo.
+                    ts_antes = {f.get("ts") for f in leer_filas(ruta_calibracion)}
                     a_correr, _ = decidir_tope(trabajo, tope_paquete, gastado_del_paquete(D))
                     if a_correr is None:
                         print(f"tope del paquete agotado: {nombre}")
@@ -376,7 +414,11 @@ def celda_3():
                         if codigo != 0:
                             fallos.append(nombre)
                             print(f"fallo: {nombre}: {codigo}")
-                fila = fila_de_trabajo(trabajo, leer_filas(ruta_calibracion), ts_de_ida)
+                        fila = fila_de_trabajo(
+                            trabajo, leer_filas(ruta_calibracion), ts_de_ida | ts_antes
+                        )
+                        if fila is not None:
+                            anotar_hecho(ruta_hechos, indice, fila["ts"])
                 if fila is None:
                     print(f"sin fila nueva: {nombre}")
                     continue

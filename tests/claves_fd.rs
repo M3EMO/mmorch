@@ -245,18 +245,193 @@ assert j.regla_de_parada([f(0.10, 0)]) is False, "sin defectos no cuenta"
 }
 
 #[test]
-fn claves_fd_juez_ya_calibrado_se_salta_solo_con_fila_nueva() {
+fn claves_fd_juez_ya_calibrado_se_salta_solo_con_hecho_y_fila() {
     let tmp = tempfile::tempdir().expect("tmp");
+    // Cambió de valor: antes `dict(fila, n=7)` daba False. Ahora `n` no se compara: el hecho manda.
     let cuerpo = r#"
 trabajo = {"tarea": "t", "dimension": "eficiencia", "n": 5, "semilla": 1}
 fila = {"tarea": "t", "dimension": "eficiencia", "n": 5, "semilla": 1, "ts": "2026-11-14T10:00:00Z"}
-assert j.ya_calibrado(trabajo, [fila], []) is True
-assert j.ya_calibrado(trabajo, [], []) is False
-assert j.ya_calibrado(trabajo, [dict(fila, n=7)], []) is False
-# La misma fila, pero viene del paquete de ida: no cuenta.
-assert j.ya_calibrado(trabajo, [fila], ["2026-11-14T10:00:00Z"]) is False
+ts = fila["ts"]
+assert j.ya_calibrado(0, {"0": ts}, [fila]) is True
+# Sin hecho anotado, la fila no basta: puede venir de la ida o de otro trabajo.
+assert j.ya_calibrado(0, {}, [fila]) is False
+# Hecho anotado, pero la fila ya no está en calibracion.json: se corre de nuevo.
+assert j.ya_calibrado(0, {"0": ts}, []) is False
+# Con otro n, la fila sigue siendo la del trabajo (el n no se compara).
+assert j.ya_calibrado(0, {"0": ts}, [dict(fila, n=7)]) is True
+# Una fila del paquete de ida no cuenta como fila nueva del trabajo.
+assert j.fila_de_trabajo(trabajo, [fila], {ts}) is None
 "#;
     let Some(salida) = correr_python(&codigo_juez(cuerpo), tmp.path()) else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+#[test]
+fn claves_fd_juez_fila_de_trabajo_encuentra_fila_con_otro_n() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cuerpo = r#"
+trabajo = {"tarea": "t", "dimension": "eficiencia", "n": 12, "semilla": 1}
+filas = [{"tarea": "t", "dimension": "eficiencia", "n": 10, "semilla": 1, "ts": "A"}]
+fila = j.fila_de_trabajo(trabajo, filas, set())
+assert fila is not None, "un trabajo n=12 debe encontrar su fila n=10"
+assert fila["ts"] == "A", fila
+"#;
+    let Some(salida) = correr_python(&codigo_juez(cuerpo), tmp.path()) else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+#[test]
+fn claves_fd_juez_dos_trabajos_del_paquete_con_n_distinto_tienen_su_fila() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cuerpo = r#"
+ida = {"ida-x"}
+t12 = {"tarea": "t", "dimension": "eficiencia", "n": 12, "semilla": 1}
+t6 = {"tarea": "t", "dimension": "eficiencia", "n": 6, "semilla": 1}
+filas = []
+# Antes del primero no hay filas: ts_antes vacío.
+ts_antes = {f.get("ts") for f in filas}
+filas.append({"tarea": "t", "dimension": "eficiencia", "n": 10, "semilla": 1, "ts": "A"})
+assert j.fila_de_trabajo(t12, filas, ida | ts_antes)["ts"] == "A"
+# Antes del segundo, ya está A.
+ts_antes = {f.get("ts") for f in filas}
+filas.append({"tarea": "t", "dimension": "eficiencia", "n": 6, "semilla": 1, "ts": "B"})
+assert j.fila_de_trabajo(t6, filas, ida | ts_antes)["ts"] == "B"
+"#;
+    let Some(salida) = correr_python(&codigo_juez(cuerpo), tmp.path()) else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+#[test]
+fn claves_fd_juez_hechos_leer_y_anotar_acumula_sin_tmp() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cuerpo = r#"
+import os
+ruta = os.path.join(sys.argv[2], "hechos.json")
+assert j.leer_hechos(ruta) == {}, "sin archivo, dict vacío"
+j.anotar_hecho(ruta, 0, "A")
+j.anotar_hecho(ruta, 3, "B")
+assert j.leer_hechos(ruta) == {"0": "A", "3": "B"}, j.leer_hechos(ruta)
+assert not os.path.exists(ruta + ".tmp"), "no debe quedar el temporal"
+# Si el reemplazo falla, el archivo anterior queda intacto.
+reemplazar = os.replace
+def roto(origen, destino):
+    raise OSError("corte")
+j.os.replace = roto
+try:
+    j.anotar_hecho(ruta, 5, "C")
+except OSError:
+    pass
+else:
+    raise AssertionError("debió fallar")
+finally:
+    j.os.replace = reemplazar
+assert j.leer_hechos(ruta) == {"0": "A", "3": "B"}, "el archivo anterior no cambia"
+"#;
+    let Some(salida) = correr_python(&codigo_juez(cuerpo), tmp.path()) else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+#[test]
+fn claves_fd_juez_regla_de_parada_cuenta_la_fila_de_n_distinto() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    // Guarda: la regla no mira `n`. Una fila n=10 de un trabajo n=12 cuenta igual.
+    let cuerpo = r#"
+fila = {"tarea": "t", "dimension": "eficiencia", "n": 10, "semilla": 1, "sensibilidad": 0.5, "defectos": 10}
+assert j.regla_de_parada([fila]) is True
+"#;
+    let Some(salida) = correr_python(&codigo_juez(cuerpo), tmp.path()) else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+/// Corre `celda_3` con `D` en `d`, un manifiesto de un trabajo y un `_correr_y_medir` falso.
+/// El falso agrega una fila n=10 a calibracion.json y cuenta las llamadas.
+const CELDA_3_CON_FILA_N_DISTINTO: &str = r#"
+import contextlib, io, json, os
+d = sys.argv[2]
+j.D = d
+args = ["colab", "calibrar"]
+if MODO_TOPE:
+    args = ["colab", "calibrar", "--tope-usd", "1.00"]
+manifiesto = {"trabajos": [{"tarea": "t", "dimension": "eficiencia", "n": 12, "semilla": 1, "args": args, "entorno": {}}]}
+if MODO_TOPE:
+    manifiesto["tope_s2_usd"] = 0.001
+def escribir(nombre, valor):
+    with open(os.path.join(d, nombre), "w", encoding="utf-8") as f:
+        json.dump(valor, f)
+escribir("manifiesto.json", manifiesto)
+escribir("filas-de-ida.json", [])
+escribir("calibracion.json", {"v": 1, "filas": []})
+llamadas = []
+def falso(indice, trabajo, clave):
+    llamadas.append(indice)
+    ruta = os.path.join(d, "calibracion.json")
+    with open(ruta, encoding="utf-8") as f:
+        datos = json.load(f)
+    datos["filas"].append({"tarea": "t", "dimension": "eficiencia", "n": 10, "semilla": 1,
+                           "ts": f"ts-{len(llamadas)}", "sensibilidad": 0.9, "especificidad": 0.9, "defectos": 10})
+    escribir("calibracion.json", datos)
+    return 0, 0.5
+j._correr_y_medir = falso
+def correr():
+    salida = io.StringIO()
+    j._CLAVE = "clave-falsa"
+    with contextlib.redirect_stdout(salida):
+        j.celda_3()
+    return salida.getvalue()
+"#;
+
+#[test]
+fn claves_fd_juez_celda_3_anota_el_hecho_y_no_repite_el_trabajo() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cuerpo = r#"
+MODO_TOPE = False
+"#
+    .to_string()
+        + CELDA_3_CON_FILA_N_DISTINTO
+        + r#"
+salida1 = correr()
+assert llamadas == [0], llamadas
+assert "tarea=t dimension=eficiencia sensibilidad=0.9" in salida1, salida1
+assert "sin fila nueva" not in salida1, salida1
+hechos = json.load(open(os.path.join(d, "hechos.json"), encoding="utf-8"))
+assert hechos == {"0": "ts-1"}, hechos
+# Retomar: el trabajo ya está hecho, no se vuelve a correr (no gasta API).
+salida2 = correr()
+assert llamadas == [0], ("se volvió a correr", llamadas)
+assert "ya calibrado, se salta" in salida2, salida2
+assert "tarea=t dimension=eficiencia sensibilidad=0.9" in salida2, salida2
+"#;
+    let Some(salida) = correr_python(&codigo_juez(&cuerpo), tmp.path()) else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+#[test]
+fn claves_fd_juez_celda_3_tope_agotado_no_anota_hecho() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cuerpo = r#"
+MODO_TOPE = True
+"#
+    .to_string()
+        + CELDA_3_CON_FILA_N_DISTINTO
+        + r#"
+salida = correr()
+assert llamadas == [], ("con tope agotado no debe correr", llamadas)
+assert "tope del paquete agotado" in salida, salida
+assert not os.path.exists(os.path.join(d, "hechos.json")), "no debe anotar hecho"
+"#;
+    let Some(salida) = correr_python(&codigo_juez(&cuerpo), tmp.path()) else {
         return;
     };
     python_ok(&salida);
@@ -543,6 +718,53 @@ j.armar_vuelta(d2, destino2)
 with tarfile.open(destino2, "r:gz") as t:
     verificacion2 = t.extractfile("verificacion.txt").read().decode("utf-8")
 assert "verificar-versiones.sh" in verificacion2, verificacion2
+"#;
+    let Some(salida) = correr_python(&codigo_juez(cuerpo), tmp.path()) else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+#[test]
+fn claves_fd_juez_armar_vuelta_lista_hechos_en_manifiesto_si_existe() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cuerpo = r#"
+import hashlib, json, os, tarfile
+base = sys.argv[2]
+
+def escribir(ruta, texto):
+    os.makedirs(os.path.dirname(ruta), exist_ok=True)
+    with open(ruta, "w", encoding="utf-8") as f:
+        f.write(texto)
+
+def armar_carpeta(d, con_hechos):
+    escribir(os.path.join(d, "calibracion.json"), json.dumps({"v": 1, "filas": []}))
+    escribir(os.path.join(d, "eventos.jsonl"), '{"tipo":"llamada","cost_usd":0.25}\n')
+    escribir(os.path.join(d, "tools", "colab", "verificar-versiones.sh"), "echo ok\n")
+    if con_hechos:
+        escribir(os.path.join(d, "hechos.json"), json.dumps({"0": "A", "3": "B"}))
+
+d1 = os.path.join(base, "D1")
+armar_carpeta(d1, True)
+destino1 = os.path.join(base, "vuelta1.tar.gz")
+j.armar_vuelta(d1, destino1)
+with tarfile.open(destino1, "r:gz") as t:
+    nombres = set(t.getnames())
+    hechos_tar = t.extractfile("hechos.json").read()
+    manifiesto = json.loads(t.extractfile("manifiesto-vuelta.json").read())
+assert "hechos.json" in nombres, nombres
+assert manifiesto["archivos"]["hechos.json"] == hashlib.sha256(hechos_tar).hexdigest(), manifiesto
+assert "hechos.json" not in nombres or True
+
+d2 = os.path.join(base, "D2")
+armar_carpeta(d2, False)
+destino2 = os.path.join(base, "vuelta2.tar.gz")
+j.armar_vuelta(d2, destino2)
+with tarfile.open(destino2, "r:gz") as t:
+    nombres2 = set(t.getnames())
+    manifiesto2 = json.loads(t.extractfile("manifiesto-vuelta.json").read())
+assert "hechos.json" not in nombres2, nombres2
+assert "hechos.json" not in manifiesto2["archivos"], manifiesto2
 "#;
     let Some(salida) = correr_python(&codigo_juez(cuerpo), tmp.path()) else {
         return;
