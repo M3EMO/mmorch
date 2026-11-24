@@ -7750,7 +7750,56 @@ mod tests {
         );
     }
 
-    /// Una fila con `base_sin_veredicto` no mide: no pisa los inestables de la medición anterior.
+    /// Huellas de la base (antes de la Tarea 169) de las seis dimensiones de oráculo: no cambian.
+    #[test]
+    fn huella_p169_las_seis_de_oraculo_no_cambian() {
+        let base = [
+            (Dimension::Funciona, "b4ec060a4cdeb4dc"),
+            (Dimension::Seguridad, "6b15c7c7291f637e"),
+            (Dimension::Completitud, "ce508b6314e2b5ca"),
+            (Dimension::Pruebas, "cd85103d4cfb9aa1"),
+            (Dimension::Eficiencia, "5aa7d3c6dcb51df4"),
+            (Dimension::Entrega, "8a9975311af332d3"),
+        ];
+        for (dimension, literal) in base {
+            assert_eq!(huella_de(dimension), literal, "{dimension:?}");
+        }
+    }
+
+    /// Huellas de la base de las tres dimensiones del juez que cambian en la Tarea 169.
+    #[test]
+    fn huella_p169_las_tres_del_juez_cambian() {
+        let base = [
+            (Dimension::Arquitectura, "60c5fb9b0d576398"),
+            (Dimension::Diseno, "19b81dea4119d429"),
+            (Dimension::Estructura, "afbc695e7b008336"),
+        ];
+        for (dimension, literal) in base {
+            assert_ne!(huella_de(dimension), literal, "{dimension:?}");
+        }
+    }
+
+    /// Una fila de Diseno con la huella de la base no calibra; con la huella actual, sí.
+    #[test]
+    fn huella_p169_fila_de_diseno_con_la_huella_de_la_base_no_calibra() {
+        let home = tempfile::tempdir().expect("home");
+        let con_huella = |huella: String| {
+            let c = Calibraciones {
+                v: VERSION,
+                filas: vec![Fila {
+                    huella: Some(huella),
+                    ..fila_medida("memora", Dimension::Diseno, 16, 16, "")
+                }],
+            };
+            c.version_en(home.path(), "memora", "", Dimension::Diseno)
+        };
+        let vieja = con_huella("19b81dea4119d429".into());
+        assert!(!vieja.calibrada(true));
+        let actual = con_huella(huella_de(Dimension::Diseno));
+        assert!(actual.calibrada(true));
+    }
+
+    /// Una fila `base_sin_veredicto` no mide: no pisa los inestables de la medición anterior.
     #[test]
     fn inestables_de_salta_la_fila_con_base_sin_veredicto() {
         let vieja = Fila {
