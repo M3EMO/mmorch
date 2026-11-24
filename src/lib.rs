@@ -1031,6 +1031,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                     n,
                     semilla,
                     juez,
+                    tope_usd,
                 },
         } => colab_empaquetar(
             cli.json,
@@ -1042,6 +1043,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                 salida: salida.clone(),
                 raiz_root: raiz_root.clone(),
                 juez: *juez,
+                tope_usd: *tope_usd,
             },
             *n,
             *semilla,
@@ -1824,6 +1826,7 @@ mod tests {
             salida: PathBuf::from("s.tar.gz"),
             raiz_root: None,
             juez: false,
+            tope_usd: None,
         }
     }
 

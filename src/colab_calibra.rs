@@ -237,6 +237,8 @@ pub struct Paquete {
     pub semilla: u64,
     /// Con `--juez`, entran las dimensiones con ítems del juez y el manifiesto fija el tope de S2.
     pub juez: bool,
+    /// Tope de gasto del paquete, en USD. Con `--juez`, el tope es el menor entre el saldo de S2 y este valor.
+    pub tope_usd: Option<f64>,
 }
 
 /// Pedido tal como llega de la línea de comandos.
@@ -250,6 +252,8 @@ pub struct PedidoEmpaquetar {
     pub raiz_root: Option<PathBuf>,
     /// Con `--juez`, entran las dimensiones con ítems del juez.
     pub juez: bool,
+    /// Tope de gasto del paquete, en USD. Exige `--juez`.
+    pub tope_usd: Option<f64>,
 }
 
 /// Lo que devuelve el comando: dónde quedó el paquete y qué trae.
@@ -368,6 +372,7 @@ pub fn empaquetar_cli_con(
         commit_root,
         semilla,
         juez,
+        tope_usd: pedido.tope_usd,
     };
     let imagen = PodmanReal {
         binario: binario_podman(),
@@ -381,6 +386,16 @@ pub fn empaquetar(paquete: &Paquete, imagen: &dyn Imagen) -> Result<Resumen, Err
         return Err(ErrorOraculo::Uso(
             "--rustup-sha256 debe tener 64 caracteres hexadecimales".into(),
         ));
+    }
+    if let Some(tope) = paquete.tope_usd {
+        if !paquete.juez {
+            return Err(ErrorOraculo::Uso("--tope-usd exige --juez".into()));
+        }
+        if !(tope.is_finite() && tope > 0.0) {
+            return Err(ErrorOraculo::Uso(
+                "--tope-usd debe ser un número finito mayor que 0".into(),
+            ));
+        }
     }
     let bytes = fs::read(&paquete.binario)
         .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", paquete.binario.display())))?;
@@ -413,10 +428,11 @@ pub fn empaquetar(paquete: &Paquete, imagen: &dyn Imagen) -> Result<Resumen, Err
     }
     validar_trabajos(&trabajos, paquete.juez)?;
     // Con juez, sin tope de S2 no hay gasto para calibrar. Se revisa antes de armar nada.
-    // Se calcula el gasto una sola vez: sirve al rechazo y al manifiesto.
+    // Se calcula el gasto una sola vez: sirve al rechazo, a la línea de stderr y al manifiesto.
     let gasto = if paquete.juez {
         let gasto = gasto_s2(&paquete.home)?;
-        eprintln!("{}", linea_gasto_s2(&gasto));
+        let tope = tope_del_paquete(gasto.restante_usd, paquete.tope_usd);
+        eprintln!("{}", linea_gasto_s2(&gasto, tope));
         if gasto.restante_usd <= 0.0 {
             return Err(ErrorOraculo::Uso(format!(
                 "con --juez no se arma el paquete: no queda tope de S2. \
@@ -592,7 +608,9 @@ fn armar_y_empaquetar(
         binario_sha256,
         trabajos,
         imagenes,
-        tope_s2_usd: gasto.map(|g| g.restante_usd),
+        tope_s2_usd: gasto
+            .as_ref()
+            .map(|g| tope_del_paquete(g.restante_usd, paquete.tope_usd)),
         gasto_s2: gasto.cloned(),
     };
     let manifiesto = armar_manifiesto(&datos, archivos);
@@ -663,15 +681,21 @@ pub fn gastado_s2_usd(home: &Path) -> Result<f64, ErrorOraculo> {
     Ok(gasto_s2(home)?.total_usd)
 }
 
-/// Línea de stderr con el gasto de S2: previo, desde el corte, total y lo que queda.
-pub fn linea_gasto_s2(g: &GastoS2) -> String {
+/// Tope del paquete: el saldo de S2, o el menor entre ese saldo y `tope_usd` si lo hay.
+pub fn tope_del_paquete(saldo: f64, tope_usd: Option<f64>) -> f64 {
+    tope_usd.map_or(saldo, |tope| tope.min(saldo))
+}
+
+/// Línea de stderr con el gasto de S2: previo, desde el corte, total, lo que queda y el tope del paquete.
+pub fn linea_gasto_s2(g: &GastoS2, tope_paquete: f64) -> String {
     format!(
-        "gasto de S2: {} USD previos + {} USD desde {} = {} USD; quedan {} USD de {TOPE_S2_USD:.0}",
+        "gasto de S2: {} USD previos + {} USD desde {} = {} USD; quedan {} USD de {TOPE_S2_USD:.0}; tope del paquete: {} USD",
         cifra_usd(g.previo_usd),
         cifra_usd(g.desde_corte_usd),
         g.corte,
         cifra_usd(g.total_usd),
         cifra_usd(g.restante_usd),
+        cifra_usd(tope_paquete),
     )
 }
 
@@ -3763,6 +3787,7 @@ mod tests {
                 commit_root: "abc123".into(),
                 semilla: SEMILLA_POR_DEFECTO,
                 juez: false,
+                tope_usd: None,
             }
         }
     }
@@ -4518,6 +4543,74 @@ mod tests {
         assert!(resumen.is_ok(), "29.55 USD quedan bajo el tope de 30 USD");
     }
 
+    fn tope_s2_del_manifiesto(paquete: &Paquete) -> Manifiesto {
+        let resumen = empaquetar(paquete, &Doble).expect("empaqueta con juez");
+        let extraido = extraer(&resumen.salida);
+        let texto =
+            fs::read_to_string(extraido.path().join("manifiesto.json")).expect("manifiesto");
+        serde_json::from_str(&texto).expect("JSON del manifiesto")
+    }
+
+    #[test]
+    fn tope_usd_menor_que_el_saldo_fija_el_tope_del_paquete() {
+        // Previo 6.55 + 8.37 desde el corte = 14.92 gastados: saldo de 15,08.
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 8.37);
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+        paquete.juez = true;
+        paquete.tope_usd = Some(8.0);
+        let m = tope_s2_del_manifiesto(&paquete);
+        let tope = m.tope_s2_usd.expect("tope de S2");
+        assert!((tope - 8.0).abs() < 1e-9, "{tope}");
+        let i = m.trabajos[0]
+            .args
+            .iter()
+            .position(|a| a == "--tope-usd")
+            .expect("el trabajo lleva --tope-usd");
+        assert_eq!(m.trabajos[0].args[i + 1], "8.00");
+        // El saldo no cambia: `gasto_s2` sigue diciendo lo que queda de los 30.
+        let g = m.gasto_s2.expect("gasto de S2");
+        assert!((g.restante_usd - 15.08).abs() < 1e-9, "{g:?}");
+    }
+
+    #[test]
+    fn tope_usd_mayor_que_el_saldo_deja_el_saldo() {
+        // Previo 6.55 + 18.45 desde el corte = 25.00 gastados: saldo de 5,00.
+        let e = Escenario::con_contrato("cargo test");
+        eventos_con_api(e.home.path(), 18.45);
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+        paquete.juez = true;
+        paquete.tope_usd = Some(8.0);
+        let m = tope_s2_del_manifiesto(&paquete);
+        let tope = m.tope_s2_usd.expect("tope de S2");
+        assert!((tope - 5.0).abs() < 1e-9, "{tope}");
+    }
+
+    #[test]
+    fn tope_usd_invalido_rechaza_con_uso() {
+        for valor in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let e = Escenario::con_contrato("cargo test");
+            let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Diseno)]);
+            paquete.juez = true;
+            paquete.tope_usd = Some(valor);
+            let Err(ErrorOraculo::Uso(m)) = empaquetar(&paquete, &Doble) else {
+                panic!("--tope-usd {valor} debe fallar con Uso");
+            };
+            assert!(m.contains("--tope-usd"), "{valor}: {m}");
+        }
+    }
+
+    #[test]
+    fn tope_usd_sin_juez_rechaza_con_uso() {
+        let e = Escenario::con_contrato("cargo test");
+        let mut paquete = e.paquete(&[("tarea-prueba", Dimension::Funciona)]);
+        paquete.tope_usd = Some(8.0);
+        let Err(ErrorOraculo::Uso(m)) = empaquetar(&paquete, &Doble) else {
+            panic!("--tope-usd sin --juez debe fallar con Uso");
+        };
+        assert!(m.contains("--tope-usd exige --juez"), "{m}");
+    }
+
     #[test]
     fn sin_juez_y_tope_agotado_el_paquete_se_arma() {
         let e = Escenario::con_contrato("cargo test");
@@ -4552,11 +4645,15 @@ mod tests {
     fn linea_gasto_s2_trae_las_cinco_cifras() {
         let home = tempfile::tempdir().expect("home");
         eventos_con_api(home.path(), 1.0);
-        let linea = linea_gasto_s2(&gasto_s2(home.path()).expect("lee eventos"));
-        assert_eq!(
-            linea,
-            "gasto de S2: 6,55 USD previos + 1,00 USD desde 2026-11-14T00:00:00Z = 7,55 USD; quedan 22,45 USD de 30"
+        let g = gasto_s2(home.path()).expect("lee eventos");
+        let linea = linea_gasto_s2(&g, 8.0);
+        assert!(
+            linea.starts_with(
+                "gasto de S2: 6,55 USD previos + 1,00 USD desde 2026-11-14T00:00:00Z = 7,55 USD; quedan 22,45 USD de 30"
+            ),
+            "{linea}"
         );
+        assert!(linea.ends_with("; tope del paquete: 8,00 USD"), "{linea}");
     }
 
     #[test]

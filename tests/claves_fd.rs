@@ -373,6 +373,102 @@ for prohibido in ("sk-falsa-xyz", "DEEPSEEK_API_KEY", "ALGO_KEY", "OTRO_TOKEN"):
 }
 
 #[test]
+fn claves_fd_juez_resto_del_tope_resta_lo_gastado_y_redondea_hacia_abajo() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cuerpo = r#"
+assert j.resto_del_tope(8, 7.5) == 0.5
+assert j.resto_del_tope(8, 0) == 8.0
+assert j.resto_del_tope(8, 8) == 0.0
+assert j.resto_del_tope(8, 9) == 0.0, "nunca negativo"
+# 8 - 7.13 = 0.87 en binario puede quedar en 0.8699999: el redondeo a centavos no lo baja.
+assert j.resto_del_tope(8, 7.13) == 0.87, j.resto_del_tope(8, 7.13)
+# 0.505 USD de resto baja a 0.50 (hacia abajo).
+assert j.resto_del_tope(8, 7.495) == 0.5, j.resto_del_tope(8, 7.495)
+"#;
+    let Some(salida) = correr_python(&codigo_juez(cuerpo), tmp.path()) else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+#[test]
+fn claves_fd_juez_con_tope_cambia_solo_el_valor_de_tope_usd() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cuerpo = r#"
+args = ["oraculo", "calibrar", "--n", "5", "--tope-usd", "16.90", "--json"]
+nuevos = j.con_tope(args, 0.5)
+assert nuevos == ["oraculo", "calibrar", "--n", "5", "--tope-usd", "0.50", "--json"], nuevos
+assert args[5] == "16.90", "la lista original no cambia"
+oraculo = ["oraculo", "calibrar", "--n", "5", "--json"]
+assert j.con_tope(oraculo, 0.5) == oraculo
+"#;
+    let Some(salida) = correr_python(&codigo_juez(cuerpo), tmp.path()) else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+#[test]
+fn claves_fd_juez_decidir_tope_pasa_el_resto_al_trabajo() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cuerpo = r#"
+trabajo = {"tarea": "t", "dimension": "calidad", "n": 5, "semilla": 1,
+           "args": ["oraculo", "calibrar", "--tope-usd", "16.90", "--json"], "entorno": {}}
+# Tope 8 y 7.50 gastados: el trabajo corre con 0.50.
+corre, resto = j.decidir_tope(trabajo, 8, 7.5)
+assert corre is not None and resto == 0.5, (corre, resto)
+assert corre["args"] == ["oraculo", "calibrar", "--tope-usd", "0.50", "--json"], corre
+assert corre is not trabajo and trabajo["args"][3] == "16.90", "el trabajo original no cambia"
+# Tope 8 y 8 gastados: no corre.
+corre, resto = j.decidir_tope(trabajo, 8, 8)
+assert corre is None and resto == 0.0, (corre, resto)
+# Sin tope en el manifiesto, el trabajo sigue igual.
+assert j.decidir_tope(trabajo, None, 8)[0] is trabajo
+# Trabajo de oráculo, sin --tope-usd: queda igual aunque el tope esté agotado.
+oraculo = {"tarea": "t", "dimension": "eficiencia", "n": 5, "semilla": 1,
+           "args": ["oraculo", "calibrar", "--json"], "entorno": {}}
+assert j.decidir_tope(oraculo, 8, 9)[0] is oraculo
+assert j.decidir_tope(oraculo, 8, 0)[0] is oraculo
+"#;
+    let Some(salida) = correr_python(&codigo_juez(cuerpo), tmp.path()) else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+#[test]
+fn claves_fd_juez_gastado_del_paquete_suma_rotados_y_actual() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cuerpo = r#"
+d = sys.argv[2]
+def escribir(nombre, lineas):
+    with open(os.path.join(d, nombre), "w", encoding="utf-8") as f:
+        f.write("".join(lineas))
+escribir("eventos.jsonl.1", ['{"tipo":"llamada","cost_usd":2.0}\n', '{"tipo":"reserva","cost_usd":9.0}\n'])
+escribir("eventos.jsonl.2", ['{"tipo":"llamada","cost_usd":1.25}\n'])
+escribir("eventos.jsonl", ['{"tipo":"llamada","cost_usd":0.25}\n', '{"tipo":"otro","cost_usd":5}\n'])
+assert j.gastado_del_paquete(d) == 3.5, j.gastado_del_paquete(d)
+"#;
+    let Some(salida) = correr_python(&format!("import os\n{}", codigo_juez(cuerpo)), tmp.path())
+    else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+#[test]
+fn claves_fd_juez_gastado_del_paquete_sin_eventos_es_cero() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cuerpo = r#"
+assert j.gastado_del_paquete(sys.argv[2]) == 0.0
+"#;
+    let Some(salida) = correr_python(&codigo_juez(cuerpo), tmp.path()) else {
+        return;
+    };
+    python_ok(&salida);
+}
+
+#[test]
 fn claves_fd_juez_etapas_del_manifiesto_agrupa_por_dimension_consecutiva() {
     let tmp = tempfile::tempdir().expect("tmp");
     let cuerpo = r#"

@@ -7,6 +7,7 @@ SHA_PAQUETE = ""
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -209,6 +210,41 @@ def gasto_de(lineas_antes, lineas_despues):
     return total
 
 
+def gastado_del_paquete(d):
+    """Suma `cost_usd` de las llamadas de todos los eventos de `d`: rotados y actual.
+
+    Es la misma regla que `gasto_de`, así cuenta también una sesión anterior retomada.
+    """
+    return gasto_de([], _lineas_de_eventos(d))
+
+
+def resto_del_tope(tope_paquete, gastado):
+    """Lo que queda del tope del paquete, en USD, redondeado hacia abajo a centavos. Nunca negativo."""
+    return max(0.0, math.floor(round((tope_paquete - gastado) * 100, 6)) / 100)
+
+
+def con_tope(args, resto):
+    """Copia de `args` con el valor de `--tope-usd` cambiado por `resto`. Sin `--tope-usd`, no cambia."""
+    if "--tope-usd" not in args:
+        return list(args)
+    nuevos = list(args)
+    nuevos[nuevos.index("--tope-usd") + 1] = f"{resto:.2f}"
+    return nuevos
+
+
+def decidir_tope(trabajo, tope_paquete, gastado):
+    """Devuelve (trabajo a correr o None, resto). None: el tope del paquete se agotó y no corre.
+
+    Sin tope en el manifiesto, o sin `--tope-usd` en el trabajo (oráculo), el trabajo sigue igual.
+    """
+    if tope_paquete is None or "--tope-usd" not in trabajo["args"]:
+        return trabajo, None
+    resto = resto_del_tope(tope_paquete, gastado)
+    if resto < 0.01:
+        return None, resto
+    return dict(trabajo, args=con_tope(trabajo["args"], resto)), resto
+
+
 def linea_de_resultado(tarea, dimension, sens, esp, gasto):
     return (
         f"tarea={tarea} dimension={dimension} sensibilidad={sens} "
@@ -313,6 +349,7 @@ def celda_3():
         if not os.path.isfile(ruta_ida):
             raise RuntimeError("falta filas-de-ida.json: corre la celda 1 primero")
         ts_de_ida = _leer_json(ruta_ida)
+        tope_paquete = manifiesto.get("tope_s2_usd")
         ruta_calibracion = os.path.join(D, "calibracion.json")
         filas_previas = {}
         fallos = []
@@ -330,10 +367,15 @@ def celda_3():
                 if ya_calibrado(trabajo, leer_filas(ruta_calibracion), ts_de_ida):
                     print(f"ya calibrado, se salta: {nombre}")
                 else:
-                    codigo, gasto = _correr_y_medir(indice, trabajo, _CLAVE)
-                    if codigo != 0:
-                        fallos.append(nombre)
-                        print(f"fallo: {nombre}: {codigo}")
+                    a_correr, _ = decidir_tope(trabajo, tope_paquete, gastado_del_paquete(D))
+                    if a_correr is None:
+                        print(f"tope del paquete agotado: {nombre}")
+                        saltos.append(nombre)
+                    else:
+                        codigo, gasto = _correr_y_medir(indice, a_correr, _CLAVE)
+                        if codigo != 0:
+                            fallos.append(nombre)
+                            print(f"fallo: {nombre}: {codigo}")
                 fila = fila_de_trabajo(trabajo, leer_filas(ruta_calibracion), ts_de_ida)
                 if fila is None:
                     print(f"sin fila nueva: {nombre}")
