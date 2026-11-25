@@ -15869,3 +15869,174 @@ Recomiendo la (a). Las sondas deterministas para Diseño y Arquitectura quedan c
 **Con P127 b, los pasos 2 a 4 cambian:** se mide Estructura por la CLI, por 2 a 3,3 USD y de 2 a 3 horas, con una excepción nueva de `--env`.
 
 **El saldo de S2 sigue en cerca de 12,53 USD** con P127 a o c. D3 corre por cupo, y no lo toca.
+
+## Vuelta del 2026-11-25 (96): volver al prompt de 2020ecc, y un juez que escribe reglas
+
+**Estado.**
+- **El plan de la vuelta 95 está en el commit 580bab3.**
+- **La respuesta del usuario a P127, literal: "Sí, con P127 a".**
+- **Antes, el usuario propuso, literal: "Una alternativa a los jueces? que los jueces armen algo? tomls?".**
+- **El orquestador la explicó así:**
+  - el LLM no puntúa cada caso;
+  - escribe una vez reglas deterministas, a partir de la ficha y del código limpio, sin ver defectos;
+  - un motor sin LLM corre las reglas en cada caso;
+  - la regla se congela por tarea y entra en la huella.
+- **El usuario aceptó pasarle la idea al planner,** junto con P127 a.
+
+## 1. La Tarea 170: volver al prompt de 2020ecc
+
+Escribí `docs/builds/brief-local-170.md`.
+
+- **Base:** 31965b2, en `claude/root-e7813e`. Es la mezcla de la 167 a la 169 y el congelado X.
+- **Qué hace:** devuelve el `PROMPT_SISTEMA` de 2020ecc, byte por byte. La fase `"juez"` de la 169 queda, porque no entra a la huella.
+- **Las guardas:**
+  - `huella_del_prompt` vuelve a 9263145aa4df4c7a;
+  - las tres huellas del juez vuelven a 60c5fb9b…, 19b81dea… y afbc695e…;
+  - las seis de oráculo no cambian.
+- **Los tests de la 169 sobre el texto del prompt se dan vuelta, y cambian de nombre.** También cambia la guarda de nueve huellas de la 168.
+
+**Lo que verifica el orquestador:**
+1. La suite con podman de `laptop/tarea-170`.
+2. `git diff 2020ecc laptop/tarea-170 -- src/oracle/juez.rs`: solo la línea de `FASE` y tests. La zona del prompt no aparece.
+3. `git diff 31965b2 laptop/tarea-170 --stat`: solo `juez.rs`, `calibra.rs`, `colab_calibra.rs` y el informe.
+4. Después de la mezcla y del congelamiento Y, el estado sobre una copia del real:
+   - las cinco de oráculo, calibradas;
+   - Estructura, calibrada con sus 3 filas de P107 a;
+   - Arquitectura y Diseño, sin calibrar por sus números, no por "calibración de otro juez";
+   - las 2 filas de juez-x, sin contar.
+
+**Costo:** cerca de 0,5 USD de builder y 1 hora, más la suite y el congelamiento, cerca de 1,5 horas. No gasta API.
+
+## 2. Lo que existe: reglas escritas por un LLM
+
+Busqué en la web y en arXiv. **No abrí los artículos completos.** Los números salen de los resúmenes, y hay que revisarlos antes de citarlos como medidos.
+
+| Trabajo | Qué hace | Lo medido | Qué enseña |
+|---|---|---|---|
+| RuleLLM, arXiv 2504.17198 | Un LLM escribe reglas YARA y Semgrep para paquetes maliciosos | 763 reglas, con 85,2 % de precisión y 91,8 % de cobertura. Unas 40 reglas Semgrep tienen una precisión cercana a 0 | Las reglas escritas por LLM pueden servir, pero hay que filtrarlas regla por regla |
+| SecReason, arXiv 2610.14453 | Calibra reglas Semgrep sobre su corpus | 98,2 % de precisión y 99,7 % de cobertura en su corpus. **En un corpus aparte, la cobertura cae a 7 %** | **Es el riesgo de medir al inyector:** una regla ajustada al corpus calibra perfecto y no generaliza |
+| QLCoder, arXiv 2511.08462 | Un agente escribe consultas CodeQL desde un CVE, con ejecución como realimentación | F1 de 0,7, contra 0,048 de IRIS y 0,073 de CodeQL. Escribe consultas correctas para 53,4 % de los CVE | Un LLM solo no alcanza. Hace falta un ciclo de prueba |
+| MoCQ, arXiv 2504.16057 | Un LLM escribe patrones para Joern y CodeQL | GPT-4o da consultas con errores de sintaxis o de ejecución | Escribir reglas es difícil para el modelo, sin un validador |
+| IRIS, arXiv 2405.17238 (ICLR 2025) | Un LLM infiere especificaciones de taint, y CodeQL las corre | 55 vulnerabilidades contra 27 de CodeQL, con una tasa de falsos descubrimientos de 84,82 % | Un LLM puede dar los datos de entrada de un análisis determinista, pero el ruido queda alto |
+| ast-grep, guía de agentes | El LLM escribe reglas YAML de ast-grep | Sin una medición publicada | Sus autores dicen que los errores se acumulan al componer reglas, y ofrecen un validador |
+| Lucena, SBES | Un LLM escribe tests de arquitectura desde texto | 76,67 % reflejan bien la regla pedida | Es la única medición de reglas de arquitectura escritas por un LLM que encontré, y es chica |
+
+**Lo que no encontré:** ninguna medición de reglas de diseño de Rust escritas por un LLM. La idea no está validada en el tema que nos importa.
+
+**Motores para Rust:**
+- **Clippy ya está en la imagen.** Trae lints deterministas y con tipos:
+  - `await_holding_lock`, del grupo suspicious: un `MutexGuard` durante un `await`;
+  - `let_underscore_must_use`, del grupo restriction y apagado por defecto: un `let _ =` sobre un valor `#[must_use]`;
+  - `let_underscore_lock`;
+  - `missing_errors_doc` y `missing_panics_doc`.
+- **ast-grep:** reglas YAML sobre el árbol de tree-sitter, sin compilar. Tiene un catálogo de reglas para Rust. No está en la imagen.
+- **Grafo de módulos:** `arch_test_core` y `archaven` validan capas y ciclos en `cargo test`. Root ya tiene su sonda `arquitectura-nativa`, que hace eso mismo para `dependencias`.
+
+## 3. Qué ítems se pueden escribir como regla
+
+**El patrón que ya funciona es `arquitectura.dependencias`.** Las capas salen de la ficha, y una sonda las verifica sin LLM. Detectó 9 de 9 defectos en P107 a y 3 de 3 en juez-x.
+
+| Ítem | Peso | ¿Regla? | Motor | Qué escribe el LLM, y qué queda afuera |
+|---|---|---|---|---|
+| `diseno.errores` | 2 | **Sí, en las anclas 0 y 2** | Clippy (`let_underscore_must_use`, `missing_errors_doc`, `missing_panics_doc`), y ast-grep para `.ok()` y `unwrap_or_default` | Nada por tarea: son reglas genéricas. El ancla 1, "error sin contexto", queda como heurística |
+| `diseno.estado` | 2 | **Sí, en las anclas 0 y 1** | Clippy `await_holding_lock`, y ast-grep para `static mut`, `lazy_static!` y estáticos con `Mutex` | El LLM mapea módulos a requisitos desde la ficha, para "dos requisitos comparten". Un lock durante E/S sincrónica y el ancla 2 quedan afuera |
+| `diseno.documentacion` | 1 | **Sí, entero** | Rustdoc y `missing_docs`, y Clippy para las secciones de errores y pánicos | El LLM lista desde la ficha la API pública que la ficha nombra |
+| `diseno.modularidad` | 3 | **En parte** | La sonda de módulos de Root, para ciclos | El LLM mapea requisitos a módulos. "Interfaces chicas" queda afuera |
+| `diseno.operabilidad` | 2 | **En parte** | ast-grep: una llamada de log en cada camino que la ficha nombra | El LLM escribe la lista de caminos desde la ficha. Datos sensibles en logs y el apagado ordenado quedan afuera |
+| `diseno.robustez` | 3 | **No** | — | "Una entrada inválida tumba el proceso" pide ejecutar. Es trabajo de un oráculo de entradas, no de una regla |
+| `arquitectura.interfaces` | 2 | **Sí, en las anclas 0 y 2** | Rustdoc o un parser de firmas | **No hace falta un LLM:** `[[arquitectura.interfaz]]` de la ficha ya trae las firmas. El ancla 1, "estado interno expuesto", queda en parte |
+| `arquitectura.extensibilidad` | 2 | **En parte** | ast-grep: cuántos módulos hacen `match` sobre el tipo del caso | El LLM nombra desde la ficha el tipo del caso, por ejemplo "comando". La medida es una heurística |
+| `arquitectura.adecuacion` | 3 | **No** | — | Compara la persistencia y la concurrencia con la ficha. Es semántica. Su parte de "lock global" ya la cubre `diseno.estado` |
+
+**El resumen:**
+- **En Diseño,** 5 de 13 de peso pueden ser regla entera o casi entera: `errores`, `estado` y `documentacion`. Otros 5 de peso quedan en parte, y 3 quedan afuera.
+- **En Arquitectura,** contando `dependencias`, 5 de 10 de peso pueden ser regla. Otros 2 quedan en parte, y 3 quedan afuera.
+
+## 4. Cómo se calibra sin medir al inyector
+
+**El riesgo es real, y está medido.** SecReason muestra reglas con 99,7 % de cobertura en su corpus y 7 % fuera de él. Nuestros defectos de calibración salen de plantillas. Una regla que reconoce la plantilla calibra 18 de 18, y no dice nada del diseño real.
+
+**Cinco reglas para evitarlo:**
+
+1. **Qué ve el LLM al escribir:** la ficha de la tarea, las anclas de la rúbrica y el `bootstrap/` de la tarea.
+   - **No ve el código limpio de referencia.** En producción, Root evalúa un repo que nadie vio antes. La regla debe salir de lo mismo que Root tiene en producción.
+   - **No ve los defectos ni el código del inyector,** `src/oracle/calibra/defectos.rs`.
+   - Esto corrige la explicación del orquestador, que incluía el código limpio. Una regla escrita mirando el código limpio puede volverse una foto de ese código.
+2. **Dos tipos de regla:**
+   - **las genéricas,** iguales para todas las tareas, como los lints de Clippy. Viven en Root, como una sonda, con su versión en la huella;
+   - **las de tarea,** que salen de la ficha. Viven en un `reglas.toml` de la tarea, y entran en el `tarea_hash`.
+3. **Cómo se congela una regla de tarea:**
+   - el LLM la escribe una vez, con modelo y prompt fijos;
+   - una regla que da hallazgos sobre el código limpio de referencia se descarta, sin corregirla a mano;
+   - el `reglas.toml` se congela antes de calibrar;
+   - una regla no se edita después de ver un resultado de calibración.
+4. **Defectos fuera de las plantillas:** la calibración suma defectos que no salen del inyector. Pueden salir de corridas reales de D3, con hallazgos revisados por un humano. Una regla que calibra con las plantillas y falla con esos defectos mide al inyector.
+5. **La validez lo prueba:** las reglas se congelan antes de abrir el final sellado. La validez compara su veredicto con lo conocido de cada caso del final. Nada se ajusta después de abrirlo.
+
+**Una advertencia sobre el número:** una regla determinista sobre defectos de plantilla puede dar 18 de 18 con facilidad. Un 18 de 18 de una regla prueba menos que un 18 de 18 del juez. Por eso pesa más el paso 4, con defectos fuera de las plantillas.
+
+## 5. Costo, riesgo y cuándo
+
+**Costo estimado:**
+- **Diseño:** 1 hora del planner. Las rúbricas cambian de `juez` a `sonda` o `mixto` en algunos ítems, y eso es producto.
+- **Tareas de Root:** de 2 a 3 tareas, una del motor y las reglas genéricas, otra del `reglas.toml` por tarea, y quizás otra de la imagen. Cuesta de 3 a 5 USD de builder y de 4 a 8 horas.
+- **La imagen:** Clippy ya está. Sumar ast-grep cambia la imagen. La huella de oráculo no lleva la imagen, pero el congelamiento sí la fija. Por esa regla, las cinco de oráculo tendrían que medirse de nuevo en Colab: cerca de 10 horas de runtime. Para evitarlo, la primera versión usa solo Clippy y la sonda de Root.
+- **API:** escribir las reglas de tarea cuesta cerca de 0,1 USD por tarea. Con 34 tareas, cerca de 3,5 USD. La calibración de los ítems de regla no gasta API.
+- **Defectos fuera de las plantillas:** horas de un humano para revisar hallazgos de D3.
+
+**Riesgos:**
+- **Medir al inyector.** Las cinco reglas de la sección 4 lo bajan, pero no lo eliminan.
+- **La cobertura es parcial.** `robustez` y `adecuacion` siguen en el juez, que no calibra. La dimensión queda mixta.
+- **Una regla de LLM sale mal con frecuencia.** RuleLLM tiene unas 40 reglas casi sin precisión, y MoCQ tiene errores de sintaxis. Hace falta el validador sobre el código limpio.
+- **Reabre el congelamiento.** Toda medición hecha antes deja de servir para los ítems que cambian.
+
+**Cuándo:**
+- **Antes de D3, no.** Frena D3 varias semanas. Y le falta su mejor insumo: defectos reales de D3.
+- **Entre D3 y la validez, se puede.** Root entraría a la validez con Diseño y Arquitectura en parte calibradas. Pero el congelamiento se reabre justo antes de la validez, y la validez se atrasa.
+- **Después de la validez, es lo más seguro.** La validez mide al Root de hoy, con 6 dimensiones. Las reglas se construyen con los defectos de D3 y se validan con otro final.
+
+**Recomiendo después de la validez, con el diseño escrito ahora.** El diseño de esta sección no cuesta nada, y queda listo.
+
+## 6. Pregunta al usuario
+
+**P128. ¿Cuándo construimos el juez que escribe reglas para Diseño y Arquitectura?** El LLM escribe una vez reglas desde la ficha, sin ver código ni defectos. Un motor sin LLM las corre en cada caso. Cubre cerca de la mitad del peso de cada dimensión. No hay mediciones publicadas de reglas de diseño de Rust escritas por un LLM.
+
+- **a) Después de la validez,** usando los defectos reales de D3 para calibrar. Cuesta de 3 a 5 USD de builder, cerca de 3,5 USD de API y horas de revisión humana. *(recomendada)*
+- **b) Entre D3 y la validez,** para que la validez incluya Diseño y Arquitectura en parte. Mismo costo, y la validez se atrasa de una a dos semanas.
+- **c) Antes de D3.** Mismo costo. D3 se atrasa, y la calibración solo tiene defectos de plantilla.
+- **d) No hacerlo.** Diseño y Arquitectura quedan sin calibrar.
+
+Recomiendo la (a). Si el usuario elige (a), (b) o (c), los cambios de `mide` en las rúbricas llegan como una pregunta aparte, ítem por ítem.
+
+## 7. Lo que falta
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | La Tarea 170 | Nada | Colab, builder | Cerca de 0,5 USD | Cerca de 1 hora | No |
+| 2 | La suite con podman de la 170 y los diffs | El paso 1 | Laptop, orquestador | 0 USD | Cerca de 30 minutos | No |
+| 3 | La mezcla de la 170 | El paso 2 | — | — | — | **Sí: la orden de mezcla** |
+| 4 | El congelamiento Y y el estado | El paso 3 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 5 | P128 | Nada | — | — | — | **Sí** |
+| 6 | La pregunta de presupuesto de D3 | El paso 4 | — | — | — | **Sí** |
+| 7 | D3: `corre` sobre las 31 tareas | El paso 6 | Laptop, podman | Cerca de 31 USD de lista por cupo por pasada, casi nada de API | De 10 a 20 horas por pasada | No |
+| 8 | Si P128 b: el juez que escribe reglas | Los pasos 5 y 7 | Colab, builder | De 3 a 5 USD de builder y cerca de 3,5 USD de API | De 1 a 2 semanas, con revisión humana | No |
+| 9 | P98 c: abrir el final | El paso 7, o el 8 | Laptop | Según la regla del final | Según el final | No |
+| 10 | La validez sobre el final sellado | El paso 9 | Colab | Según el final | Según el final | No |
+| 11 | Si P128 a: el juez que escribe reglas | Los pasos 5 y 10 | Colab, builder | De 3 a 5 USD de builder y cerca de 3,5 USD de API | De 1 a 2 semanas, con revisión humana | No |
+| 12 | Después de la validez: una sola fuente de las versiones de Seguridad, y la tarea en el error de lanzar | El paso 10 | Laptop, builder | Cerca de 1 USD | Menos de 1 hora | No |
+
+**El saldo de S2 sigue en cerca de 12,53 USD.** La 170 y D3 no lo tocan.
+
+**Fuentes:**
+- RuleLLM: https://arxiv.org/abs/2504.17198
+- SecReason: https://arxiv.org/pdf/2610.14453
+- QLCoder: https://arxiv.org/abs/2511.08462
+- MoCQ: https://arxiv.org/html/2504.16057v3
+- IRIS: https://arxiv.org/abs/2405.17238
+- ast-grep y los agentes: https://ast-grep.github.io/blog/ast-grep-agent.html
+- ast-grep, catálogo de Rust: https://ast-grep.github.io/catalog/rust
+- Lucena, SBES: https://sol.sbc.org.br/index.php/sbes/article/download/37049/36834
+- archaven: https://docs.rs/crate/archaven/1.1.0
+- arch_test_core: https://docs.rs/crate/arch_test_core/latest
+- Clippy, `await_holding_lock`: https://rust.googlesource.com/rust-clippy/+/refs/heads/beta/clippy_lints/src/await_holding_invalid.rs
+- Clippy, `let_underscore`: https://rust.googlesource.com/rust-clippy/+/refs/heads/beta/clippy_lints/src/let_underscore.rs
