@@ -15747,3 +15747,125 @@ Recomiendo la (a). Solo gasta en Estructura cuando el prompt nuevo ya probó que
 **El saldo de S2:** cerca de 15,08 USD. Después del paso 8 quedan, como mínimo, cerca de 7 USD. Después del paso 9 quedan, como mínimo, cerca de 3,8 USD.
 
 **La fase de los eventos y `_coincide` salen de la lista de después de la validez.** Los resuelven la 169 y la 168.
+
+## Vuelta del 2026-11-25 (95): el prompt nuevo estabiliza la base, pero el juez no distingue
+
+**Estado.**
+- **Respuestas del usuario, literales:**
+  - P126: "a) Aparte, después (Recommended)".
+  - La clave por `--env` para el paso C: "Sí, para esta corrida". Según `registro.md`, la excepción vale solo para juez-x.
+  - La mezcla: "Sí, con un PR".
+- **Tareas 168 y 169:** las hizo el builder en Colab, por 0,93 y 0,69 USD. Las suites con podman dieron 4084/0/5 y 4098/0/5. El orquestador las aceptó.
+- **Paso A:** entraron al real 8 de las 10 filas de P107 a. Las 2 de Diseño de s2-t1, con `n=0`, no traen casos. Con 2020ecc, Estructura quedó calibrada.
+- **Paso B:** la mezcla es el PR #3, con el commit X = 31965b2.
+  - El binario es `congelado-31965b2/r00t`, con SHA 68d84bfe….
+  - La imagen es 3c6ea283….
+  - El estado con X dio lo esperado.
+- **Paso C, juez-x:** gastó 2,55 USD en 32 llamadas. La regla de parada saltó 4 de los 6 trabajos. Las 2 filas entraron al real, que ahora tiene SHA 53849be5….
+- **El saldo de S2 es de cerca de 12,53 USD,** con el tope de 30.
+
+## 1. El prompt de la 169, evaluado
+
+Leí `juez-x/diagnostico.txt` y los casos de `juez-x/vuelta-extraida/calibracion/`. Imprimí solo ítems, niveles, motivos y valores.
+
+**Un aviso sobre el tamaño:** los datos son de una sola tarea, s2-t1. Cada dimensión tiene 6 defectos y 6 limpios. Las conclusiones tienen ese límite.
+
+### La comparación en s2-t1
+
+| Dimensión | Prompt | Sensibilidad | Especificidad | Inestables en la base |
+|---|---|---|---|---|
+| Arquitectura | 2020ecc | 3 de 6, todos por la sonda | 5 de 5, con 1 limpio sin veredicto | `adecuacion` (falta en un juicio) y `extensibilidad` |
+| Arquitectura | 169 | 4 de 6: 3 por la sonda y 1 por el juez | 4 de 6 | `extensibilidad` (varía de 1 a 3) |
+| Diseño | 2020ecc | sin fila: `n=0` las dos veces | — | 4 ítems, y una base sin veredicto |
+| Diseño | 169 | 2 de 5, con 1 defecto sin veredicto | 5 de 6 | `operabilidad` (varía de 1 a 3) |
+
+### Qué mejoró
+
+- **La base es más estable.** `adecuacion` y `errores` ya no son inestables en s2-t1. Diseño de s2-t1 dio una fila por primera vez.
+- **El juez da nivel más seguido.** Ningún ítem faltó por `sin_evidencia` en las bases de juez-x.
+- **En `diseno.estado` hay señal.** El juez bajó `estado` en 2 de 5 defectos con veredicto. No lo bajó en ninguno de los 6 limpios.
+
+### Qué empeoró
+
+- **Aparecieron falsos positivos.** Con 2020ecc, la especificidad de s2-t1 era 1,0 en las dos dimensiones. Con la 169, es 0,67 en Arquitectura y 0,83 en Diseño.
+- **En `arquitectura.adecuacion` no hay señal.**
+  - El juez bajó `adecuacion` de 3 a 0 en 3 de 6 limpios.
+  - Lo bajó en 1 de 3 defectos.
+  - Sobre código sin defecto, lo baja tan seguido como sobre código con defecto.
+- **Uno de los 3 limpios que bajan no cuenta como falso positivo.** Cuenta como bien solo porque su par es un defecto de `dependencias`. La regla de detección mira el ítem del par.
+- **El falso positivo de Diseño sale de una cita.** El juez citó la línea de la inyección limpia y bajó `robustez`. La inyección limpia es un cambio neutro, y cae en un extracto de "cambio".
+
+### Por qué
+
+**El prompt nuevo no le enseñó al juez a ver un defecto. Le sacó la salida `sin_evidencia`.**
+- Con 2020ecc, la duda del juez salía como un faltante. El ítem quedaba inestable y salía de la dimensión. No había detección, pero tampoco había falsos positivos.
+- Con la 169, la misma duda sale como un nivel. La base pasa el filtro de inestables, a veces por suerte. Después, la duda aparece en los casos como un nivel que baja sin motivo.
+- La regla "buscá el código del tema y citalo" lleva al juez a las líneas cambiadas. Una inyección limpia es una línea cambiada.
+
+**La estimación del ruido:** en `adecuacion`, el juez da 0 sobre código sin defecto en cerca de 1 de cada 3 llamadas. Con ese ruido, una base de tres juicios en 3 pasa el filtro cerca de 3 de cada 10 veces. Es lo que pasó en s2-t1.
+
+**Un fallo de infraestructura:** 1 de las 32 llamadas falló, y dejó un defecto sin veredicto. Es un dato aparte, no del prompt.
+
+**Mi conclusión:** el prompt de la 169 cambió un juez que se abstiene por un juez que se equivoca. El modo de falla del verificador barato es refutar trabajo bueno. La 169 empeora justo ese modo de falla.
+
+## 2. Qué hacer con el juez
+
+| Opción | Qué mide | Costo | Riesgo |
+|---|---|---|---|
+| **a) Varios juicios por caso, con mediana o mayoría** | Lo mismo que hoy, con menos ruido por ítem | Una tarea de Root y una versión nueva. Cerca de 3 veces la API: unos 20 USD para 6 trabajos. Un juicio de producción también cuesta 3 veces | **Pasa el saldo de 12,53 USD.** Además, un agregado no crea señal. En `adecuacion`, una mediana de 3 da un falso positivo en cerca de 1 de cada 4 limpios. No alcanza para 0,8 |
+| **b) Sondas deterministas para Arquitectura y Diseño** | Patrones del código: un error que se traga, un lock durante E/S, estado global. No mide si el diseño sirve a la spec | Cambiar las rúbricas, que es producto. Una o dos tareas de Root, de 1 a 3 USD. Una versión nueva, sin API para los ítems de sonda | **Puede medir al inyector, no al diseño.** Los defectos de la calibración salen de plantillas. Una sonda que reconoce la plantilla calibra perfecto y no generaliza. `adecuacion` compara el código con la ficha, y no tiene sonda posible |
+| **c) Volver al prompt de 2020ecc** | Lo mismo que 2020ecc: Estructura calibrada, y Arquitectura y Diseño no | Una tarea chica de Root, cerca de 0,5 USD. Un congelamiento nuevo. 0 USD de API | Arquitectura y Diseño siguen con la abstención de 2020ecc. Las 2 filas de juez-x dejan de contar |
+| **d) Dejar Arquitectura y Diseño sin calibrar, y seguir a D3** | Root evalúa con 6 dimensiones calibradas: Estructura y las cinco de oráculo. Arquitectura y Diseño dan veredicto, pero no entran al global ni a los mínimos (P103 a) | 0 USD | El global de Root no mide diseño ni arquitectura hasta después de la validez |
+
+**Otra opción, que no recomiendo ahora:** cambiar de modelo. No está medida. Un modelo de otra familia costó hasta 17 veces más en la medición de checkeables. Y el saldo no alcanza para medirlo bien.
+
+**Recomiendo (c) junto con (d).**
+- **(c) restaura un juez que se abstiene en lugar de equivocarse.** Para dimensiones sin calibrar que igual dan veredicto, un "sin veredicto" es más honesto que un falso positivo.
+- **(c) devuelve a Estructura sus filas sin gasto.** Las huellas vuelven a ser las de 2020ecc, porque la huella no lleva la fase.
+- **(d) no gasta, y no frena D3.**
+- **(a) no entra en el saldo, y no crea señal donde no la hay.**
+- **(b) merece una pregunta propia después de la validez.** Antes, conviene ver qué defectos reales encuentra D3.
+
+**Lo que haría la tarea de (c), la 170, si el usuario la elige:**
+- Devuelve las tres líneas del prompt de 2020ecc, byte por byte.
+- La fase `"juez"` de la 169 queda, porque no entra a la huella.
+- Las guardas de huella piden los nueve literales de 2020ecc.
+- No escribo el brief hasta la respuesta a P127.
+
+## 3. Estructura, según P126 a
+
+**P126 a dice: medir Estructura aparte, después de ver Diseño y Arquitectura.** La razón era no pagar Estructura si el prompt nuevo no servía. El prompt nuevo no calibró Diseño ni Arquitectura en s2-t1. Por esa misma razón, no corresponde gastar en Estructura con el prompt de la 169.
+
+**Qué pasa con Estructura depende de P127:**
+- **Si se vuelve al prompt de 2020ecc,** Estructura queda calibrada con sus 3 filas de P107 a: 18 de 18, con una cota de 0,824. No gasta nada.
+- **Si queda el prompt de la 169,** Estructura queda sin calibrar. Medirla cuesta de 2 a 3,3 USD de API. Y necesita otra excepción de `--env`, porque la de juez-x ya no vale. Su riesgo es que el ruido nuevo rompa el 18 de 18, que no tiene margen.
+
+## 4. Pregunta al usuario
+
+**P127. ¿Qué hacemos con el juez después de juez-x?** El prompt de la 169 estabilizó la base. Pero el juez baja niveles sobre código limpio: la especificidad de Arquitectura cayó de 1,0 a 0,67. Con la 169, ninguna dimensión del juez calibra, ni siquiera Estructura.
+
+- **a) Volver al prompt de 2020ecc, dejar Arquitectura y Diseño sin calibrar, y seguir a D3.** Estructura vuelve a estar calibrada, sin gasto de API. Cuesta una tarea chica, la 170, y un congelamiento: cerca de 0,5 USD y 3 horas. *(recomendada)*
+- **b) Mantener el prompt de la 169, y medir Estructura con él.** Cuesta de 2 a 3,3 USD de API y otra excepción de `--env`. Arquitectura y Diseño quedan sin calibrar.
+- **c) Mantener el prompt de la 169, y dejar Estructura sin calibrar.** Cuesta 0 USD. Root sigue con 5 dimensiones calibradas.
+- **d) Varios juicios por caso, con un agregado.** Hace falta subir el tope de S2: cerca de 20 USD de API, más una tarea y una versión nueva. No recomiendo: un agregado no crea señal en `adecuacion`.
+
+Recomiendo la (a). Las sondas deterministas para Diseño y Arquitectura quedan como una pregunta de después de la validez.
+
+## 5. Lo que falta
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | P127 | Nada | — | — | — | **Sí** |
+| 2 | Con P127 a: el brief y la Tarea 170, que vuelve al prompt de 2020ecc | El paso 1 | Colab, builder | Cerca de 0,5 USD | Cerca de 1 hora | No |
+| 3 | La suite con podman de la 170, la mezcla y el congelamiento Y | El paso 2 | Laptop, orquestador | 0 USD | Cerca de 1,5 horas | **Sí: la orden de mezcla** |
+| 4 | El estado con Y: Estructura y las cinco de oráculo calibradas | El paso 3 | Laptop, podman | 0 USD | Cerca de 20 minutos | No |
+| 5 | La pregunta de presupuesto de D3 | El paso 4 | — | — | — | **Sí** |
+| 6 | D3: `corre` sobre las 31 tareas | El paso 5 | Laptop, podman | Cerca de 31 USD de lista por cupo por pasada, casi nada de API | De 10 a 20 horas por pasada | No |
+| 7 | P98 c: abrir el final | El paso 6 | Laptop | Según la regla del final | Según el final | No |
+| 8 | La validez sobre el final sellado | El paso 7 | Colab | Según el final | Según el final | No |
+| 9 | Después de la validez: sondas deterministas para Diseño y Arquitectura, como pregunta | El paso 8 | — | — | — | **Sí** |
+| 10 | Después de la validez: una sola fuente de las versiones de Seguridad, y la tarea en el error de lanzar | El paso 8 | Laptop, builder | Cerca de 1 USD | Menos de 1 hora | No |
+
+**Con P127 b, los pasos 2 a 4 cambian:** se mide Estructura por la CLI, por 2 a 3,3 USD y de 2 a 3 horas, con una excepción nueva de `--env`.
+
+**El saldo de S2 sigue en cerca de 12,53 USD** con P127 a o c. D3 corre por cupo, y no lo toca.
