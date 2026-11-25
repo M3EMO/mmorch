@@ -7766,22 +7766,17 @@ mod tests {
         }
     }
 
-    /// Huellas de la base de las tres dimensiones del juez que cambian en la Tarea 169.
+    /// Huellas de las tres dimensiones del juez: la Tarea 170 las vuelve a las de 2020ecc.
     #[test]
-    fn huella_p169_las_tres_del_juez_cambian() {
-        let base = [
-            (Dimension::Arquitectura, "60c5fb9b0d576398"),
-            (Dimension::Diseno, "19b81dea4119d429"),
-            (Dimension::Estructura, "afbc695e7b008336"),
-        ];
-        for (dimension, literal) in base {
-            assert_ne!(huella_de(dimension), literal, "{dimension:?}");
-        }
+    fn huella_p170_las_tres_del_juez_son_las_de_2020ecc() {
+        assert_eq!(huella_de(Dimension::Arquitectura), "60c5fb9b0d576398");
+        assert_eq!(huella_de(Dimension::Diseno), "19b81dea4119d429");
+        assert_eq!(huella_de(Dimension::Estructura), "afbc695e7b008336");
     }
 
-    /// Una fila de Diseno con la huella de la base no calibra; con la huella actual, sí.
+    /// Una fila de Diseno con la huella de 2020ecc calibra; con la huella de la Tarea 169 no.
     #[test]
-    fn huella_p169_fila_de_diseno_con_la_huella_de_la_base_no_calibra() {
+    fn huella_p170_fila_de_diseno_con_la_huella_nueva_calibra() {
         let home = tempfile::tempdir().expect("home");
         let con_huella = |huella: String| {
             let c = Calibraciones {
@@ -7793,10 +7788,10 @@ mod tests {
             };
             c.version_en(home.path(), "memora", "", Dimension::Diseno)
         };
-        let vieja = con_huella("19b81dea4119d429".into());
-        assert!(!vieja.calibrada(true));
-        let actual = con_huella(huella_de(Dimension::Diseno));
-        assert!(actual.calibrada(true));
+        let nueva = con_huella("19b81dea4119d429".into());
+        assert!(nueva.calibrada(true));
+        let de_169 = con_huella("9b2a621ebb5c4632".into());
+        assert!(!de_169.calibrada(true));
     }
 
     /// Una fila `base_sin_veredicto` no mide: no pisa los inestables de la medición anterior.
