@@ -85,6 +85,12 @@ pub struct EjecutorBwrapBuilder {
     pub setpriv: String,
     /// Programa `bwrap`. Los tests lo cambian por uno falso.
     pub bwrap: String,
+    /// Programa `chown`. Da `repo/` y el estado al builder antes de cada lanzamiento. Los tests lo cambian
+    /// por uno falso: ningún test cambia dueños reales.
+    pub chown: String,
+    /// Último ancestro que se revisa al buscar el paso del builder. Por omisión `/`. Los tests lo ponen en su
+    /// carpeta temporal, porque su `TMPDIR` puede estar bajo un `$HOME` que el builder no puede recorrer.
+    pub tope_ancestros: PathBuf,
 }
 
 /// Lo que hay en una ruta de la raíz del host: nada, una carpeta o un enlace con su destino.
@@ -150,6 +156,8 @@ impl EjecutorBwrapBuilder {
             prlimit: "prlimit".into(),
             setpriv: "setpriv".into(),
             bwrap: "bwrap".into(),
+            chown: "chown".into(),
+            tope_ancestros: PathBuf::from("/"),
         })
     }
 
@@ -282,6 +290,14 @@ impl EjecutorBuilder for EjecutorBwrapBuilder {
         let copia = copia
             .map(|copia| fisica(&copia, "la copia de la credencial"))
             .transpose()?;
+        // Antes de lanzar: el builder tiene que poder pasar por toda la ruta física de repo y del estado, y
+        // pasa a ser dueño de los dos. El estado comparte carpeta padre con repo, pero se revisa su ruta
+        // física por si `claude-estado` es un enlace.
+        let mut ancestros = ancestros_de(&real.repo, &self.tope_ancestros)?;
+        ancestros.extend(ancestros_de(&estado, &self.tope_ancestros)?);
+        revisar_ancestros(builder, &ancestros)?;
+        cambiar_dueno(&self.chown, &real.repo, builder)?;
+        cambiar_dueno(&self.chown, &estado, builder)?;
         let cmd = self.armar_comando(&real, copia.as_deref(), &estado, builder, token.as_deref());
 
         let plazo = l.plazo.min(self.timeout);
@@ -506,8 +522,9 @@ fn uid_gid_en(passwd: &str, usuario: &str) -> Result<(u32, u32), ErrorCorre> {
 }
 
 /// Chequeo de permisos antes de lanzar. Función pura. Falla si el builder tiene el uid de quien corre r00t,
-/// si `ROOT_HOME` no es de ese uid o tiene algún permiso para grupo u otros, o si el builder puede leer o
-/// buscar en `$HOME`. Con el builder dueño de `$HOME`, cuenta el modo del dueño.
+/// si `ROOT_HOME` no es de ese uid o tiene algún permiso para grupo u otros, o si el builder puede leer
+/// `$HOME` (bit r, no x: con 0711 el builder pasa, porque puede buscar pero no listar). Con el builder dueño
+/// de `$HOME`, cuenta el bit de dueño; con su grupo, el de grupo; si no, el de otros.
 fn revisar_permisos(
     propio: u32,
     builder: (u32, u32),
@@ -527,19 +544,86 @@ fn revisar_permisos(
         )));
     }
     let puede_leer = if home.uid == uid_builder {
-        home.modo & 0o500 != 0
+        home.modo & 0o400 != 0
     } else if home.gid == gid_builder {
-        home.modo & 0o050 != 0
+        home.modo & 0o040 != 0
     } else {
-        home.modo & 0o005 != 0
+        home.modo & 0o004 != 0
     };
     if puede_leer {
         return Err(ErrorCorre::Ejecutor(format!(
-            "el builder puede leer o buscar en $HOME (modo {:o}): cierre sus permisos",
+            "el builder puede leer $HOME (modo {:o}): cierre el permiso de lectura",
             home.modo
         )));
     }
     Ok(())
+}
+
+/// Revisa que el builder pueda pasar (buscar, bit x) por cada carpeta de `ancestros`. Función pura. Usa el
+/// bit de dueño si el uid coincide, el de grupo si coincide el gid, y el de otros si no. Si una carpeta no lo
+/// deja pasar, el error nombra esa carpeta.
+fn revisar_ancestros(
+    builder: (u32, u32),
+    ancestros: &[(PathBuf, Permisos)],
+) -> Result<(), ErrorCorre> {
+    let (uid_builder, gid_builder) = builder;
+    for (ruta, permisos) in ancestros {
+        let bit_x = if permisos.uid == uid_builder {
+            permisos.modo & 0o100
+        } else if permisos.gid == gid_builder {
+            permisos.modo & 0o010
+        } else {
+            permisos.modo & 0o001
+        };
+        if bit_x == 0 {
+            return Err(ErrorCorre::Ejecutor(format!(
+                "el builder no puede pasar por {} (modo {:o}, dueño {}:{}): dele bit x en esa carpeta",
+                ruta.display(),
+                permisos.modo,
+                permisos.uid,
+                permisos.gid
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Ancestros de `ruta` (sin `ruta` misma) hasta `tope`, incluido. Va de la carpeta más cercana hacia arriba.
+/// `ruta` debe ser física: así un enlace no esconde una carpeta de la cadena.
+fn ancestros_de(ruta: &Path, tope: &Path) -> Result<Vec<(PathBuf, Permisos)>, ErrorCorre> {
+    let mut lista = Vec::new();
+    for ancestro in ruta.ancestors().skip(1) {
+        lista.push((ancestro.to_path_buf(), permisos_de(ancestro, "la carpeta")?));
+        if ancestro == tope {
+            break;
+        }
+    }
+    Ok(lista)
+}
+
+/// Cambia el dueño y el grupo de `ruta` y de todo lo que tiene dentro, sin seguir enlaces (`-h`). Corre
+/// `programa` (`chown` por omisión). Si sale con error, el mensaje lleva su stderr.
+fn cambiar_dueno(programa: &str, ruta: &Path, (uid, gid): (u32, u32)) -> Result<(), ErrorCorre> {
+    let salida = Command::new(programa)
+        .args(["-R", "-h"])
+        .arg(format!("{uid}:{gid}"))
+        .arg(ruta)
+        .output()
+        .map_err(|e| {
+            ErrorCorre::Ejecutor(format!(
+                "no se pudo correr {programa} sobre {}: {e}",
+                ruta.display()
+            ))
+        })?;
+    if salida.status.success() {
+        return Ok(());
+    }
+    let detalle = String::from_utf8_lossy(&salida.stderr).trim().to_string();
+    Err(ErrorCorre::Ejecutor(format!(
+        "chown de {} falló ({}): {detalle}",
+        ruta.display(),
+        salida.status
+    )))
 }
 
 #[cfg(test)]
@@ -667,7 +751,18 @@ mod tests {
         )
         .expect("credencial");
         modo(&home, 0o700);
-        modo(&usuario, 0o700);
+        // Cada carpeta de la cadena del repo deja pasar al builder (bit de otros, 0711).
+        let cadena = [
+            raiz.clone(),
+            usuario.clone(),
+            usuario.join(".cache"),
+            usuario.join(".cache/root"),
+            usuario.join(".cache/root/corridas"),
+            corrida.clone(),
+        ];
+        for carpeta in &cadena {
+            modo(carpeta, 0o711);
+        }
         Disposicion {
             _tmp: tmp,
             raiz,
@@ -679,9 +774,10 @@ mod tests {
         }
     }
 
-    /// Programas falsos `ip`, `prlimit`, `setpriv` y `bwrap`. Cada uno pasa el resto a la siguiente pieza.
-    /// `cuerpo_bwrap` es el script del `bwrap` falso. `DIR` en él se cambia por la carpeta `dir`.
-    fn cadena_falsa(dir: &Path, cuerpo_bwrap: &str) -> [String; 4] {
+    /// Programas falsos `ip`, `prlimit`, `setpriv`, `bwrap` y `chown`. Cada uno pasa el resto a la siguiente
+    /// pieza. `chown` anota sus argumentos en `chown-args` y sale con 0. `cuerpo_bwrap` es el script del
+    /// `bwrap` falso. `DIR` en él se cambia por la carpeta `dir`.
+    fn cadena_falsa(dir: &Path, cuerpo_bwrap: &str) -> [String; 5] {
         let ip = escribir_ejecutable(&dir.join("ip-falso"), "#!/bin/sh\nshift 3\nexec \"$@\"\n");
         let prlimit = escribir_ejecutable(
             &dir.join("prlimit-falso"),
@@ -692,11 +788,20 @@ mod tests {
             &dir.join("bwrap-falso"),
             &cuerpo_bwrap.replace("DIR", &dir.display().to_string()),
         );
-        [ip, prlimit, setpriv, bwrap].map(|p| p.display().to_string())
+        let chown = escribir_ejecutable(
+            &dir.join("chown-falso"),
+            &format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\n",
+                dir.join("chown-args").display()
+            ),
+        );
+        [ip, prlimit, setpriv, bwrap, chown].map(|p| p.display().to_string())
     }
 
-    /// Ejecutor bwrap de la disposición, con los programas `progs` (`ip`, `prlimit`, `setpriv`, `bwrap`).
-    fn ejecutor_de(d: &Disposicion, progs: &[String; 4]) -> EjecutorBwrapBuilder {
+    /// Ejecutor bwrap de la disposición, con los programas `progs` (`ip`, `prlimit`, `setpriv`, `bwrap`,
+    /// `chown`). El usuario del builder es `root` (uid y gid 0 en `/etc/passwd`). El tope de ancestros es la
+    /// carpeta temporal de la disposición, con su ruta real.
+    fn ejecutor_de(d: &Disposicion, progs: &[String; 5]) -> EjecutorBwrapBuilder {
         EjecutorBwrapBuilder {
             credencial: d.credencial.clone(),
             home: d.home.clone(),
@@ -709,6 +814,8 @@ mod tests {
             prlimit: progs[1].clone(),
             setpriv: progs[2].clone(),
             bwrap: progs[3].clone(),
+            chown: progs[4].clone(),
+            tope_ancestros: fs::canonicalize(&d.raiz).expect("raíz real"),
         }
     }
 
@@ -988,6 +1095,7 @@ mod tests {
                 "prlimit".into(),
                 "setpriv".into(),
                 "bwrap".into(),
+                "chown".into(),
             ],
         );
         let cmd = ej.armar_comando(
@@ -1046,6 +1154,7 @@ mod tests {
                 "prlimit".into(),
                 "setpriv".into(),
                 "bwrap".into(),
+                "chown".into(),
             ],
         );
         let cmd = ej.armar_comando(
@@ -1084,6 +1193,7 @@ mod tests {
                 "prlimit".into(),
                 "setpriv".into(),
                 "bwrap".into(),
+                "chown".into(),
             ],
         );
         let cmd = ej.armar_comando(
@@ -1122,6 +1232,7 @@ mod tests {
                 "prlimit".into(),
                 "setpriv".into(),
                 "bwrap".into(),
+                "chown".into(),
             ],
         );
         let cmd = ej.armar_comando(
@@ -1377,6 +1488,145 @@ mod tests {
         assert_eq!(uid_gid_en(passwd, "root").expect("existe"), (0, 0));
         let error = uid_gid_en(passwd, "nadie").expect_err("falta");
         assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+    }
+
+    #[test]
+    fn corre_bwrap_home_0711_pasa_y_0704_frena() {
+        let propio = 1001;
+        let builder = (1002, 2000);
+        let root_home = Permisos {
+            uid: propio,
+            gid: propio,
+            modo: 0o700,
+        };
+        // Con 0711 el builder puede buscar pero no listar: pasa.
+        let buscable = Permisos {
+            uid: propio,
+            gid: propio,
+            modo: 0o711,
+        };
+        assert!(revisar_permisos(propio, builder, root_home, buscable).is_ok());
+        // Con 0704 el builder puede leer: frena.
+        let legible = Permisos {
+            uid: propio,
+            gid: propio,
+            modo: 0o704,
+        };
+        assert!(revisar_permisos(propio, builder, root_home, legible).is_err());
+    }
+
+    #[test]
+    fn corre_bwrap_ancestros_el_bit_que_cuenta_es_el_de_quien_coincide() {
+        let builder = (1002, 2000);
+        let ruta = |s: &str| PathBuf::from(s);
+        let ajena = |modo| Permisos {
+            uid: 1001,
+            gid: 1001,
+            modo,
+        };
+        // Cadena con 0711 en cada nivel: pasa.
+        let todos = [
+            (ruta("/"), ajena(0o755)),
+            (ruta("/srv/root-usuario"), ajena(0o711)),
+            (ruta("/srv/root-usuario/.cache"), ajena(0o711)),
+        ];
+        assert!(revisar_ancestros(builder, &todos).is_ok());
+        // Dueño builder: cuenta el bit de dueño, así que 0700 pasa.
+        let dueno = Permisos {
+            uid: 1002,
+            gid: 1001,
+            modo: 0o700,
+        };
+        assert!(revisar_ancestros(builder, &[(ruta("/srv/x"), dueno)]).is_ok());
+        // Grupo del builder: cuenta solo el bit de grupo. 0701 no basta aunque otros tengan x.
+        let grupo = Permisos {
+            uid: 1001,
+            gid: 2000,
+            modo: 0o701,
+        };
+        assert!(revisar_ancestros(builder, &[(ruta("/srv/x"), grupo)]).is_err());
+        let grupo_ok = Permisos {
+            uid: 1001,
+            gid: 2000,
+            modo: 0o710,
+        };
+        assert!(revisar_ancestros(builder, &[(ruta("/srv/x"), grupo_ok)]).is_ok());
+        // Otros sin x: frena, y el error nombra la carpeta.
+        let error = revisar_ancestros(
+            builder,
+            &[
+                (ruta("/"), ajena(0o755)),
+                (ruta("/srv/cerrada"), ajena(0o700)),
+            ],
+        )
+        .expect_err("0700 ajeno no deja pasar");
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains("/srv/cerrada")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn corre_bwrap_chown_da_repo_y_estado_al_builder_antes_de_lanzar() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        let progs = cadena_falsa(&d.raiz, BWRAP_OK);
+        let salida = ejecutor_de(&d, &progs)
+            .lanzar(&lanzamiento(d.repo.clone(), Vec::new()))
+            .expect("lanza");
+        assert_eq!(salida.codigo, 0);
+        let anotado = fs::read_to_string(d.raiz.join("chown-args")).expect("chown no corrió");
+        // El uid y gid son los de `root` en /etc/passwd: 0:0.
+        let repo = fs::canonicalize(&d.repo).expect("repo real");
+        let estado = fs::canonicalize(&d.estado).expect("estado real");
+        for ruta in [repo, estado] {
+            let esperado = format!("-R -h 0:0 {}", ruta.display());
+            assert!(
+                anotado.lines().any(|l| l == esperado),
+                "falta `{esperado}` en: {anotado}"
+            );
+        }
+    }
+
+    #[test]
+    fn corre_bwrap_chown_que_falla_frena_con_su_stderr() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        let progs = cadena_falsa(&d.raiz, BWRAP_OK);
+        escribir_ejecutable(
+            Path::new(&progs[4]),
+            "#!/bin/sh\necho 'chown: operación no permitida' >&2\nexit 1\n",
+        );
+        let error = ejecutor_de(&d, &progs)
+            .lanzar(&lanzamiento(d.repo.clone(), Vec::new()))
+            .expect_err("chown que falla no lanza");
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains("operación no permitida")),
+            "{error}"
+        );
+        assert!(!d.raiz.join("bwrap-args").exists(), "no debe lanzar");
+    }
+
+    #[test]
+    fn corre_bwrap_ancestro_0700_frena_y_nombra_la_carpeta() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        let cerrada = d.usuario.join(".cache");
+        modo(&cerrada, 0o700);
+        let progs = cadena_falsa(&d.raiz, BWRAP_OK);
+        let error = ejecutor_de(&d, &progs)
+            .lanzar(&lanzamiento(d.repo.clone(), Vec::new()))
+            .expect_err("un ancestro 0700 ajeno no deja lanzar");
+        let real = fs::canonicalize(&cerrada).expect("carpeta real");
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains(&real.display().to_string())),
+            "{error}"
+        );
+        assert!(!d.raiz.join("bwrap-args").exists(), "no debe lanzar");
+        assert!(
+            !d.raiz.join("chown-args").exists(),
+            "no debe cambiar dueños"
+        );
     }
 
     // --- Lanzamiento con programas falsos ---

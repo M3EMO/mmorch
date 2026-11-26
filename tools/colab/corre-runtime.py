@@ -10,7 +10,8 @@ Se mueve a ROOT_CORRE_TOKEN (defecto /run/root-token), con modo 0600, y el origi
 El token de /run se borra al terminar. ROOT_TOKEN_CUPO ya no existe: si está en el entorno,
 el guion sale con 2 sin correr nada.
 Variables para testear, todas con defecto: ROOT_CORRE_R00T, ROOT_CORRE_HOME, ROOT_CORRE_TOKEN,
-ROOT_CORRE_PLAZO_S, ROOT_TOKEN_ARCHIVO.
+ROOT_CORRE_PLAZO_S, ROOT_TOKEN_ARCHIVO, ROOT_CORRE_HOME_USUARIO.
+El r00t hijo corre con HOME=/srv/root-usuario (ROOT_CORRE_HOME_USUARIO lo cambia para tests).
 """
 
 import hashlib
@@ -26,6 +27,8 @@ from datetime import datetime, timezone
 
 R00T_DEFECTO = "/usr/local/bin/r00t"
 HOME_DEFECTO = "/root/root-home"
+# HOME del r00t hijo. Es una carpeta que el builder puede buscar pero no listar (preparar-corre.sh).
+HOME_USUARIO_DEFECTO = "/srv/root-usuario"
 TOKEN_DEFECTO = "/run/root-token"
 TOKEN_ARCHIVO_DEFECTO = "/content/root-token"
 PLAZO_DEFECTO = "7200"
@@ -207,6 +210,7 @@ class Corrida:
         self.imagen_id = entorno["imagen_id"]
         self.r00t = entorno["r00t"]
         self.home = entorno["home"]
+        self.home_usuario = entorno["home_usuario"]
         self.token = entorno["token"]
         self.plazo = entorno["plazo"]
         self.clave = entorno["clave"]
@@ -227,6 +231,7 @@ class Corrida:
         entorno.update(
             {
                 "ROOT_HOME": self.home,
+                "HOME": self.home_usuario,
                 "ROOT_CONTENEDOR_MODO": "bwrap",
                 "ROOT_RED_BUILDER": "root-builder",
                 "ROOT_USUARIO_BUILDER": "builder",
@@ -361,6 +366,9 @@ def principal(argv):
                 "imagen_id": imagen_id,
                 "r00t": os.environ.get("ROOT_CORRE_R00T", R00T_DEFECTO),
                 "home": os.environ.get("ROOT_CORRE_HOME", HOME_DEFECTO),
+                "home_usuario": os.environ.get(
+                    "ROOT_CORRE_HOME_USUARIO", HOME_USUARIO_DEFECTO
+                ),
                 "token": token,
                 "plazo": plazo,
                 "clave": clave,

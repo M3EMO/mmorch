@@ -2525,6 +2525,7 @@ COMPORTAMIENTO
                 .env("ROOT_TOKEN_ARCHIVO", &self.archivo)
                 .env("DEEPSEEK_API_KEY", CLAVE)
                 .env_remove("ROOT_TOKEN_CUPO")
+                .env_remove("ROOT_CORRE_HOME_USUARIO")
                 .envs(extra.iter().copied())
                 .output()
                 .expect("lanza python3")
@@ -2589,6 +2590,27 @@ COMPORTAMIENTO
         let vars = fs::read_to_string(c.fuera.join("vars")).expect("vars");
         let esperado = format!("{}\n{IMAGEN_ID}\n", c.paquete.join("entorno.env").display());
         assert_eq!(vars, esperado, "el r00t debe recibir la ruta y el id");
+    }
+
+    #[test]
+    fn corre_runtime_pasa_al_r00t_home_de_usuario_en_srv() {
+        if !python_disponible() {
+            eprintln!("sin python3: se saltea corre_runtime_pasa_al_r00t_home_de_usuario_en_srv");
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1"]);
+        c.r00t_falso(&format!(
+            "printf '%s' \"$HOME\" > '{}'",
+            c.fuera.join("home").display()
+        ));
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+        let home = fs::read_to_string(c.fuera.join("home")).expect("home del r00t");
+        assert_eq!(
+            home, "/srv/root-usuario",
+            "el r00t debe ver HOME de usuario en /srv"
+        );
     }
 
     #[test]
@@ -2968,6 +2990,10 @@ COMPORTAMIENTO
         curl_log: PathBuf,
         /// Donde el `tar` falso anota sus argumentos.
         tar_log: PathBuf,
+        /// Donde el `chown` falso anota sus argumentos.
+        chown_log: PathBuf,
+        /// Donde el `git` falso anota sus argumentos.
+        git_log: PathBuf,
         /// Tarball falso de node. El `curl` falso lo copia como si fuera el de nodejs.org.
         tarball: PathBuf,
         /// SHASUMS256.txt falso. Tiene el SHA-256 correcto del tarball falso.
@@ -2993,6 +3019,8 @@ COMPORTAMIENTO
                 prefijo_node: raiz.path().join("prefijo-node"),
                 curl_log: raiz.path().join("curl-args.txt"),
                 tar_log: raiz.path().join("tar-args.txt"),
+                chown_log: raiz.path().join("chown-args.txt"),
+                git_log: raiz.path().join("git-args.txt"),
                 tarball: raiz.path().join("tarball-node.tar.xz"),
                 shasums: raiz.path().join("SHASUMS256.txt"),
                 raiz,
@@ -3053,7 +3081,11 @@ COMPORTAMIENTO
                 &p.falsos.join("useradd"),
                 "#!/bin/sh\necho \"useradd $*\"\n",
             );
-            escribir_ejecutable(&p.falsos.join("chown"), "#!/bin/sh\nexit 0\n");
+            // `chown` falso: anota sus argumentos y sale con 0. Ningún test cambia dueños reales.
+            escribir_ejecutable(
+                &p.falsos.join("chown"),
+                &format!("#!/bin/sh\necho \"$*\" >> '{}'\n", p.chown_log.display()),
+            );
             // `id builder` sale 1 (no existe, crea el usuario). `id -u` y `id -g` dan el uid y gid 1001.
             escribir_ejecutable(
                 &p.falsos.join("id"),
@@ -3063,9 +3095,13 @@ COMPORTAMIENTO
                 &p.falsos.join("cargo"),
                 "#!/bin/sh\necho 'cargo 1.91.0 (abc 2026-01-01)'\n",
             );
+            // `git` falso: anota sus argumentos (`config --system ...` llega acá) y dice su versión.
             escribir_ejecutable(
                 &p.falsos.join("git"),
-                "#!/bin/sh\necho 'git version 2.43.0'\n",
+                &format!(
+                    "#!/bin/sh\necho \"$*\" >> '{}'\necho 'git version 2.43.0'\n",
+                    p.git_log.display()
+                ),
             );
             // `setpriv` falso: anota sus argumentos y salta las opciones `--...`; ejecuta el resto sin
             // cambiar de usuario.
@@ -3150,6 +3186,11 @@ COMPORTAMIENTO
                     self.raiz.path().join("usr/local/rustup"),
                 )
                 .env("ROOT_SETPRIV", self.falsos.join("setpriv-falso"))
+                // La raíz del usuario root va bajo la raíz temporal, nunca en /srv del host.
+                .env(
+                    "ROOT_USUARIO_DIR",
+                    self.raiz.path().join("srv-root-usuario"),
+                )
                 // El CARGO_HOME temporal del guion sale bajo la raíz de la prueba, no en /tmp.
                 .env("TMPDIR", self.raiz.path());
             for (clave, valor) in extra {
@@ -3230,6 +3271,69 @@ COMPORTAMIENTO
         let original = fs::read(p.paquete.join("plugins/ecc/x.md")).expect("plugin en paquete");
         let copia = fs::read(p.prefijo.join("opt/ecc-falso/x.md")).expect("plugin copiado");
         assert_eq!(copia, original);
+    }
+
+    #[test]
+    fn preparar_corre_crea_raiz_de_usuario_root_con_modo_0711() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_crea_raiz_de_usuario_root_con_modo_0711");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        let salida = p.correr();
+        assert!(salida.status.success(), "{}", texto(&salida));
+
+        let raiz = p.raiz.path().join("srv-root-usuario");
+        let niveles = [
+            raiz.clone(),
+            raiz.join(".cache"),
+            raiz.join(".cache/root"),
+            raiz.join(".cache/root/corridas"),
+        ];
+        for nivel in &niveles {
+            assert!(nivel.is_dir(), "falta {}", nivel.display());
+            assert_eq!(modo(nivel), 0o711, "modo de {}", nivel.display());
+        }
+        let anotado = fs::read_to_string(&p.chown_log).expect("chown no corrió");
+        for nivel in &niveles {
+            let esperado = format!("root:root {}", nivel.display());
+            assert!(
+                anotado.lines().any(|l| l == esperado),
+                "falta `{esperado}` en: {anotado}"
+            );
+        }
+    }
+
+    #[test]
+    fn preparar_corre_root_usuario_por_omision_es_srv() {
+        falta_guion(PREPARAR);
+        let corre = fs::read_to_string(PREPARAR).expect("lee el guion");
+        assert_eq!(
+            omision_en_corre(&corre, "ROOT_USUARIO_DIR"),
+            "/srv/root-usuario"
+        );
+    }
+
+    #[test]
+    fn preparar_corre_fija_safe_directory_en_git_del_sistema() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_fija_safe_directory_en_git_del_sistema");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        let salida = p.correr();
+        assert!(salida.status.success(), "{}", texto(&salida));
+        let anotado = fs::read_to_string(&p.git_log).expect("git no corrió");
+        assert!(
+            anotado
+                .lines()
+                .any(|l| l == "config --system --add safe.directory *"),
+            "falta safe.directory en el git del sistema: {anotado}"
+        );
     }
 
     #[test]

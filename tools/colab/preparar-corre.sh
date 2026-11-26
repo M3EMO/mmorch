@@ -3,8 +3,9 @@
 # Llama a preparar-runtime.sh, instala las herramientas de red con apt, baja Node de nodejs.org
 # (la versión NODE_VERSION de versiones-builder.env, con SHA-256 revisado), instala claude con npm
 # --prefix /usr/local (claude y node tienen que quedar bajo /usr, donde bwrap los monta), fija
-# claude, node y rustc, crea el usuario builder, mueve el root-home del paquete y deja el plugin en
-# su ruta original.
+# claude, node y rustc, crea el usuario builder, mueve el root-home del paquete, crea la raíz del HOME
+# del r00t (ROOT_USUARIO_DIR, con .cache/root/corridas), fija safe.directory '*' en el git del sistema y
+# deja el plugin en su ruta original.
 # Termina llamando a red-builder.sh (lo trae la Tarea 171).
 # Uso: preparar-corre.sh <carpeta_del_paquete>
 set -euo pipefail
@@ -15,6 +16,8 @@ ROOT_BIN_DIR="${ROOT_BIN_DIR:-/usr/local/bin}"
 ROOT_HOME_DESTINO="${ROOT_HOME_DESTINO:-/root/root-home}"
 ROOT_DIR_RAIZ="${ROOT_DIR_RAIZ:-/root}"
 ROOT_RAIZ_DIR="${ROOT_RAIZ_DIR:-}"
+# Raíz del HOME del r00t. Cada nivel es de root y modo 0711: el builder pasa pero no lista. Los tests la cambian.
+ROOT_USUARIO_DIR="${ROOT_USUARIO_DIR:-/srv/root-usuario}"
 ROOT_NPM="${ROOT_NPM:-/usr/local/bin/npm}"
 ROOT_PREFIJO_USR="${ROOT_PREFIJO_USR:-/usr/}"
 # Node se baja con curl de ROOT_NODE_URL y se extrae en ROOT_PREFIJO_NODE. Los tests usan falsos.
@@ -30,6 +33,7 @@ ROOT_CHOWN="${ROOT_CHOWN:-chown}"
 ROOT_RUSTUP_HOME="${ROOT_RUSTUP_HOME:-/usr/local/rustup}"
 ROOT_CARGO_HOME="${ROOT_CARGO_HOME:-/usr/local/cargo}"
 export ROOT_BIN_DIR ROOT_HOME_DESTINO ROOT_DIR_RAIZ ROOT_RAIZ_DIR ROOT_NPM ROOT_PREFIJO_USR ROOT_PATH_BUILDER
+export ROOT_USUARIO_DIR
 export ROOT_RUSTUP_HOME ROOT_CARGO_HOME
 
 # Paquetes que el builder necesita. Igual que el par update + install de preparar-runtime.sh.
@@ -237,6 +241,27 @@ for origen, relativa in manifiesto.get("plugins", {}).items():
     done <<<"$pares"
 }
 
+# Crea la raíz del HOME del r00t: ROOT_USUARIO_DIR, .cache, .cache/root y .cache/root/corridas. Cada nivel
+# es de root con modo 0711: el builder puede pasar por ellos (buscar) pero no listarlos.
+crear_raiz_usuario() {
+    local ruta
+    for ruta in "$ROOT_USUARIO_DIR" "$ROOT_USUARIO_DIR/.cache" "$ROOT_USUARIO_DIR/.cache/root" \
+        "$ROOT_USUARIO_DIR/.cache/root/corridas"; do
+        mkdir -p "$ruta"
+        chown root:root "$ruta"
+        chmod 0711 "$ruta"
+    done
+}
+
+# Pone safe.directory '*' en el git del sistema, una sola vez. El builder deja archivos de su dueño en repo/;
+# sin esto, el git de r00t falla con "dubious ownership".
+fijar_safe_directory() {
+    if git config --system --get-all safe.directory 2>/dev/null | grep -qxF '*'; then
+        return 0
+    fi
+    git config --system --add safe.directory '*'
+}
+
 # Paso 5: arma el ROOT_HOME. Mueve (no copia) root-home, lo deja solo para root y pone r00t.
 armar_root_home() {
     local origen="$carpeta/root-home"
@@ -254,6 +279,8 @@ armar_root_home() {
     chmod 0700 "$ROOT_HOME_DESTINO"
     chmod 0700 "$ROOT_DIR_RAIZ"
     chmod 0700 "$carpeta"
+    crear_raiz_usuario
+    fijar_safe_directory
 
     mkdir -p "$ROOT_BIN_DIR"
     install -m 0755 "$carpeta/r00t" "$ROOT_BIN_DIR/r00t"
