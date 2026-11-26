@@ -5,6 +5,7 @@
 
 pub mod args;
 mod barrido;
+mod bwrap;
 pub mod config;
 pub mod contenedor;
 pub mod corrida;
@@ -31,6 +32,7 @@ use crate::route::politica::nombre_rol;
 use crate::tipos::Rol;
 
 pub use args::{args_claude, env_del_builder};
+pub use bwrap::EjecutorBwrapBuilder;
 pub use config::{ClaudeCorrida, ConfigCorrida};
 pub use corrida::{DepsCorre, correr, correr_reanudando};
 pub use credencial::{copiar_sin_mcp, vencimiento_ms, verificar_vigencia, vida_restante};
