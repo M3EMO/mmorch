@@ -4,7 +4,7 @@ Label: wayfinder:map · Creado: 2026-11-26 · Tickets en `issues/` · Tracker: l
 ## Destination
 
 Confirmado con el usuario en [Destino y hogar del compresor](issues/01-destino-y-hogar.md).
-Una spec que ECC construye, con dos piezas:
+Una spec que ECC construye, con dos piezas. La spec está escrita: [spec.md](spec.md) (2026-11-26).
 - Supersesión en el vault de este repo (`mmorch/vault.py`). Está lista cuando un test determinista de pares pasa en el 100%: el recall nunca devuelve una nota reemplazada.
 - Compresor del contexto de arranque, en Root. Está listo con un arranque medido de 52k tokens o menos (hoy 66.8k), sobre el piso de fidelidad del oráculo.
 
@@ -31,13 +31,12 @@ Una spec que ECC construye, con dos piezas:
 - [Desglose medido del contexto de arranque](issues/02-desglose-del-arranque.md) — El arranque real mide 66.8k tokens de mediana en 11 sesiones. ECC aporta unos 43k: skills 29.7k, agentes 7.8k y comandos 5.6k. Los CLAUDE.md, AGENTS.md y MEMORY.md suman unos 6.4k. `skillOverrides` está vacío hoy, y los agentes de ECC solo se apagan con el plugin entero.
 - [Supersesión en el vault](issues/07-supersesion-en-el-vault.md) — `supersedes` explícito mueve la vieja a `archive/` con aviso; el MOC la lista en "Reemplazadas" y el recall nunca. Un atado a código marca "a revisar" sin ocultar. Sin migración: un comando a mano archiva seeds sin lecturas en 60 días.
 - [Oráculo de fidelidad del compresor](issues/06-oraculo-de-fidelidad.md) — Haiku responde por API una batería de 200 preguntas exactas, de ruteo y de reglas. Un gate final de 10 tareas reales corre con `claude -p`. El piso es una retención de 0.965 o más, 100% en guardrails y cero regresiones en tareas.
+- [Compresor de arranque](issues/09-compresor-de-arranque.md) — ECC pesa ~16.5k, no 43k. Palancas: `user-invocable-only` en skills sin uso, SkillReducer en skills propias, cuatro MCP apagados y reescritura de los `.md`. Los hooks quedan. El estimado da ~54.7k, arriba de la meta de 52k.
 
 ## Not yet specified
 
-- Cómo se aplica el compresor al arranque sin editar archivos de ECC. La decisión "dejar ECC igual" limita las palancas a `skillOverrides`, CLAUDE.md y skills propios.
-- Cómo el comando de archivo detecta una lectura por nombre en los transcripts, y si los transcripts duran 60 días (el más viejo es del 2026-10-12). Las seeds son 138, no 126; el ticket 07 decidió no migrarlas.
-- Dónde corre el compresor: hook al escribir, comando a mano o paso nocturno.
-- Limpieza de restos: `vault/moc/sin-proyecto.md` y `_gen_moc_PROTOTYPE.py` linkean al lexicon borrado; el README del vault nombra carpetas que no existen.
+- Nada queda en la niebla. La spec lleva las preguntas abiertas a su sección "Riesgos y preguntas abiertas": la meta de 52k, el valor `user-invocable-only` y dónde corre el compresor.
+- Limpieza de restos, vista al pasar y fuera de la spec: `vault/moc/sin-proyecto.md` y `_gen_moc_PROTOTYPE.py` linkean al lexicon borrado. El README del vault nombra carpetas que no existen.
 
 ## Out of scope
 
