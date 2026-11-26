@@ -16040,3 +16040,150 @@ Recomiendo la (a). Si el usuario elige (a), (b) o (c), los cambios de `mide` en 
 - arch_test_core: https://docs.rs/crate/arch_test_core/latest
 - Clippy, `await_holding_lock`: https://rust.googlesource.com/rust-clippy/+/refs/heads/beta/clippy_lints/src/await_holding_invalid.rs
 - Clippy, `let_underscore`: https://rust.googlesource.com/rust-clippy/+/refs/heads/beta/clippy_lints/src/let_underscore.rs
+
+## Vuelta del 2026-11-26 (97): Root listo para D3, y cómo correrlo
+
+**Estado.**
+- **El plan de la vuelta 96 está en 9c4ff34.**
+- **La respuesta del usuario a P128, literal: "a) Después de la validez (Recommended)".**
+- **La Tarea 170 está hecha:** commits eed807b y ad35146, por 0,41 USD.
+  - El builder corrió en Colab al tercer intento: un 408 al subir, y un RemoteDisconnected en `colab new`.
+  - El orquestador revisó los diffs, y dieron lo esperado.
+  - La suite con podman de `laptop/cadena-170` dio 4098/0/5.
+- **La mezcla:** el usuario respondió, literal, "Sí, con un PR (Recommended)". La PR #4 quedó como 5a4f295.
+- **El congelado Y es 5a4f295:** `congelado-5a4f295/r00t`, con SHA 9f0b2545…. El diff 2020ecc..Y está vacío en rúbricas, imágenes y `versiones.env`.
+- **El estado con Y,** sobre una copia del real con 153 filas, dio lo que esperaba la vuelta 96:
+  - calibradas: Funciona, Seguridad, Eficiencia, Estructura, Completitud y Pruebas;
+  - sin calibrar: Arquitectura, Diseño y Entrega, sin "calibración de otro juez".
+
+## 1. ¿Está Root listo para D3?
+
+**Sí, con Y.** D3 mide a Root como evaluador: un builder resuelve cada tarea con `corre`, y Root juzga el resultado. Las 6 dimensiones que van a decidir ya están calibradas, y la versión está congelada.
+
+**Qué significa "calibrada" hoy.** Las filas de calibración salen de las 3 tareas de S2, con defectos inyectados. D3 corre sobre otros 6 repos: broot, bytes, eyre, heapless, ron y watchexec. Que la calibración se transfiera a esos repos no está medido. Medir eso es justo el trabajo de D3 y de la validez.
+
+**Los riesgos que quedan:**
+
+1. **La verificación del dataset es vieja.** `verif-dataset-2` corrió el 2026-11-17, con un binario anterior a la 159. Después cambiaron varias sondas: Seguridad v2, Arquitectura v3, la vuelta de instalación de la 164 y las huellas de la 166. Una sonda nueva puede bloquear una solución buena. **Cómo lo cubro:** el piloto de la sección 3 y la revisión de cada caso donde el oculto pasa entero y Root no da "listo".
+2. **b8d0db4058 con su lock real no instala ni con la solución de referencia.** La verif-163 dio NoListo, por P121 a. En D3 ese caso debe pedir un humano. Su resultado se informa aparte, y no cuenta como acierto ni como error de Root.
+3. **El cupo es compartido.** Si una sesión del planner o del orquestador gasta cupo durante una tanda, `corre` puede quedarse sin cupo. `corre` ya para con un `Gate` "cupo agotado antes del rol X", y esa corrida queda cortada. Una corrida cortada se repite en la ventana siguiente, y no cuenta como medición.
+4. **D3 mide a Root sobre una sola configuración de builder,** `ecc-haiku`, como S2 (P82). Lo que mide vale para salidas de ese builder.
+5. **El juez de Estructura gasta API.** Sin `DEEPSEEK_API_KEY`, Estructura queda sin veredicto. La corrida de b8d0 de la vuelta 85 corrió sin claves, y no usó el juez. D3 tiene que correr con la clave.
+
+### Por qué Entrega sale sin calibrar
+
+**Ninguna tarea del dataset tiene algo que entregar.** En la copia `home-estado-5a4f295`:
+- ninguno de los 33 `tarea.toml` trae `[entrega]`;
+- ningún `bootstrap/` trae un `Dockerfile`.
+
+Entrega no aplica en ninguna tarea. Sin casos, no se calibra. Su `motivo_sin_calibrar` sale nulo porque no hay filas, no porque una fila falle.
+
+**No bloquea D3.** En D3, Entrega da "no aplica" en las 31 tareas, y no entra al global.
+
+**No bloquea la validez, con un límite.** Si el final sellado trae tareas con `Dockerfile`, Entrega da veredicto, pero no entra al global ni a los mínimos (P103 a). No sé si el final las trae, porque está sellado. La validez no puede afirmar nada de Entrega. Calibrar Entrega pide al menos una tarea nueva con `Dockerfile`. Queda para después de la validez.
+
+## 2. Pregunta al usuario
+
+**P129. ¿Cómo corremos D3?** D3 corre `corre` sobre las 31 tareas: las 28 del dataset y las 3 de S2. `corre` de S2 midió de 16 a 22 minutos, de 0,71 a 1,19 USD de lista por cupo, y de 0,06 a 0,15 USD de API por corrida.
+
+**Una pasada cuesta:**
+- de 22 a 37 USD de lista por cupo, con una media de 28;
+- de 2 a 4,6 USD de API, del saldo de S2 de 12,53 USD;
+- de 8,5 a 11,5 horas de laptop, más las pausas entre ventanas de cupo. En total, de 1,5 a 2 días.
+
+**Sobre Colab, por la regla del usuario "acordate de usar colab para temas de root":** hoy `corre` no puede ir a Colab.
+- El builder de `corre` corre dentro de un contenedor de podman, con `pasta` y `--userns=keep-id` (`src/corre/contenedor.rs`).
+- Ese contenedor es lo que separa al builder del `ROOT_HOME` y de los tests ocultos.
+- Colab no tiene podman. Por eso la calibración usa bwrap, pero solo para el oráculo, no para el builder.
+- Llevar `corre` a Colab pide dos tareas de Root: un contenedor del builder con bwrap, y un transporte `colab corre`. Y hay que probar de nuevo el aislamiento del builder.
+
+- **a) Una pasada en la laptop, con las 31 tareas, en 4 tandas.** La tanda 0 es un piloto de 1 tarea. Las tandas 1 a 3 llevan unas 10 tareas cada una, una tanda por ventana de cupo. No pide código nuevo. Rompe la regla de Colab, por la razón de arriba. *(recomendada)*
+- **b) Primero llevar `corre` a Colab, y después una pasada allá.** Cuesta 2 tareas de Root, de 2 a 3 USD de builder, y de 2 a 3 días antes de empezar. Cambia el aislamiento del builder justo antes de medir. Después, la pasada cuesta el mismo cupo y cerca de 2 unidades de Colab.
+- **c) Dos pasadas en la laptop.** Son 62 corridas, cerca de 56 USD de lista y de 3 a 4 días. La segunda pasada mide cuánto varía el builder, más que a Root.
+- **d) Una pasada en la laptop, solo con las 28 tareas nuevas.** Ahorra cerca de 3 USD de lista. Pierde la comparación con las corridas de S2.
+
+Recomiendo la (a). Una pasada da 31 datos. Si Root acierta en todas, la cota de Wilson es 0,89. Con un error, es 0,83. La segunda pasada se decide con esos datos. La laptop está libre, porque los builders ya corren en Colab.
+
+## 3. La receta de D3, para el orquestador
+
+Vale con P129 a. Con otra respuesta, la receta cambia.
+
+### Antes de la tanda 0
+
+1. **La carpeta:** `~/.cache/root-wt/d3/`, con `out/`, `rc/`, `inicio/`, `fin/` y `vivos/`.
+2. **El binario:** `colab-pruebas/congelado-5a4f295/r00t`. El guion compara su SHA-256 con el valor entero de `registro.md`, que empieza con 9f0b2545.
+3. **El directorio de trabajo:** el worktree `~/.cache/root-wt/reparto/wt`, en 5a4f295. `corre` necesita `GOAL.md` en el directorio de trabajo. La vuelta 85 falló por eso.
+4. **El `ROOT_HOME`:** una copia del real en `d3/home-d3`, con `cp -a --reflink=auto`. El guion revisa que `calibracion.json` de la copia empiece con el SHA 53849be5. El real no se toca.
+5. **Las tareas:** el orquestador escribe las listas desde `dataset.json`, solo con ids de tarea:
+   - `tareas-0.txt`: `s2-t1`;
+   - `tareas-1.txt`, `tareas-2.txt` y `tareas-3.txt`: las otras 30, unas 10 por lista, con los repos repartidos entre las listas;
+   - b8d0db4058 con su lock real va en la última lista.
+   El orquestador confirma que las cuatro listas suman 31, sin repetidos.
+6. **Las claves:**
+   - el guion exporta solo `DEEPSEEK_API_KEY`, leída de `~/.claude/orchestration/.env`, sin imprimirla;
+   - el guion quita `ANTHROPIC_API_KEY`, porque el builder va por cupo (P82). Con esa clave, `claude` cobraría por API.
+
+### El guion `d3/d3.sh`
+
+Lo escribe el orquestador. No es código de Root. Recibe el número de tanda y hace esto:
+1. Frena si el SHA del binario, el commit del worktree o el SHA de la copia no son los esperados.
+2. Frena si hay una unidad activa `builder-*`, `suite-*` o `verif-*`, o una `serie-*` que no sea la suya.
+3. Exporta la clave como dice el paso 6 de arriba.
+4. Para cada tarea de `tareas-N.txt`:
+   - si `rc/<tarea>` existe, la salta: así se retoma una tanda cortada;
+   - escribe `date +%s` en `inicio/<tarea>`;
+   - corre, desde el worktree: `timeout 7200 env ROOT_HOME=$D/home-d3 $BIN corre --tarea <tarea> --config ecc-haiku > $D/out/<tarea>.out 2>&1`;
+   - escribe el código en `rc/<tarea>` y la hora en `fin/<tarea>`;
+   - escribe en `vivos/<tarea>` los contenedores y procesos de builder que siguen vivos.
+5. Al final escribe `fin de la tanda N` con la hora.
+
+**Se lanza así:** `systemd-run --user --unit serie-d3-N bash ~/.cache/root-wt/d3/d3.sh N`.
+
+**El ritmo:** una tanda por ventana de cupo de 5 horas. Una tanda de 10 tareas usa cerca de 9 USD de lista. Una ventana entera da cerca de 13,6. Durante una tanda, no corre ninguna sesión que gaste cupo: ni el planner ni un builder.
+
+### Dónde queda cada salida
+
+| Salida | Lugar |
+|---|---|
+| La salida de cada corrida | `d3/out/<tarea>.out` |
+| El código, el inicio y el fin | `d3/rc/`, `d3/inicio/`, `d3/fin/` |
+| Lo que quedó vivo | `d3/vivos/<tarea>` |
+| La carpeta de cada corrida, con su transcript | `$HOME/corre-<tarea>-ecc-haiku-…`, como en la vuelta 85 |
+| Los eventos, el gasto y los veredictos | `d3/home-d3/` |
+
+### Qué revisa el orquestador después de cada tanda
+
+1. **El código de cada corrida.** Un código distinto de 0 se clasifica: por el veredicto, por un corte, o por la infraestructura.
+2. **Los cortes por cupo.** Una corrida con el `Gate` "cupo agotado" no cuenta. Se borra su `rc/<tarea>`, y se repite en la tanda siguiente con `--reanuda <id>`.
+3. **Las lecturas del oráculo.** Cuenta los eventos `oraculo_leido` de cada corrida, por motivo. Si hay alguno, corre `r00t corre revisar-lectura --tarea <tarea> --transcript <ruta>`. Una corrida marcada no cuenta.
+4. **Nada vivo:** `vivos/` vacío, y ningún contenedor de builder en `podman ps -a`.
+5. **Una fila por tarea en `registro.md`,** sin nombres de tests:
+   - la decisión y el global;
+   - el contrato y el oculto, como pasa y total;
+   - `pide_humano` y las dimensiones sin veredicto;
+   - los minutos, el cupo de lista y la API.
+6. **El gasto de S2.** La copia guarda su propio `eventos.jsonl`. El gasto de la API de D3 no aparece en el real. El orquestador lo suma a mano al saldo de S2, en `registro.md`.
+7. **Los casos para el planner, sin arreglar nada:**
+   - el oculto pasa entero, y Root no da "listo";
+   - el oculto falla, y Root da "listo".
+8. **Después de la tanda 0:** si el piloto falla por la infraestructura, no se lanza la tanda 1. Va al planner.
+
+**Al terminar las 4 tandas,** el orquestador escribe un resumen en `registro.md`. El análisis de D3 va en la vuelta siguiente del planner.
+
+## 4. Lo que falta
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | P129 | Nada | — | — | — | **Sí** |
+| 2 | El guion de D3, las listas y la copia del `ROOT_HOME` | El paso 1 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 3 | La tanda 0: el piloto con s2-t1 | El paso 2 | Laptop, podman | Cerca de 0,9 USD de lista y 0,1 USD de API | Cerca de 25 minutos | No |
+| 4 | Las tandas 1 a 3 | El paso 3 | Laptop, podman | De 21 a 36 USD de lista, y de 2 a 4,5 USD de API | De 8 a 11 horas, en 3 ventanas de cupo | No |
+| 5 | El análisis de D3 | El paso 4 | Planner | Cupo | Una vuelta | No |
+| 6 | Si el análisis lo pide: una segunda pasada | El paso 5 | Laptop, podman | Lo mismo que los pasos 3 y 4 | De 1,5 a 2 días | **Sí** |
+| 7 | P98 c: abrir el final | El paso 5, o el 6 | Laptop | Según la regla del final | Según el final | No |
+| 8 | La validez sobre el final sellado | El paso 7 | Colab | Según el final | Según el final | No |
+| 9 | Después de la validez: el juez que escribe reglas, por P128 a | El paso 8 | Colab, builder | De 3 a 5 USD de builder y cerca de 3,5 USD de API | De 1 a 2 semanas, con revisión humana | No |
+| 10 | Después de la validez: una tarea con `Dockerfile` para calibrar Entrega | El paso 8 | Minería y Colab | Sin estimar | Sin estimar | **Sí** |
+| 11 | Después de la validez: una sola fuente de las versiones de Seguridad, y la tarea en el error de lanzar | El paso 8 | Laptop, builder | Cerca de 1 USD | Menos de 1 hora | No |
+
+**El saldo de S2:** cerca de 12,53 USD. Después de D3 quedan entre 8 y 10,5 USD.
