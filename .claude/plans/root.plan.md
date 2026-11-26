@@ -16614,3 +16614,183 @@ Recomiendo la (a).
 
 **El saldo de S2:** cerca de 12,53 USD. La prueba de aislamiento no lo toca.
 **Las unidades de Colab:** la 171 y la 172 usaron cerca de 1,3 horas de high-mem. Todo lo que falta hasta D3 usa menos de 5 unidades.
+
+## Vuelta del 2026-11-26 (100): las preguntas de la 173, la revisión de la prueba de aislamiento, y el piloto de D3
+
+**Estado.**
+- **El plan de la vuelta 99 está en a140a067.**
+- **La respuesta del usuario a P131, literal: "a) Una PR después de la prueba (Recommended)".**
+- **La suite de `laptop/junta-171-172` (3ae7370) dio 4184/0/5.** Es la rama que el brief de la 173 llama `laptop/cadena-172`.
+- **La Tarea 173:** commits a2bb3e3 a 8c06324. Costó 1,91 USD de lista y 2999 s de high-mem. Su suite con podman dio 4218 verdes y 1 falla. La falla era del test: en Fedora, `ip6tables` y `bash` viven en `/usr/bin`.
+- **La Tarea 173b:** el commit 8eb25e1 arregla solo ese test, por P121 a y P122 a. Costó 0,30 USD y 908 s. La suite con podman de `laptop/cadena-173b` dio 4219/0/5. El release está en `colab-pruebas/v173b/r00t`.
+- **Los archivos de la prueba de aislamiento están en `d3/aisla/`,** con el `ROOT_HOME` de prueba en `d3/aisla/home-aisla`.
+- **El clasificador del modo auto no deja que el orquestador corra `paso0-aisla.sh`.** Lo corre el usuario, y hasta entonces la prueba espera.
+
+## 1. Las preguntas de la 173
+
+Leí `informe-local-173.md` y `informe-local-173b.md` en `laptop/tarea-173b`.
+
+| # | Pregunta | Decisión | ¿Frena la prueba o la PR? |
+|---|---|---|---|
+| 1 | Tocó `src/lib.rs` fuera de la tabla | **Acepto.** Son 7 líneas de cableado, sin las cuales el crate no compila. El error fue mío: `lib.rs` arma el pedido | No |
+| 2 | Los tests de `preparar-corre.sh` viven en `src/colab_corre.rs` | **Acepto.** No había otro lugar en la tabla | No |
+| 3 | `--rustup-sha256` es obligatorio siempre | **Acepto.** Antes de la 172 ya lo era para la calibración. Todos los `paso0` lo pasan | No |
+| 4 | La clave de un evento es corrida, `ts` y tipo | **Acepto por ahora.** Dos llamadas de la misma corrida con el mismo `ts` exacto, en microsegundos, no ocurren en la práctica: cada llamada tarda segundos. Pero el error iría hacia gastar de menos. **Después de la validez,** la clave pasa a ser la línea entera | No |
+| 5 | `ROOT_TOKEN_ARCHIVO` igual a `ROOT_CORRE_TOKEN` sale con 2 | **Acepto.** Evita borrar el token antes de usarlo | No |
+| 6 | Un transcript idéntico ya existente se acepta | **Acepto.** Hace falta para completar un reintento | No |
+| 7 | Un token con modo 0644 frena el lanzamiento | **Acepto.** El runtime lo crea en 0600 | No |
+
+**Ninguna frena la prueba de aislamiento ni la PR.**
+
+**Dos notas del informe que valen para la prueba:**
+- **Si el kernel de Colab no trae `ip6tables`,** `red-builder.sh` frena. Es un fallo cerrado: el builder no corre sin red segura. La prueba lo muestra.
+- **El paquete de `corre` ahora lee la imagen del oráculo con podman.** Por eso lo arma el usuario, en la laptop, como los paquetes de calibración.
+
+## 2. La revisión de `d3/aisla/`
+
+Leí `ataque.sh`, `preparar-ataque.py`, `aisla-runtime.sh`, `argv.py`, `recoge.py`, `control.py`, `aisla.sh`, `revisa.py`, `lanza.py`, `consulta.py` y `colab-pruebas/paso0-aisla.sh`. No leí `canarios.env`.
+
+### Los desvíos del orquestador
+
+| Desvío | ¿Vale? | Por qué |
+|---|---|---|
+| A1 anota `corte` si el grep llega al plazo | **Sí** | Un grep cortado que anota `nada` es un falso aprobado. Ver el arreglo 1, que lo completa |
+| La sesión corre en el runtime con un solo lanzamiento, y `argv.py` y `recoge.py` corren ahí cada 60 s | **Sí, es mejor** | Un `colab exec` cada 60 s desde la laptop fallaría seguido. En el runtime, la consulta no depende de la red |
+| `preparar-ataque.py` frena si un canario no tiene 64 hex | **Sí** | Nunca entra una clave real a la prueba |
+| `revisa.py` compara lo bajado con la tabla | **Sí** | La decisión deja de depender de leer a mano. Ver el arreglo 6 |
+
+### Lo que falta o está mal: seis arreglos
+
+**Arreglo 1. A1, en el control positivo.** Fuera de bwrap, el grep recorre todo el runtime y puede llegar al plazo de 900 s. Hoy, un grep cortado anota `corte` aunque ya haya encontrado C1. `revisa.py` pide `encontrado`, y el control fallaría sin motivo. **Además,** el grep debe saltar los dispositivos. Reemplazar las tres líneas de A1 por:
+```
+o=$(timeout 900 grep -rlsF -D skip --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev -- "$C1" / 2>/dev/null); rc=$?
+n=$(printf '%s\n' "$o" | grep -v '/ataque-[^/]*\.txt$' | grep -vx "$0" | grep -c .)
+if [ "$n" != 0 ]; then anota A1 encontrado "$n archivos"; elif [ "$rc" = 124 ]; then anota A1 corte; else anota A1 nada; fi
+```
+Dentro de bwrap, `corte` sigue siendo una falla: `revisa.py` pide `nada`.
+
+**Arreglo 2. A2, con `/proc/1/root`.** Dentro de bwrap, el pid 1 es el propio bwrap, del mismo usuario. `ls /proc/1/root` lista la raíz del sandbox, y anotaría `leyo`. Es un falso positivo. **Lo que importa** es si por ahí se llega a `ROOT_HOME`. **Además,** `ls` de un archivo anda sin leerlo, así que `/run` debe probar el token con una lectura. Reemplazar el bucle de A2 por:
+```
+for d in "$ROOTHOME" /root /content "/proc/1/root$ROOTHOME" /run/root-token; do
+  if [ -d "$d" ]; then ls "$d" >/dev/null 2>&1 && anota A2 leyo "$d" || anota A2 falla "$d"
+  else head -c1 "$d" >/dev/null 2>&1 && anota A2 leyo "$d" || anota A2 falla "$d"; fi
+done
+```
+`revisa.py` sigue pidiendo 5 filas con `falla` dentro, y `leyo /root/root-home` fuera.
+
+**Arreglo 3. A8, A11 y A13 usan `find / -xdev`.** Dentro de bwrap, la raíz es un tmpfs, y `/usr`, `/etc`, `/trabajo` y el estado son otros montajes. Con `-xdev`, `find` no entra a ninguno de ellos. Los tres ataques darían `nada` sin buscar. Reemplazar:
+- en A8: `find /usr/bin /usr/sbin /usr/lib /usr/libexec /bin /sbin -perm -4000 -type f 2>/dev/null`;
+- en A11: `find / \( -path /proc -o -path /sys -o -path /dev \) -prune -o -type s -print 2>/dev/null | wc -l`;
+- en A13: `find / \( -path /proc -o -path /sys \) -prune -o -path '*oculto*' -print 2>/dev/null | wc -l`.
+
+**Arreglo 4. A11, en `revisa.py`.** `/proc/net/unix` cuenta los sockets del espacio de red `root-builder`, no los de fuera. bwrap o `ip netns exec` pueden dejar ahí un socket propio, y el `unix=0` exacto fallaría sin motivo. **Lo que importa** son los sockets de fuera con ruta. Cambiar la fila de A11 por:
+```
+ok(len(by("A11")) == 1 and by("A11")[0][1].startswith("archivos=0 "), n + " A11 sin sockets de fuera (%s)" % by("A11"))
+```
+El número de `unix` queda anotado, como dato.
+
+**Arreglo 5. El control positivo de A13.** Hoy no hay. Fuera de bwrap, A13 debe encontrar `oculto/`. Sumar a `revisa.py`:
+```
+ok(any(r == "encontrado" for r, _ in fz("A13")), "fuera A13 encuentra oculto/")
+```
+
+**Arreglo 6. Probar `revisa.py` con los arreglos.** El orquestador vuelve a correr `revisa.py` con su caso bueno y su caso malo, y suma dos casos:
+- un A1 de fuera con `encontrado` después de un corte;
+- un A2 de dentro con `leyo /proc/1/root/root/root-home`, que debe dar FALLA.
+
+**Lo que la tabla de la vuelta 99 pide y ya está:** A1 a A13, los controles de A1, A2, A3 y A4, los conteos de `argv.py`, las reglas de la red y la búsqueda de C2 y C3 en lo bajado. Con los seis arreglos, la prueba queda completa.
+
+**Una nota sobre `aisla.sh`:** `colab exec --env "DEEPSEEK_API_KEY=$C2"` pone el valor en los argumentos de `colab` en la laptop, por unos segundos. Con C2 falsa no importa. **En el piloto, con la clave real, pasa lo mismo.** Es parte de la excepción de P130 a, igual que en juez-x. La laptop tiene un solo usuario.
+
+## 3. La receta del piloto de D3
+
+Vale después de que pasen la prueba de aislamiento, la PR de P131 a y el congelamiento Z.
+
+### Antes del piloto
+
+1. **El árbol de Z es el de la cadena probada.** `git rev-parse Z^{tree}` es igual a `git rev-parse laptop/cadena-173b^{tree}`. Si no lo es, no hay piloto: va al planner.
+2. **El binario:** el release de Z, en `colab-pruebas/congelado-<Z>/r00t`, con su SHA en `registro.md`.
+3. **El estado con Z,** sobre una copia del real: las mismas 6 dimensiones calibradas que con Y.
+4. **El worktree** `~/.cache/root-wt/reparto/wt`, en Z.
+
+### El paquete, que arma el usuario
+
+El orquestador escribe `colab-pruebas/paso0-d3.sh`, sobre la base de `paso0-aisla.sh`. Lo corre el usuario, porque lee la imagen del oráculo con podman. El guion:
+1. Revisa el SHA del binario de Z, el commit del worktree, y que no corra un builder ni una suite.
+2. Toma el SHA del instalador de rustup, como los otros `paso0`.
+3. Con el `ROOT_HOME` real, que `empaquetar` solo lee, desde el worktree:
+   `<Z> colab empaquetar --corre --tareas s2-t1 --config ecc-haiku --pasada 1 --rustup-sha256 <sha> --binario <Z> --raiz-root <worktree> --salida ~/.cache/root-wt/d3/s0/paquete.tar.gz`
+4. Imprime solo conteos: archivos, nombres `.env` o `.credentials.json`, archivos con `sk-`, y rutas con `oculto`.
+
+**El estado del cupo en el paquete.** El paquete lleva `eventos.jsonl` del momento en que se arma. Si se arma horas antes, el ruteo de Colab ve un bloque viejo. Por eso el paquete del piloto se arma justo antes de la sesión.
+
+### La sesión `d3-0`
+
+El orquestador escribe `d3/d3-colab.sh` y `d3/d3-runtime.sh`, sobre la base de `aisla.sh` y `aisla-runtime.sh`, sin los pasos del ataque:
+1. `colab new -s d3-0 --high-mem`, con 3 intentos.
+2. La subida en trozos de 40 MiB, y la revisión del SHA en el runtime.
+3. **El token, por la excepción de P130 a:** `colab upload` de `~/.config/root-colab/claude-token` a `/content/root-token`. Antes, el guion revisa que el archivo exista con modo 600, como `builder-colab.sh`.
+4. **La clave, por la excepción de P130 a:** `colab exec -f lanza.py --env "DEEPSEEK_API_KEY=$K"`. `K` sale de `~/.claude/orchestration/.env`, como en juez-x. El guion hace `unset K` enseguida.
+5. **En el runtime,** `d3-runtime.sh` une el paquete, corre `preparar-corre.sh` sin la clave en su entorno, y lanza `corre-runtime.py` con `ROOT_TOKEN_ARCHIVO=/content/root-token`.
+6. **La consulta, cada 240 s,** con `consulta.py`: la fase, si sigue vivo, y las tareas de `hechos/` con su SHA.
+7. **La bajada:** cada vuelta nueva se baja enseguida a `d3/s0/`, y se revisa su SHA.
+8. **La importación de cada vuelta:** primero en una copia, `d3/home-d3`, y después en el real, con `<Z> colab importar --corre <vuelta> --sha <sha> --ida d3/s0/paquete.tar.gz --raiz-root <worktree>`.
+9. **El cierre:** con `fin` o `error`, el guion baja lo que falte. Revisa que `/run/root-token` y `/content/root-token` ya no existan. Después corre `colab stop -s d3-0`. La sesión `hpil` no se toca.
+10. **El chequeo de secretos:** el guion filtra sus salidas con la misma función `oculta` de `builder-colab.sh`. Al final, busca `sk-` y el prefijo del token en todo lo bajado y en sus salidas.
+11. **El registro:** cada uso de la excepción de P130 a queda en `registro.md`, con la sesión y la hora, sin valores.
+
+### Qué revisa el orquestador
+
+| Qué | Lo esperado |
+|---|---|
+| La clase de la corrida | `completa` |
+| El aviso del ejecutor | "builder en bwrap" |
+| Las lecturas del oráculo | 0 eventos `oraculo_leido`. Si hay alguno, `r00t corre revisar-lectura` |
+| Estructura | Con veredicto. Prueba que la clave llegó |
+| El contrato y el oculto | Pasa y total, sin nombres de tests |
+| La decisión y el global | Anotados. Se comparan con las corridas de s2-t1 en la laptop |
+| Los minutos | Entre 16 y 30. Las corridas de S2 en la laptop tardaron de 16 a 22 |
+| El cupo | Entre 0,7 y 1,3 USD de lista |
+| La API | Entre 0,05 y 0,2 USD, y el gasto de S2 del real sube en esa cantidad |
+| Los secretos | Ninguno en lo bajado ni en las salidas |
+| La sesión | Cerrada. `hpil` sigue igual |
+
+**Si el piloto falla por la infraestructura,** no se lanza la sesión 1. Va al planner con lo bajado.
+**Si el piloto pasa,** las sesiones 1 a 3 siguen la receta de la vuelta 98, sección 5, con estos mismos guiones.
+
+**Costo del piloto:** cerca de 0,9 USD de lista, 0,1 USD de API, 0,1 unidades y 1 hora.
+
+## 4. Pregunta al usuario
+
+**P132. ¿Cómo se arman los paquetes de las sesiones de D3?** El clasificador del modo auto no deja que el orquestador arme un paquete. Lo arma el usuario, porque `empaquetar` lee la imagen del oráculo con podman y el `ROOT_HOME` real. D3 tiene 4 sesiones: el piloto y 3 tandas de unas 10 tareas.
+
+- **a) El usuario corre `paso0-d3.sh` dos veces:** una para el piloto, y otra que arma los 3 paquetes de las tandas juntos, justo antes de la sesión 1. Si una tarea queda cortada, el usuario lo corre otra vez para un paquete extra. *(recomendada)*
+- **b) El usuario corre `paso0-d3.sh` antes de cada sesión.** Son 4 corridas o más. Cada paquete trae el estado del cupo de ese momento.
+- **c) El usuario deja que el orquestador corra `paso0-d3.sh`,** con una regla de permiso que nombre solo ese guion.
+
+Recomiendo la (a). Pide al usuario dos o tres corridas, no cuatro. El estado del cupo de un paquete armado unas horas antes no cambia lo que mide D3: Root ya rutea igual en la laptop, sin ver el cupo de las otras sesiones del usuario.
+
+## 5. Lo que falta
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | Los seis arreglos de `ataque.sh` y `revisa.py`, y la prueba de `revisa.py` | Nada | Laptop, orquestador | 0 USD | Cerca de 30 minutos | No |
+| 2 | `paso0-aisla.sh`: el paquete de la prueba | El paso 1 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: lo corre el usuario** |
+| 3 | La prueba de aislamiento | El paso 2 | Colab | 0 USD y cerca de 0,15 unidades | De 1 a 1,5 horas | No |
+| 4 | P132 | Nada | — | — | — | **Sí** |
+| 5 | Si la prueba pasa: la PR con la 171, la 172, la 173 y la 173b | El paso 3 | — | — | — | **Sí: la orden de mezcla** |
+| 6 | El congelamiento Z, el árbol igual al de la cadena, y el estado con Z | El paso 5 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 7 | `paso0-d3.sh`, `d3-colab.sh` y `d3-runtime.sh` | El paso 3 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 8 | El paquete del piloto | Los pasos 4, 6 y 7 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: lo corre el usuario** |
+| 9 | El piloto de D3: s2-t1 | El paso 8 | Colab | Cerca de 0,9 USD de lista, 0,1 USD de API y 0,1 unidades | Cerca de 1 hora | No |
+| 10 | Los paquetes y las sesiones 1 a 3 de D3 | El paso 9 | Laptop y Colab | De 21 a 36 USD de lista, de 2 a 4,5 USD de API, y de 1,5 a 3 unidades | De 12 a 14 horas, en 3 ventanas de cupo | **Sí: el paquete lo arma el usuario** |
+| 11 | El análisis de D3 | El paso 10 | Planner | Cupo | Una vuelta | No |
+| 12 | Si el análisis lo pide: una segunda pasada | El paso 11 | Colab | Lo mismo que los pasos 9 y 10 | De 1,5 a 2 días | **Sí** |
+| 13 | P98 c: abrir el final | El paso 11, o el 12 | Laptop | Según la regla del final | Según el final | No |
+| 14 | La validez sobre el final sellado | El paso 13 | Colab | Según el final | Según el final | No |
+| 15 | Después de la validez: el juez que escribe reglas, por P128 a | El paso 14 | Colab, builder | De 3 a 5 USD de builder, y cerca de 3,5 USD de API | De 1 a 2 semanas, con revisión humana | No |
+| 16 | Después de la validez: una tarea con `Dockerfile` para calibrar Entrega | El paso 14 | Minería y Colab | Sin estimar | Sin estimar | **Sí** |
+| 17 | Después de la validez: las versiones de Seguridad en una sola fuente, la tarea en el error de lanzar, la limpieza por señal sin `podman ps`, y la clave de los eventos como línea entera | El paso 14 | Colab, builder | Cerca de 1 USD | Cerca de 1 hora | No |
+
+**El saldo de S2:** cerca de 12,53 USD. La prueba de aislamiento no lo toca. El piloto usa cerca de 0,1 USD.
+**Las unidades de Colab:** la 173 y la 173b usaron cerca de 1,1 horas de high-mem. Todo lo que falta hasta D3 usa menos de 5 unidades.
