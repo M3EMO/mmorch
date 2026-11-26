@@ -912,3 +912,536 @@ mod tests {
         assert!(mensaje.contains("ELF"), "{mensaje}");
     }
 }
+
+/// Tests de los guiones de Colab: `corre-runtime.py` y `preparar-corre.sh`.
+/// Usan Python y bash reales, con programas falsos. Ningún test toca /run, /usr ni /root del host.
+#[cfg(test)]
+mod runtime {
+    use crate::prueba_ejecutable::escribir_ejecutable;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
+
+    const CORRE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tools/colab/corre-runtime.py");
+    const PREPARAR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tools/colab/preparar-corre.sh");
+
+    /// Valores falsos. Solo llegan al hijo por `Command::env`, nunca al shell del test.
+    const CLAVE: &str = "sk-falso-clave-0001";
+    const CUPO: &str = "tok-falso-cupo-0002";
+
+    /// r00t falso. `REGISTRO` y `COMPORTAMIENTO` se cambian antes de escribirlo.
+    /// Anota la tarea (`$3`, después de `corre --tarea`) y deja una fila en runs y eventos.
+    const R00T_BASE: &str = r#"#!/bin/sh
+tarea="$3"
+echo "$tarea" >> 'REGISTRO'
+mkdir -p "$ROOT_HOME/transcripts/run-$tarea"
+echo "turno de $tarea" > "$ROOT_HOME/transcripts/run-$tarea/turno.txt"
+echo "{\"tarea\":\"$tarea\"}" >> "$ROOT_HOME/runs.jsonl"
+echo "{\"evento\":\"$tarea\"}" >> "$ROOT_HOME/eventos.jsonl"
+COMPORTAMIENTO
+"#;
+
+    const VERSIONES_OK: &str = "CLAUDE_VERSION=2.1.5\nRUST_VERSION=1.91.0\n";
+
+    fn bash_disponible() -> bool {
+        Command::new("bash")
+            .arg("-c")
+            .arg("exit 0")
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    fn python_disponible() -> bool {
+        Command::new("python3")
+            .arg("-c")
+            .arg("pass")
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Falla con la causa clara si el guion no existe.
+    fn falta_guion(ruta: &str) {
+        assert!(Path::new(ruta).is_file(), "falta el guion {ruta}");
+    }
+
+    fn texto(salida: &Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&salida.stdout),
+            String::from_utf8_lossy(&salida.stderr)
+        )
+    }
+
+    /// Lee todos los archivos de un árbol y los une en un texto.
+    fn texto_de_arbol(dir: &Path) -> String {
+        let mut salida = String::new();
+        for entrada in fs::read_dir(dir).expect("lee carpeta") {
+            let ruta = entrada.expect("entrada").path();
+            if ruta.is_dir() {
+                salida.push_str(&texto_de_arbol(&ruta));
+            } else {
+                salida.push_str(&fs::read_to_string(&ruta).unwrap_or_default());
+            }
+        }
+        salida
+    }
+
+    /// Paquete falso, ROOT_HOME falso, token en un temporal y r00t falso.
+    struct Corrida {
+        raiz: tempfile::TempDir,
+        paquete: PathBuf,
+        home: PathBuf,
+        token: PathBuf,
+        r00t: PathBuf,
+        fuera: PathBuf,
+    }
+
+    impl Corrida {
+        fn nueva(tareas: &[&str]) -> Self {
+            let raiz = tempfile::tempdir().expect("raíz temporal");
+            let c = Corrida {
+                paquete: raiz.path().join("paquete"),
+                home: raiz.path().join("home"),
+                token: raiz.path().join("token"),
+                r00t: raiz.path().join("r00t"),
+                fuera: raiz.path().join("fuera"),
+                raiz,
+            };
+            for dir in [&c.paquete, &c.home, &c.fuera] {
+                fs::create_dir_all(dir).expect("crea carpeta");
+            }
+            let lista: Vec<String> = tareas.iter().map(|t| format!("\"{t}\"")).collect();
+            let manifiesto = format!(
+                "{{\"v\":1,\"tipo\":\"corre\",\"pasada\":1,\"config\":\"cfg\",\"tareas\":[{}],\"plugins\":{{}},\"archivos\":{{}}}}\n",
+                lista.join(",")
+            );
+            fs::write(c.paquete.join("manifiesto.json"), manifiesto).expect("escribe manifiesto");
+            c
+        }
+
+        /// Escribe el r00t falso. `comportamiento` es código de shell que corre tras anotar la tarea.
+        fn r00t_falso(&self, comportamiento: &str) {
+            let texto = R00T_BASE
+                .replace(
+                    "REGISTRO",
+                    &self.fuera.join("registro").display().to_string(),
+                )
+                .replace("COMPORTAMIENTO", comportamiento);
+            escribir_ejecutable(&self.r00t, &texto);
+        }
+
+        /// Tareas que el r00t falso recibió, en orden.
+        fn registro(&self) -> Vec<String> {
+            fs::read_to_string(self.fuera.join("registro"))
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect()
+        }
+
+        fn correr(&self, plazo: &str) -> Output {
+            Command::new("python3")
+                .arg("-I")
+                .arg(CORRE)
+                .arg(&self.paquete)
+                .current_dir(self.raiz.path())
+                .env("ROOT_CORRE_R00T", &self.r00t)
+                .env("ROOT_CORRE_HOME", &self.home)
+                .env("ROOT_CORRE_TOKEN", &self.token)
+                .env("ROOT_CORRE_PLAZO_S", plazo)
+                .env("DEEPSEEK_API_KEY", CLAVE)
+                .env("ROOT_TOKEN_CUPO", CUPO)
+                .output()
+                .expect("lanza python3")
+        }
+
+        fn escribir_hecho(&self, tarea: &str, codigo: i64) {
+            let dir = self.paquete.join("hechos");
+            fs::create_dir_all(&dir).expect("crea hechos");
+            let texto = format!(
+                "{{\"codigo\":{codigo},\"sha\":\"previo\",\"inicio\":\"previo\",\"fin\":\"previo\"}}"
+            );
+            fs::write(dir.join(format!("{tarea}.json")), texto).expect("escribe hecho");
+        }
+
+        fn estado(&self) -> serde_json::Value {
+            let texto = fs::read_to_string(self.paquete.join("estado.json")).expect("estado.json");
+            serde_json::from_str(&texto).expect("estado.json es JSON")
+        }
+
+        fn hecho(&self, tarea: &str) -> serde_json::Value {
+            let texto = fs::read_to_string(self.paquete.join(format!("hechos/{tarea}.json")))
+                .expect("hecho");
+            serde_json::from_str(&texto).expect("hecho es JSON")
+        }
+
+        fn vuelta(&self, tarea: &str) -> PathBuf {
+            self.paquete.join(format!("vuelta-{tarea}.tar.gz"))
+        }
+
+        /// Extrae la vuelta de una tarea en una carpeta del temporal y devuelve su ruta.
+        fn extraer(&self, tarea: &str) -> PathBuf {
+            let destino = self.raiz.path().join(format!("extraida-{tarea}"));
+            fs::create_dir_all(&destino).expect("crea destino");
+            let estado = Command::new("tar")
+                .arg("-xzf")
+                .arg(self.vuelta(tarea))
+                .arg("-C")
+                .arg(&destino)
+                .status()
+                .expect("lanza tar");
+            assert!(estado.success(), "tar no abre la vuelta de {tarea}");
+            destino
+        }
+    }
+
+    #[test]
+    fn corre_runtime_salta_tareas_ya_hechas() {
+        if !python_disponible() {
+            eprintln!("sin python3: se saltea corre_runtime_salta_tareas_ya_hechas");
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1", "t2", "t3"]);
+        c.r00t_falso("");
+        c.escribir_hecho("t2", 0);
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+        assert_eq!(c.registro(), vec!["t1", "t3"]);
+    }
+
+    #[test]
+    fn corre_runtime_sigue_si_r00t_sale_con_1() {
+        if !python_disponible() {
+            eprintln!("sin python3: se saltea corre_runtime_sigue_si_r00t_sale_con_1");
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1", "t2"]);
+        c.r00t_falso("if [ \"$tarea\" = t1 ]; then exit 1; fi");
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+        assert!(c.vuelta("t1").is_file(), "falta vuelta-t1.tar.gz");
+        assert_eq!(c.hecho("t1")["codigo"], 1);
+        assert_eq!(c.registro(), vec!["t1", "t2"], "debe seguir con t2");
+    }
+
+    #[test]
+    fn corre_runtime_no_filtra_clave_ni_token() {
+        if !python_disponible() {
+            eprintln!("sin python3: se saltea corre_runtime_no_filtra_clave_ni_token");
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1", "t2"]);
+        // El r00t falso imprime su entorno y el token a propósito. La salida debe ocultarlos.
+        c.r00t_falso(&format!(
+            "printf '%s' \"$DEEPSEEK_API_KEY\" > '{clave}'\n\
+             env > '{entorno}'\n\
+             cat \"$ROOT_TOKEN_BUILDER\"\n\
+             env",
+            clave = c.fuera.join("clave").display(),
+            entorno = c.fuera.join("entorno").display(),
+        ));
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+
+        let dicho = texto(&salida);
+        assert!(!dicho.contains(CLAVE), "la salida trae la clave");
+        assert!(!dicho.contains(CUPO), "la salida trae el token");
+
+        let estado = fs::read_to_string(c.paquete.join("estado.json")).expect("estado.json");
+        assert!(
+            !estado.contains(CLAVE) && !estado.contains(CUPO),
+            "estado.json con secretos"
+        );
+
+        for tarea in ["t1", "t2"] {
+            let vuelta = texto_de_arbol(&c.extraer(tarea));
+            assert!(
+                !vuelta.contains(CLAVE),
+                "la vuelta de {tarea} trae la clave"
+            );
+            assert!(!vuelta.contains(CUPO), "la vuelta de {tarea} trae el token");
+            assert!(
+                vuelta.contains("[oculto]"),
+                "la vuelta de {tarea} debe marcar lo oculto"
+            );
+        }
+
+        // La clave sí llegó al hijo. Lo anotó el r00t falso fuera de la vuelta.
+        let recibida = fs::read_to_string(c.fuera.join("clave")).expect("clave recibida");
+        assert_eq!(recibida, CLAVE, "el hijo debe recibir la clave");
+        let entorno = fs::read_to_string(c.fuera.join("entorno")).expect("entorno");
+        assert!(
+            !entorno.contains("ROOT_TOKEN_CUPO="),
+            "el hijo no debe recibir ROOT_TOKEN_CUPO"
+        );
+        assert!(
+            entorno.contains("ROOT_TOKEN_BUILDER="),
+            "el hijo debe recibir la ruta del token"
+        );
+        assert!(
+            !entorno.contains(CUPO),
+            "el hijo no debe recibir el valor del token"
+        );
+    }
+
+    #[test]
+    fn corre_runtime_borra_el_token_al_terminar() {
+        if !python_disponible() {
+            eprintln!("sin python3: se saltea corre_runtime_borra_el_token_al_terminar");
+            return;
+        }
+        falta_guion(CORRE);
+        // Caso 1: r00t sale con 0. El token existe con modo 0600 durante la corrida.
+        let c = Corrida::nueva(&["t1"]);
+        c.r00t_falso(&format!(
+            "stat -c %a \"$ROOT_TOKEN_BUILDER\" > '{}'",
+            c.fuera.join("modo").display()
+        ));
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+        let modo = fs::read_to_string(c.fuera.join("modo")).expect("modo");
+        assert_eq!(
+            modo.trim(),
+            "600",
+            "el token debe ser 0600 durante la corrida"
+        );
+        assert!(!c.token.exists(), "el token sigue después de la corrida");
+
+        // Caso 2: r00t sale con 1. El token también se borra.
+        let c = Corrida::nueva(&["t1"]);
+        c.r00t_falso(&format!(
+            "stat -c %a \"$ROOT_TOKEN_BUILDER\" > '{}'; exit 1",
+            c.fuera.join("modo").display()
+        ));
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+        assert!(!c.token.exists(), "el token sigue tras un r00t que falló");
+    }
+
+    #[test]
+    fn corre_runtime_corta_por_plazo() {
+        if !python_disponible() {
+            eprintln!("sin python3: se saltea corre_runtime_corta_por_plazo");
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1"]);
+        c.r00t_falso("sleep 30");
+        let salida = c.correr("1");
+        assert!(salida.status.success(), "{}", texto(&salida));
+        assert!(c.vuelta("t1").is_file(), "falta vuelta-t1.tar.gz");
+        let dir = c.extraer("t1");
+        let meta: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("vuelta.json")).expect("vuelta.json"),
+        )
+        .expect("vuelta.json es JSON");
+        assert_eq!(meta["cortada"], "plazo");
+        assert_eq!(meta["codigo"], 124);
+    }
+
+    #[test]
+    fn corre_runtime_estado_final() {
+        if !python_disponible() {
+            eprintln!("sin python3: se saltea corre_runtime_estado_final");
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1", "t2"]);
+        fs::write(
+            c.home.join("runs.jsonl"),
+            "{\"previo\":1}\n{\"previo\":2}\n",
+        )
+        .expect("runs previo");
+        c.r00t_falso("");
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+
+        let estado = c.estado();
+        assert_eq!(estado["fin"], true);
+        assert_eq!(estado["hechas"], serde_json::json!(["t1", "t2"]));
+        assert_eq!(estado["faltan"], serde_json::json!([]));
+
+        for tarea in ["t1", "t2"] {
+            let dir = c.extraer(tarea);
+            let runs = fs::read_to_string(dir.join("runs.jsonl")).expect("runs.jsonl");
+            let filas: Vec<&str> = runs.lines().collect();
+            assert_eq!(
+                filas,
+                vec![format!("{{\"tarea\":\"{tarea}\"}}")],
+                "solo la fila nueva"
+            );
+        }
+    }
+
+    /// Paquete de `preparar-corre.sh` con programas falsos en PATH y rutas dentro de un temporal.
+    struct Prep {
+        raiz: tempfile::TempDir,
+        paquete: PathBuf,
+        falsos: PathBuf,
+        bin: PathBuf,
+        destino: PathBuf,
+        root: PathBuf,
+        prefijo: PathBuf,
+        red: PathBuf,
+        runtime: PathBuf,
+    }
+
+    impl Prep {
+        /// `claude_dice` es la salida falsa de `claude --version`. `versiones` es versiones-builder.env.
+        fn nuevo(claude_dice: &str, versiones: &str) -> Self {
+            let raiz = tempfile::tempdir().expect("raíz temporal");
+            let p = Prep {
+                paquete: raiz.path().join("paquete"),
+                falsos: raiz.path().join("falsos"),
+                bin: raiz.path().join("bin"),
+                destino: raiz.path().join("destino/root-home"),
+                root: raiz.path().join("root"),
+                prefijo: raiz.path().join("prefijo"),
+                red: raiz.path().join("red-builder.sh"),
+                runtime: raiz.path().join("preparar-runtime.sh"),
+                raiz,
+            };
+            for dir in [&p.paquete, &p.falsos, &p.root, &p.prefijo] {
+                fs::create_dir_all(dir).expect("crea carpeta");
+            }
+            fs::write(p.paquete.join("versiones-builder.env"), versiones).expect("versiones");
+            fs::write(
+                p.paquete.join("manifiesto.json"),
+                "{\"v\":1,\"tipo\":\"corre\",\"pasada\":1,\"config\":\"cfg\",\"tareas\":[\"tarea-a\"],\
+                 \"plugins\":{\"/opt/ecc-falso\":\"plugins/ecc\"},\"archivos\":{}}\n",
+            )
+            .expect("manifiesto");
+            fs::create_dir_all(p.paquete.join("root-home/oraculos/tarea-a/docs"))
+                .expect("root-home");
+            fs::write(
+                p.paquete.join("root-home/oraculos/tarea-a/docs/SPEC.md"),
+                "spec\n",
+            )
+            .expect("spec");
+            fs::create_dir_all(p.paquete.join("plugins/ecc")).expect("plugin");
+            fs::write(p.paquete.join("plugins/ecc/x.md"), "plugin de prueba\n").expect("plugin");
+            fs::write(p.paquete.join("r00t"), "binario falso\n").expect("r00t");
+
+            escribir_ejecutable(&p.runtime, "#!/bin/sh\necho \"runtime $1\"\n");
+            escribir_ejecutable(
+                &p.falsos.join("apt-get"),
+                "#!/bin/sh\necho \"apt-get $*\"\n",
+            );
+            escribir_ejecutable(&p.falsos.join("npm"), "#!/bin/sh\necho \"npm $*\"\n");
+            escribir_ejecutable(
+                &p.falsos.join("useradd"),
+                "#!/bin/sh\necho \"useradd $*\"\n",
+            );
+            escribir_ejecutable(&p.falsos.join("chown"), "#!/bin/sh\nexit 0\n");
+            escribir_ejecutable(&p.falsos.join("id"), "#!/bin/sh\nexit 1\n");
+            escribir_ejecutable(
+                &p.falsos.join("claude"),
+                &format!("#!/bin/sh\necho '{claude_dice}'\n"),
+            );
+            escribir_ejecutable(
+                &p.falsos.join("rustc"),
+                "#!/bin/sh\necho 'rustc 1.91.0 (abc 2026-01-01)'\n",
+            );
+            p
+        }
+
+        fn correr(&self) -> Output {
+            let path = format!(
+                "{}:{}",
+                self.falsos.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            Command::new("bash")
+                .arg(PREPARAR)
+                .arg(&self.paquete)
+                .current_dir(self.raiz.path())
+                .env("PATH", path)
+                .env("ROOT_PREPARAR_RUNTIME", &self.runtime)
+                .env("ROOT_RED_BUILDER_SH", &self.red)
+                .env("ROOT_BIN_DIR", &self.bin)
+                .env("ROOT_HOME_DESTINO", &self.destino)
+                .env("ROOT_DIR_RAIZ", &self.root)
+                .env("ROOT_RAIZ_DIR", &self.prefijo)
+                .env("ROOT_APT_ESPERA", "0")
+                .output()
+                .expect("lanza bash")
+        }
+    }
+
+    fn modo(ruta: &Path) -> u32 {
+        fs::metadata(ruta).expect("metadatos").permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn preparar_corre_frena_si_claude_no_coincide() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_frena_si_claude_no_coincide");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("9.9.9 (Claude Code)", VERSIONES_OK);
+        let salida = p.correr();
+        assert!(!salida.status.success(), "debe salir distinto de 0");
+        let dicho = texto(&salida);
+        assert!(dicho.contains("mal versiones"), "{dicho}");
+        assert!(
+            dicho.contains("9.9.9"),
+            "el mensaje nombra la versión real: {dicho}"
+        );
+        assert!(
+            dicho.contains("2.1.5"),
+            "el mensaje nombra la versión fijada: {dicho}"
+        );
+    }
+
+    #[test]
+    fn preparar_corre_sin_red_builder_falla() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_sin_red_builder_falla");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        let salida = p.correr();
+        assert!(!salida.status.success(), "debe salir distinto de 0");
+        let dicho = texto(&salida);
+        assert!(dicho.contains("mal red-builder.sh"), "{dicho}");
+        assert!(dicho.contains("Tarea 171"), "{dicho}");
+    }
+
+    #[test]
+    fn preparar_corre_camino_feliz() {
+        if !bash_disponible() || !python_disponible() {
+            eprintln!("sin bash o python3: se saltea preparar_corre_camino_feliz");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        let salida = p.correr();
+        assert!(salida.status.success(), "{}", texto(&salida));
+
+        // El root-home se mueve: no queda copia en el paquete.
+        assert!(
+            !p.paquete.join("root-home").exists(),
+            "queda root-home en el paquete"
+        );
+        assert!(p.destino.join("oraculos/tarea-a/docs/SPEC.md").is_file());
+        assert_eq!(modo(&p.destino), 0o700);
+        assert_eq!(modo(&p.root), 0o700);
+        assert_eq!(modo(&p.paquete), 0o700);
+
+        // El r00t queda instalado y ejecutable.
+        assert!(p.bin.join("r00t").is_file());
+        assert_eq!(modo(&p.bin.join("r00t")), 0o755);
+
+        // El plugin vuelve a su ruta original, dentro del prefijo de prueba.
+        let original = fs::read(p.paquete.join("plugins/ecc/x.md")).expect("plugin en paquete");
+        let copia = fs::read(p.prefijo.join("opt/ecc-falso/x.md")).expect("plugin copiado");
+        assert_eq!(copia, original);
+    }
+}
