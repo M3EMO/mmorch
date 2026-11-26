@@ -196,18 +196,44 @@ pub enum ColabAccion {
         /// Binario `r00t` para x86-64 que entra al paquete.
         #[arg(long)]
         binario: PathBuf,
-        /// Trabajos `tarea:dimension`, separados por coma.
-        #[arg(long, value_delimiter = ',', required = true)]
+        /// Trabajos `tarea:dimension`, separados por coma. Sin `--corre`, es obligatorio.
+        #[arg(
+            long,
+            value_delimiter = ',',
+            required_unless_present = "corre",
+            conflicts_with = "corre"
+        )]
         trabajos: Vec<String>,
-        /// Repo bueno de una tarea, como `tarea=ruta`. Se repite por cada tarea.
-        #[arg(long, num_args = 1, required = true)]
+        /// Repo bueno de una tarea, como `tarea=ruta`. Se repite por cada tarea. Sin `--corre`, es obligatorio.
+        #[arg(
+            long,
+            num_args = 1,
+            required_unless_present = "corre",
+            conflicts_with = "corre"
+        )]
         repo: Vec<String>,
-        /// SHA-256 en hexadecimal (64 caracteres) del instalador de rustup.
-        #[arg(long)]
-        rustup_sha256: String,
+        /// SHA-256 en hexadecimal (64 caracteres) del instalador de rustup. Sin `--corre`, es obligatorio.
+        #[arg(long, required_unless_present = "corre", conflicts_with = "corre")]
+        rustup_sha256: Option<String>,
         /// Archivo `.tar.gz` de salida.
         #[arg(long)]
         salida: PathBuf,
+        /// Arma el paquete de `corre` para Colab. Exige `--tareas`, `--config` y `--pasada`.
+        #[arg(
+            long,
+            conflicts_with_all = ["trabajos", "repo", "rustup_sha256", "n", "semilla", "juez", "tope_usd"],
+            requires_all = ["tareas", "config", "pasada"]
+        )]
+        corre: bool,
+        /// Tareas de `corre`, separadas por coma, en el orden del manifiesto. Exige `--corre`.
+        #[arg(long, value_delimiter = ',', requires = "corre")]
+        tareas: Vec<String>,
+        /// Config de la corrida: `<ROOT_HOME>/configs/<config>.toml`. Exige `--corre`.
+        #[arg(long, requires = "corre")]
+        config: Option<String>,
+        /// Pasada de la corrida. Exige `--corre`.
+        #[arg(long, requires = "corre")]
+        pasada: Option<u32>,
         /// Repo de Root: de ahí sale `tools/colab/`. Por defecto, el directorio actual.
         #[arg(long)]
         raiz_root: Option<PathBuf>,
@@ -795,6 +821,136 @@ mod tests {
             }
             otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
         }
+    }
+
+    #[test]
+    fn colab_empaquetar_corre_parsea_tareas_config_y_pasada() {
+        let cli = Cli::try_parse_from([
+            "r00t",
+            "colab",
+            "empaquetar",
+            "--corre",
+            "--binario",
+            "b",
+            "--tareas",
+            "t1,t2",
+            "--config",
+            "corrida",
+            "--pasada",
+            "3",
+            "--salida",
+            "s.tar.gz",
+        ])
+        .expect("colab empaquetar --corre parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion:
+                    ColabAccion::Empaquetar {
+                        corre,
+                        tareas,
+                        config,
+                        pasada,
+                        ..
+                    },
+            } => {
+                assert!(corre);
+                assert_eq!(tareas, vec!["t1".to_string(), "t2".to_string()]);
+                assert_eq!(config.as_deref(), Some("corrida"));
+                assert_eq!(pasada, Some(3));
+            }
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_empaquetar_sin_corre_parsea_como_antes_y_corre_es_falso() {
+        let cli = Cli::try_parse_from(empaquetar_base()).expect("colab empaquetar parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion:
+                    ColabAccion::Empaquetar {
+                        corre,
+                        trabajos,
+                        repo,
+                        rustup_sha256,
+                        tareas,
+                        config,
+                        pasada,
+                        ..
+                    },
+            } => {
+                assert!(!corre);
+                assert_eq!(trabajos, vec!["t:d".to_string()]);
+                assert_eq!(repo, vec!["t=r".to_string()]);
+                assert_eq!(rustup_sha256.as_deref().map(str::len), Some(64));
+                assert!(tareas.is_empty());
+                assert_eq!(config, None);
+                assert_eq!(pasada, None);
+            }
+            otro => panic!("se esperaba colab empaquetar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_empaquetar_corre_con_trabajos_falla() {
+        let mut args = vec![
+            "r00t",
+            "colab",
+            "empaquetar",
+            "--corre",
+            "--binario",
+            "b",
+            "--tareas",
+            "t1",
+            "--config",
+            "corrida",
+            "--pasada",
+            "1",
+            "--salida",
+            "s.tar.gz",
+        ];
+        args.extend(["--trabajos", "t:d"]);
+        let error = Cli::try_parse_from(args).expect_err("--corre con --trabajos falla");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn colab_empaquetar_corre_sin_pasada_falla() {
+        let error = Cli::try_parse_from([
+            "r00t",
+            "colab",
+            "empaquetar",
+            "--corre",
+            "--binario",
+            "b",
+            "--tareas",
+            "t1",
+            "--config",
+            "corrida",
+            "--salida",
+            "s.tar.gz",
+        ])
+        .expect_err("--corre sin --pasada falla");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn colab_empaquetar_sin_corre_sin_trabajos_falla() {
+        let error = Cli::try_parse_from([
+            "r00t",
+            "colab",
+            "empaquetar",
+            "--binario",
+            "b",
+            "--repo",
+            "t=r",
+            "--rustup-sha256",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--salida",
+            "s.tar.gz",
+        ])
+        .expect_err("sin --corre y sin --trabajos falla");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     /// Argumentos base de `colab importar`, con el paquete y sin banderas.

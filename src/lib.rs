@@ -20,6 +20,7 @@ pub mod tipos;
 pub mod track;
 
 mod colab_calibra;
+mod colab_corre;
 mod limpieza;
 #[cfg(test)]
 mod prueba_ejecutable;
@@ -646,6 +647,22 @@ fn colab_empaquetar_con(
     ) -> Result<colab_calibra::Resumen, oracle::ErrorOraculo>,
 ) -> Result<(), Error> {
     let resumen = armar(pedido, n, semilla)?;
+    imprimir_paquete(json, &resumen);
+    Ok(())
+}
+
+/// `colab empaquetar --corre`: arma el paquete de `corre` e imprime lo mismo que `colab empaquetar`.
+fn colab_empaquetar_corre(
+    json: bool,
+    pedido: colab_corre::PedidoEmpaquetarCorre,
+) -> Result<(), Error> {
+    let resumen = colab_corre::empaquetar_corre_cli(pedido)?;
+    imprimir_paquete(json, &resumen);
+    Ok(())
+}
+
+/// Imprime el resumen de un paquete: el objeto JSON o la línea con los archivos y el SHA-256.
+fn imprimir_paquete(json: bool, resumen: &colab_calibra::Resumen) {
     let salida = resumen.salida.display().to_string();
     if json {
         println!(
@@ -659,9 +676,8 @@ fn colab_empaquetar_con(
         );
     } else {
         println!("{salida}: {} archivos", resumen.archivos);
-        println!("{}", linea_sha(&resumen));
+        println!("{}", linea_sha(resumen));
     }
-    Ok(())
 }
 
 /// Línea que `colab empaquetar` imprime con el SHA-256 del tar.
@@ -1022,6 +1038,38 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
         Comando::Colab {
             accion:
                 ColabAccion::Empaquetar {
+                    corre: true,
+                    binario,
+                    tareas,
+                    config,
+                    pasada,
+                    raiz_root,
+                    salida,
+                    ..
+                },
+        } => {
+            // Clap exige estas tres banderas con `--corre`. El `let` solo cubre un caso que no llega.
+            let (Some(config), Some(pasada)) = (config.clone(), *pasada) else {
+                return Err(
+                    oracle::ErrorOraculo::Uso("--corre exige --config y --pasada".into()).into(),
+                );
+            };
+            colab_empaquetar_corre(
+                cli.json,
+                colab_corre::PedidoEmpaquetarCorre {
+                    tareas: tareas.clone(),
+                    config,
+                    pasada,
+                    binario: binario.clone(),
+                    raiz_root: raiz_root.clone(),
+                    salida: salida.clone(),
+                },
+            )
+        }
+        Comando::Colab {
+            accion:
+                ColabAccion::Empaquetar {
+                    corre: false,
                     binario,
                     trabajos,
                     repo,
@@ -1032,6 +1080,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                     semilla,
                     juez,
                     tope_usd,
+                    ..
                 },
         } => colab_empaquetar(
             cli.json,
@@ -1039,7 +1088,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                 binario: binario.clone(),
                 trabajos: trabajos.clone(),
                 repos: repo.clone(),
-                rustup_sha256: rustup_sha256.clone(),
+                rustup_sha256: rustup_sha256.clone().unwrap_or_default(),
                 salida: salida.clone(),
                 raiz_root: raiz_root.clone(),
                 juez: *juez,
