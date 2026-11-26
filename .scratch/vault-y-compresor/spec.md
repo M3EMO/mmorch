@@ -7,7 +7,7 @@ La spec tiene dos piezas independientes. Cada pieza se construye y se acepta sol
 | Pieza | Dónde vive | Lista cuando |
 |---|---|---|
 | A. Supersesión en el vault | `mmorch/vault.py` y `mmorch/memory.py`, este repo | El test de pares pasa en el 100% |
-| B. Compresor de arranque | Repo Root (Rust) | El arranque medido baja a 52k tokens o menos, sobre el piso del oráculo |
+| B. Compresor de arranque | Repo Root (Rust) | El arranque medido baja a 55k tokens o menos, sobre el piso del oráculo |
 
 ## Pieza A — Supersesión en el vault (mantenimiento de mmorch)
 
@@ -123,7 +123,7 @@ El oráculo tiene dos piezas, y ninguna usa un LLM-juez.
 
 ### B6. Aceptación de la pieza B
 
-- El arranque medido según B1 queda en 52k tokens o menos.
+- El arranque medido según B1 queda en 55k tokens o menos.
 - El oráculo B4 pasa su piso completo con la versión aplicada.
 
 ## Fases de build sugeridas
@@ -139,7 +139,7 @@ El oráculo tiene dos piezas, y ninguna usa un LLM-juez.
 
 ## Riesgos y preguntas abiertas
 
-- **La meta de 52k puede no cerrar.** Con un recorte de 40% en los `.md`, el estimado da ~54.7k. Llegar a 52k pide ~79% en los `.md`. SkillReducer midió -39% a -48%. Si B6 falla, el build se frena. Entonces el usuario decide entre bajar la meta y apagar un hook.
+- **La meta de 55k es ajustada.** El usuario la bajó de 52k a 55k el 2026-11-26. La meta de 52k pedía recortar ~79% de los `.md`, y SkillReducer midió -39% a -48%. Con un recorte de 40%, el estimado da ~54.7k. Si B6 falla, el build se frena y el usuario decide.
 - **`user-invocable-only` falta probarlo.** El valor sale del binario de Claude Code 2.1.332, no de la documentación. La fase 7 prueba primero dos cosas: la skill sale del listado y `/nombre` sigue andando.
 - **Dónde corre el compresor.** El mapa no decidió entre comando a mano, hook o paso nocturno. Esta spec asume un comando a mano que produce diffs. El usuario confirma antes de la fase 7.
 - **Versión de Claude Code.** Un cambio de versión puede mover el reparto. B1 compara solo sesiones de la misma versión.

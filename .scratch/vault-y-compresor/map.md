@@ -6,7 +6,7 @@ Label: wayfinder:map · Creado: 2026-11-26 · Tickets en `issues/` · Tracker: l
 Confirmado con el usuario en [Destino y hogar del compresor](issues/01-destino-y-hogar.md).
 Una spec que ECC construye, con dos piezas. La spec está escrita: [spec.md](spec.md) (2026-11-26).
 - Supersesión en el vault de este repo (`mmorch/vault.py`). Está lista cuando un test determinista de pares pasa en el 100%: el recall nunca devuelve una nota reemplazada.
-- Compresor del contexto de arranque, en Root. Está listo con un arranque medido de 52k tokens o menos (hoy 66.8k), sobre el piso de fidelidad del oráculo.
+- Compresor del contexto de arranque, en Root. Está listo con un arranque medido de 55k tokens o menos (hoy 66.8k; la meta bajó de 52k el 2026-11-26), sobre el piso de fidelidad del oráculo.
 
 ## Notes
 
@@ -23,7 +23,7 @@ Una spec que ECC construye, con dos piezas. La spec está escrita: [spec.md](spe
 
 <!-- una línea por ticket resuelto: gist + link -->
 
-- [Destino y hogar del compresor](issues/01-destino-y-hogar.md) — Spec que construye ECC. La supersesión queda en este repo y el compresor va a Root. Listo = arranque ≤52k tokens y recall sin notas reemplazadas.
+- [Destino y hogar del compresor](issues/01-destino-y-hogar.md) — Spec que construye ECC. La supersesión queda en este repo y el compresor va a Root. Listo = arranque ≤55k tokens (antes 52k) y recall sin notas reemplazadas.
 
 - [Métodos de compresión con piso de fidelidad](issues/03-metodos-de-compresion.md) — SkillReducer es el único método con piso medido sobre skills y salida legible. LLMLingua-2 y Selective Context dejan texto ilegible. Todas las cifras vienen de abstracts, ninguna se midió en español.
 - [Supersesión en sistemas de memoria de agentes](issues/04-supersesion-en-memorias.md) — Un registro determinista (`valid_to`, `superseded_by`, clave sujeto-relación) supera al LLM al escribir. En StaleBench, el rerank por fecha da 0.925 contra 53% de error del coseno. Zep y mem0 no miden la supersesión aislada.
@@ -31,11 +31,11 @@ Una spec que ECC construye, con dos piezas. La spec está escrita: [spec.md](spe
 - [Desglose medido del contexto de arranque](issues/02-desglose-del-arranque.md) — El arranque real mide 66.8k tokens de mediana en 11 sesiones. ECC aporta unos 43k: skills 29.7k, agentes 7.8k y comandos 5.6k. Los CLAUDE.md, AGENTS.md y MEMORY.md suman unos 6.4k. `skillOverrides` está vacío hoy, y los agentes de ECC solo se apagan con el plugin entero.
 - [Supersesión en el vault](issues/07-supersesion-en-el-vault.md) — `supersedes` explícito mueve la vieja a `archive/` con aviso; el MOC la lista en "Reemplazadas" y el recall nunca. Un atado a código marca "a revisar" sin ocultar. Sin migración: un comando a mano archiva seeds sin lecturas en 60 días.
 - [Oráculo de fidelidad del compresor](issues/06-oraculo-de-fidelidad.md) — Haiku responde por API una batería de 200 preguntas exactas, de ruteo y de reglas. Un gate final de 10 tareas reales corre con `claude -p`. El piso es una retención de 0.965 o más, 100% en guardrails y cero regresiones en tareas.
-- [Compresor de arranque](issues/09-compresor-de-arranque.md) — ECC pesa ~16.5k, no 43k. Palancas: `user-invocable-only` en skills sin uso, SkillReducer en skills propias, cuatro MCP apagados y reescritura de los `.md`. Los hooks quedan. El estimado da ~54.7k, arriba de la meta de 52k.
+- [Compresor de arranque](issues/09-compresor-de-arranque.md) — ECC pesa ~16.5k, no 43k. Palancas: `user-invocable-only` en skills sin uso, SkillReducer en skills propias, cuatro MCP apagados y reescritura de los `.md`. Los hooks quedan. El estimado da ~54.7k, y el usuario bajó la meta de 52k a 55k.
 
 ## Not yet specified
 
-- Nada queda en la niebla. La spec lleva las preguntas abiertas a su sección "Riesgos y preguntas abiertas": la meta de 52k, el valor `user-invocable-only` y dónde corre el compresor.
+- Nada queda en la niebla. La spec lleva las preguntas abiertas a su sección "Riesgos y preguntas abiertas": la meta de 55k, el valor `user-invocable-only` y dónde corre el compresor.
 - Limpieza de restos, vista al pasar y fuera de la spec: `vault/moc/sin-proyecto.md` y `_gen_moc_PROTOTYPE.py` linkean al lexicon borrado. El README del vault nombra carpetas que no existen.
 
 ## Out of scope

@@ -16,5 +16,6 @@ Resuelto con el usuario el 2026-11-26 en un grilling. Captura completa: `vault/b
 - La supersesión vive en `mmorch/vault.py` de este repo, como mantenimiento.
 - El compresor vive en Root, como pieza nueva.
 - El compresor cubre solo el contexto de arranque. El compresor de notas queda fuera de alcance.
-- El compresor está listo con un arranque medido de 52k tokens o menos, sobre el piso de fidelidad.
+- El compresor está listo con un arranque medido de 55k tokens o menos, sobre el piso de fidelidad.
+- La meta era 52k. El usuario la bajó a 55k el 2026-11-26, porque 52k pedía un recorte fuera de lo medido ("Sí, 55k").
 - La supersesión está lista cuando un test determinista de pares pasa en el 100%: el recall nunca devuelve una nota reemplazada.
