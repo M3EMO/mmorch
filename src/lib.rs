@@ -811,6 +811,38 @@ fn colab_importar(json: bool, pedido: colab_calibra::PedidoImportar) -> Result<(
     Ok(())
 }
 
+/// `colab importar --corre`: revisa la vuelta de una tarea, la importa si entra e imprime el resumen.
+/// El resumen no trae nombres de tests ni nada de `oculto/`.
+fn colab_importar_corre(json: bool, pedido: colab_corre::PedidoImportarCorre) -> Result<(), Error> {
+    let resumen = colab_corre::importar_corre_cli(pedido)?;
+    if json {
+        println!("{}", serde_json::to_string(&resumen)?);
+        return Ok(());
+    }
+    let clase = match resumen.clase {
+        colab_corre::ClaseCorrida::Completa => "completa",
+        colab_corre::ClaseCorrida::Cortada => "cortada",
+    };
+    println!("clase: {clase}");
+    if let Some(veredicto) = &resumen.veredicto {
+        println!("veredicto: {veredicto}");
+    }
+    if let Some((pasa, total)) = resumen.contrato {
+        println!("contrato: {pasa}/{total}");
+    }
+    if let Some((pasa, total)) = resumen.oculto {
+        println!("oculto: {pasa}/{total}");
+    }
+    if let Some(minutos) = resumen.minutos {
+        println!("minutos: {minutos:.1}");
+    }
+    println!("gasto: {:.2} USD", resumen.gasto_usd);
+    if let Some(motivo) = &resumen.motivo {
+        println!("no entra: {motivo}");
+    }
+    Ok(())
+}
+
 /// `oraculo pendientes`: arma el paquete de los tests pendientes, o importa el junit de Colab.
 fn oraculo_pendientes(
     json: bool,
@@ -1104,16 +1136,44 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                     raiz_root,
                     sha,
                     ida,
+                    corre,
                 },
-        } => colab_importar(
-            cli.json,
-            colab_calibra::PedidoImportar {
-                archivo: archivo.clone(),
-                raiz_root: raiz_root.clone(),
-                sha: sha.clone(),
-                ida: ida.clone(),
-            },
-        ),
+        } => match corre {
+            Some(vuelta) => {
+                // Clap exige `--sha` e `--ida` con `--corre`. El `let` solo cubre un caso que no llega.
+                let (Some(sha), Some(ida)) = (sha.clone(), ida.clone()) else {
+                    return Err(
+                        oracle::ErrorOraculo::Uso("--corre exige --sha e --ida".into()).into(),
+                    );
+                };
+                colab_importar_corre(
+                    cli.json,
+                    colab_corre::PedidoImportarCorre {
+                        vuelta: vuelta.clone(),
+                        sha,
+                        ida,
+                        raiz_root: raiz_root.clone(),
+                    },
+                )
+            }
+            None => {
+                let Some(archivo) = archivo.clone() else {
+                    return Err(oracle::ErrorOraculo::Uso(
+                        "falta el paquete de vuelta: pásalo o usa --corre".into(),
+                    )
+                    .into());
+                };
+                colab_importar(
+                    cli.json,
+                    colab_calibra::PedidoImportar {
+                        archivo,
+                        raiz_root: raiz_root.clone(),
+                        sha: sha.clone(),
+                        ida: ida.clone(),
+                    },
+                )
+            }
+        },
         Comando::Colab {
             accion:
                 ColabAccion::Calibrar {

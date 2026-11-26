@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::borrado;
 use crate::colab_calibra::{
-    EXCLUIDOS, ROOT_PODMAN_BIN, Resumen, es_elf_x86_64, revisar_root_toml, sha256_hex,
-    version_de_rustc,
+    EXCLUIDOS, ROOT_PODMAN_BIN, Resumen, es_elf_x86_64, es_sha256_hex, revisar_root_toml,
+    sha256_hex, version_de_rustc,
 };
 use crate::config::root_home;
 use crate::corre::ErrorCorre;
@@ -23,6 +23,9 @@ use crate::corre::config::{ConfigCorrida, ruta_de};
 use crate::observe::ruta_eventos_en;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::pendientes::nombre_de_tarea_valido;
+use crate::tipos::{Estado, Evento, Fila, TipoEvento};
+use crate::track::{agregar_en, es_sin_veredicto};
+use serde_json::Value;
 
 /// Imagen con `claude` y `rustc` que lee el paquete.
 const IMAGEN_BUILDER: &str = "root-builder:1";
@@ -527,6 +530,535 @@ fn archivos_de(raiz: &Path) -> Result<BTreeMap<String, String>, ErrorOraculo> {
         .collect()
 }
 
+/// Pedido de `colab importar --corre`, tal como llega de la línea de comandos.
+#[derive(Debug, Clone)]
+pub struct PedidoImportarCorre {
+    /// Vuelta de una tarea: `vuelta-<tarea>.tar.gz`.
+    pub vuelta: PathBuf,
+    /// SHA-256 en hexadecimal de la vuelta, tal como lo dio quien la trajo.
+    pub sha: String,
+    /// Paquete de ida de `colab empaquetar --corre`. De ahí salen la pasada y el commit.
+    pub ida: PathBuf,
+    /// Repo de Root: de ahí sale el commit de la laptop. Por defecto, el directorio actual.
+    pub raiz_root: Option<PathBuf>,
+}
+
+/// Clase de una corrida de la vuelta. `Completa` tiene fila y entra a `runs.jsonl`.
+/// `Cortada` no tiene fila: solo suma su gasto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaseCorrida {
+    Completa,
+    Cortada,
+}
+
+/// Lo que devuelve `colab importar --corre`. No trae nombres de tests ni nada de `oculto/`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ResumenImportarCorre {
+    pub tarea: String,
+    pub pasada: u32,
+    /// Si la vuelta entró.
+    pub entro: bool,
+    /// Por qué no entró. `None` si entró.
+    pub motivo: Option<String>,
+    pub clase: ClaseCorrida,
+    /// Estado de la fila: `verde`, `rojo` o `sin_veredicto`. `None` si la vuelta no trae fila.
+    pub veredicto: Option<String>,
+    /// Pasan y total del contrato.
+    pub contrato: Option<(u32, u32)>,
+    /// Pasan y total del oculto.
+    pub oculto: Option<(u32, u32)>,
+    pub minutos: Option<f64>,
+    pub gasto_usd: f64,
+}
+
+/// Archivo de registro en ROOT_HOME: qué vueltas entraron, por pasada y tarea.
+const REGISTRO_CORRE: &str = "colab-corre.json";
+/// Prefijo del motivo de un `Gate` de cupo agotado. Lo escribe `corre::corrida`.
+const MOTIVO_CUPO: &str = "cupo agotado antes del rol";
+/// Origen que se marca en los eventos importados desde la vuelta.
+const ORIGEN_COLAB: &str = "colab";
+
+/// Una entrada del registro: la vuelta por su SHA, su clase y el id de su fila (`""` sin fila).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct EntradaRegistro {
+    sha: String,
+    clase: ClaseCorrida,
+    id: String,
+}
+
+/// Registro de `colab-corre.json`: `pasada` -> tarea -> entradas.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+struct Registro {
+    #[serde(default)]
+    pasadas: BTreeMap<String, BTreeMap<String, Vec<EntradaRegistro>>>,
+}
+
+/// Punto de entrada de `colab importar --corre`. Toma el commit de la laptop de `raiz_root` y el ROOT_HOME real.
+pub fn importar_corre_cli(
+    pedido: PedidoImportarCorre,
+) -> Result<ResumenImportarCorre, ErrorOraculo> {
+    let raiz_root = match &pedido.raiz_root {
+        Some(raiz) => raiz.clone(),
+        None => std::env::current_dir()
+            .map_err(|e| ErrorOraculo::Infra(format!("directorio actual: {e}")))?,
+    };
+    let commit = commit_de(&raiz_root)?;
+    importar_corre(&root_home(), &pedido, &commit)
+}
+
+/// Importa una vuelta de `corre` en `home`. Revisa todo antes de escribir. `commit_laptop` llega como argumento.
+/// Una vuelta que no entra no escribe nada en `home`; el resumen dice por qué.
+pub fn importar_corre(
+    home: &Path,
+    pedido: &PedidoImportarCorre,
+    commit_laptop: &str,
+) -> Result<ResumenImportarCorre, ErrorOraculo> {
+    if !es_sha256_hex(&pedido.sha) {
+        return Err(ErrorOraculo::Uso(format!(
+            "--sha quiere 64 caracteres hexadecimales, llegó {}",
+            pedido.sha
+        )));
+    }
+    verificar_sha_de_la_vuelta(&pedido.sha, &pedido.vuelta)?;
+
+    // Las carpetas de trabajo viven en ROOT_HOME/tmp y se borran al salir, también ante error.
+    let tmp = home.join(CARPETA_TMP);
+    fs::create_dir_all(&tmp)
+        .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", tmp.display())))?;
+    let id = std::process::id();
+    let ida_dir = tmp.join(format!("colab-importar-corre-{id}"));
+    let vuelta_dir = tmp.join(format!("colab-importar-corre-{id}-vuelta"));
+    for dir in [&ida_dir, &vuelta_dir] {
+        borrado::borrar_dir_dentro(&tmp, dir)
+            .map_err(|e| ErrorOraculo::Infra(format!("limpiar {}: {e}", dir.display())))?;
+        fs::create_dir_all(dir)
+            .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", dir.display())))?;
+    }
+    let resultado = importar_corre_desde(home, pedido, &ida_dir, &vuelta_dir, commit_laptop);
+    let limpieza_ida = borrado::borrar_dir_dentro(&tmp, &ida_dir);
+    let limpieza_vuelta = borrado::borrar_dir_dentro(&tmp, &vuelta_dir);
+    let resumen = resultado?;
+    limpieza_ida
+        .and(limpieza_vuelta)
+        .map_err(|e| ErrorOraculo::Infra(format!("borrar la carpeta de trabajo: {e}")))?;
+    Ok(resumen)
+}
+
+/// Cuerpo de `importar_corre`: extrae ida y vuelta, decide y escribe. Las carpetas de trabajo ya existen y están vacías.
+fn importar_corre_desde(
+    home: &Path,
+    pedido: &PedidoImportarCorre,
+    ida_dir: &Path,
+    vuelta_dir: &Path,
+    commit_laptop: &str,
+) -> Result<ResumenImportarCorre, ErrorOraculo> {
+    extraer_seguro(&pedido.ida, ida_dir)?;
+    let manifiesto = leer_manifiesto_de_ida(ida_dir)?;
+
+    extraer_seguro(&pedido.vuelta, vuelta_dir)?;
+    let meta: VueltaMeta = leer_json_de_vuelta(&vuelta_dir.join(VUELTA_META))?;
+    if !manifiesto.tareas.contains(&meta.tarea) {
+        return Err(ErrorOraculo::Uso(format!(
+            "la tarea {} no está en el paquete de ida: {}",
+            meta.tarea,
+            manifiesto.tareas.join(", ")
+        )));
+    }
+    if manifiesto.commit_root != commit_laptop {
+        return Err(ErrorOraculo::Uso(format!(
+            "el commit del paquete es {}; la laptop está en {}",
+            manifiesto.commit_root, commit_laptop
+        )));
+    }
+
+    let filas: Vec<Fila> = lineas_de_vuelta(&vuelta_dir.join(VUELTA_RUNS))?;
+    let de_la_tarea: Vec<&Fila> = filas.iter().filter(|f| f.tarea == meta.tarea).collect();
+    if de_la_tarea.len() > 1 {
+        return Err(ErrorOraculo::Uso(format!(
+            "la vuelta trae {} filas de {}; se espera una",
+            de_la_tarea.len(),
+            meta.tarea
+        )));
+    }
+    let fila = de_la_tarea.first().map(|f| (*f).clone());
+    let eventos: Vec<Evento> = lineas_de_vuelta(&vuelta_dir.join(VUELTA_EVENTOS))?;
+
+    let completa = fila.as_ref().is_some_and(|f| !es_sin_veredicto(f))
+        && meta.cortada.is_none()
+        && !cupo_agotado(&eventos);
+    let clase = if completa {
+        ClaseCorrida::Completa
+    } else {
+        ClaseCorrida::Cortada
+    };
+    let gasto_usd = match &fila {
+        Some(f) => f.resumen.usd_api,
+        None => eventos
+            .iter()
+            .filter(|ev| es_gasto(ev.tipo))
+            .fold(0.0, |total, ev| total + ev.cost_usd),
+    };
+    let mut resumen = ResumenImportarCorre {
+        tarea: meta.tarea.clone(),
+        pasada: manifiesto.pasada,
+        entro: false,
+        motivo: None,
+        clase,
+        veredicto: fila
+            .as_ref()
+            .map(|f| etiqueta_estado(f.veredicto.estado).to_string()),
+        contrato: fila
+            .as_ref()
+            .map(|f| (f.veredicto.contrato.pasa, f.veredicto.contrato.total)),
+        oculto: fila
+            .as_ref()
+            .map(|f| (f.veredicto.oculto.pasa, f.veredicto.oculto.total)),
+        minutos: fila.as_ref().map(|f| f.resumen.minutos),
+        gasto_usd,
+    };
+
+    let sha = pedido.sha.to_ascii_lowercase();
+    let mut registro = leer_registro(&home.join(REGISTRO_CORRE))?;
+    let previas: Vec<EntradaRegistro> = registro
+        .pasadas
+        .get(&manifiesto.pasada.to_string())
+        .and_then(|tareas| tareas.get(&meta.tarea))
+        .cloned()
+        .unwrap_or_default();
+    if previas.iter().any(|e| e.sha == sha) {
+        resumen.motivo = Some("ya estaba".into());
+        return Ok(resumen);
+    }
+    if clase == ClaseCorrida::Completa && previas.iter().any(|e| e.clase == ClaseCorrida::Completa)
+    {
+        resumen.motivo = Some("ya hay una corrida completa".into());
+        return Ok(resumen);
+    }
+
+    // Revisado todo: a partir de aquí se escribe.
+    let id = fila.as_ref().map(|f| f.id.clone()).unwrap_or_default();
+    if clase == ClaseCorrida::Completa {
+        if !id_de_carpeta_valido(&id) {
+            return Err(ErrorOraculo::Uso(format!(
+                "el id de la fila no sirve como nombre de carpeta: {id}"
+            )));
+        }
+        let origen = vuelta_dir.join(CARPETA_TRANSCRIPTS).join(&id);
+        if origen.is_dir() && home.join(CARPETA_TRANSCRIPTS).join(&id).exists() {
+            return Err(ErrorOraculo::Infra(format!(
+                "ya existe transcripts/{id} en la laptop; no se importó nada"
+            )));
+        }
+    }
+    let a_importar: Vec<Evento> = eventos
+        .into_iter()
+        .filter(|ev| clase == ClaseCorrida::Completa || es_gasto(ev.tipo))
+        .map(|mut ev| {
+            ev.extra
+                .insert("origen".into(), Value::String(ORIGEN_COLAB.into()));
+            ev
+        })
+        .collect();
+    agregar_eventos(home, &a_importar)?;
+    if let (ClaseCorrida::Completa, Some(fila)) = (clase, &fila) {
+        agregar_en(&home.join("runs.jsonl"), fila)
+            .map_err(|e| ErrorOraculo::Infra(format!("escribir runs.jsonl: {e}")))?;
+        copiar_transcripts(vuelta_dir, home, &id)?;
+    }
+    registro
+        .pasadas
+        .entry(manifiesto.pasada.to_string())
+        .or_default()
+        .entry(meta.tarea.clone())
+        .or_default()
+        .push(EntradaRegistro { sha, clase, id });
+    escribir_registro(home, &registro)?;
+    resumen.entro = true;
+    Ok(resumen)
+}
+
+/// Nombre del `vuelta.json` dentro de la vuelta.
+const VUELTA_META: &str = "vuelta.json";
+/// Filas nuevas de la vuelta.
+const VUELTA_RUNS: &str = "runs.jsonl";
+/// Eventos nuevos de la vuelta.
+const VUELTA_EVENTOS: &str = "eventos.jsonl";
+/// Carpeta de transcripts dentro de la vuelta y dentro de ROOT_HOME.
+const CARPETA_TRANSCRIPTS: &str = "transcripts";
+
+/// Lo que la importación lee de `vuelta.json`. Lo demás del archivo no hace falta.
+#[derive(Debug, Clone, Deserialize)]
+struct VueltaMeta {
+    tarea: String,
+    /// Motivo del corte: `plazo`, o `null` si la corrida terminó.
+    cortada: Option<String>,
+}
+
+/// Revisa el SHA-256 de la vuelta contra `--sha`. Sin coincidencia, la vuelta no se abre.
+fn verificar_sha_de_la_vuelta(esperado: &str, vuelta: &Path) -> Result<(), ErrorOraculo> {
+    if !vuelta.is_file() {
+        return Err(ErrorOraculo::Uso(format!(
+            "no existe la vuelta {}",
+            vuelta.display()
+        )));
+    }
+    let bytes = fs::read(vuelta)
+        .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", vuelta.display())))?;
+    let real = sha256_hex(&bytes);
+    if real == esperado.to_ascii_lowercase() {
+        return Ok(());
+    }
+    Err(ErrorOraculo::Infra(format!(
+        "el SHA-256 de la vuelta es {real}, --sha dio {esperado}; no se importó nada"
+    )))
+}
+
+/// Extrae un tar.gz en `dir` con el `tar` del sistema. Antes revisa la lista: rechaza enlaces
+/// y rutas absolutas o con `..`. El error nombra la entrada, nunca su contenido.
+fn extraer_seguro(archivo: &Path, dir: &Path) -> Result<(), ErrorOraculo> {
+    if !archivo.is_file() {
+        return Err(ErrorOraculo::Uso(format!(
+            "no existe el paquete {}",
+            archivo.display()
+        )));
+    }
+    let absoluto = std::path::absolute(archivo)
+        .map_err(|e| ErrorOraculo::Infra(format!("ruta del paquete: {e}")))?;
+    let nombres = tar_listado(&absoluto, &["-tzf"])?;
+    for nombre in &nombres {
+        if nombre.starts_with('/') || nombre.split('/').any(|c| c == "..") {
+            return Err(ErrorOraculo::Uso(format!(
+                "el paquete trae una ruta no permitida: {nombre}"
+            )));
+        }
+    }
+    // `-tvzf` da el tipo de cada entrada en el mismo orden que `-tzf`: `l` enlace, `h` enlace duro.
+    let detalle = tar_listado(&absoluto, &["-tvzf"])?;
+    for (nombre, linea) in nombres.iter().zip(&detalle) {
+        if linea.starts_with('l') || linea.starts_with('h') {
+            return Err(ErrorOraculo::Uso(format!(
+                "el paquete trae un enlace: {nombre}; no se importa"
+            )));
+        }
+    }
+    let salida = Command::new("tar")
+        .arg("-xzf")
+        .arg(&absoluto)
+        .arg("-C")
+        .arg(dir)
+        .output()
+        .map_err(|e| ErrorOraculo::Infra(format!("correr tar: {e}")))?;
+    if !salida.status.success() {
+        return Err(ErrorOraculo::Uso(format!(
+            "no se pudo leer el paquete: {}",
+            String::from_utf8_lossy(&salida.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Líneas de `tar` con `modo` sobre `archivo`, sin líneas vacías.
+fn tar_listado(archivo: &Path, modo: &[&str]) -> Result<Vec<String>, ErrorOraculo> {
+    let salida = Command::new("tar")
+        .args(modo)
+        .arg(archivo)
+        .output()
+        .map_err(|e| ErrorOraculo::Infra(format!("correr tar: {e}")))?;
+    if !salida.status.success() {
+        return Err(ErrorOraculo::Uso(format!(
+            "no se pudo leer el paquete: {}",
+            String::from_utf8_lossy(&salida.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&salida.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Lee `manifiesto.json` de la ida. Debe ser un manifiesto de `corre`.
+fn leer_manifiesto_de_ida(ida_dir: &Path) -> Result<ManifiestoCorre, ErrorOraculo> {
+    let ruta = ida_dir.join(MANIFIESTO);
+    let texto = fs::read_to_string(&ruta)
+        .map_err(|_| ErrorOraculo::Uso("falta manifiesto.json en el paquete de ida".into()))?;
+    let valor: Value = serde_json::from_str(&texto)
+        .map_err(|e| ErrorOraculo::Uso(format!("manifiesto.json ilegible: {e}")))?;
+    if valor.get("tipo").and_then(Value::as_str) != Some("corre") {
+        return Err(ErrorOraculo::Uso(
+            "el paquete de ida no es de corre (tipo distinto de \"corre\")".into(),
+        ));
+    }
+    serde_json::from_value(valor)
+        .map_err(|e| ErrorOraculo::Uso(format!("manifiesto.json ilegible: {e}")))
+}
+
+/// Lee un JSON de la vuelta. Un archivo que falta o no parsea es error de uso.
+fn leer_json_de_vuelta<T: serde::de::DeserializeOwned>(ruta: &Path) -> Result<T, ErrorOraculo> {
+    let nombre = ruta
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let texto = fs::read_to_string(ruta)
+        .map_err(|_| ErrorOraculo::Uso(format!("falta {nombre} en la vuelta")))?;
+    serde_json::from_str(&texto).map_err(|e| ErrorOraculo::Uso(format!("{nombre} ilegible: {e}")))
+}
+
+/// Lee un `.jsonl` de la vuelta. Sin archivo, lista vacía. Una línea que no parsea es error de uso.
+fn lineas_de_vuelta<T: serde::de::DeserializeOwned>(ruta: &Path) -> Result<Vec<T>, ErrorOraculo> {
+    let texto = match fs::read_to_string(ruta) {
+        Ok(texto) => texto,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(ErrorOraculo::Infra(format!("leer {}: {e}", ruta.display()))),
+    };
+    let nombre = ruta
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    texto
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .enumerate()
+        .map(|(indice, linea)| {
+            serde_json::from_str(linea)
+                .map_err(|_| ErrorOraculo::Uso(format!("{nombre} línea {} ilegible", indice + 1)))
+        })
+        .collect()
+}
+
+/// Dice si hay un `Gate` de cupo agotado antes de un rol. Lo escribe `corre::corrida` en `extra.motivo`.
+fn cupo_agotado(eventos: &[Evento]) -> bool {
+    eventos.iter().any(|ev| {
+        ev.tipo == TipoEvento::Gate
+            && ev
+                .extra
+                .get("motivo")
+                .and_then(Value::as_str)
+                .is_some_and(|motivo| motivo.starts_with(MOTIVO_CUPO))
+    })
+}
+
+/// Dice si un tipo de evento es gasto de API de la vuelta: solo llamadas y reservas.
+fn es_gasto(tipo: TipoEvento) -> bool {
+    matches!(tipo, TipoEvento::Llamada | TipoEvento::Reserva)
+}
+
+/// Etiqueta de un estado de la fila, como se muestra en el resumen.
+fn etiqueta_estado(estado: Estado) -> &'static str {
+    match estado {
+        Estado::Verde => "verde",
+        Estado::Rojo => "rojo",
+        Estado::SinVeredicto => "sin_veredicto",
+    }
+}
+
+/// Dice si un id de fila sirve como nombre de carpeta: no vacío y sin separadores ni `..`.
+fn id_de_carpeta_valido(id: &str) -> bool {
+    !id.is_empty() && !id.contains(['/', '\\']) && id != "." && id != ".."
+}
+
+/// Clave de un evento para no duplicarlo: corrida, `extra.reserva` (o ausente) y `ts`.
+type ClaveEvento = (String, Option<String>, u64);
+
+fn clave_de_evento(ev: &Evento) -> ClaveEvento {
+    (
+        ev.corrida.clone(),
+        ev.extra.get("reserva").map(Value::to_string),
+        ev.ts.to_bits(),
+    )
+}
+
+/// Eventos de `nuevos` que `existentes` no tiene. Una clave repetida cuenta una vez.
+fn pendientes_de(existentes: &[Evento], nuevos: &[Evento]) -> Vec<Evento> {
+    let mut vistos: BTreeSet<ClaveEvento> = existentes.iter().map(clave_de_evento).collect();
+    nuevos
+        .iter()
+        .filter(|ev| vistos.insert(clave_de_evento(ev)))
+        .cloned()
+        .collect()
+}
+
+/// Agrega a `eventos.jsonl` de `home` los eventos que faltan. Devuelve cuántos agregó.
+/// Lee y escribe bajo el mismo lock, como `agregar_gasto`.
+fn agregar_eventos(home: &Path, eventos: &[Evento]) -> Result<usize, ErrorOraculo> {
+    let ruta = ruta_eventos_en(home);
+    crate::observe::uso::con_eventos_bloqueados(
+        &ruta,
+        |existentes, log| -> Result<usize, crate::observe::ErrorObserve> {
+            let pendientes = pendientes_de(existentes, eventos);
+            for ev in &pendientes {
+                let linea = serde_json::to_string(ev)?;
+                log.agregar(&linea, crate::observe::jsonl::UMBRAL_POR_DEFECTO)?;
+            }
+            Ok(pendientes.len())
+        },
+    )
+    .map_err(|e| ErrorOraculo::Infra(format!("escribir eventos en eventos.jsonl: {e}")))
+}
+
+/// Copia `transcripts/<id>` de la vuelta a `home/transcripts/<id>`. Sin carpeta en la vuelta, no hace nada.
+/// La carpeta de destino no debe existir: `create_dir` la crea sola o falla.
+fn copiar_transcripts(vuelta_dir: &Path, home: &Path, id: &str) -> Result<(), ErrorOraculo> {
+    let origen = vuelta_dir.join(CARPETA_TRANSCRIPTS).join(id);
+    if !origen.is_dir() {
+        return Ok(());
+    }
+    let padre = home.join(CARPETA_TRANSCRIPTS);
+    fs::create_dir_all(&padre)
+        .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", padre.display())))?;
+    let destino = padre.join(id);
+    fs::create_dir(&destino)
+        .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", destino.display())))?;
+    copiar_carpeta(&origen, &destino)
+}
+
+/// Copia el contenido de `origen` a `destino`, en cualquier nivel. Un enlace no se copia.
+fn copiar_carpeta(origen: &Path, destino: &Path) -> Result<(), ErrorOraculo> {
+    let error = |e: io::Error| ErrorOraculo::Infra(format!("copiar {}: {e}", origen.display()));
+    fs::create_dir_all(destino)
+        .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", destino.display())))?;
+    for entrada in fs::read_dir(origen).map_err(error)? {
+        let entrada = entrada.map_err(error)?;
+        let ruta = entrada.path();
+        let tipo = entrada.file_type().map_err(error)?;
+        let destino_entrada = destino.join(entrada.file_name());
+        if tipo.is_dir() {
+            copiar_carpeta(&ruta, &destino_entrada)?;
+        } else if tipo.is_file() {
+            fs::copy(&ruta, &destino_entrada)
+                .map_err(|e| ErrorOraculo::Infra(format!("copiar {}: {e}", ruta.display())))?;
+        }
+    }
+    Ok(())
+}
+
+/// Lee `colab-corre.json`. Sin archivo, el registro está vacío. Un archivo ilegible es error de infraestructura.
+fn leer_registro(ruta: &Path) -> Result<Registro, ErrorOraculo> {
+    match fs::read_to_string(ruta) {
+        Ok(texto) => serde_json::from_str(&texto)
+            .map_err(|e| ErrorOraculo::Infra(format!("{REGISTRO_CORRE} ilegible: {e}"))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Registro::default()),
+        Err(e) => Err(ErrorOraculo::Infra(format!("leer {}: {e}", ruta.display()))),
+    }
+}
+
+/// Escribe `colab-corre.json` de forma atómica: primero un temporal en el mismo directorio, luego rename.
+fn escribir_registro(home: &Path, registro: &Registro) -> Result<(), ErrorOraculo> {
+    let ruta = home.join(REGISTRO_CORRE);
+    let temporal = home.join(format!("{REGISTRO_CORRE}.{}.tmp", std::process::id()));
+    let json = serde_json::to_string_pretty(registro)
+        .map_err(|e| ErrorOraculo::Infra(format!("serializar {REGISTRO_CORRE}: {e}")))?;
+    fs::write(&temporal, format!("{json}\n"))
+        .map_err(|e| ErrorOraculo::Infra(format!("escribir {}: {e}", temporal.display())))?;
+    fs::rename(&temporal, &ruta).map_err(|e| {
+        let _ = fs::remove_file(&temporal);
+        ErrorOraculo::Infra(format!("cerrar {}: {e}", ruta.display()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,6 +1442,526 @@ mod tests {
         fs::write(&e.binario, b"texto plano, no es un binario").expect("escribe");
         let mensaje = uso(e.empaqueta(&e.pedido(&["tarea-a"])));
         assert!(mensaje.contains("ELF"), "{mensaje}");
+    }
+
+    // ----- colab importar --corre -----
+
+    /// Commit de la laptop en los tests de importación. Es el que trae el `Escenario`.
+    const COMMIT_LAPTOP: &str = "abc123";
+
+    /// Un momento posterior al corte de S2: los eventos de gasto de los tests cuentan para `gasto_s2`.
+    fn ts_de_prueba() -> f64 {
+        crate::colab_calibra::corte_s2_epoch(crate::colab_calibra::CORTE_S2).expect("corte")
+            + 3600.0
+    }
+
+    /// Fila de la vuelta, con contrato 3/4, oculto 5/6, 12.5 minutos y 0.25 USD de API.
+    fn fila(id: &str, tarea: &str, estado: crate::tipos::Estado) -> Fila {
+        Fila {
+            id: id.into(),
+            tarea: tarea.into(),
+            ts: ts_de_prueba(),
+            veredicto: crate::tipos::Veredicto {
+                estado,
+                contrato: crate::tipos::Conteo { pasa: 3, total: 4 },
+                oculto: crate::tipos::Conteo { pasa: 5, total: 6 },
+                ..crate::tipos::Veredicto::default()
+            },
+            resumen: crate::tipos::Resumen {
+                usd_api: 0.25,
+                minutos: 12.5,
+                ..Default::default()
+            },
+            ..Fila::default()
+        }
+    }
+
+    /// Llamada de API con costo `costo`, en la corrida `corrida`, `desfase` segundos después del corte.
+    fn gasto(corrida: &str, desfase: f64, costo: f64) -> Evento {
+        Evento {
+            ts: ts_de_prueba() + desfase,
+            corrida: corrida.into(),
+            tipo: crate::tipos::TipoEvento::Llamada,
+            via: Some(crate::tipos::Via::Api),
+            cost_usd: costo,
+            ..Evento::default()
+        }
+    }
+
+    /// Evento que no es gasto.
+    fn sesion(corrida: &str, desfase: f64) -> Evento {
+        Evento {
+            ts: ts_de_prueba() + desfase,
+            corrida: corrida.into(),
+            tipo: crate::tipos::TipoEvento::Sesion,
+            ..Evento::default()
+        }
+    }
+
+    /// `Gate` de cupo agotado antes de un rol, con el motivo que escribe `corre::corrida`.
+    fn gate_de_cupo(corrida: &str) -> Evento {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "motivo".into(),
+            serde_json::json!("cupo agotado antes del rol construye, vuelta 1: va por api"),
+        );
+        Evento {
+            ts: ts_de_prueba() + 5.0,
+            corrida: corrida.into(),
+            fase: "rol".into(),
+            tipo: crate::tipos::TipoEvento::Gate,
+            extra,
+            ..Evento::default()
+        }
+    }
+
+    /// Una línea de JSON por elemento.
+    fn lineas<T: Serialize>(items: &[T]) -> String {
+        items
+            .iter()
+            .map(|i| format!("{}\n", serde_json::to_string(i).expect("serializa")))
+            .collect()
+    }
+
+    /// Arma una vuelta falsa en `dir` con `tar`: `vuelta.json`, `runs.jsonl`, `eventos.jsonl`,
+    /// `salida.txt`, los transcripts y los enlaces simbólicos pedidos (nombre, destino).
+    fn armar_vuelta(
+        dir: &Path,
+        nombre: &str,
+        meta: &str,
+        runs: &str,
+        eventos: &str,
+        transcripts: &[(&str, &str)],
+        enlaces: &[(&str, &str)],
+    ) -> PathBuf {
+        let raiz = dir.join(format!("stage-{nombre}"));
+        fs::create_dir_all(&raiz).expect("dir");
+        fs::write(raiz.join("vuelta.json"), meta).expect("escribe");
+        fs::write(raiz.join("runs.jsonl"), runs).expect("escribe");
+        fs::write(raiz.join("eventos.jsonl"), eventos).expect("escribe");
+        fs::write(raiz.join("salida.txt"), "salida\n").expect("escribe");
+        for (relativa, texto) in transcripts {
+            let ruta = raiz.join("transcripts").join(relativa);
+            fs::create_dir_all(ruta.parent().expect("padre")).expect("dir");
+            fs::write(ruta, texto).expect("escribe");
+        }
+        for (nombre_enlace, destino) in enlaces {
+            symlink(destino, raiz.join(nombre_enlace)).expect("enlace");
+        }
+        let salida = dir.join(nombre);
+        let estado = Command::new("tar")
+            .arg("-czf")
+            .arg(&salida)
+            .arg("-C")
+            .arg(&raiz)
+            .arg(".")
+            .status()
+            .expect("tar");
+        assert!(estado.success(), "tar falló");
+        salida
+    }
+
+    /// Un ROOT_HOME de importación, el paquete de ida de `corre` (tareas a y b, pasada 2) y
+    /// una carpeta para las vueltas.
+    struct Importa {
+        /// Dueño de las carpetas del paquete de ida: vive mientras viva `Importa`.
+        _origen: Escenario,
+        ida: PathBuf,
+        destino: tempfile::TempDir,
+        vueltas: tempfile::TempDir,
+    }
+
+    impl Importa {
+        fn nuevo() -> Self {
+            let origen = Escenario::nuevo();
+            let ida = origen
+                .empaqueta(&origen.pedido(&["tarea-a", "tarea-b"]))
+                .expect("empaqueta la ida")
+                .salida;
+            Importa {
+                _origen: origen,
+                ida,
+                destino: tempfile::tempdir().expect("destino"),
+                vueltas: tempfile::tempdir().expect("vueltas"),
+            }
+        }
+
+        fn home(&self) -> &Path {
+            self.destino.path()
+        }
+
+        /// Vuelta de `tarea` con las filas, eventos y transcripts dados. `cortada` es el motivo del corte.
+        fn vuelta(
+            &self,
+            nombre: &str,
+            tarea: &str,
+            cortada: Option<&str>,
+            filas: &[Fila],
+            eventos: &[Evento],
+            transcripts: &[(&str, &str)],
+        ) -> PathBuf {
+            let meta = serde_json::json!({
+                "tarea": tarea,
+                "codigo": 0,
+                "cortada": cortada,
+                "inicio": 1.0,
+                "fin": 2.0,
+            })
+            .to_string();
+            armar_vuelta(
+                self.vueltas.path(),
+                nombre,
+                &meta,
+                &lineas(filas),
+                &lineas(eventos),
+                transcripts,
+                &[],
+            )
+        }
+
+        /// Pedido con el SHA real de la vuelta.
+        fn pedido_de(&self, vuelta: &Path) -> PedidoImportarCorre {
+            PedidoImportarCorre {
+                vuelta: vuelta.to_path_buf(),
+                sha: sha_de(vuelta),
+                ida: self.ida.clone(),
+                raiz_root: None,
+            }
+        }
+
+        fn importa(
+            &self,
+            pedido: &PedidoImportarCorre,
+        ) -> Result<ResumenImportarCorre, ErrorOraculo> {
+            importar_corre(self.home(), pedido, COMMIT_LAPTOP)
+        }
+    }
+
+    /// SHA-256 real del archivo.
+    fn sha_de(ruta: &Path) -> String {
+        crate::colab_calibra::sha256_hex(&fs::read(ruta).expect("lee la vuelta"))
+    }
+
+    /// Todos los archivos bajo `home`, con su contenido. Las carpetas vacías no cuentan.
+    fn instantanea(home: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn recorre(raiz: &Path, dir: &Path, salida: &mut BTreeMap<String, Vec<u8>>) {
+            let Ok(entradas) = fs::read_dir(dir) else {
+                return;
+            };
+            for entrada in entradas {
+                let ruta = entrada.expect("entrada").path();
+                if ruta.is_dir() {
+                    recorre(raiz, &ruta, salida);
+                } else {
+                    let relativa = ruta.strip_prefix(raiz).expect("prefijo");
+                    let clave = relativa.to_string_lossy().into_owned();
+                    salida.insert(clave, fs::read(&ruta).expect("lee"));
+                }
+            }
+        }
+        let mut salida = BTreeMap::new();
+        recorre(home, home, &mut salida);
+        salida
+    }
+
+    /// Ids de las filas de `runs.jsonl` de `home`. Sin archivo, lista vacía.
+    fn ids_de_runs(home: &Path) -> Vec<String> {
+        fs::read_to_string(home.join("runs.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str::<Fila>(l).expect("fila").id)
+            .collect()
+    }
+
+    /// Eventos de `eventos.jsonl` de `home`.
+    fn eventos_de(home: &Path) -> Vec<Evento> {
+        fs::read_to_string(home.join("eventos.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str::<Evento>(l).expect("evento"))
+            .collect()
+    }
+
+    /// Registro de `colab-corre.json` de `home`.
+    fn registro_de(home: &Path) -> Registro {
+        let texto = fs::read_to_string(home.join(REGISTRO_CORRE)).expect("hay registro");
+        serde_json::from_str(&texto).expect("registro válido")
+    }
+
+    #[test]
+    fn importar_corre_vuelta_completa_entra_y_el_registro_la_marca() {
+        let i = Importa::nuevo();
+        let vuelta = i.vuelta(
+            "v1.tar.gz",
+            "tarea-a",
+            None,
+            &[fila("f1", "tarea-a", crate::tipos::Estado::Verde)],
+            &[gasto("c1", 10.0, 0.5)],
+            &[("f1/1-construye.jsonl", "{}\n")],
+        );
+        let r = i.importa(&i.pedido_de(&vuelta)).expect("importa");
+        assert!(r.entro, "{r:?}");
+        assert_eq!(r.motivo, None);
+        assert_eq!(r.clase, ClaseCorrida::Completa);
+        assert_eq!(r.veredicto.as_deref(), Some("verde"));
+        assert_eq!(r.contrato, Some((3, 4)));
+        assert_eq!(r.oculto, Some((5, 6)));
+        assert_eq!(r.minutos, Some(12.5));
+        assert_eq!(ids_de_runs(i.home()), vec!["f1".to_string()]);
+        assert!(i.home().join("transcripts/f1/1-construye.jsonl").is_file());
+        let registro = registro_de(i.home());
+        let entradas = &registro.pasadas["2"]["tarea-a"];
+        assert_eq!(entradas.len(), 1, "{entradas:?}");
+        assert_eq!(entradas[0].clase, ClaseCorrida::Completa);
+        assert_eq!(entradas[0].id, "f1");
+        assert_eq!(entradas[0].sha, sha_de(&vuelta));
+        let eventos = eventos_de(i.home());
+        assert_eq!(eventos.len(), 1, "{eventos:?}");
+        assert_eq!(
+            eventos[0].extra.get("origen"),
+            Some(&serde_json::json!("colab"))
+        );
+    }
+
+    #[test]
+    fn importar_corre_segunda_completa_misma_tarea_y_pasada_no_entra() {
+        let i = Importa::nuevo();
+        let v1 = i.vuelta(
+            "v1.tar.gz",
+            "tarea-a",
+            None,
+            &[fila("f1", "tarea-a", crate::tipos::Estado::Verde)],
+            &[],
+            &[],
+        );
+        i.importa(&i.pedido_de(&v1)).expect("la primera entra");
+        let antes = instantanea(i.home());
+        let v2 = i.vuelta(
+            "v2.tar.gz",
+            "tarea-a",
+            None,
+            &[fila("f2", "tarea-a", crate::tipos::Estado::Rojo)],
+            &[gasto("c2", 20.0, 0.1)],
+            &[],
+        );
+        let r = i.importa(&i.pedido_de(&v2)).expect("la segunda no falla");
+        assert!(!r.entro, "{r:?}");
+        assert_eq!(r.motivo.as_deref(), Some("ya hay una corrida completa"));
+        assert_eq!(r.clase, ClaseCorrida::Completa);
+        assert_eq!(ids_de_runs(i.home()), vec!["f1".to_string()]);
+        assert_eq!(instantanea(i.home()), antes, "ROOT_HOME no cambia");
+    }
+
+    #[test]
+    fn importar_corre_cortada_y_despues_completa_entran_las_dos_y_solo_cuenta_la_completa() {
+        let i = Importa::nuevo();
+        let cortada = i.vuelta(
+            "c.tar.gz",
+            "tarea-a",
+            Some("plazo"),
+            &[],
+            &[gasto("c1", 10.0, 0.5), sesion("c1", 11.0)],
+            &[("c1/1-construye.jsonl", "{}\n")],
+        );
+        let r1 = i.importa(&i.pedido_de(&cortada)).expect("la cortada");
+        assert!(r1.entro, "{r1:?}");
+        assert_eq!(r1.clase, ClaseCorrida::Cortada);
+        assert_eq!(r1.veredicto, None);
+        assert!(
+            !i.home().join("transcripts").exists(),
+            "una cortada no copia transcripts"
+        );
+        let completa = i.vuelta(
+            "f.tar.gz",
+            "tarea-a",
+            None,
+            &[fila("f1", "tarea-a", crate::tipos::Estado::Verde)],
+            &[gasto("c2", 20.0, 0.25), sesion("c2", 21.0)],
+            &[("f1/1-construye.jsonl", "{}\n")],
+        );
+        let r2 = i.importa(&i.pedido_de(&completa)).expect("la completa");
+        assert!(r2.entro, "{r2:?}");
+        assert_eq!(r2.clase, ClaseCorrida::Completa);
+        assert_eq!(ids_de_runs(i.home()), vec!["f1".to_string()]);
+        let registro = registro_de(i.home());
+        let clases: Vec<ClaseCorrida> = registro.pasadas["2"]["tarea-a"]
+            .iter()
+            .map(|e| e.clase)
+            .collect();
+        assert_eq!(clases, vec![ClaseCorrida::Cortada, ClaseCorrida::Completa]);
+        // La cortada trae solo su gasto; la completa trae sus dos eventos.
+        assert_eq!(eventos_de(i.home()).len(), 3);
+    }
+
+    #[test]
+    fn importar_corre_gasto_de_una_cortada_entra_y_sube_el_gasto_s2() {
+        let i = Importa::nuevo();
+        let antes = crate::colab_calibra::gasto_s2(i.home()).expect("gasto antes");
+        let cortada = i.vuelta(
+            "c.tar.gz",
+            "tarea-a",
+            Some("plazo"),
+            &[],
+            &[gasto("c1", 10.0, 1.5)],
+            &[],
+        );
+        let r = i.importa(&i.pedido_de(&cortada)).expect("importa");
+        assert!(r.entro, "{r:?}");
+        assert_eq!(r.clase, ClaseCorrida::Cortada);
+        assert!((r.gasto_usd - 1.5).abs() < 1e-9, "{}", r.gasto_usd);
+        let despues = crate::colab_calibra::gasto_s2(i.home()).expect("gasto después");
+        assert!(
+            (despues.desde_corte_usd - antes.desde_corte_usd - 1.5).abs() < 1e-9,
+            "{despues:?}"
+        );
+        assert!((despues.total_usd - antes.total_usd - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn importar_corre_sha_distinto_no_entra_y_no_escribe_nada() {
+        let i = Importa::nuevo();
+        let vuelta = i.vuelta(
+            "v.tar.gz",
+            "tarea-a",
+            None,
+            &[fila("f1", "tarea-a", crate::tipos::Estado::Verde)],
+            &[gasto("c1", 10.0, 0.5)],
+            &[("f1/1-construye.jsonl", "{}\n")],
+        );
+        let antes = instantanea(i.home());
+        let otro = "0".repeat(64);
+        let pedido = PedidoImportarCorre {
+            sha: otro.clone(),
+            ..i.pedido_de(&vuelta)
+        };
+        match i.importa(&pedido) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("no se importó nada"), "{mensaje}");
+                assert!(mensaje.contains(&otro), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra, llegó {otro:?}"),
+        }
+        assert_eq!(instantanea(i.home()), antes);
+        let pedido = PedidoImportarCorre {
+            sha: "no-hex".into(),
+            ..i.pedido_de(&vuelta)
+        };
+        assert!(matches!(i.importa(&pedido), Err(ErrorOraculo::Uso(_))));
+        assert_eq!(instantanea(i.home()), antes);
+    }
+
+    #[test]
+    fn importar_corre_tarea_fuera_del_manifiesto_no_entra() {
+        let i = Importa::nuevo();
+        let vuelta = i.vuelta(
+            "v.tar.gz",
+            "tarea-c",
+            None,
+            &[fila("f1", "tarea-c", crate::tipos::Estado::Verde)],
+            &[],
+            &[],
+        );
+        let antes = instantanea(i.home());
+        match i.importa(&i.pedido_de(&vuelta)) {
+            Err(ErrorOraculo::Uso(mensaje)) => assert!(mensaje.contains("tarea-c"), "{mensaje}"),
+            otro => panic!("se esperaba Uso, llegó {otro:?}"),
+        }
+        assert_eq!(instantanea(i.home()), antes);
+    }
+
+    #[test]
+    fn importar_corre_la_misma_vuelta_dos_veces_ya_estaba() {
+        let i = Importa::nuevo();
+        let vuelta = i.vuelta(
+            "v.tar.gz",
+            "tarea-a",
+            None,
+            &[fila("f1", "tarea-a", crate::tipos::Estado::Verde)],
+            &[gasto("c1", 10.0, 0.5)],
+            &[],
+        );
+        let pedido = i.pedido_de(&vuelta);
+        assert!(i.importa(&pedido).expect("la primera").entro);
+        let antes = instantanea(i.home());
+        let r = i.importa(&pedido).expect("la segunda no falla");
+        assert!(!r.entro, "{r:?}");
+        assert_eq!(r.motivo.as_deref(), Some("ya estaba"));
+        assert_eq!(instantanea(i.home()), antes);
+    }
+
+    #[test]
+    fn importar_corre_commit_distinto_no_entra() {
+        let i = Importa::nuevo();
+        let vuelta = i.vuelta(
+            "v.tar.gz",
+            "tarea-a",
+            None,
+            &[fila("f1", "tarea-a", crate::tipos::Estado::Verde)],
+            &[],
+            &[],
+        );
+        let antes = instantanea(i.home());
+        match importar_corre(i.home(), &i.pedido_de(&vuelta), "otro999") {
+            Err(ErrorOraculo::Uso(mensaje)) => {
+                assert!(mensaje.contains(COMMIT_LAPTOP), "{mensaje}");
+                assert!(mensaje.contains("otro999"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Uso, llegó {otro:?}"),
+        }
+        assert_eq!(instantanea(i.home()), antes);
+    }
+
+    #[test]
+    fn importar_corre_no_imprime_nombres_de_tests() {
+        let i = Importa::nuevo();
+        let mut f = fila("f1", "tarea-a", crate::tipos::Estado::Rojo);
+        f.veredicto.inestables = vec!["oculto:test_secreto_zeta_42".into()];
+        let vuelta = i.vuelta("v.tar.gz", "tarea-a", None, &[f], &[], &[]);
+        let r = i.importa(&i.pedido_de(&vuelta)).expect("importa");
+        let texto = serde_json::to_string(&r).expect("json");
+        assert!(!texto.contains("test_secreto_zeta_42"), "{texto}");
+        assert!(!texto.contains("oculto:"), "{texto}");
+        assert!(!texto.contains("oculto/"), "{texto}");
+    }
+
+    #[test]
+    fn importar_corre_gate_de_cupo_hace_cortada_aunque_haya_fila() {
+        let i = Importa::nuevo();
+        let vuelta = i.vuelta(
+            "g.tar.gz",
+            "tarea-a",
+            None,
+            &[fila("f1", "tarea-a", crate::tipos::Estado::Verde)],
+            &[gate_de_cupo("c1")],
+            &[("f1/1-construye.jsonl", "{}\n")],
+        );
+        let r = i.importa(&i.pedido_de(&vuelta)).expect("importa");
+        assert!(r.entro, "{r:?}");
+        assert_eq!(r.clase, ClaseCorrida::Cortada);
+        assert_eq!(r.veredicto.as_deref(), Some("verde"));
+        assert!(ids_de_runs(i.home()).is_empty());
+        assert!(!i.home().join("transcripts").exists());
+    }
+
+    #[test]
+    fn importar_corre_vuelta_con_enlace_simbolico_da_uso() {
+        let i = Importa::nuevo();
+        let meta =
+            serde_json::json!({"tarea": "tarea-a", "codigo": 0, "cortada": null}).to_string();
+        let vuelta = armar_vuelta(
+            i.vueltas.path(),
+            "e.tar.gz",
+            &meta,
+            "",
+            "",
+            &[],
+            &[("liga", "/etc/hosts")],
+        );
+        match i.importa(&i.pedido_de(&vuelta)) {
+            Err(ErrorOraculo::Uso(mensaje)) => assert!(mensaje.contains("liga"), "{mensaje}"),
+            otro => panic!("se esperaba Uso, llegó {otro:?}"),
+        }
+        assert!(instantanea(i.home()).is_empty());
     }
 }
 

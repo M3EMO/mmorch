@@ -252,8 +252,9 @@ pub enum ColabAccion {
     },
     /// Importa la vuelta de una calibración de Colab: revisa el paquete y agrega sus filas.
     Importar {
-        /// Paquete `.tar.gz` de vuelta que trajo Colab.
-        archivo: PathBuf,
+        /// Paquete `.tar.gz` de vuelta que trajo Colab. Sin `--corre`, es obligatorio.
+        #[arg(required_unless_present = "corre", conflicts_with = "corre")]
+        archivo: Option<PathBuf>,
         /// Repo de Root: de ahí sale el commit de la laptop. Por defecto, el directorio actual.
         #[arg(long)]
         raiz_root: Option<PathBuf>,
@@ -263,6 +264,9 @@ pub enum ColabAccion {
         /// Paquete de ida. Con él, el archivo es la vuelta cruda del runtime. Exige `--sha`.
         #[arg(long, requires = "sha")]
         ida: Option<PathBuf>,
+        /// Vuelta de una tarea de `corre` (`vuelta-<tarea>.tar.gz`). Exige `--sha` e `--ida`.
+        #[arg(long, requires_all = ["sha", "ida"])]
+        corre: Option<PathBuf>,
     },
     /// Calibra en Colab: corre cada paquete de `colab empaquetar` en su runtime de CPU e importa la vuelta.
     Calibrar {
@@ -1008,6 +1012,73 @@ mod tests {
                 accion: ColabAccion::Calibrar { sin_stop, .. },
             } => assert!(!sin_stop),
             otro => panic!("se esperaba colab calibrar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_importar_corre_con_sha_e_ida_parsea() {
+        let cli = Cli::try_parse_from([
+            "r00t", "colab", "importar", "--corre", "v.tar.gz", "--sha", "abc", "--ida", "p.tar.gz",
+        ])
+        .expect("colab importar --corre con --sha e --ida parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion:
+                    ColabAccion::Importar {
+                        archivo,
+                        corre,
+                        sha,
+                        ida,
+                        ..
+                    },
+            } => {
+                assert!(archivo.is_none());
+                assert_eq!(corre, Some(PathBuf::from("v.tar.gz")));
+                assert_eq!(sha.as_deref(), Some("abc"));
+                assert_eq!(ida, Some(PathBuf::from("p.tar.gz")));
+            }
+            otro => panic!("se esperaba colab importar --corre, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn colab_importar_corre_sin_ida_falla() {
+        let error = Cli::try_parse_from([
+            "r00t", "colab", "importar", "--corre", "v.tar.gz", "--sha", "abc",
+        ])
+        .expect_err("--corre sin --ida debe fallar");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn colab_importar_corre_con_paquete_posicional_falla() {
+        let error = Cli::try_parse_from([
+            "r00t",
+            "colab",
+            "importar",
+            "paquete.tar.gz",
+            "--corre",
+            "v.tar.gz",
+            "--sha",
+            "abc",
+            "--ida",
+            "p.tar.gz",
+        ])
+        .expect_err("el paquete posicional y --corre no van juntos");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn colab_importar_sin_corre_parsea_el_paquete_como_siempre() {
+        let cli = Cli::try_parse_from(importar_base()).expect("colab importar parsea");
+        match cli.comando {
+            Comando::Colab {
+                accion: ColabAccion::Importar { archivo, corre, .. },
+            } => {
+                assert_eq!(archivo, Some(PathBuf::from("paquete.tar.gz")));
+                assert!(corre.is_none());
+            }
+            otro => panic!("se esperaba colab importar, llegó {otro:?}"),
         }
     }
 
