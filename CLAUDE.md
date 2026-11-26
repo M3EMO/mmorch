@@ -2,8 +2,14 @@
 
 # mmorch — Orquestacion Multi-Modelo
 
-(Movido desde ~/.claude/CLAUDE.md global el 2026-06-11. Se carga automaticamente
-al trabajar en este directorio. La regla de ruteo corta vive en el CLAUDE.md global.)
+Root reemplaza a mmorch (decision del usuario 2026-10-31). Una idea nueva de banco,
+oraculo o ruteo va a Root, no a mmorch. Este repo solo recibe mantenimiento.
+
+## Invariantes medidos (vinieron del CLAUDE.md global el 2026-11-26)
+- **Checkeable → oraculo, nunca un LLM.** `checkers.py`, no un juez: el LLM-juez refuta en falso ~74% en checkeable dificil.
+- **Verificador con razonamiento prendido.** Medido 2026-09-07 (n=350): sin `thinking` rechaza ~40% del trabajo
+  correcto (acc. balanceada 0.77); con `thinking`, 0.997. Para verificar: `DEFAULT_VERIFIER` (`mmorch/config.py`), que razona.
+- Verificar barato: `/verify-cross`. Numeros y como re-correrlos: seccion "Measured" del README.
 
 Mapa de fuentes: `docs/SOURCES.md`. Vocabulario: `CONTEXT.md`. Invariantes: `GOAL.md`
 (no se reescriben aca). Catálogo vivo: `docs/generated/catalog.md`.
