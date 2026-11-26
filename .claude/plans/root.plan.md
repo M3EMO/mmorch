@@ -16897,3 +16897,156 @@ Escribí `docs/builds/brief-local-174.md`. Parte de `laptop/cadena-173b`. Sigue 
 
 **El saldo de S2:** cerca de 12,53 USD, sin cambios.
 **Las unidades de Colab:** todo lo que falta hasta D3 usa menos de 5.
+
+## Vuelta del 2026-11-26 (102): la red del builder en Colab, y la Tarea 175
+
+**Estado.**
+- **La vuelta 101 está en 051cc47b.**
+- **La Tarea 174:** `laptop/tarea-174` (f7fd89b), con 5 commits y 1,77 USD. Tocó solo los archivos del brief. La suite de `laptop/cadena-174` dio 4243/0/5. El release está en `colab-pruebas/v174/r00t`.
+- **El usuario corrió `paso0-aisla.sh` con v174.** El paquete trae `NODE_VERSION=20.19.2`, y ningún secreto real.
+- **La tercera corrida de `aisla.sh`:** el exec de `lanza.py` perdió la conexión. El orquestador lo relanzó a mano. El mismo arreglo, con reintento solo si el runtime no vive, quedó en `d3/d3-colab.sh`.
+- **`preparar-corre.sh` pasó `paquetes`, `node`, `builder`, `versiones` y `root-home`.** Los cuatro arreglos de la 174 andan en Colab. Falló en `red-builder`, con rc=4.
+- **El orquestador corrió seis sondas en Colab,** en sesiones CPU propias, ya cerradas. Están en `d3/sonda-red/`.
+- **Hay dos sesiones GPU L4 ajenas en Colab.** No se tocan.
+
+## 1. El defecto de `red-builder.sh`, confirmado
+
+Leí `tools/colab/red-builder.sh`, `src/corre/bwrap.rs` y `tools/colab/preparar-corre.sh` en `laptop/cadena-174`. También leí `d3/sonda-red/sonda.sh` y su resultado.
+
+### Cómo entra hoy el builder
+
+- `red-builder.sh` crea el espacio con `ip netns add root-builder`.
+- `bwrap.rs` lanza el builder así: `ip netns exec root-builder prlimit --nproc=4096 setpriv --reuid=<builder> … bwrap … claude`.
+- **Así, el builder entra solo al espacio de red.** Sigue en el espacio de usuario del contenedor, como el usuario `builder` del host.
+
+### Por qué falla
+
+- **`ip netns add` crea un espacio de red del mismo espacio de usuario del contenedor.** En ese espacio de usuario, el contenedor de Colab no tiene `CAP_NET_ADMIN`. Su CapEff es `a82c25fb`.
+- **Por eso `iptables` e `ip6tables` fallan,** también dentro de `ip netns exec`.
+- **`/proc/sys` está en solo lectura.** `disable_ipv6` no se puede escribir.
+
+El defecto es real. `red-builder.sh` supone una máquina donde root tiene `CAP_NET_ADMIN`, y Colab no lo es.
+
+### Qué cambia si el espacio de red pertenece a un espacio de usuario nuevo
+
+**Con `unshare -Urn`,** root crea un espacio de usuario nuevo, y dentro un espacio de red. Root es el dueño de ese espacio de usuario, y tiene ahí todas las capacidades. Por eso, dentro, `iptables` e `ip6tables` andan. Las sondas lo muestran.
+
+**Hay dos formas de meter al builder ahí, y una rompe la seguridad:**
+
+| Forma | Qué pasa |
+|---|---|
+| **`nsenter -U -n`, como en la sonda 5** | El proceso entra al espacio de usuario de root, como uid 0 real del host. bwrap le pone un uid 1000 dentro, pero solo de nombre: para los permisos de archivo del host sigue siendo root. **Se pierde la capa 1**, el usuario aparte. Además, con las capacidades de ese espacio, podría borrar las reglas |
+| **Solo el espacio de red, como hoy:** `ip netns attach` y `ip netns exec` | El proceso queda en el espacio de usuario del contenedor, y `setpriv` lo baja al usuario `builder` real. **No tiene capacidades sobre el espacio de red,** porque el dueño es un espacio de usuario de root, y el builder no puede entrar a él. No puede borrar las reglas |
+
+**Elijo la segunda.** El lanzamiento de `bwrap.rs` no cambia. Solo cambia cómo se crea el espacio: `unshare -Urn` y `ip netns attach`, en lugar de `ip netns add`. Las reglas las pone root, con `nsenter -U -n`.
+
+**Una parte no está probada todavía:** que root pueda entrar con `ip netns exec`, solo al espacio de red, a un espacio que pertenece a otro espacio de usuario. Por la regla del kernel, el dueño de un espacio de usuario tiene sus capacidades desde el espacio padre. Debería andar. Lo prueba la sonda 6, antes del builder.
+
+### El DNS
+
+`/etc/resolv.conf` de Colab apunta a 127.0.0.11, el DNS de Docker, que no existe dentro del espacio. **`ip netns exec` ya resuelve esto:** monta `/etc/netns/<red>/resolv.conf` sobre `/etc/resolv.conf`. bwrap monta `/etc` desde ese mismo espacio de montaje. Así, el builder ve `nameserver 10.0.2.3`, sin un montaje nuevo de bwrap y sin tocar el `resolv.conf` del runtime.
+
+## 2. ¿Alcanza el cierre de IPv6 sin `disable_ipv6`?
+
+**Sí.** El builder necesita una ruta para salir por IPv6, y no la tiene:
+1. **slirp4netns sin `--enable-ipv6` no da IPv6.** El espacio nuevo no tiene direcciones globales ni rutas IPv6. La sonda lo mostró.
+2. **`ip6tables` queda en `DROP`** para `OUTPUT`, `INPUT` y `FORWARD`. Es una segunda capa, por si algo agrega una ruta.
+3. **`::1` dentro del espacio es el loopback propio del espacio.** El kernel de Colab escucha en el loopback del contenedor, que es otro espacio de red.
+4. **El builder no puede cambiar nada de esto,** porque no tiene capacidades sobre el espacio.
+
+**Un detalle:** `getent hosts api.anthropic.com` dio primero una dirección IPv6. `curl` llegó igual por IPv4, porque IPv6 no tiene ruta. `node` 20 prueba las dos familias, así que `claude` también llega.
+
+**Cómo lo prueba la prueba de aislamiento:**
+- **A4 ya prueba `::1` y la IP IPv6 del runtime** en cada puerto. Lo esperado es `falla`.
+- **`revisa.py` cambia una fila.** "IPv6 apagado" pide `disable_ipv6 = 1`, que en Colab no existe. La fila nueva pide que `ip -6 route show default` y `ip -6 addr show scope global` salgan vacíos dentro del espacio.
+- **`recoge.py` cambia cómo lee la red.** Lee `iptables -S`, `ip6tables -S`, `ip -6 route` e `ip -6 addr show scope global` con `nsenter -t <pid del sostén> -U -n`. El pid sale de `/run/root-builder-sosten.pid`. Con `ip netns exec`, la lectura de reglas puede fallar como hoy.
+- **Un ataque nuevo, A14:** desde dentro de bwrap, el builder intenta `iptables -F OUTPUT`, `ip6tables -P OUTPUT ACCEPT` e `ip route add 169.254.169.254 dev tap0`. Los tres deben fallar. Después, `recoge.py` muestra las reglas sin cambios.
+- **`argv.py` ya muestra el uid real del host** de cada proceso del builder. Debe ser el de `builder`, no 0. Esa fila prueba que no se perdió la capa 1.
+
+## 3. La sonda 6, antes del builder
+
+Va antes de lanzar la 175, porque prueba lo único no probado del diseño. La corre el orquestador, en una sesión CPU propia que cierra al terminar. No usa secretos.
+
+1. Instala `iptables`, `slirp4netns`, `iproute2`, `bubblewrap`, `curl` y `util-linux`. Crea un usuario de prueba con uid 1000.
+2. Crea el sostén con `unshare -Urn sleep infinity`, y corre `ip netns attach root-builder <pid>`.
+3. Crea `/dev/net/tun` con modo 0666, y lanza `slirp4netns --configure --disable-host-loopback --mtu=65520 --userns-path=/proc/<pid>/ns/user <pid> tap0`.
+4. Pone las reglas con `nsenter -t <pid> -U -n`: las 2 de DNS y los 6 cortes de IPv4, y las 3 políticas `DROP` de IPv6.
+5. Escribe `/etc/netns/root-builder/resolv.conf` con `nameserver 10.0.2.3`.
+6. **Prueba:** `ip netns exec root-builder getent hosts api.anthropic.com` resuelve.
+7. **Prueba, como el builder:** `ip netns exec root-builder setpriv --reuid=1000 --regid=1000 --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs bwrap --unshare-user --unshare-pid --ro-bind /usr /usr --ro-bind /etc /etc` con los enlaces de `/bin` y `/lib`, `--proc /proc` y `--dev /dev`. Dentro:
+   - `curl https://api.anthropic.com/` da 404;
+   - `curl http://169.254.169.254/` y `curl http://10.0.2.2:8080/` no conectan;
+   - `iptables -F OUTPUT` e `ip6tables -P OUTPUT ACCEPT` fallan;
+   - un `sleep 30` del builder tiene `Uid: 1000` en `/proc/<pid>/status`, visto desde fuera.
+8. **Prueba:** después del paso 7, las reglas siguen iguales.
+
+**La regla:** si los pasos 6, 7 y 8 dan lo esperado, se lanza la 175 tal como está. Si no, el brief vuelve al planner con la salida.
+
+**Costo:** cerca de 15 minutos y 0,02 unidades.
+
+## 4. La Tarea 175
+
+Escribí `docs/builds/brief-local-175.md`. Parte de `laptop/cadena-174`, y sigue P121 a y P122 a. Toca solo `tools/colab/red-builder.sh` y `tests/red_builder.rs`.
+
+| Punto | Qué |
+|---|---|
+| 1 | El espacio nace de `unshare -Urn` y se nombra con `ip netns attach`. Es idempotente, y rehace el espacio si el sostén murió |
+| 2 | `/dev/net/tun` con `mknod`, si falta, y slirp4netns con `--userns-path` |
+| 3 | Las reglas, con `nsenter -U -n`. IPv4 igual que hoy. IPv6 con las 3 políticas en `DROP`, sin `sysctl`, y una revisión de que no hay rutas ni direcciones globales |
+| 4 | `/etc/netns/<red>/resolv.conf` con `nameserver 10.0.2.3`, sin tocar el del runtime |
+| 5 | La comprobación con `getent`, igual que hoy |
+
+**No toca `src/`, y no agrega montajes de bwrap.** Lo que pruebe la prueba de aislamiento vale para el builder real.
+
+**Costo:** cerca de 1 USD de lista, 40 minutos y 0,05 unidades.
+
+## 5. Las preguntas de la 174
+
+| # | Pregunta | Decisión |
+|---|---|---|
+| 1 | `NODE_VERSION` sin la `v` | **Acepto.** El paquete real trae `20.19.2`, y el paso `node` pasó en Colab |
+| 2 | `tope_ancestros` como campo público | **Acepto.** Es un punto de prueba, con `/` por defecto. Ninguna variable de entorno lo cambia |
+| 3 | `safe.directory '*'` es amplio | **Acepto.** El riesgo es que el `git` de `r00t` ejecute la config del builder, como un `fsmonitor`. Root ya lo cubre. Un test de `src/corre/corrida.rs` deja un `fsmonitor` en el `.git/config` del builder, y prueba que no se ejecuta. Otro prueba que el evaluador recibe el repo sin el `.git` del builder |
+| 4 | `chown -R` en cada lanzamiento | **Acepto.** El piloto mide su costo en minutos |
+| 5 | El SHA-256 de node sale del mismo host | **Acepto por ahora.** Valida la descarga, con la misma confianza que el instalador de rustup. Una firma GPG queda para después de la validez |
+| 6 | `RUSTUP_HOME` en solo lectura | **Acepto.** La revisión del paso `versiones`, como `builder`, ya pasó en Colab con `cargo --version` y `rustc --version`. Un `cargo build` real lo prueba el piloto |
+
+**Ninguna es del usuario.**
+
+## 6. El aviso de node 22
+
+**No cambia nada para D3.** La regla es la paridad con la laptop, y se cumple: Colab usa la misma `node` 20.19.2 que la imagen `root-builder:1`. Las corridas de `corre` en la laptop usan esa imagen.
+
+**Un riesgo queda:** no sé si las corridas viejas de la laptop usaron `claude` 2.1.317 o una versión anterior. **El piloto lo prueba:** es una sesión real de `claude`, con roles y herramientas. Si falla por `node`, el arreglo es subir `node` en la imagen y en Colab a la vez, para no romper la paridad.
+
+## 7. ¿La PR lleva la 175?
+
+**Sí.** La PR de P131 a lleva la 171, la 172, la 173, la 173b, la 174 y la 175. El árbol de Z debe ser el de `laptop/cadena-175`, que es el que pasa la prueba de aislamiento.
+
+**Preguntas al usuario:** ninguna nueva.
+
+## 8. Lo que falta
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | La sonda 6 | Nada | Colab, orquestador | Cerca de 0,02 unidades | Cerca de 15 minutos | No |
+| 2 | La Tarea 175 | El paso 1 | Colab, builder | Cerca de 1 USD de lista, y 0,05 unidades | Cerca de 40 minutos | No |
+| 3 | Los cambios de `recoge.py`, `revisa.py` y `ataque.sh`: la red por `nsenter`, la fila de IPv6, A14, y la prueba de `revisa.py` | Nada | Laptop, orquestador | 0 USD | Cerca de 30 minutos | No |
+| 4 | La suite con podman de `laptop/cadena-175`, y el release | El paso 2 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 5 | `paso0-aisla.sh` con el release de la 175 | El paso 4 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: lo corre el usuario** |
+| 6 | La prueba de aislamiento | Los pasos 3 y 5 | Colab | 0 USD y cerca de 0,15 unidades | De 1 a 1,5 horas | No |
+| 7 | La PR con la 171 a la 175 | El paso 6 | — | — | — | **Sí: la orden de mezcla** |
+| 8 | El congelamiento Z, el árbol igual al de la cadena 175, y el estado con Z | El paso 7 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 9 | El paquete del piloto, con `paso0-d3.sh` | El paso 8 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: la primera de las dos corridas de P132 a** |
+| 10 | El piloto de D3: s2-t1 | El paso 9 | Colab | Cerca de 0,9 USD de lista, 0,1 USD de API y 0,1 unidades | Cerca de 1 hora | No |
+| 11 | Los 3 paquetes de las tandas, y las sesiones 1 a 3 | El paso 10 | Laptop y Colab | De 21 a 36 USD de lista, de 2 a 4,5 USD de API, y de 1,5 a 3 unidades | De 12 a 14 horas, en 3 ventanas de cupo | **Sí: la segunda corrida de P132 a** |
+| 12 | El análisis de D3 | El paso 11 | Planner | Cupo | Una vuelta | No |
+| 13 | Si el análisis lo pide: una segunda pasada | El paso 12 | Colab | Lo mismo que los pasos 10 y 11 | De 1,5 a 2 días | **Sí** |
+| 14 | P98 c: abrir el final | El paso 12, o el 13 | Laptop | Según la regla del final | Según el final | No |
+| 15 | La validez sobre el final sellado | El paso 14 | Colab | Según el final | Según el final | No |
+| 16 | Después de la validez: el juez que escribe reglas, por P128 a | El paso 15 | Colab, builder | De 3 a 5 USD de builder, y cerca de 3,5 USD de API | De 1 a 2 semanas, con revisión humana | No |
+| 17 | Después de la validez: una tarea con `Dockerfile` para calibrar Entrega | El paso 15 | Minería y Colab | Sin estimar | Sin estimar | **Sí** |
+| 18 | Después de la validez: las versiones de Seguridad en una sola fuente, la tarea en el error de lanzar, la limpieza por señal sin `podman ps`, la clave de los eventos como línea entera, y la firma GPG de node | El paso 15 | Colab, builder | Cerca de 1 USD | Cerca de 1 hora | No |
+
+**El saldo de S2:** cerca de 12,53 USD, sin cambios.
+**Las unidades de Colab:** todo lo que falta hasta D3 usa menos de 5.
