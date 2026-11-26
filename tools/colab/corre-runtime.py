@@ -12,6 +12,7 @@ el guion sale con 2 sin correr nada.
 Variables para testear, todas con defecto: ROOT_CORRE_R00T, ROOT_CORRE_HOME, ROOT_CORRE_TOKEN,
 ROOT_CORRE_PLAZO_S, ROOT_TOKEN_ARCHIVO, ROOT_CORRE_HOME_USUARIO.
 El r00t hijo corre con HOME=/srv/root-usuario (ROOT_CORRE_HOME_USUARIO lo cambia para tests).
+El r00t hijo recibe ROOT_PROC_BUILDER=/proc: el procfs del runtime, que el builder ve en solo lectura.
 """
 
 import hashlib
@@ -235,6 +236,7 @@ class Corrida:
                 "ROOT_CONTENEDOR_MODO": "bwrap",
                 "ROOT_RED_BUILDER": "root-builder",
                 "ROOT_USUARIO_BUILDER": "builder",
+                "ROOT_PROC_BUILDER": "/proc",
                 "ROOT_TOKEN_BUILDER": self.token,
                 "DEEPSEEK_API_KEY": self.clave,
                 "ROOT_BWRAP_ENTORNO": os.path.join(self.carpeta, "entorno.env"),

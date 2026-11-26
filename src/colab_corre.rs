@@ -2614,6 +2614,59 @@ COMPORTAMIENTO
     }
 
     #[test]
+    fn corre_runtime_pasa_al_r00t_proc_builder_en_proc() {
+        if !python_disponible() {
+            eprintln!("sin python3: se saltea corre_runtime_pasa_al_r00t_proc_builder_en_proc");
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1"]);
+        c.r00t_falso(&format!(
+            "printf '%s' \"$ROOT_PROC_BUILDER\" > '{}'",
+            c.fuera.join("proc").display()
+        ));
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+        let proc = fs::read_to_string(c.fuera.join("proc")).expect("ROOT_PROC_BUILDER del r00t");
+        assert_eq!(proc, "/proc", "el r00t debe recibir el procfs del runtime");
+    }
+
+    #[test]
+    fn corre_runtime_el_resto_del_entorno_del_hijo_es_el_de_la_174() {
+        if !python_disponible() {
+            eprintln!(
+                "sin python3: se saltea corre_runtime_el_resto_del_entorno_del_hijo_es_el_de_la_174"
+            );
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1"]);
+        c.r00t_falso(&format!("env > '{}'", c.fuera.join("entorno").display()));
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+        let entorno = fs::read_to_string(c.fuera.join("entorno")).expect("entorno del r00t");
+        let lineas: Vec<&str> = entorno.lines().collect();
+        let imagen = format!("ROOT_BWRAP_IMAGEN_ID={IMAGEN_ID}");
+        let esperados = [
+            "ROOT_CONTENEDOR_MODO=bwrap",
+            "ROOT_RED_BUILDER=root-builder",
+            "ROOT_USUARIO_BUILDER=builder",
+            "HOME=/srv/root-usuario",
+            imagen.as_str(),
+        ];
+        for esperado in esperados {
+            assert!(
+                lineas.contains(&esperado),
+                "falta {esperado} en el entorno del r00t"
+            );
+        }
+        assert!(
+            !lineas.iter().any(|l| l.starts_with("ROOT_TOKEN_CUPO=")),
+            "ROOT_TOKEN_CUPO no debe estar en el entorno del r00t"
+        );
+    }
+
+    #[test]
     fn corre_runtime_sin_imagen_id_en_el_manifiesto_falla_sin_correr() {
         if !python_disponible() {
             eprintln!(
