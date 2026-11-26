@@ -2161,12 +2161,14 @@ COMPORTAMIENTO
         salida
     }
 
-    /// Paquete falso, ROOT_HOME falso, token en un temporal y r00t falso.
+    /// Paquete falso, ROOT_HOME falso, token en un temporal, archivo del token original (con
+    /// `CUPO`) y r00t falso.
     struct Corrida {
         raiz: tempfile::TempDir,
         paquete: PathBuf,
         home: PathBuf,
         token: PathBuf,
+        archivo: PathBuf,
         r00t: PathBuf,
         fuera: PathBuf,
     }
@@ -2178,6 +2180,7 @@ COMPORTAMIENTO
                 paquete: raiz.path().join("paquete"),
                 home: raiz.path().join("home"),
                 token: raiz.path().join("token"),
+                archivo: raiz.path().join("content-root-token"),
                 r00t: raiz.path().join("r00t"),
                 fuera: raiz.path().join("fuera"),
                 raiz,
@@ -2185,6 +2188,7 @@ COMPORTAMIENTO
             for dir in [&c.paquete, &c.home, &c.fuera] {
                 fs::create_dir_all(dir).expect("crea carpeta");
             }
+            fs::write(&c.archivo, CUPO).expect("escribe el archivo del token");
             let lista: Vec<String> = tareas.iter().map(|t| format!("\"{t}\"")).collect();
             let manifiesto = format!(
                 "{{\"v\":1,\"tipo\":\"corre\",\"pasada\":1,\"config\":\"cfg\",\"imagen_id\":\"{IMAGEN_ID}\",\"tareas\":[{}],\"plugins\":{{}},\"archivos\":{{}}}}\n",
@@ -2215,6 +2219,11 @@ COMPORTAMIENTO
         }
 
         fn correr(&self, plazo: &str) -> Output {
+            self.correr_con(plazo, &[])
+        }
+
+        /// Corre el guion. `extra` se aplica al final y puede pisar cualquier variable.
+        fn correr_con(&self, plazo: &str, extra: &[(&str, &str)]) -> Output {
             Command::new("python3")
                 .arg("-I")
                 .arg(CORRE)
@@ -2224,8 +2233,10 @@ COMPORTAMIENTO
                 .env("ROOT_CORRE_HOME", &self.home)
                 .env("ROOT_CORRE_TOKEN", &self.token)
                 .env("ROOT_CORRE_PLAZO_S", plazo)
+                .env("ROOT_TOKEN_ARCHIVO", &self.archivo)
                 .env("DEEPSEEK_API_KEY", CLAVE)
-                .env("ROOT_TOKEN_CUPO", CUPO)
+                .env_remove("ROOT_TOKEN_CUPO")
+                .envs(extra.iter().copied())
                 .output()
                 .expect("lanza python3")
         }
@@ -2494,6 +2505,155 @@ COMPORTAMIENTO
                 "solo la fila nueva"
             );
         }
+    }
+
+    #[test]
+    fn corre_runtime_mueve_el_token_del_archivo_y_borra_el_original() {
+        if !python_disponible() {
+            eprintln!(
+                "sin python3: se saltea corre_runtime_mueve_el_token_del_archivo_y_borra_el_original"
+            );
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1"]);
+        c.r00t_falso("");
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+        assert_eq!(c.registro(), vec!["t1"], "debe correr la tarea");
+        assert!(
+            !c.archivo.exists(),
+            "el archivo original debe borrarse al moverlo"
+        );
+    }
+
+    #[test]
+    fn corre_runtime_token_nuevo_es_0600_con_el_contenido_del_archivo() {
+        if !python_disponible() {
+            eprintln!(
+                "sin python3: se saltea corre_runtime_token_nuevo_es_0600_con_el_contenido_del_archivo"
+            );
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1"]);
+        c.r00t_falso(&format!(
+            "stat -c %a \"$ROOT_TOKEN_BUILDER\" > '{modo}'\ncat \"$ROOT_TOKEN_BUILDER\" > '{contenido}'",
+            modo = c.fuera.join("modo").display(),
+            contenido = c.fuera.join("contenido").display(),
+        ));
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+        let modo = fs::read_to_string(c.fuera.join("modo")).expect("modo");
+        assert_eq!(modo.trim(), "600", "el token nuevo debe ser 0600");
+        let contenido = fs::read_to_string(c.fuera.join("contenido")).expect("contenido");
+        assert_eq!(
+            contenido, CUPO,
+            "el token nuevo debe tener el contenido del archivo"
+        );
+    }
+
+    #[test]
+    fn corre_runtime_rechaza_root_token_cupo_sin_correr_ni_mostrar_el_valor() {
+        if !python_disponible() {
+            eprintln!(
+                "sin python3: se saltea corre_runtime_rechaza_root_token_cupo_sin_correr_ni_mostrar_el_valor"
+            );
+            return;
+        }
+        falta_guion(CORRE);
+        // Con valor y vacía: basta que la variable esté definida.
+        for valor in [CUPO, ""] {
+            let c = Corrida::nueva(&["t1"]);
+            c.r00t_falso("");
+            let salida = c.correr_con("7200", &[("ROOT_TOKEN_CUPO", valor)]);
+            let dicho = texto(&salida);
+            assert_eq!(salida.status.code(), Some(2), "debe salir con 2: {dicho}");
+            assert!(
+                dicho.contains("ROOT_TOKEN_CUPO"),
+                "el error debe nombrar la variable: {dicho}"
+            );
+            assert!(
+                !dicho.contains(CUPO),
+                "la salida trae el valor del token: {dicho}"
+            );
+            assert!(c.registro().is_empty(), "no debe correr ningún r00t");
+        }
+    }
+
+    #[test]
+    fn corre_runtime_sin_archivo_o_vacio_no_corre_nada() {
+        if !python_disponible() {
+            eprintln!("sin python3: se saltea corre_runtime_sin_archivo_o_vacio_no_corre_nada");
+            return;
+        }
+        falta_guion(CORRE);
+        for vacio in [false, true] {
+            let c = Corrida::nueva(&["t1"]);
+            if vacio {
+                fs::write(&c.archivo, "").expect("vacía el archivo");
+            } else {
+                fs::remove_file(&c.archivo).expect("quita el archivo");
+            }
+            c.r00t_falso("");
+            let salida = c.correr("7200");
+            let dicho = texto(&salida);
+            assert_eq!(salida.status.code(), Some(2), "vacio={vacio}: {dicho}");
+            assert!(
+                dicho.contains(&c.archivo.display().to_string()),
+                "el error debe nombrar la ruta del archivo: {dicho}"
+            );
+            assert!(
+                c.registro().is_empty(),
+                "vacio={vacio}: no debe correr ningún r00t"
+            );
+        }
+    }
+
+    #[test]
+    fn corre_runtime_si_el_destino_falla_conserva_el_original() {
+        if !python_disponible() {
+            eprintln!(
+                "sin python3: se saltea corre_runtime_si_el_destino_falla_conserva_el_original"
+            );
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1"]);
+        c.r00t_falso("");
+        // La carpeta del destino no existe: crear el token debe fallar.
+        let destino = c.raiz.path().join("no-existe").join("token");
+        let destino_txt = destino.display().to_string();
+        let salida = c.correr_con("7200", &[("ROOT_CORRE_TOKEN", &destino_txt)]);
+        let dicho = texto(&salida);
+        assert!(!salida.status.success(), "debe fallar: {dicho}");
+        assert!(
+            dicho.contains(&destino_txt),
+            "el error debe nombrar el destino: {dicho}"
+        );
+        assert!(
+            c.archivo.is_file(),
+            "no debe borrar el original si el destino falla"
+        );
+        assert!(c.registro().is_empty(), "no debe correr ningún r00t");
+    }
+
+    #[test]
+    fn corre_runtime_rechaza_el_mismo_archivo_como_origen_y_destino() {
+        if !python_disponible() {
+            eprintln!(
+                "sin python3: se saltea corre_runtime_rechaza_el_mismo_archivo_como_origen_y_destino"
+            );
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1"]);
+        c.r00t_falso("");
+        let mismo = c.archivo.display().to_string();
+        let salida = c.correr_con("7200", &[("ROOT_CORRE_TOKEN", &mismo)]);
+        assert_eq!(salida.status.code(), Some(2), "{}", texto(&salida));
+        assert!(c.archivo.is_file(), "no debe borrar el token");
+        assert!(c.registro().is_empty(), "no debe correr ningún r00t");
     }
 
     /// Paquete de `preparar-corre.sh` con programas falsos en PATH y rutas dentro de un temporal.

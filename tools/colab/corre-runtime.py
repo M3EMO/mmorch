@@ -4,10 +4,13 @@
 Se lanza aparte del exec, como lanzar.py. Usa solo la biblioteca estándar.
 Uso: corre-runtime.py <carpeta_del_paquete>
 
-La clave (DEEPSEEK_API_KEY) y el token (ROOT_TOKEN_CUPO) entran por el entorno. La clave va solo
-al entorno del r00t hijo. El token se escribe en un archivo 0600 y se borra al terminar.
+La clave entra por DEEPSEEK_API_KEY (entorno) y se pasa solo al entorno del r00t hijo.
+El token entra por archivo: su ruta sale de ROOT_TOKEN_ARCHIVO (defecto /content/root-token).
+Se mueve a ROOT_CORRE_TOKEN (defecto /run/root-token), con modo 0600, y el original se borra.
+El token de /run se borra al terminar. ROOT_TOKEN_CUPO ya no existe: si está en el entorno,
+el guion sale con 2 sin correr nada.
 Variables para testear, todas con defecto: ROOT_CORRE_R00T, ROOT_CORRE_HOME, ROOT_CORRE_TOKEN,
-ROOT_CORRE_PLAZO_S.
+ROOT_CORRE_PLAZO_S, ROOT_TOKEN_ARCHIVO.
 """
 
 import hashlib
@@ -24,6 +27,7 @@ from datetime import datetime, timezone
 R00T_DEFECTO = "/usr/local/bin/r00t"
 HOME_DEFECTO = "/root/root-home"
 TOKEN_DEFECTO = "/run/root-token"
+TOKEN_ARCHIVO_DEFECTO = "/content/root-token"
 PLAZO_DEFECTO = "7200"
 # Código que se anota cuando el plazo corta la vuelta. Es el de `timeout`.
 CODIGO_PLAZO = 124
@@ -91,7 +95,20 @@ def escribir_estado(carpeta, tareas, corre=None, pid=None, final=None):
     escribir_atomico(os.path.join(carpeta, "estado.json"), texto.encode())
 
 
-def escribir_token(ruta, cupo):
+def leer_token(ruta):
+    """Lee el token del archivo tal cual. Falla si no existe o está vacío. El mensaje nunca lleva
+    el contenido."""
+    try:
+        with open(ruta, "rb") as f:
+            datos = f.read()
+    except OSError:
+        raise ErrorCorrida(f"no se pudo leer el token en {ruta}")
+    if not datos.strip():
+        raise ErrorCorrida(f"el archivo del token está vacío: {ruta}")
+    return datos
+
+
+def escribir_token(ruta, datos):
     """Crea el archivo del token con modo 0600. Si ya existe, lo reemplaza."""
     try:
         os.unlink(ruta)
@@ -99,7 +116,7 @@ def escribir_token(ruta, cupo):
         pass
     fd = os.open(ruta, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as f:
-        f.write(cupo)
+        f.write(datos)
 
 
 def quitar_token(ruta):
@@ -194,7 +211,7 @@ class Corrida:
         self.plazo = entorno["plazo"]
         self.clave = entorno["clave"]
         self.cupo = entorno["cupo"]
-        self.secretos = [s.encode() for s in (self.clave, self.cupo) if s]
+        self.secretos = [s for s in (self.clave.encode(), self.cupo) if s]
         self.proceso = None
 
     def correr_todas(self):
@@ -297,16 +314,37 @@ def principal(argv):
         return 2
 
     carpeta = os.path.abspath(argv[1])
-    faltan = [n for n in ("DEEPSEEK_API_KEY", "ROOT_TOKEN_CUPO") if not os.environ.get(n)]
-    # Se sacan del entorno aunque falten: el hijo no debe heredarlas.
+    # Se sacan del entorno antes de imprimir nada: el hijo no debe heredarlas, y el valor del
+    # token viejo no debe salir en ninguna salida.
+    tenia_cupo_viejo = os.environ.pop("ROOT_TOKEN_CUPO", None) is not None
     clave = os.environ.pop("DEEPSEEK_API_KEY", "")
-    cupo = os.environ.pop("ROOT_TOKEN_CUPO", "")
-    if faltan:
-        print("mal corre-runtime.py: falta " + ", ".join(faltan), file=sys.stderr)
+    if tenia_cupo_viejo:
+        print(
+            "mal corre-runtime.py: ROOT_TOKEN_CUPO ya no se usa; el token va en el archivo "
+            "de ROOT_TOKEN_ARCHIVO",
+            file=sys.stderr,
+        )
+        return 2
+    if not clave:
+        print("mal corre-runtime.py: falta DEEPSEEK_API_KEY", file=sys.stderr)
         return 2
 
+    archivo_token = os.environ.get("ROOT_TOKEN_ARCHIVO", TOKEN_ARCHIVO_DEFECTO)
     token = os.environ.get("ROOT_CORRE_TOKEN", TOKEN_DEFECTO)
-    secretos = [s.encode() for s in (clave, cupo) if s]
+    if os.path.abspath(archivo_token) == os.path.abspath(token):
+        print(
+            "mal corre-runtime.py: ROOT_TOKEN_ARCHIVO y ROOT_CORRE_TOKEN no pueden ser la misma ruta",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        crudo = leer_token(archivo_token)
+    except ErrorCorrida as e:
+        print("mal corre-runtime.py: " + str(e), file=sys.stderr)
+        return 2
+    # El valor que se oculta va sin espacios de sobra; el archivo se mueve tal cual.
+    cupo = crudo.strip()
+    secretos = [s for s in (clave.encode(), cupo) if s]
     tareas = []
     corrida = None
     error = None
@@ -329,7 +367,8 @@ def principal(argv):
                 "cupo": cupo,
             },
         )
-        escribir_token(token, cupo.encode())
+        escribir_token(token, crudo)
+        quitar_token(archivo_token)
         corrida.correr_todas()
     except SystemExit:
         error = "interrumpido"
