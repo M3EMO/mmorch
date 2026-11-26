@@ -163,7 +163,7 @@ REGISTRY: dict[str, ModelSpec] = {
         api_key_env="ANTHROPIC_API_KEY",
         price_in=0.10,
         price_out=0.50,
-        role="router, encoder de babel, juez visual y verificador de ensemble",
+        role="router, juez visual y verificador de ensemble",
     ),
 }
 

@@ -23,7 +23,6 @@ EXCLUIR = {
     "server": "levanta el HTTP server real y bloquea (main loop, no self-check)",
     "cli": "entrypoint CLI: parsea argv y ejecuta comandos reales",
     "nightly": "pipeline nocturno completo: LLM/API real y estado del home real",
-    "babel": "asserta lexicon_version() del vault REAL — vacio en el home aislado",
     "sdlc_bench": "CLI: corre el builder sdlc con API real sobre una task del bench",
     "cursor_worker": "CLI: lanza cursor-agent real en un worktree; sus piezas puras van en test_cursor_worker.py",
 }

@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**119 módulos · 44 MCP tools · 1207 tests.**
+**118 módulos · 44 MCP tools · 1207 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -20,7 +20,6 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/auto_repair.py` | Auto-reparación nocturna: los errores que el sistema DETECTA se convierten |
 | `mmorch/automerge.py` | Automerge con semáforo — merges sin accionar humano SOLO en el carril verde. |
 | `mmorch/autoresearch.py` | autoresearch (r4a) — hillclimb como JOB declarativo + resumable. |
-| `mmorch/babel.py` | babel — capa comprimida model-native del vault (paper 2606.19857). |
 | `mmorch/bench.py` | bench — benchmark CONGELADO de tasks difíciles para evolución de workflows. |
 | `mmorch/budget.py` | budget — BudgetKeeper: techo de gasto mensual (ataca el incidente +$5). |
 | `mmorch/budget_policy.py` | budget_policy — scoped budget policies (graft G5 from paperclip). |

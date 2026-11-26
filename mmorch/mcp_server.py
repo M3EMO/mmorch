@@ -607,12 +607,11 @@ def mmorch_vault_write(
     """Write a research note to the GLOBAL knowledge vault (single validated door,
     spec vault-global ticket 03). Validates title + project tag (hard minimum),
     autocompletes `created`, regenerates the project's MOC, bridges a gist to
-    memory (scope global -> recall finds it, sessions read the note by path) and
-    fires babel ingest async (gates decide if the .babel.md pays; the nightly
-    sweep is the safety net). `sources`/`tags` = comma-separated. The original
-    note is ALWAYS the source of truth. Returns JSON {path, moc}.
+    memory (scope global -> recall finds it, sessions read the note by path).
+    No babel derivative is written. `sources`/`tags` = comma-separated.
+    Returns JSON {path, moc}.
     """
-    # W5.1: toda la orquestacion (frontmatter CSV, bridge a memoria, babel async)
+    # W5.1: toda la orquestacion (frontmatter CSV, bridge a memoria)
     # vive en la libreria; este wrapper solo adapta tipos
     from mmorch.vault import write_research_note
     p, moc = write_research_note(title, body, project=project, folder=folder,

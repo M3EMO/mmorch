@@ -20,26 +20,25 @@ def tmp_vault(tmp_path, monkeypatch):
 
 
 def _fakes():
-    calls = {"remember": [], "babel": []}
-    return calls, (lambda gist, **kw: calls["remember"].append((gist, kw))), \
-        (lambda path: calls["babel"].append(path))
+    calls = {"remember": []}
+    return calls, (lambda gist, **kw: calls["remember"].append((gist, kw)))
 
 
 def test_valida_frontmatter_minimo_duro(tmp_vault):
-    calls, rem, enq = _fakes()
+    calls, rem = _fakes()
     with pytest.raises(ValueError):
         write_validated("", "cuerpo", project="mmorch",
-                        remember_fn=rem, enqueue_babel_fn=enq)
+                        remember_fn=rem)
     with pytest.raises(ValueError):
         write_validated("titulo", "cuerpo", project="",
-                        remember_fn=rem, enqueue_babel_fn=enq)
-    assert not calls["remember"] and not calls["babel"]
+                        remember_fn=rem)
+    assert not calls["remember"]
 
 
 def test_escribe_nota_con_created_auto_y_tag_proyecto(tmp_vault):
-    _, rem, enq = _fakes()
+    _, rem = _fakes()
     p = write_validated("Mi nota de research", "hallazgo X medido", project="lotus",
-                        folder="research", remember_fn=rem, enqueue_babel_fn=enq)
+                        folder="research", remember_fn=rem)
     txt = p.read_text(encoding="utf-8")
     assert p.parent.name == "research" and p.suffix == ".md"
     assert re.search(r"created: \d{4}-\d{2}-\d{2}", txt), "created no autocompletado"
@@ -48,22 +47,22 @@ def test_escribe_nota_con_created_auto_y_tag_proyecto(tmp_vault):
 
 
 def test_regenera_moc_del_proyecto(tmp_vault):
-    _, rem, enq = _fakes()
+    _, rem = _fakes()
     write_validated("Nota uno", "cuerpo", project="mmorch",
-                    remember_fn=rem, enqueue_babel_fn=enq)
+                    remember_fn=rem)
     moc = tmp_vault / "moc" / "mmorch.md"
     assert moc.exists(), "MOC del proyecto no regenerado al escribir"
     assert "[[nota-uno]]" in moc.read_text(encoding="utf-8")
 
 
 def test_moc_excluye_infra_y_archive(tmp_vault):
-    _, rem, enq = _fakes()
+    _, rem = _fakes()
     (tmp_vault / "archive").mkdir(parents=True)
     (tmp_vault / "archive" / "viejo.md").write_text(
         "---\ntitle: viejo\ntags: [mmorch]\n---\nx", encoding="utf-8")
     (tmp_vault / "lexicon.md").write_text("# lexicon", encoding="utf-8")
     write_validated("Nota dos", "cuerpo", project="mmorch",
-                    remember_fn=rem, enqueue_babel_fn=enq)
+                    remember_fn=rem)
     moc = (tmp_vault / "moc" / "mmorch.md").read_text(encoding="utf-8")
     assert "viejo" not in moc and "lexicon" not in moc
 
@@ -118,20 +117,19 @@ def test_frontmatter_de_write_note_es_yaml_valido(tmp_vault):
     assert "— applied · conf alta: medido" in moc, "el MOC debe mostrar el valor sin comillas"
 
 
-def test_bridge_remember_y_cola_babel(tmp_vault):
-    calls, rem, enq = _fakes()
+def test_bridge_remember(tmp_vault):
+    calls, rem = _fakes()
     p = write_validated("Nota tres", "b" * 50, project="mmorch",
-                        remember_fn=rem, enqueue_babel_fn=enq)
+                        remember_fn=rem)
     assert len(calls["remember"]) == 1, "gist no bridgeado a memoria"
     gist = calls["remember"][0][0]
     assert str(p) in gist or p.name in gist, "el gist no referencia el path de la nota"
-    assert calls["babel"] == [p], "job babel no encolado con el path"
 
 
 def test_log_de_operaciones_parseable(tmp_vault):
-    _, rem, enq = _fakes()
+    _, rem = _fakes()
     write_validated("Nota logueada", "cuerpo", project="mmorch",
-                    remember_fn=rem, enqueue_babel_fn=enq)
+                    remember_fn=rem)
     log = (tmp_vault / "log.md").read_text(encoding="utf-8")
     assert re.search(r"^## \[\d{4}-\d{2}-\d{2}\] write \| Nota logueada",
                      log, re.M), "entrada de log parseable ausente"
@@ -141,7 +139,7 @@ def test_fallo_de_side_channels_no_rompe_el_write(tmp_vault):
     def boom(*a, **kw):
         raise RuntimeError("side channel roto")
     p = write_validated("Nota cuatro", "cuerpo", project="mmorch",
-                        remember_fn=boom, enqueue_babel_fn=boom)
+                        remember_fn=boom)
     assert p.exists(), "la nota debe escribirse aunque bridge/cola fallen"
 
 

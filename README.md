@@ -298,7 +298,7 @@ the gate scored 0.744 before `orchestration-6qb` and 1.00 after.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **119 módulos · 44 MCP tools (15 expuestas por default) · 1207 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **118 módulos · 44 MCP tools (15 expuestas por default) · 1207 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -328,15 +328,10 @@ encoder trained from loop trajectories (`flywheel/`, numpy inference); an enviro
 scout pre-pass; and full cost observability (per-provider 429/budget-cap rates, cache-hit
 rate, off-peak split, effort-routing, prefix-stable prompts).
 
-**Knowledge vault global (`vault/` + `babel.py`):** research de TODOS los proyectos vive en
-el vault Obsidian (deja de estar local por-proyecto). `babel.ingest()` copia el original
-(siempre fuente de verdad) y deriva un `.babel.md` comprimido model-native (paper 2606.19857)
-solo si pasan DOS gates de ejecución: ratio ≤ 0.7 y fidelidad QA ≥ 0.8 (lector cross-family
-que solo ve el babel; grading determinista por containment — jamás LLM-judge). Medido
-2026-08: encoder = Gemini (DeepSeek ignora el char-budget en docs >10k), lector = DeepSeek;
-símbolos del lexicon en el prompt del encoder ROMPEN la compresión (el lexicon
-`vault/lexicon.md` es decoder key del lector). Charts del vault vía `flint-chart-mcp`
-(registrado en `.mcp.json`).
+**Knowledge vault global (`vault/`):** research de TODOS los proyectos vive en el vault
+Obsidian (deja de estar local por-proyecto). La capa babel se borró el 2026-11-26: nadie leyó
+un `.babel.md` en un mes, y babel más su lexicon costaba 96% de la nota original. Charts del
+vault vía `flint-chart-mcp` (registrado en `.mcp.json`).
 
 ## Setup
 

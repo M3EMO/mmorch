@@ -152,8 +152,7 @@ def log_op(op: str, title: str, *, base: Path | None = None) -> None:
 
 
 def write_validated(title: str, body: str, *, project: str, folder: str = 'research',
-                    frontmatter: dict | None = None, remember_fn=None,
-                    enqueue_babel_fn=None) -> Path:
+                    frontmatter: dict | None = None, remember_fn=None) -> Path:
     """Escribe una nota validada, regenera el MOC y dispara callbacks opcionales."""
     if not title or not title.strip():
         raise ValueError("title must be non-empty")
@@ -179,11 +178,6 @@ def write_validated(title: str, body: str, *, project: str, folder: str = 'resea
             remember_fn(f"[{project}] {title} — nota del vault en {p}")
         except Exception:
             pass
-    if enqueue_babel_fn is not None:
-        try:
-            enqueue_babel_fn(p)
-        except Exception:
-            pass  # side-channel (cola babel): su fallo nunca rompe el write
     return p
 
 
@@ -191,11 +185,9 @@ def write_research_note(title: str, body: str, *, project: str, folder: str = "r
                         status: str = "seed", confidence: str = "", sources: str = "",
                         tags: str = "") -> tuple[Path, Path]:
     """Puerta de ALTO nivel para callers de borde (MCP/CLI): arma el frontmatter desde
-    strings CSV, escribe la nota validada, puentea un gist a memoria (scope global) y
-    dispara babel ingest async. Antes esta orquestacion vivia en el wrapper MCP (W5.1:
-    la logica va en la libreria, el wrapper solo adapta tipos). Devuelve (nota, moc)."""
-    import threading
-
+    strings CSV, escribe la nota validada y puentea un gist a memoria (scope global).
+    Babel se borro el 2026-11-26: nadie leyo un .babel.md en un mes y babel mas el
+    lexicon costaba 96% del original. Devuelve (nota, moc)."""
     fm: dict = {"status": status or "seed"}
     if confidence:
         fm["confidence"] = confidence
@@ -211,20 +203,8 @@ def write_research_note(title: str, body: str, *, project: str, folder: str = "r
         from .memory import remember
         remember("global", gist, kind="vault_note")
 
-    def _babel_async(path: Path) -> None:
-        # decision 03 pedia cola del server; thread daemon = mismo efecto async sin
-        # endpoint nuevo. El nightly barre notas sin babel: perder el thread no pierde nada.
-        def _run() -> None:
-            try:
-                from .babel import ingest
-                ingest(path, folder=folder)
-            except Exception:
-                pass  # side-channel: el gate/nightly deciden, jamas romper el write
-        threading.Thread(target=_run, daemon=True).start()
-
     p = write_validated(title, body, project=project, folder=folder,
-                        frontmatter=fm, remember_fn=_bridge,
-                        enqueue_babel_fn=_babel_async)
+                        frontmatter=fm, remember_fn=_bridge)
     return p, _moc_path(project)
 
 
@@ -251,8 +231,6 @@ def regenerate_moc(project: str) -> Path:
         if not folder.is_dir() or folder.name in excluded_dirs:
             continue
         for p in sorted(folder.glob("*.md")):
-            if p.name.endswith(".babel.md"):
-                continue
             fm = _read_frontmatter_only(p)
             # una nota declara su proyecto en `tags` o en `applies_to` (notas viejas,
             # 2026-10-01: sin esto desaparecian del MOC en cada regeneracion)
@@ -263,14 +241,11 @@ def regenerate_moc(project: str) -> Path:
             # el MOC muestra solo el valor
             status = fm.get("status", "").split("#")[0].strip()
             confidence = fm.get("confidence", "").split("#")[0].strip()
-            babel_ok = "babel OK" if (p.with_suffix(".babel.md")).exists() else ""
             parts = [f"- [[{p.stem}]]"]
             if status:
                 parts.append(f"— {status}")
             if confidence:
                 parts.append(f"· conf {confidence}")
-            if babel_ok:
-                parts.append(f"· {babel_ok}")
             sections.setdefault(folder.name, []).append(" ".join(parts))
 
     moc_path = _moc_path(project)
