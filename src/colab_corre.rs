@@ -2976,7 +2976,12 @@ COMPORTAMIENTO
                 .env("ROOT_APT_ESPERA", "0")
                 .env("ROOT_NPM", npm)
                 .env("ROOT_PREFIJO_USR", prefijo_usr)
-                .env("ROOT_PATH_BUILDER", self.falsos.display().to_string());
+                .env("ROOT_PATH_BUILDER", self.falsos.display().to_string())
+                .env("ROOT_CARGO_HOME", self.raiz.path().join("usr/local/cargo"))
+                .env(
+                    "ROOT_RUSTUP_HOME",
+                    self.raiz.path().join("usr/local/rustup"),
+                );
             for (clave, valor) in extra {
                 orden.env(clave, valor);
             }
@@ -3174,5 +3179,86 @@ COMPORTAMIENTO
         assert!(!salida.status.success(), "debe salir distinto de 0");
         let dicho = texto(&salida);
         assert!(dicho.contains("mal claude"), "{dicho}");
+    }
+
+    /// Ruta de preparar-runtime.sh: sus valores de Rust son la referencia de preparar-corre.sh.
+    const RUNTIME: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tools/colab/preparar-runtime.sh"
+    );
+
+    /// Valor de `export NOMBRE=valor` en el guion. Sale con pánico si falta la línea.
+    fn valor_export_en_runtime(guion: &str, nombre: &str) -> String {
+        let inicio = format!("export {nombre}=");
+        guion
+            .lines()
+            .find_map(|l| l.strip_prefix(&inicio))
+            .unwrap_or_else(|| panic!("falta `export {nombre}=` en preparar-runtime.sh"))
+            .to_string()
+    }
+
+    /// Valor por omisión de `RAIZ="${RAIZ:-valor}"` en el guion de corre. Sale con pánico si falta.
+    fn omision_en_corre(guion: &str, raiz: &str) -> String {
+        let inicio = format!("{raiz}=\"${{{raiz}:-");
+        let resto = guion
+            .lines()
+            .find_map(|l| l.strip_prefix(&inicio))
+            .unwrap_or_else(|| panic!("falta {raiz} con valor por omisión en preparar-corre.sh"));
+        resto
+            .strip_suffix("}\"")
+            .unwrap_or_else(|| panic!("la línea de {raiz} debe cerrar con }}\""))
+            .to_string()
+    }
+
+    #[test]
+    fn preparar_corre_rust_igual_que_preparar_runtime() {
+        falta_guion(PREPARAR);
+        falta_guion(RUNTIME);
+        let corre = fs::read_to_string(PREPARAR).expect("lee preparar-corre.sh");
+        let runtime = fs::read_to_string(RUNTIME).expect("lee preparar-runtime.sh");
+        for (nombre, raiz) in [
+            ("RUSTUP_HOME", "ROOT_RUSTUP_HOME"),
+            ("CARGO_HOME", "ROOT_CARGO_HOME"),
+        ] {
+            let esperado = valor_export_en_runtime(&runtime, nombre);
+            let hallado = omision_en_corre(&corre, raiz);
+            assert_eq!(
+                hallado, esperado,
+                "{raiz} de preparar-corre.sh debe ser igual a {nombre} de preparar-runtime.sh"
+            );
+        }
+    }
+
+    #[test]
+    fn preparar_corre_versiones_encuentra_rustc_bajo_cargo_home() {
+        if !bash_disponible() {
+            eprintln!(
+                "sin bash: se saltea preparar_corre_versiones_encuentra_rustc_bajo_cargo_home"
+            );
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        // El rustc falso vive solo bajo la raíz temporal, como /usr/local/cargo/bin.
+        fs::remove_file(p.falsos.join("rustc")).expect("quita el rustc de falsos");
+        let cargo = p.raiz.path().join("usr/local/cargo");
+        fs::create_dir_all(cargo.join("bin")).expect("carpeta bin de cargo");
+        escribir_ejecutable(
+            &cargo.join("bin/rustc"),
+            "#!/bin/sh\necho 'rustc 1.91.0 (abc 2026-01-01)'\n",
+        );
+        // El PATH de la prueba no trae el rustc real de /root/.cargo/bin.
+        let path = format!("{}:/usr/bin:/bin", p.falsos.display());
+        let salida = p.correr_con(&[
+            ("ROOT_CARGO_HOME", cargo.display().to_string()),
+            ("PATH", path),
+        ]);
+        assert!(salida.status.success(), "{}", texto(&salida));
+        assert!(
+            texto(&salida).contains("paso versiones"),
+            "{}",
+            texto(&salida)
+        );
     }
 }

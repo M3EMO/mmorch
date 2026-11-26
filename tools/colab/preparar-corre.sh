@@ -17,7 +17,11 @@ ROOT_RAIZ_DIR="${ROOT_RAIZ_DIR:-}"
 ROOT_NPM="${ROOT_NPM:-/usr/bin/npm}"
 ROOT_PREFIJO_USR="${ROOT_PREFIJO_USR:-/usr/}"
 ROOT_PATH_BUILDER="${ROOT_PATH_BUILDER:-/usr/local/bin:/usr/bin:/bin}"
+# Rust lo instala preparar-runtime.sh en estos valores. Son los mismos de ese guion.
+ROOT_RUSTUP_HOME="${ROOT_RUSTUP_HOME:-/usr/local/rustup}"
+ROOT_CARGO_HOME="${ROOT_CARGO_HOME:-/usr/local/cargo}"
 export ROOT_BIN_DIR ROOT_HOME_DESTINO ROOT_DIR_RAIZ ROOT_RAIZ_DIR ROOT_NPM ROOT_PREFIJO_USR ROOT_PATH_BUILDER
+export ROOT_RUSTUP_HOME ROOT_CARGO_HOME
 
 # Paquetes que el builder necesita. Igual que el par update + install de preparar-runtime.sh.
 PAQUETES_APT=(nodejs npm slirp4netns iptables iproute2)
@@ -40,11 +44,16 @@ clave() {
 }
 
 # Paso 1: el runtime base. Si falla, este script falla.
+# preparar-runtime.sh corre en otro proceso: sus exports no llegan acá. Por eso se exportan de nuevo.
 llamar_runtime() {
     if ! bash "$ROOT_PREPARAR_RUNTIME" "$carpeta"; then
         echo "mal preparar-runtime.sh: no terminó el runtime base"
         exit 1
     fi
+    export RUSTUP_HOME="$ROOT_RUSTUP_HOME"
+    export CARGO_HOME="$ROOT_CARGO_HOME"
+    PATH="$ROOT_CARGO_HOME/bin:$PATH"
+    export PATH
 }
 
 # Paso 2: instala los paquetes de apt. El par update + install se reintenta entero.
