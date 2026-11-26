@@ -17050,3 +17050,142 @@ Escribí `docs/builds/brief-local-175.md`. Parte de `laptop/cadena-174`, y sigue
 
 **El saldo de S2:** cerca de 12,53 USD, sin cambios.
 **Las unidades de Colab:** todo lo que falta hasta D3 usa menos de 5.
+
+## Vuelta del 2026-11-26 (103): el `/proc` del builder en Colab
+
+**Estado.**
+- **La vuelta 102 está en 88f433ee,** con el brief de la 175. El builder de la 175 no se lanzó.
+- **La sonda 6:** los pasos 6 y 8 salieron bien. El paso 7 falló entero: cada bwrap dio `Can't mount proc on /newroot/proc: Permission denied`.
+- **La sonda 7,** una matriz de variantes:
+  - fallan con el mismo error las variantes V0, V1 y V3 a V6, y la V8;
+  - andan V2, bwrap sin `--unshare-pid` con `--proc /proc`, y V7, bwrap con `--unshare-pid` y `--ro-bind /proc /proc`;
+  - en V2 y V7, como uid 1000 en `root-builder`, la API da 404, los metadatos no conectan, `iptables -F` e `ip6tables -P` fallan, y las reglas no cambian.
+- **La sonda 8:** sin las máscaras de Docker sobre `/proc`, falla igual.
+- **La sonda 9:** `mount` de proc da `EACCES`, también para root con `CAP_SYS_ADMIN`, en cualquier espacio de pids nuevo. El kernel es `6.6.159+`, con `Seccomp: 2`. La causa exacta no se pudo ver.
+- **El paso 3 de la vuelta 102 ya está hecho** en `d3/aisla/`: `recoge.py` lee la red con `nsenter -U -n`, `revisa.py` tiene las filas nuevas, y `ataque.sh` suma A14.
+- **Las sesiones `sonda` quedaron cerradas.** Las dos sesiones GPU ajenas no se tocan.
+
+## 1. El diseño de red de la 175 está probado
+
+**La sonda 7 prueba lo que el paso 7 de la sonda 6 quería probar.** En V2 y en V7, el builder corre como uid 1000 dentro de `root-builder`, llega a la API, no llega a los metadatos, y no puede tocar las reglas. El fallo del paso 7 viene del `/proc`, no de la red.
+
+**Por eso lanzo la 175 tal como está.** La regla de su brief pedía que la sonda 6 saliera bien. La causa del fallo es otra, y la sonda 7 cubre lo que el paso 7 medía. Es una decisión técnica.
+
+## 2. Lo que pierde el aislamiento sin un `/proc` propio
+
+Leí `src/corre/bwrap.rs`, `tools/colab/preparar-corre.sh` y `tools/colab/red-builder.sh` en `laptop/cadena-174`. Hoy, `args_bwrap_builder` pasa siempre `--unshare-pid` y `--proc /proc` (líneas 331 y 352).
+
+**Un dato importante:** el oráculo ya corre en Colab con `--unshare-pid` y `--ro-bind /proc /proc` (`src/oracle/contenedor.rs`). Así se calibró. Es la opción b de abajo. Pero el oráculo corre código de Root, y el builder corre código no confiable.
+
+### Lo que el kernel protege en las tres opciones
+
+En las tres, el builder es otro usuario, sin capacidades. El kernel le niega, para los procesos de root:
+- leer `/proc/<pid>/environ`, `fd/`, `mem`, `root` y `cwd`, porque eso pide permiso de `ptrace`;
+- mandarles una señal.
+
+**Por eso, la clave de DeepSeek, que vive en el entorno de `r00t`, sigue fuera de su alcance.** Lo que cambia es qué ve, y si sus procesos sobreviven.
+
+### Las tres opciones
+
+| | a) Sin `--unshare-pid`, con `--proc /proc` (V2) | b) Con `--unshare-pid` y `--ro-bind /proc /proc` (V7) | c) Con `--unshare-pid` y `--ro-bind` de un procfs con `hidepid=invisible` |
+|---|---|---|---|
+| **Qué procesos ve** | Todos los del runtime: unos 21 | Todos los del runtime | Solo los suyos |
+| **Qué lee de ellos** | `cmdline`, `status` y `stat` de cada uno. El `cmdline` es legible para todos | Lo mismo | Nada de otros usuarios: los procesos de root no aparecen |
+| **Sus procesos al terminar `claude`** | **Sobreviven.** Un proceso con `setsid` queda vivo después del rol | Mueren con su espacio de pids | Mueren con su espacio de pids |
+| **El riesgo principal** | Un proceso que sobrevive puede mirar el `cmdline` del oráculo mientras evalúa. Ese `cmdline` puede traer nombres de tests ocultos, por ejemplo en el filtro de `nextest`. También puede tocar `/trabajo` durante la evaluación | Mientras el builder corre, ve el `cmdline` de los procesos del runtime. Hoy ninguno lleva secretos en sus argumentos. El oráculo no corre a la vez que el builder | Ninguno nuevo. Es lo que ve en podman |
+| **Qué haría falta en Root** | Matar todos los procesos del usuario `builder` después de cada lanzamiento, y revisar que no quede ninguno antes de evaluar | Nada más | Montar el procfs con `hidepid` en el runtime, y exigirlo antes de lanzar |
+| **Comparado con podman** | Más bajo | Más bajo | Igual |
+
+**Otras opciones que descarto:**
+- **Sin `/proc`:** `rustc` y `cargo` buscan su sysroot por `/proc/self/exe`, y `node` lee `/proc/self`. No andan.
+- **Un `/proc` parcial con `subset=pid`:** esconde `/proc/cpuinfo`, `/proc/meminfo` y `/proc/sys`. `cargo` y `node` los leen para contar CPUs y memoria. Es un riesgo de fallos raros, sin ganancia de seguridad sobre la c.
+
+### Qué la mide en `ataque.sh` y en `argv.py`
+
+| Riesgo | Qué lo mide hoy | Qué falta |
+|---|---|---|
+| Leer la clave del entorno de `r00t` | **A3** busca C2 en `environ` y `cmdline` de todos los procesos que ve | Nada |
+| Entrar a la raíz de otro proceso | **A2** prueba `/proc/1/root$ROOTHOME` | Nada |
+| Mandar una señal al pid 1 | **A9** | **Cambia la fila de `revisa.py`.** En a y b, el pid 1 visible es el del contenedor, no bwrap. Lo que importa es que `kill -0 1` falle. La fila pasa con `falla`, sin mirar el nombre |
+| Ver procesos de otros usuarios | Nada | **A15, nuevo:** cuenta los pids visibles de otros usuarios, y cuántos de sus `environ`, `fd/`, `root` y `cwd` puede leer. Con c, los dos números dan 0. Con b, el primero da más de 0, y el segundo da 0 |
+| Un proceso que sobrevive al rol | Nada | **A16, nuevo:** `ataque.sh` deja un `setsid sleep 900` en segundo plano. Una fila nueva de `argv.py`, después de la corrida, cuenta los procesos vivos del usuario `builder`. Lo esperado es 0 |
+| El uid real del host | La fila de uid de `argv.py` | Nada |
+
+## 3. Cómo elige `bwrap.rs` el modo de Colab
+
+**La laptop no usa bwrap para el builder:** usa `EjecutorContenedorBuilder`, con podman. `EjecutorBwrapBuilder` solo corre con `ROOT_CONTENEDOR_MODO=bwrap`, es decir, en Colab. Igual, el cambio queda detrás de una variable, para que bwrap siga andando donde sí puede montar proc.
+
+- **Con `ROOT_PROC_BUILDER=<ruta>`,** bwrap usa `--ro-bind <ruta> /proc` en lugar de `--proc /proc`. `--unshare-pid` queda siempre.
+- **El chequeo previo exige,** con la variable, que la ruta sea un procfs con `hidepid=invisible` o `hidepid=2`, según `/proc/self/mountinfo`. Si no lo es, el builder no arranca.
+- **Sin la variable,** todo queda como hoy.
+
+**Los tests:** una función pura que lee el texto de `mountinfo`, con casos falsos, y los argumentos de bwrap con y sin la variable. Los tests de `EjecutorContenedorBuilder` quedan como guarda.
+
+## 4. ¿La 175 o una Tarea 176?
+
+**Va una Tarea 176 aparte.**
+- **La 175 está lista y probada por la sonda 7.** Toca solo `red-builder.sh` y su test. Se puede lanzar ya.
+- **El cambio del `/proc` espera dos cosas:** la respuesta del usuario a P133, y la sonda 10.
+- **Juntarlas frenaría la 175** sin motivo.
+
+Escribí `docs/builds/brief-local-176.md`. Parte de `laptop/cadena-175`. Toca `src/corre/bwrap.rs`, `tools/colab/preparar-corre.sh` y `tools/colab/corre-runtime.py`, con sus tests en `src/colab_corre.rs`. **Vale con P133 c.** Con P133 b, cambia un punto: el chequeo no exige `hidepid`, y la variable apunta a `/proc`. Con P133 a, hace falta otro brief.
+
+**La PR de P131 a lleva también la 176.** El árbol de Z debe ser el de `laptop/cadena-176`.
+
+## 5. Pregunta al usuario
+
+**P133. ¿Qué ve el builder en su `/proc` en Colab?** En Colab, nadie puede montar un `/proc` para un espacio de pids nuevo. Lo midieron las sondas 6 a 9. El builder de podman, que es el aislamiento aprobado, solo ve sus propios procesos. Con las tres opciones, el builder no puede leer la clave ni el entorno de otros procesos.
+
+- **a) Un `/proc` propio, sin espacio de pids (V2).** Ve los procesos del runtime, y sus procesos sobreviven al rol. Pide que Root mate los procesos del builder después de cada rol. Es la que más baja el aislamiento aprobado.
+- **b) El `/proc` entero del runtime, y su propio espacio de pids (V7).** Es lo que ya usa el oráculo. Ve la lista de procesos del runtime y sus líneas de comandos, pero no su entorno. Sus procesos mueren con el rol. Baja el aislamiento aprobado, porque ve más que en podman.
+- **c) Un procfs del runtime con `hidepid=invisible`, y su propio espacio de pids.** Ve solo sus procesos, y sus procesos mueren con el rol. Es lo mismo que en podman. Depende de que la sonda 10 pruebe que root puede montarlo y que `node`, `claude` y `cargo` andan así. *(recomendada)*
+
+Recomiendo la (c). Si la sonda 10 muestra que la (c) no anda, la pregunta vuelve con los datos, entre la (a) y la (b).
+
+## 6. La sonda 10, antes del builder de la 176
+
+Va en una sesión CPU propia, que se cierra al terminar. No usa secretos. Mide si la opción c anda.
+
+1. **El montaje:** como root, `mount -t proc -o hidepid=invisible,nosuid,nodev,noexec proc /run/root-proc`. Anota el código y la línea de `mountinfo`.
+2. **Como uid 1000,** con `ip netns exec root-builder setpriv … bwrap --unshare-pid --ro-bind /run/root-proc /proc` y los montajes de `/usr`, `/etc`, `/tmp` y `/dev`:
+   - `ls /proc | grep -c '^[0-9]'`: debe dar solo sus procesos, unos pocos;
+   - `readlink /proc/self` y `cat /proc/self/status` andan;
+   - `head -1 /proc/cpuinfo` y `head -1 /proc/meminfo` andan;
+   - `node -e 'console.log(require("os").cpus().length)'` anda;
+   - `rustc --version`, y `cargo new` más `cargo build` de un crate sin dependencias en `/tmp`, andan;
+   - `claude --version` anda;
+   - `kill -0 1` falla.
+3. **Los procesos que sobreviven:** dentro, `setsid sleep 300 &` y salir. Fuera, como root, contar los procesos de uid 1000. Debe dar 0.
+4. **La comparación:** los mismos pasos 2 y 3 con la opción b, `--ro-bind /proc /proc`. Así queda medida la diferencia en procesos visibles.
+
+**Costo:** cerca de 20 minutos y 0,03 unidades.
+
+## 7. Lo que falta
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | La Tarea 175 | Nada | Colab, builder | Cerca de 1 USD de lista, y 0,05 unidades | Cerca de 40 minutos | No |
+| 2 | P133 | Nada | — | — | — | **Sí** |
+| 3 | La sonda 10 | Nada | Colab, orquestador | Cerca de 0,03 unidades | Cerca de 20 minutos | No |
+| 4 | A15, A16, y la fila de A9, en `ataque.sh`, `argv.py` y `revisa.py`, con su prueba | Nada | Laptop, orquestador | 0 USD | Cerca de 30 minutos | No |
+| 5 | La suite con podman de `laptop/cadena-175` | El paso 1 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 6 | La Tarea 176 | Los pasos 2, 3 y 5 | Colab, builder | Cerca de 1,5 USD de lista, y 0,05 unidades | Cerca de 45 minutos | No |
+| 7 | La suite con podman de `laptop/cadena-176`, y el release | El paso 6 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 8 | `paso0-aisla.sh` con el release de la 176 | El paso 7 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: lo corre el usuario** |
+| 9 | La prueba de aislamiento | Los pasos 4 y 8 | Colab | 0 USD y cerca de 0,15 unidades | De 1 a 1,5 horas | No |
+| 10 | La PR con la 171 a la 176 | El paso 9 | — | — | — | **Sí: la orden de mezcla** |
+| 11 | El congelamiento Z, el árbol igual al de la cadena 176, y el estado con Z | El paso 10 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 12 | El paquete del piloto, con `paso0-d3.sh` | El paso 11 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: la primera de las dos corridas de P132 a** |
+| 13 | El piloto de D3: s2-t1 | El paso 12 | Colab | Cerca de 0,9 USD de lista, 0,1 USD de API y 0,1 unidades | Cerca de 1 hora | No |
+| 14 | Los 3 paquetes de las tandas, y las sesiones 1 a 3 | El paso 13 | Laptop y Colab | De 21 a 36 USD de lista, de 2 a 4,5 USD de API, y de 1,5 a 3 unidades | De 12 a 14 horas, en 3 ventanas de cupo | **Sí: la segunda corrida de P132 a** |
+| 15 | El análisis de D3 | El paso 14 | Planner | Cupo | Una vuelta | No |
+| 16 | Si el análisis lo pide: una segunda pasada | El paso 15 | Colab | Lo mismo que los pasos 13 y 14 | De 1,5 a 2 días | **Sí** |
+| 17 | P98 c: abrir el final | El paso 15, o el 16 | Laptop | Según la regla del final | Según el final | No |
+| 18 | La validez sobre el final sellado | El paso 17 | Colab | Según el final | Según el final | No |
+| 19 | Después de la validez: el juez que escribe reglas, por P128 a | El paso 18 | Colab, builder | De 3 a 5 USD de builder, y cerca de 3,5 USD de API | De 1 a 2 semanas, con revisión humana | No |
+| 20 | Después de la validez: una tarea con `Dockerfile` para calibrar Entrega | El paso 18 | Minería y Colab | Sin estimar | Sin estimar | **Sí** |
+| 21 | Después de la validez: las versiones de Seguridad en una sola fuente, la tarea en el error de lanzar, la limpieza por señal sin `podman ps`, la clave de los eventos como línea entera, y la firma GPG de node | El paso 18 | Colab, builder | Cerca de 1 USD | Cerca de 1 hora | No |
+
+**Los pasos 1 a 4 corren en paralelo.** El paso 6 espera los tres anteriores.
+**El saldo de S2:** cerca de 12,53 USD, sin cambios.
+**Las unidades de Colab:** todo lo que falta hasta D3 usa menos de 5.
