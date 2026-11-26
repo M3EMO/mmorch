@@ -29,12 +29,13 @@ Una spec que ECC construye, con dos piezas:
 - [Supersesión en sistemas de memoria de agentes](issues/04-supersesion-en-memorias.md) — Un registro determinista (`valid_to`, `superseded_by`, clave sujeto-relación) supera al LLM al escribir. En StaleBench, el rerank por fecha da 0.925 contra 53% de error del coseno. Zep y mem0 no miden la supersesión aislada.
 - [Lecturas y tamaños de las notas del vault](issues/05-lecturas-del-vault.md) — Comprimir notas ahorra disco, no cupo. El mes tuvo 53 lecturas, unos 21k tokens estimados (~0.009% del input) y 0 llamadas a `mmorch_recall`. Una nota p50 pesa unos 1.5k tokens, y se lee en promedio el 43% de cada nota.
 - [Desglose medido del contexto de arranque](issues/02-desglose-del-arranque.md) — El arranque real mide 66.8k tokens de mediana en 11 sesiones. ECC aporta unos 43k: skills 29.7k, agentes 7.8k y comandos 5.6k. Los CLAUDE.md, AGENTS.md y MEMORY.md suman unos 6.4k. `skillOverrides` está vacío hoy, y los agentes de ECC solo se apagan con el plugin entero.
+- [Supersesión en el vault](issues/07-supersesion-en-el-vault.md) — `supersedes` explícito mueve la vieja a `archive/` con aviso; el MOC la lista en "Reemplazadas" y el recall nunca. Un atado a código marca "a revisar" sin ocultar. Sin migración: un comando a mano archiva seeds sin lecturas en 60 días.
 - [Oráculo de fidelidad del compresor](issues/06-oraculo-de-fidelidad.md) — Haiku responde por API una batería de 200 preguntas exactas, de ruteo y de reglas. Un gate final de 10 tareas reales corre con `claude -p`. El piso es una retención de 0.965 o más, 100% en guardrails y cero regresiones en tareas.
 
 ## Not yet specified
 
 - Cómo se aplica el compresor al arranque sin editar archivos de ECC. La decisión "dejar ECC igual" limita las palancas a `skillOverrides`, CLAUDE.md y skills propios.
-- Qué pasa con las 126 notas `seed` y las notas viejas sin fecha de vencimiento: migración, archivo o supersesión retroactiva.
+- Cómo el comando de archivo detecta una lectura por nombre en los transcripts, y si los transcripts duran 60 días (el más viejo es del 2026-10-12). Las seeds son 138, no 126; el ticket 07 decidió no migrarlas.
 - Dónde corre el compresor: hook al escribir, comando a mano o paso nocturno.
 - Limpieza de restos: `vault/moc/sin-proyecto.md` y `_gen_moc_PROTOTYPE.py` linkean al lexicon borrado; el README del vault nombra carpetas que no existen.
 
