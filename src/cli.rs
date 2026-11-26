@@ -212,8 +212,8 @@ pub enum ColabAccion {
             conflicts_with = "corre"
         )]
         repo: Vec<String>,
-        /// SHA-256 en hexadecimal (64 caracteres) del instalador de rustup. Sin `--corre`, es obligatorio.
-        #[arg(long, required_unless_present = "corre", conflicts_with = "corre")]
+        /// SHA-256 en hexadecimal (64 caracteres) del instalador de rustup. Siempre es obligatorio.
+        #[arg(long, required = true)]
         rustup_sha256: Option<String>,
         /// Archivo `.tar.gz` de salida.
         #[arg(long)]
@@ -221,7 +221,7 @@ pub enum ColabAccion {
         /// Arma el paquete de `corre` para Colab. Exige `--tareas`, `--config` y `--pasada`.
         #[arg(
             long,
-            conflicts_with_all = ["trabajos", "repo", "rustup_sha256", "n", "semilla", "juez", "tope_usd"],
+            conflicts_with_all = ["trabajos", "repo", "n", "semilla", "juez", "tope_usd"],
             requires_all = ["tareas", "config", "pasada"]
         )]
         corre: bool,
@@ -556,6 +556,9 @@ mod tests {
 
     use super::*;
 
+    /// SHA-256 falso de 64 caracteres, para las banderas que lo exigen.
+    const SHA_FALSO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
     /// Argumentos base de `oraculo auditar`, con todos los obligatorios.
     fn base() -> Vec<&'static str> {
         vec![
@@ -842,6 +845,8 @@ mod tests {
             "corrida",
             "--pasada",
             "3",
+            "--rustup-sha256",
+            SHA_FALSO,
             "--salida",
             "s.tar.gz",
         ])
@@ -910,6 +915,8 @@ mod tests {
             "corrida",
             "--pasada",
             "1",
+            "--rustup-sha256",
+            SHA_FALSO,
             "--salida",
             "s.tar.gz",
         ];
@@ -931,10 +938,34 @@ mod tests {
             "t1",
             "--config",
             "corrida",
+            "--rustup-sha256",
+            SHA_FALSO,
             "--salida",
             "s.tar.gz",
         ])
         .expect_err("--corre sin --pasada falla");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn colab_empaquetar_corre_sin_rustup_sha256_falla() {
+        let error = Cli::try_parse_from([
+            "r00t",
+            "colab",
+            "empaquetar",
+            "--corre",
+            "--binario",
+            "b",
+            "--tareas",
+            "t1",
+            "--config",
+            "corrida",
+            "--pasada",
+            "1",
+            "--salida",
+            "s.tar.gz",
+        ])
+        .expect_err("--corre sin --rustup-sha256 falla");
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 

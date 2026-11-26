@@ -1077,6 +1077,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                     pasada,
                     raiz_root,
                     salida,
+                    rustup_sha256,
                     ..
                 },
         } => {
@@ -1084,6 +1085,11 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
             let (Some(config), Some(pasada)) = (config.clone(), *pasada) else {
                 return Err(
                     oracle::ErrorOraculo::Uso("--corre exige --config y --pasada".into()).into(),
+                );
+            };
+            let Some(rustup_sha256) = rustup_sha256.clone() else {
+                return Err(
+                    oracle::ErrorOraculo::Uso("--corre exige --rustup-sha256".into()).into(),
                 );
             };
             colab_empaquetar_corre(
@@ -1095,6 +1101,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                     binario: binario.clone(),
                     raiz_root: raiz_root.clone(),
                     salida: salida.clone(),
+                    rustup_sha256,
                 },
             )
         }

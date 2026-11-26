@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::borrado;
 use crate::colab_calibra::{
-    EXCLUIDOS, ROOT_PODMAN_BIN, Resumen, es_elf_x86_64, es_sha256_hex, revisar_root_toml,
-    sha256_hex, version_de_rustc,
+    EXCLUIDOS, Imagen, PodmanReal, ROOT_PODMAN_BIN, Resumen, armar_oraculo_runtime, binario_podman,
+    es_elf_x86_64, es_sha256_hex, revisar_root_toml, sha256_hex, version_de_rustc,
 };
 use crate::config::root_home;
 use crate::corre::ErrorCorre;
@@ -29,6 +29,8 @@ use serde_json::Value;
 
 /// Imagen con `claude` y `rustc` que lee el paquete.
 const IMAGEN_BUILDER: &str = "root-builder:1";
+/// Imagen del oráculo: de ella salen `herramientas/`, `versiones.env` y `entorno.env`.
+const IMAGEN_ORACULO: &str = "localhost/root-oraculo-rust:4";
 /// Nombre del binario dentro del paquete.
 const BINARIO: &str = "r00t";
 /// Archivo de versiones del builder, en la raíz del paquete.
@@ -49,6 +51,8 @@ pub struct PedidoEmpaquetarCorre {
     pub binario: PathBuf,
     pub raiz_root: Option<PathBuf>,
     pub salida: PathBuf,
+    /// SHA-256 del instalador de rustup, en hexadecimal (64 caracteres).
+    pub rustup_sha256: String,
 }
 
 /// Lee las versiones de `claude` y de `rustc` dentro de la imagen del builder.
@@ -103,6 +107,9 @@ pub struct ManifiestoCorre {
     pub commit_root: String,
     pub config: String,
     pub binario_sha256: String,
+    /// Id de la imagen del oráculo, que el runtime pasa al r00t.
+    #[serde(default)]
+    pub imagen_id: String,
     /// Tareas en el orden pedido.
     pub tareas: Vec<String>,
     /// Ruta absoluta original del plugin -> ruta relativa dentro del paquete.
@@ -119,7 +126,17 @@ pub fn empaquetar_corre_cli(pedido: PedidoEmpaquetarCorre) -> Result<Resumen, Er
             .map_err(|e| ErrorOraculo::Infra(format!("directorio actual: {e}")))?,
     };
     let commit = commit_de(&raiz_root)?;
-    empaquetar_corre(&root_home(), &raiz_root, &commit, &pedido, &PodmanBuilder)
+    let oraculo = PodmanReal {
+        binario: binario_podman(),
+    };
+    empaquetar_corre(
+        &root_home(),
+        &raiz_root,
+        &commit,
+        &pedido,
+        &PodmanBuilder,
+        &oraculo,
+    )
 }
 
 /// Arma el paquete de `corre` con los datos dados. Los tests llaman a esta función.
@@ -129,7 +146,13 @@ pub fn empaquetar_corre(
     commit: &str,
     pedido: &PedidoEmpaquetarCorre,
     imagen: &dyn ImagenBuilder,
+    oraculo: &dyn Imagen,
 ) -> Result<Resumen, ErrorOraculo> {
+    if !es_sha256_hex(&pedido.rustup_sha256) {
+        return Err(ErrorOraculo::Uso(
+            "--rustup-sha256 debe tener 64 caracteres hexadecimales".into(),
+        ));
+    }
     validar_tareas(home, &pedido.tareas)?;
     let config = ConfigCorrida::cargar(home, &pedido.config).map_err(error_de_corre)?;
     let bytes = fs::read(&pedido.binario)
@@ -180,6 +203,7 @@ pub fn empaquetar_corre(
             staging: &staging,
         },
         imagen,
+        oraculo,
     );
     let limpieza = borrado::borrar_dir_dentro(&tmp, &staging);
     let resumen = resultado?;
@@ -259,7 +283,11 @@ fn plugins_de(config: &ConfigCorrida) -> Result<BTreeMap<PathBuf, String>, Error
 }
 
 /// Llena la carpeta de trabajo, la revisa, escribe el manifiesto y empaqueta con `tar`.
-fn armar(a: &Armado, imagen: &dyn ImagenBuilder) -> Result<Resumen, ErrorOraculo> {
+fn armar(
+    a: &Armado,
+    imagen: &dyn ImagenBuilder,
+    oraculo: &dyn Imagen,
+) -> Result<Resumen, ErrorOraculo> {
     let staging = a.staging;
     let claude = imagen.version_claude()?;
     let version_claude = claude
@@ -277,6 +305,8 @@ fn armar(a: &Armado, imagen: &dyn ImagenBuilder) -> Result<Resumen, ErrorOraculo
     escribir(&staging.join(BINARIO), a.bytes)?;
     fijar_ejecutable(&staging.join(BINARIO))?;
     let binario_sha256 = sha256_hex(a.bytes);
+    let imagen_id =
+        armar_oraculo_runtime(staging, &a.pedido.rustup_sha256, oraculo, IMAGEN_ORACULO)?;
     escribir(
         &staging.join(VERSIONES),
         format!("CLAUDE_VERSION={version_claude}\nRUST_VERSION={version_rust}\n").as_bytes(),
@@ -329,6 +359,7 @@ fn armar(a: &Armado, imagen: &dyn ImagenBuilder) -> Result<Resumen, ErrorOraculo
         commit_root: a.commit.into(),
         config: a.pedido.config.clone(),
         binario_sha256,
+        imagen_id,
         tareas: a.pedido.tareas.clone(),
         plugins: a
             .plugins
@@ -1132,11 +1163,47 @@ mod tests {
                 binario: self.binario.clone(),
                 raiz_root: Some(self.raiz.path().to_path_buf()),
                 salida: self.salida.path().join("paquete-corre.tar.gz"),
+                rustup_sha256: "a".repeat(64),
             }
         }
 
         fn empaqueta(&self, pedido: &PedidoEmpaquetarCorre) -> Result<Resumen, ErrorOraculo> {
-            empaquetar_corre(self.home.path(), self.raiz.path(), "abc123", pedido, &Falso)
+            empaquetar_corre(
+                self.home.path(),
+                self.raiz.path(),
+                "abc123",
+                pedido,
+                &Falso,
+                &DobleOraculo,
+            )
+        }
+    }
+
+    /// Doble de la imagen del oráculo. Devuelve datos fijos y no llama a podman.
+    struct DobleOraculo;
+
+    impl Imagen for DobleOraculo {
+        fn extraer_herramienta(
+            &self,
+            _imagen: &str,
+            nombre: &str,
+            destino: &Path,
+        ) -> Result<(), ErrorOraculo> {
+            fs::write(destino, format!("herramienta {nombre}\n"))
+                .map_err(|e| ErrorOraculo::Infra(e.to_string()))
+        }
+        fn version_rustc(&self, _imagen: &str) -> Result<String, ErrorOraculo> {
+            Ok("rustc 1.91.0 (abc 2026-01-01)".into())
+        }
+        fn entorno(&self, _imagen: &str) -> Result<Vec<String>, ErrorOraculo> {
+            Ok(vec![
+                "PATH=/usr/bin".into(),
+                "GITHUB_TOKEN=abc".into(),
+                "LANG=C.UTF-8".into(),
+            ])
+        }
+        fn id(&self, _imagen: &str) -> Result<String, ErrorOraculo> {
+            Ok("sha256:imagen-doble".into())
         }
     }
 
@@ -1207,6 +1274,58 @@ mod tests {
     fn manifiesto_de(extraido: &Path) -> ManifiestoCorre {
         let texto = fs::read_to_string(extraido.join("manifiesto.json")).expect("lee manifiesto");
         serde_json::from_str(&texto).expect("manifiesto válido")
+    }
+
+    #[test]
+    fn corre_paquete_trae_herramientas_versiones_y_entorno_del_oraculo() {
+        let e = Escenario::nuevo();
+        let resumen = e.empaqueta(&e.pedido(&["tarea-a"])).expect("empaqueta");
+        let nombres = listar(&resumen.salida);
+        for herramienta in [
+            "cargo-audit",
+            "cargo-mutants",
+            "cargo-nextest",
+            "gitleaks",
+            "hadolint",
+        ] {
+            assert!(
+                nombres.contains(&format!("herramientas/{herramienta}")),
+                "falta herramientas/{herramienta}"
+            );
+        }
+        assert!(nombres.contains("versiones.env"), "falta versiones.env");
+        assert!(nombres.contains("entorno.env"), "falta entorno.env");
+        // El builder sigue con su propio archivo de versiones.
+        assert!(nombres.contains("versiones-builder.env"));
+
+        let dir = extraer(&resumen.salida);
+        let versiones = fs::read_to_string(dir.path().join("versiones.env")).expect("lee");
+        assert!(versiones.contains("RUST_VERSION=1.91.0\n"), "{versiones}");
+        assert!(versiones.contains(&format!("RUSTUP_SHA256={}\n", "a".repeat(64))));
+        let entorno = fs::read_to_string(dir.path().join("entorno.env")).expect("lee");
+        assert!(entorno.contains("PATH=/usr/bin\n"), "{entorno}");
+        assert!(!entorno.contains("GITHUB_TOKEN"), "entorno trae un secreto");
+    }
+
+    #[test]
+    fn corre_manifiesto_trae_el_id_de_la_imagen_del_oraculo() {
+        let e = Escenario::nuevo();
+        let resumen = e.empaqueta(&e.pedido(&["tarea-a"])).expect("empaqueta");
+        let dir = extraer(&resumen.salida);
+        assert_eq!(manifiesto_de(dir.path()).imagen_id, "sha256:imagen-doble");
+    }
+
+    #[test]
+    fn empaquetar_corre_con_sha_invalido_da_uso_antes_de_armar() {
+        let e = Escenario::nuevo();
+        let mut pedido = e.pedido(&["tarea-a"]);
+        pedido.rustup_sha256 = "corto".into();
+        let mensaje = uso(e.empaqueta(&pedido));
+        assert!(
+            mensaje.contains("--rustup-sha256 debe tener 64 caracteres hexadecimales"),
+            "{mensaje}"
+        );
+        assert!(!pedido.salida.exists(), "no debe escribir el paquete");
     }
 
     #[test]
@@ -1996,6 +2115,9 @@ COMPORTAMIENTO
 
     const VERSIONES_OK: &str = "CLAUDE_VERSION=2.1.5\nRUST_VERSION=1.91.0\n";
 
+    /// Id de imagen falso que trae el manifiesto de prueba.
+    const IMAGEN_ID: &str = "sha256:imagen-prueba";
+
     fn bash_disponible() -> bool {
         Command::new("bash")
             .arg("-c")
@@ -2065,7 +2187,7 @@ COMPORTAMIENTO
             }
             let lista: Vec<String> = tareas.iter().map(|t| format!("\"{t}\"")).collect();
             let manifiesto = format!(
-                "{{\"v\":1,\"tipo\":\"corre\",\"pasada\":1,\"config\":\"cfg\",\"tareas\":[{}],\"plugins\":{{}},\"archivos\":{{}}}}\n",
+                "{{\"v\":1,\"tipo\":\"corre\",\"pasada\":1,\"config\":\"cfg\",\"imagen_id\":\"{IMAGEN_ID}\",\"tareas\":[{}],\"plugins\":{{}},\"archivos\":{{}}}}\n",
                 lista.join(",")
             );
             fs::write(c.paquete.join("manifiesto.json"), manifiesto).expect("escribe manifiesto");
@@ -2146,6 +2268,51 @@ COMPORTAMIENTO
             assert!(estado.success(), "tar no abre la vuelta de {tarea}");
             destino
         }
+    }
+
+    #[test]
+    fn corre_runtime_pasa_al_r00t_el_entorno_y_el_id_de_la_imagen() {
+        if !python_disponible() {
+            eprintln!(
+                "sin python3: se saltea corre_runtime_pasa_al_r00t_el_entorno_y_el_id_de_la_imagen"
+            );
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1"]);
+        c.r00t_falso(&format!(
+            "printf '%s\\n%s\\n' \"$ROOT_BWRAP_ENTORNO\" \"$ROOT_BWRAP_IMAGEN_ID\" > '{}'",
+            c.fuera.join("vars").display()
+        ));
+        let salida = c.correr("7200");
+        assert!(salida.status.success(), "{}", texto(&salida));
+        let vars = fs::read_to_string(c.fuera.join("vars")).expect("vars");
+        let esperado = format!("{}\n{IMAGEN_ID}\n", c.paquete.join("entorno.env").display());
+        assert_eq!(vars, esperado, "el r00t debe recibir la ruta y el id");
+    }
+
+    #[test]
+    fn corre_runtime_sin_imagen_id_en_el_manifiesto_falla_sin_correr() {
+        if !python_disponible() {
+            eprintln!(
+                "sin python3: se saltea corre_runtime_sin_imagen_id_en_el_manifiesto_falla_sin_correr"
+            );
+            return;
+        }
+        falta_guion(CORRE);
+        let c = Corrida::nueva(&["t1"]);
+        fs::write(
+            c.paquete.join("manifiesto.json"),
+            "{\"v\":1,\"tipo\":\"corre\",\"pasada\":1,\"config\":\"cfg\",\"tareas\":[\"t1\"],\"plugins\":{},\"archivos\":{}}\n",
+        )
+        .expect("escribe manifiesto");
+        c.r00t_falso("");
+        let salida = c.correr("7200");
+        assert!(!salida.status.success(), "debe fallar sin imagen_id");
+        let estado = c.estado();
+        let error = estado["error"].as_str().unwrap_or_default();
+        assert!(error.contains("imagen_id"), "{error}");
+        assert!(c.registro().is_empty(), "no debe correr ningún r00t");
     }
 
     #[test]

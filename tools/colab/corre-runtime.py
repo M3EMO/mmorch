@@ -118,14 +118,17 @@ def leer_manifiesto(carpeta):
         raise ErrorCorrida(f"no se pudo leer {ruta}")
     tareas = manifiesto.get("tareas")
     config = manifiesto.get("config")
+    imagen_id = manifiesto.get("imagen_id")
     if not isinstance(tareas, list) or not all(isinstance(t, str) for t in tareas):
         raise ErrorCorrida("manifiesto.json sin lista de tareas")
     if not isinstance(config, str) or not config:
         raise ErrorCorrida("manifiesto.json sin config")
+    if not isinstance(imagen_id, str) or not imagen_id:
+        raise ErrorCorrida("manifiesto.json sin imagen_id")
     for tarea in tareas:
         if not tarea or "/" in tarea or tarea in (".", ".."):
             raise ErrorCorrida(f"nombre de tarea inválido: {tarea!r}")
-    return tareas, config
+    return tareas, config, imagen_id
 
 
 def leer_plazo():
@@ -184,6 +187,7 @@ class Corrida:
         self.carpeta = carpeta
         self.tareas = tareas
         self.config = config
+        self.imagen_id = entorno["imagen_id"]
         self.r00t = entorno["r00t"]
         self.home = entorno["home"]
         self.token = entorno["token"]
@@ -211,6 +215,8 @@ class Corrida:
                 "ROOT_USUARIO_BUILDER": "builder",
                 "ROOT_TOKEN_BUILDER": self.token,
                 "DEEPSEEK_API_KEY": self.clave,
+                "ROOT_BWRAP_ENTORNO": os.path.join(self.carpeta, "entorno.env"),
+                "ROOT_BWRAP_IMAGEN_ID": self.imagen_id,
             }
         )
         return entorno
@@ -307,13 +313,14 @@ def principal(argv):
     signal.signal(signal.SIGTERM, _interrumpir)
     signal.signal(signal.SIGINT, _interrumpir)
     try:
-        tareas, config = leer_manifiesto(carpeta)
+        tareas, config, imagen_id = leer_manifiesto(carpeta)
         plazo = leer_plazo()
         corrida = Corrida(
             carpeta,
             tareas,
             config,
             {
+                "imagen_id": imagen_id,
                 "r00t": os.environ.get("ROOT_CORRE_R00T", R00T_DEFECTO),
                 "home": os.environ.get("ROOT_CORRE_HOME", HOME_DEFECTO),
                 "token": token,
