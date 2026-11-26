@@ -767,7 +767,7 @@ fn importar_corre_desde(
         return Ok(resumen);
     }
 
-    // Revisado todo: a partir de aquí se escribe.
+    // Revisado todo: a partir de aquí se escribe. Un transcript distinto ya en la laptop frena aquí.
     let id = fila.as_ref().map(|f| f.id.clone()).unwrap_or_default();
     if clase == ClaseCorrida::Completa {
         if !id_de_carpeta_valido(&id) {
@@ -776,10 +776,8 @@ fn importar_corre_desde(
             )));
         }
         let origen = vuelta_dir.join(CARPETA_TRANSCRIPTS).join(&id);
-        if origen.is_dir() && home.join(CARPETA_TRANSCRIPTS).join(&id).exists() {
-            return Err(ErrorOraculo::Infra(format!(
-                "ya existe transcripts/{id} en la laptop; no se importó nada"
-            )));
+        if origen.is_dir() {
+            transcripts_ya_copiados(&origen, &home.join(CARPETA_TRANSCRIPTS).join(&id), &id)?;
         }
     }
     let a_importar: Vec<Evento> = eventos
@@ -791,11 +789,13 @@ fn importar_corre_desde(
             ev
         })
         .collect();
-    agregar_eventos(home, &a_importar)?;
+    // Orden: transcripts, eventos, fila, registro. Un fallo en medio se reintenta sin duplicar nada.
     if let (ClaseCorrida::Completa, Some(fila)) = (clase, &fila) {
-        agregar_en(&home.join("runs.jsonl"), fila)
-            .map_err(|e| ErrorOraculo::Infra(format!("escribir runs.jsonl: {e}")))?;
         copiar_transcripts(vuelta_dir, home, &id)?;
+        agregar_eventos(home, &a_importar)?;
+        agregar_fila_si_falta(home, fila)?;
+    } else {
+        agregar_eventos(home, &a_importar)?;
     }
     registro
         .pasadas
@@ -991,15 +991,29 @@ fn id_de_carpeta_valido(id: &str) -> bool {
     !id.is_empty() && !id.contains(['/', '\\']) && id != "." && id != ".."
 }
 
-/// Clave de un evento para no duplicarlo: corrida, `extra.reserva` (o ausente) y `ts`.
-type ClaveEvento = (String, Option<String>, u64);
+/// Clave de un evento para no duplicarlo: corrida, `extra.reserva` (o ausente), `ts` y tipo.
+type ClaveEvento = (String, Option<String>, u64, &'static str);
 
 fn clave_de_evento(ev: &Evento) -> ClaveEvento {
     (
         ev.corrida.clone(),
         ev.extra.get("reserva").map(Value::to_string),
         ev.ts.to_bits(),
+        etiqueta_tipo(ev.tipo),
     )
+}
+
+/// Nombre del tipo de evento, igual que en el JSON (serde `snake_case`).
+fn etiqueta_tipo(tipo: TipoEvento) -> &'static str {
+    match tipo {
+        TipoEvento::Llamada => "llamada",
+        TipoEvento::Sesion => "sesion",
+        TipoEvento::Humano => "humano",
+        TipoEvento::PlanAprobado => "plan_aprobado",
+        TipoEvento::Gate => "gate",
+        TipoEvento::OraculoLeido => "oraculo_leido",
+        TipoEvento::Reserva => "reserva",
+    }
 }
 
 /// Eventos de `nuevos` que `existentes` no tiene. Una clave repetida cuenta una vez.
@@ -1031,7 +1045,8 @@ fn agregar_eventos(home: &Path, eventos: &[Evento]) -> Result<usize, ErrorOracul
 }
 
 /// Copia `transcripts/<id>` de la vuelta a `home/transcripts/<id>`. Sin carpeta en la vuelta, no hace nada.
-/// La carpeta de destino no debe existir: `create_dir` la crea sola o falla.
+/// Copia primero a `<id>.parcial` y renombra al final: una copia a medias nunca tiene el nombre final.
+/// Si `<id>` ya está con el mismo contenido, no copia; si difiere, es error.
 fn copiar_transcripts(vuelta_dir: &Path, home: &Path, id: &str) -> Result<(), ErrorOraculo> {
     let origen = vuelta_dir.join(CARPETA_TRANSCRIPTS).join(id);
     if !origen.is_dir() {
@@ -1041,9 +1056,59 @@ fn copiar_transcripts(vuelta_dir: &Path, home: &Path, id: &str) -> Result<(), Er
     fs::create_dir_all(&padre)
         .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", padre.display())))?;
     let destino = padre.join(id);
-    fs::create_dir(&destino)
-        .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", destino.display())))?;
-    copiar_carpeta(&origen, &destino)
+    if transcripts_ya_copiados(&origen, &destino, id)? {
+        return Ok(());
+    }
+    let parcial = padre.join(format!("{id}.parcial"));
+    borrado::borrar_dir_dentro(&padre, &parcial)
+        .map_err(|e| ErrorOraculo::Infra(format!("limpiar {}: {e}", parcial.display())))?;
+    let copia = copiar_carpeta(&origen, &parcial).and_then(|()| {
+        fs::rename(&parcial, &destino)
+            .map_err(|e| ErrorOraculo::Infra(format!("renombrar {}: {e}", parcial.display())))
+    });
+    if copia.is_err() {
+        let _ = borrado::borrar_dir_dentro(&padre, &parcial);
+    }
+    copia
+}
+
+/// Dice si `destino` ya tiene los transcripts de `origen`: mismos archivos relativos y mismos bytes.
+/// Sin nada en `destino`, da `false`. Si hay algo distinto, es error: no se importó nada.
+fn transcripts_ya_copiados(origen: &Path, destino: &Path, id: &str) -> Result<bool, ErrorOraculo> {
+    if fs::symlink_metadata(destino).is_err() {
+        return Ok(false);
+    }
+    if destino.is_dir() && bytes_de_arbol(origen)? == bytes_de_arbol(destino)? {
+        return Ok(true);
+    }
+    Err(ErrorOraculo::Infra(format!(
+        "ya existe transcripts/{id} en la laptop; no se importó nada"
+    )))
+}
+
+/// Contenido de cada archivo bajo `raiz`, con la ruta relativa como clave.
+fn bytes_de_arbol(raiz: &Path) -> Result<BTreeMap<String, Vec<u8>>, ErrorOraculo> {
+    let mut rutas = Vec::new();
+    archivos_relativos(raiz, raiz, &mut rutas)?;
+    rutas
+        .into_iter()
+        .map(|relativa| {
+            let bytes = fs::read(raiz.join(&relativa))
+                .map_err(|e| ErrorOraculo::Infra(format!("leer {relativa}: {e}")))?;
+            Ok((relativa, bytes))
+        })
+        .collect()
+}
+
+/// Agrega la fila a `runs.jsonl` de `home`, salvo que su id ya esté. Un reintento no la escribe dos veces.
+fn agregar_fila_si_falta(home: &Path, fila: &Fila) -> Result<(), ErrorOraculo> {
+    let ruta = home.join("runs.jsonl");
+    let filas = crate::track::filas_de(&ruta, &crate::track::Filtro::default())
+        .map_err(|e| ErrorOraculo::Infra(format!("leer runs.jsonl: {e}")))?;
+    if filas.iter().any(|f| f.id == fila.id) {
+        return Ok(());
+    }
+    agregar_en(&ruta, fila).map_err(|e| ErrorOraculo::Infra(format!("escribir runs.jsonl: {e}")))
 }
 
 /// Copia el contenido de `origen` a `destino`, en cualquier nivel. Un enlace no se copia.
@@ -2081,6 +2146,138 @@ mod tests {
             otro => panic!("se esperaba Uso, llegó {otro:?}"),
         }
         assert!(instantanea(i.home()).is_empty());
+    }
+
+    /// Vuelta completa de `tarea-a` con la fila f1, un gasto y un transcript. Para los reintentos.
+    fn vuelta_completa(i: &Importa, nombre: &str, eventos: &[Evento]) -> PathBuf {
+        i.vuelta(
+            nombre,
+            "tarea-a",
+            None,
+            &[fila("f1", "tarea-a", crate::tipos::Estado::Verde)],
+            eventos,
+            &[("f1/1-construye.jsonl", "{}\n")],
+        )
+    }
+
+    #[test]
+    fn importar_corre_reintento_tras_fallar_la_copia_no_duplica_la_fila() {
+        let i = Importa::nuevo();
+        let vuelta = vuelta_completa(&i, "v.tar.gz", &[gasto("c1", 10.0, 0.5)]);
+        let pedido = i.pedido_de(&vuelta);
+        // Un archivo en `transcripts` hace fallar la carpeta de la copia, después de la fila en el orden viejo.
+        fs::write(i.home().join("transcripts"), "estorbo\n").expect("estorbo");
+        assert!(i.importa(&pedido).is_err(), "el primer intento debe fallar");
+        fs::remove_file(i.home().join("transcripts")).expect("quita el estorbo");
+        let r = i.importa(&pedido).expect("el reintento");
+        assert!(r.entro, "{r:?}");
+        assert_eq!(ids_de_runs(i.home()), vec!["f1".to_string()]);
+        assert!(i.home().join("transcripts/f1/1-construye.jsonl").is_file());
+        let registro = registro_de(i.home());
+        assert_eq!(registro.pasadas["2"]["tarea-a"].len(), 1);
+        assert_eq!(eventos_de(i.home()).len(), 1);
+    }
+
+    #[test]
+    fn importar_corre_fallo_despues_de_los_eventos_el_reintento_no_los_duplica() {
+        let i = Importa::nuevo();
+        let vuelta = vuelta_completa(
+            &i,
+            "v.tar.gz",
+            &[gasto("c1", 10.0, 0.5), sesion("c1", 11.0)],
+        );
+        let pedido = i.pedido_de(&vuelta);
+        // `runs.jsonl` como carpeta: la fila no se escribe, pero los eventos ya quedaron.
+        fs::create_dir(i.home().join("runs.jsonl")).expect("estorbo");
+        assert!(i.importa(&pedido).is_err(), "el primer intento debe fallar");
+        assert_eq!(
+            eventos_de(i.home()).len(),
+            2,
+            "los eventos ya estaban escritos"
+        );
+        fs::remove_dir(i.home().join("runs.jsonl")).expect("quita el estorbo");
+        let r = i.importa(&pedido).expect("el reintento");
+        assert!(r.entro, "{r:?}");
+        let eventos = eventos_de(i.home());
+        assert_eq!(eventos.len(), 2, "{eventos:?}");
+        assert_eq!(ids_de_runs(i.home()), vec!["f1".to_string()]);
+    }
+
+    #[test]
+    fn importar_corre_evento_con_misma_corrida_ts_y_tipo_no_entra_dos_veces() {
+        let ev = gasto("c1", 10.0, 0.5);
+        assert!(pendientes_de(std::slice::from_ref(&ev), std::slice::from_ref(&ev)).is_empty());
+        assert_eq!(pendientes_de(&[], &[ev.clone(), ev.clone()]).len(), 1);
+    }
+
+    #[test]
+    fn importar_corre_mismo_ts_y_corrida_con_tipo_distinto_entran_los_dos() {
+        let llamada = gasto("c1", 10.0, 0.5);
+        let sesion_mismo_ts = Evento {
+            tipo: crate::tipos::TipoEvento::Sesion,
+            ..llamada.clone()
+        };
+        let pendientes = pendientes_de(
+            std::slice::from_ref(&llamada),
+            std::slice::from_ref(&sesion_mismo_ts),
+        );
+        assert_eq!(pendientes.len(), 1, "{pendientes:?}");
+        assert_eq!(pendientes_de(&[], &[llamada, sesion_mismo_ts]).len(), 2);
+    }
+
+    #[test]
+    fn importar_corre_transcripts_ya_copiados_e_iguales_se_aceptan() {
+        let i = Importa::nuevo();
+        let vuelta = vuelta_completa(&i, "v.tar.gz", &[gasto("c1", 10.0, 0.5)]);
+        // Quedó de un intento que se cortó después de copiar los transcripts.
+        let previo = i.home().join("transcripts/f1");
+        fs::create_dir_all(&previo).expect("previo");
+        fs::write(previo.join("1-construye.jsonl"), "{}\n").expect("previo");
+        let r = i.importa(&i.pedido_de(&vuelta)).expect("entra");
+        assert!(r.entro, "{r:?}");
+        assert_eq!(ids_de_runs(i.home()), vec!["f1".to_string()]);
+        assert_eq!(registro_de(i.home()).pasadas["2"]["tarea-a"].len(), 1);
+        assert_eq!(
+            fs::read_to_string(previo.join("1-construye.jsonl")).expect("lee"),
+            "{}\n"
+        );
+    }
+
+    #[test]
+    fn importar_corre_transcripts_distintos_frenan_antes_de_escribir() {
+        let i = Importa::nuevo();
+        let vuelta = vuelta_completa(&i, "v.tar.gz", &[gasto("c1", 10.0, 0.5)]);
+        let previo = i.home().join("transcripts/f1");
+        fs::create_dir_all(&previo).expect("previo");
+        fs::write(previo.join("1-construye.jsonl"), "otro contenido\n").expect("previo");
+        let antes = instantanea(i.home());
+        match i.importa(&i.pedido_de(&vuelta)) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(
+                    mensaje.contains("ya existe transcripts/f1 en la laptop"),
+                    "{mensaje}"
+                );
+                assert!(mensaje.contains("no se importó nada"), "{mensaje}");
+            }
+            otro => panic!("se esperaba Infra, llegó {otro:?}"),
+        }
+        assert_eq!(instantanea(i.home()), antes);
+    }
+
+    #[test]
+    fn importar_corre_copia_a_medias_previa_se_borra_y_no_queda_parcial() {
+        let i = Importa::nuevo();
+        let vuelta = vuelta_completa(&i, "v.tar.gz", &[gasto("c1", 10.0, 0.5)]);
+        let parcial = i.home().join("transcripts/f1.parcial");
+        fs::create_dir_all(&parcial).expect("parcial");
+        fs::write(parcial.join("basura.jsonl"), "a medias\n").expect("parcial");
+        let r = i.importa(&i.pedido_de(&vuelta)).expect("entra");
+        assert!(r.entro, "{r:?}");
+        assert!(!parcial.exists(), "no queda transcripts/f1.parcial");
+        assert_eq!(
+            fs::read_to_string(i.home().join("transcripts/f1/1-construye.jsonl")).expect("copiado"),
+            "{}\n"
+        );
     }
 }
 
