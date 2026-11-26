@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Prepara el runtime de Colab para `corre`. Corre como root en Ubuntu 24.04.
-# Llama a preparar-runtime.sh, instala Node y las herramientas de red, fija claude y rustc,
-# crea el usuario builder, mueve el root-home del paquete y deja el plugin en su ruta original.
+# Llama a preparar-runtime.sh, instala Node y las herramientas de red, instala claude con npm
+# --prefix /usr/local (claude y node tienen que quedar bajo /usr, donde bwrap los monta), fija
+# claude y rustc, crea el usuario builder, mueve el root-home del paquete y deja el plugin en su
+# ruta original.
 # Termina llamando a red-builder.sh (lo trae la Tarea 171).
 # Uso: preparar-corre.sh <carpeta_del_paquete>
 set -euo pipefail
@@ -12,7 +14,10 @@ ROOT_BIN_DIR="${ROOT_BIN_DIR:-/usr/local/bin}"
 ROOT_HOME_DESTINO="${ROOT_HOME_DESTINO:-/root/root-home}"
 ROOT_DIR_RAIZ="${ROOT_DIR_RAIZ:-/root}"
 ROOT_RAIZ_DIR="${ROOT_RAIZ_DIR:-}"
-export ROOT_BIN_DIR ROOT_HOME_DESTINO ROOT_DIR_RAIZ ROOT_RAIZ_DIR
+ROOT_NPM="${ROOT_NPM:-/usr/bin/npm}"
+ROOT_PREFIJO_USR="${ROOT_PREFIJO_USR:-/usr/}"
+ROOT_PATH_BUILDER="${ROOT_PATH_BUILDER:-/usr/local/bin:/usr/bin:/bin}"
+export ROOT_BIN_DIR ROOT_HOME_DESTINO ROOT_DIR_RAIZ ROOT_RAIZ_DIR ROOT_NPM ROOT_PREFIJO_USR ROOT_PATH_BUILDER
 
 # Paquetes que el builder necesita. Igual que el par update + install de preparar-runtime.sh.
 PAQUETES_APT=(nodejs npm slirp4netns iptables iproute2)
@@ -62,13 +67,34 @@ instalar_paquetes() {
     exit "$codigo"
 }
 
-# Paso 3: instala claude fijado y revisa las versiones de claude y de rustc.
-# Si no coinciden con versiones-builder.env, sale con 1 y nombra las dos versiones.
+# Revisa que un comando resuelva bajo ROOT_PREFIJO_USR con el PATH del builder.
+# Sale con 1 si no lo encuentra o si la ruta real (readlink -f) cae fuera del prefijo.
+revisar_bajo_usr() {
+    local nombre="$1" hallado real
+    if ! hallado="$(PATH="$ROOT_PATH_BUILDER" command -v "$nombre")" || [ -z "$hallado" ]; then
+        echo "mal $nombre: command -v no encuentra $nombre con el PATH del builder ($ROOT_PATH_BUILDER)"
+        exit 1
+    fi
+    real="$(readlink -f "$hallado")"
+    case "$real" in
+        "$ROOT_PREFIJO_USR"*) ;;
+        *)
+            echo "mal $nombre: la ruta real es $real y debe estar bajo $ROOT_PREFIJO_USR"
+            exit 1
+            ;;
+    esac
+}
+
+# Paso 3: instala claude fijado con el npm de apt y --prefix /usr/local. Revisa que claude y node
+# queden bajo /usr y que claude --version (con el PATH del builder) dé la versión fijada.
+# Revisa las versiones de claude y de rustc. Si no coinciden con versiones-builder.env, sale con 1.
 instalar_y_verificar_versiones() {
-    npm install -g "@anthropic-ai/claude-code@$CLAUDE_VERSION"
+    "$ROOT_NPM" install -g --prefix /usr/local "@anthropic-ai/claude-code@$CLAUDE_VERSION"
+    revisar_bajo_usr claude
+    revisar_bajo_usr node
 
     local salida primero segundo
-    salida="$(claude --version)" || {
+    salida="$(env PATH="$ROOT_PATH_BUILDER" claude --version)" || {
         echo "mal versiones: claude --version falló"
         exit 1
     }

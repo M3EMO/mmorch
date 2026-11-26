@@ -2667,6 +2667,10 @@ COMPORTAMIENTO
         prefijo: PathBuf,
         red: PathBuf,
         runtime: PathBuf,
+        /// Carpeta "/usr" falsa: el `claude` real vive acá. `falsos/claude` es un enlace a él.
+        usr: PathBuf,
+        /// Donde el `npm` falso anota sus argumentos.
+        npm_args: PathBuf,
     }
 
     impl Prep {
@@ -2682,9 +2686,11 @@ COMPORTAMIENTO
                 prefijo: raiz.path().join("prefijo"),
                 red: raiz.path().join("red-builder.sh"),
                 runtime: raiz.path().join("preparar-runtime.sh"),
+                usr: raiz.path().join("usr-falso/bin"),
+                npm_args: raiz.path().join("npm-args.txt"),
                 raiz,
             };
-            for dir in [&p.paquete, &p.falsos, &p.root, &p.prefijo] {
+            for dir in [&p.paquete, &p.falsos, &p.root, &p.prefijo, &p.usr] {
                 fs::create_dir_all(dir).expect("crea carpeta");
             }
             fs::write(p.paquete.join("versiones-builder.env"), versiones).expect("versiones");
@@ -2710,17 +2716,27 @@ COMPORTAMIENTO
                 &p.falsos.join("apt-get"),
                 "#!/bin/sh\necho \"apt-get $*\"\n",
             );
-            escribir_ejecutable(&p.falsos.join("npm"), "#!/bin/sh\necho \"npm $*\"\n");
+            escribir_ejecutable(
+                &p.falsos.join("npm"),
+                &format!(
+                    "#!/bin/sh\necho \"npm $*\"\necho \"$*\" >> '{}'\n",
+                    p.npm_args.display()
+                ),
+            );
             escribir_ejecutable(
                 &p.falsos.join("useradd"),
                 "#!/bin/sh\necho \"useradd $*\"\n",
             );
             escribir_ejecutable(&p.falsos.join("chown"), "#!/bin/sh\nexit 0\n");
             escribir_ejecutable(&p.falsos.join("id"), "#!/bin/sh\nexit 1\n");
-            escribir_ejecutable(
-                &p.falsos.join("claude"),
+            // `claude` real queda en la carpeta "/usr" falsa; en `falsos` solo hay un enlace.
+            let claude_real = escribir_ejecutable(
+                &p.usr.join("claude"),
                 &format!("#!/bin/sh\necho '{claude_dice}'\n"),
             );
+            std::os::unix::fs::symlink(&claude_real, p.falsos.join("claude"))
+                .expect("enlace de claude");
+            escribir_ejecutable(&p.falsos.join("node"), "#!/bin/sh\necho 'v22.0.0'\n");
             escribir_ejecutable(
                 &p.falsos.join("rustc"),
                 "#!/bin/sh\necho 'rustc 1.91.0 (abc 2026-01-01)'\n",
@@ -2728,13 +2744,28 @@ COMPORTAMIENTO
             p
         }
 
+        /// Ruta real (sin enlaces) de algo que ya existe en el temporal.
+        fn real(&self, ruta: &Path) -> PathBuf {
+            fs::canonicalize(ruta).expect("ruta real")
+        }
+
+        /// Corre el guion con los defaults de prueba: PATH con `falsos`, `ROOT_NPM` falso,
+        /// prefijo "/usr/" en la raíz temporal y el PATH del builder en `falsos`.
         fn correr(&self) -> Output {
+            self.correr_con(&[])
+        }
+
+        /// Igual que `correr`, pero `extra` pisa variables (por ejemplo, un prefijo distinto).
+        fn correr_con(&self, extra: &[(&str, String)]) -> Output {
             let path = format!(
                 "{}:{}",
                 self.falsos.display(),
                 std::env::var("PATH").unwrap_or_default()
             );
-            Command::new("bash")
+            let prefijo_usr = format!("{}/", self.real(self.raiz.path()).display());
+            let npm = self.real(&self.falsos).join("npm").display().to_string();
+            let mut orden = Command::new("bash");
+            orden
                 .arg(PREPARAR)
                 .arg(&self.paquete)
                 .current_dir(self.raiz.path())
@@ -2746,8 +2777,13 @@ COMPORTAMIENTO
                 .env("ROOT_DIR_RAIZ", &self.root)
                 .env("ROOT_RAIZ_DIR", &self.prefijo)
                 .env("ROOT_APT_ESPERA", "0")
-                .output()
-                .expect("lanza bash")
+                .env("ROOT_NPM", npm)
+                .env("ROOT_PREFIJO_USR", prefijo_usr)
+                .env("ROOT_PATH_BUILDER", self.falsos.display().to_string());
+            for (clave, valor) in extra {
+                orden.env(clave, valor);
+            }
+            orden.output().expect("lanza bash")
         }
     }
 
@@ -2822,5 +2858,124 @@ COMPORTAMIENTO
         let original = fs::read(p.paquete.join("plugins/ecc/x.md")).expect("plugin en paquete");
         let copia = fs::read(p.prefijo.join("opt/ecc-falso/x.md")).expect("plugin copiado");
         assert_eq!(copia, original);
+    }
+
+    #[test]
+    fn preparar_corre_npm_instala_claude_con_prefix_usr_local() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_npm_instala_claude_con_prefix_usr_local");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        let salida = p.correr();
+        assert!(salida.status.success(), "{}", texto(&salida));
+        let anotado = fs::read_to_string(&p.npm_args).expect("npm no recibió argumentos");
+        assert_eq!(
+            anotado,
+            "install -g --prefix /usr/local @anthropic-ai/claude-code@2.1.5\n"
+        );
+    }
+
+    #[test]
+    fn preparar_corre_root_npm_por_omision_es_usr_bin_npm() {
+        falta_guion(PREPARAR);
+        let guion = fs::read_to_string(PREPARAR).expect("lee el guion");
+        assert!(
+            guion.contains("ROOT_NPM=\"${ROOT_NPM:-/usr/bin/npm}\""),
+            "falta el default ROOT_NPM=/usr/bin/npm en el guion"
+        );
+    }
+
+    #[test]
+    fn preparar_corre_frena_si_claude_fuera_de_usr() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_frena_si_claude_fuera_de_usr");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        let prefijo = format!("{}/", p.real(&p.prefijo).display());
+        let salida = p.correr_con(&[("ROOT_PREFIJO_USR", prefijo.clone())]);
+        assert!(!salida.status.success(), "debe salir distinto de 0");
+        let dicho = texto(&salida);
+        assert!(dicho.contains("mal claude"), "{dicho}");
+        let hallado = p.real(&p.usr.join("claude")).display().to_string();
+        assert!(
+            dicho.contains(&hallado),
+            "nombra la ruta real de claude: {dicho}"
+        );
+        assert!(
+            dicho.contains(&prefijo),
+            "nombra el prefijo esperado: {dicho}"
+        );
+    }
+
+    #[test]
+    fn preparar_corre_frena_si_node_fuera_de_usr() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_frena_si_node_fuera_de_usr");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        // claude queda bajo el prefijo, node no: el guion tiene que frenar por node.
+        let prefijo = format!("{}/", p.real(&p.usr).display());
+        let salida = p.correr_con(&[("ROOT_PREFIJO_USR", prefijo.clone())]);
+        assert!(!salida.status.success(), "debe salir distinto de 0");
+        let dicho = texto(&salida);
+        assert!(dicho.contains("mal node"), "{dicho}");
+        let hallado = p.real(&p.falsos.join("node")).display().to_string();
+        assert!(
+            dicho.contains(&hallado),
+            "nombra la ruta real de node: {dicho}"
+        );
+        assert!(
+            dicho.contains(&prefijo),
+            "nombra el prefijo esperado: {dicho}"
+        );
+    }
+
+    #[test]
+    fn preparar_corre_revisa_claude_por_ruta_real_del_enlace() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_revisa_claude_por_ruta_real_del_enlace");
+            return;
+        }
+        falta_guion(PREPARAR);
+        // falsos/claude es un enlace a usr/claude. Con prefijo = falsos/ la ruta del enlace
+        // cae bajo falsos/, pero la real no. Solo frena si el guion mira la ruta real.
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        let prefijo = format!("{}/", p.real(&p.falsos).display());
+        let salida = p.correr_con(&[("ROOT_PREFIJO_USR", prefijo.clone())]);
+        assert!(!salida.status.success(), "debe salir distinto de 0");
+        let dicho = texto(&salida);
+        assert!(dicho.contains("mal claude"), "{dicho}");
+        let hallado = p.real(&p.usr.join("claude")).display().to_string();
+        assert!(
+            dicho.contains(&hallado),
+            "nombra la ruta real de claude: {dicho}"
+        );
+    }
+
+    #[test]
+    fn preparar_corre_frena_si_claude_no_se_encuentra() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_frena_si_claude_no_se_encuentra");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        let vacio = p.raiz.path().join("vacio");
+        fs::create_dir_all(&vacio).expect("carpeta vacía");
+        let salida = p.correr_con(&[("ROOT_PATH_BUILDER", vacio.display().to_string())]);
+        assert!(!salida.status.success(), "debe salir distinto de 0");
+        let dicho = texto(&salida);
+        assert!(dicho.contains("mal claude"), "{dicho}");
     }
 }
