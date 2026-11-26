@@ -151,6 +151,8 @@ struct Escenario {
     netns_dir: PathBuf,
     /// Nodo de tun del test (`ROOT_DEV_NET_TUN`), dentro de la raíz temporal.
     tun: PathBuf,
+    /// Carpeta `etc` del test (`ROOT_ETC_DIR`), dentro de la raíz temporal. Nunca es el /etc real.
+    etc: PathBuf,
     /// Marca de IPv6 activo: si existe, el `ip` falso imprime ruta y dirección global.
     ipv6: PathBuf,
     _raiz: tempfile::TempDir,
@@ -236,6 +238,7 @@ fn escenario() -> Escenario {
         slirp_log: raiz.path().join("slirp.log"),
         netns_dir,
         tun: raiz.path().join("dev").join("net").join("tun"),
+        etc: raiz.path().join("etc"),
         ipv6,
         _raiz: raiz,
     }
@@ -270,6 +273,7 @@ fn correr_con_path(e: &Escenario, path: &str, extra: &[(&str, &str)]) -> Output 
         .env("ROOT_SLIRP_LOG", &e.slirp_log)
         .env("ROOT_NETNS_DIR", &e.netns_dir)
         .env("ROOT_DEV_NET_TUN", &e.tun)
+        .env("ROOT_ETC_DIR", &e.etc)
         .env("ROOT_RED_INTENTOS", "1");
     for (clave, valor) in extra {
         orden.env(clave, valor);
@@ -795,4 +799,55 @@ fn sin_nsenter_frena_y_lo_nombra() {
     );
     let ls = llamadas(&e);
     assert!(ls.is_empty(), "no debe llamar a ningún falso: {ls:?}");
+}
+
+#[test]
+fn escribe_resolv_del_builder() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea escribe_resolv_del_builder");
+        return;
+    }
+    let e = escenario();
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let resolv = e.etc.join("netns").join(RED).join("resolv.conf");
+    let contenido = fs::read_to_string(&resolv)
+        .unwrap_or_else(|error| panic!("falta {}: {error}", resolv.display()));
+    assert_eq!(
+        contenido, "nameserver 10.0.2.3\n",
+        "contenido de resolv.conf"
+    );
+    let modo = fs::metadata(&resolv)
+        .expect("metadatos de resolv.conf")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(modo, 0o644, "resolv.conf del builder debe ser 0644");
+}
+
+#[test]
+fn no_toca_el_resolv_del_runtime() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea no_toca_el_resolv_del_runtime");
+        return;
+    }
+    let e = escenario();
+    fs::create_dir_all(&e.etc).expect("crea la carpeta etc del test");
+    let runtime = e.etc.join("resolv.conf");
+    fs::write(&runtime, "nameserver 127.0.0.11\n").expect("pone el resolv.conf del runtime");
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let contenido = fs::read_to_string(&runtime).expect("lee el resolv.conf del runtime");
+    assert_eq!(
+        contenido, "nameserver 127.0.0.11\n",
+        "el resolv.conf del runtime no debe cambiar"
+    );
 }

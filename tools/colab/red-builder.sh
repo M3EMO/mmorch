@@ -18,7 +18,8 @@ ROOT_SLIRP_LOG="${ROOT_SLIRP_LOG:-/run/root-builder-slirp.log}"
 ROOT_RED_INTENTOS="${ROOT_RED_INTENTOS:-10}"
 ROOT_NETNS_DIR="${ROOT_NETNS_DIR:-/run/netns}"
 ROOT_DEV_NET_TUN="${ROOT_DEV_NET_TUN:-/dev/net/tun}"
-export ROOT_RED_BUILDER ROOT_SLIRP_PID ROOT_SOSTEN_PID ROOT_SLIRP_LOG ROOT_RED_INTENTOS ROOT_NETNS_DIR ROOT_DEV_NET_TUN
+ROOT_ETC_DIR="${ROOT_ETC_DIR:-/etc}"
+export ROOT_RED_BUILDER ROOT_SLIRP_PID ROOT_SOSTEN_PID ROOT_SLIRP_LOG ROOT_RED_INTENTOS ROOT_NETNS_DIR ROOT_DEV_NET_TUN ROOT_ETC_DIR
 
 # DNS de slirp4netns. Es lo único que se acepta antes de los cortes.
 DNS_SLIRP="10.0.2.3"
@@ -66,6 +67,18 @@ asegurar_espacio() {
         lanzar_sosten
     fi
     ip netns attach "$ROOT_RED_BUILDER" "$(cat "$ROOT_SOSTEN_PID")"
+}
+
+# Paso 1a: escribe el resolv.conf del builder en $ROOT_ETC_DIR/netns/$ROOT_RED_BUILDER/resolv.conf,
+# con una sola línea: el DNS de slirp4netns. Corre como root, así que el dueño ya es root: no hace falta chown.
+# NO toca $ROOT_ETC_DIR/resolv.conf (el del runtime): r00t y la CLI de Colab lo necesitan tal como está.
+# `ip netns exec <red>` monta ese archivo sobre /etc/resolv.conf en su espacio de montaje, y bwrap monta
+# /etc desde ahí, por eso no hace falta otro montaje. Es idempotente: escribir lo mismo otra vez no cambia nada.
+escribir_resolv() {
+    local carpeta="$ROOT_ETC_DIR/netns/$ROOT_RED_BUILDER"
+    mkdir -p "$carpeta"
+    echo "nameserver $DNS_SLIRP" >"$carpeta/resolv.conf"
+    chmod 0644 "$carpeta/resolv.conf"
 }
 
 # Paso 1b: asegura el nodo de tun (ROOT_DEV_NET_TUN). Si ya existe, no lo toca ni llama a mknod.
@@ -167,6 +180,7 @@ principal() {
     revisar_herramientas
     preparar_pidfiles
     asegurar_espacio
+    escribir_resolv
     asegurar_tun
     cerrar_ipv6
     asegurar_slirp
