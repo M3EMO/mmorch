@@ -101,6 +101,8 @@ exit 0
 /// Carpetas y archivos de un test. Los pidfiles están en la raíz temporal.
 struct Escenario {
     falsos: PathBuf,
+    /// Enlaces a los programas reales que usa el guion (`cat`, `grep`...), para el PATH sin ip6tables.
+    reales: PathBuf,
     registro: PathBuf,
     fallo: PathBuf,
     slirp_pid: PathBuf,
@@ -119,6 +121,9 @@ impl Drop for Escenario {
         }
     }
 }
+
+/// Programas reales que el guion llama y que no son falsos. Van enlazados en la carpeta `reales`.
+const PROGRAMAS_REALES: [&str; 7] = ["cat", "cut", "grep", "dirname", "mkdir", "touch", "chmod"];
 
 fn bash_disponible() -> bool {
     Command::new("bash")
@@ -143,6 +148,12 @@ fn escenario() -> Escenario {
     let raiz = tempfile::tempdir().expect("raíz temporal");
     let falsos = raiz.path().join("falsos");
     fs::create_dir_all(&falsos).expect("crea falsos");
+    let reales = raiz.path().join("reales");
+    fs::create_dir_all(&reales).expect("crea reales");
+    for programa in PROGRAMAS_REALES {
+        std::os::unix::fs::symlink(ruta_de(programa), reales.join(programa))
+            .expect("enlaza el programa real");
+    }
     let registro = raiz.path().join("registro.txt");
     let estado = raiz.path().join("netns.txt");
     let reglas = raiz.path().join("reglas.txt");
@@ -165,6 +176,7 @@ fn escenario() -> Escenario {
     escribir_ejecutable(&falsos.join("ip6tables"), &completar(IP6TABLES_FALSO));
     Escenario {
         falsos,
+        reales,
         registro,
         fallo,
         slirp_pid: raiz.path().join("slirp.pid"),
@@ -174,13 +186,16 @@ fn escenario() -> Escenario {
     }
 }
 
-/// PATH del test: los falsos primero, después el PATH real. Con `sin_ip6tables`, quita del PATH real
-/// las carpetas que tengan `ip6tables`, para que el guion no lo encuentre.
+/// PATH del test: los falsos primero, después el PATH real. Con `sin_ip6tables`, en vez del PATH
+/// real va una carpeta propia con enlaces a los programas reales del guion: así el guion no encuentra
+/// `ip6tables` aunque viva en la misma carpeta que `bash`, `cat` o `grep` (en Fedora, `/usr/bin`).
 fn path_del_test(e: &Escenario, sin_ip6tables: bool) -> String {
-    let resto = std::env::var_os("PATH").unwrap_or_default();
-    let carpetas = std::env::split_paths(&resto)
-        .filter(|carpeta| !(sin_ip6tables && carpeta.join("ip6tables").exists()));
-    std::env::join_paths(std::iter::once(e.falsos.clone()).chain(carpetas))
+    let resto = if sin_ip6tables {
+        e.reales.clone().into_os_string()
+    } else {
+        std::env::var_os("PATH").unwrap_or_default()
+    };
+    std::env::join_paths(std::iter::once(e.falsos.clone()).chain(std::env::split_paths(&resto)))
         .expect("PATH válido")
         .to_string_lossy()
         .into_owned()
@@ -189,7 +204,8 @@ fn path_del_test(e: &Escenario, sin_ip6tables: bool) -> String {
 /// Corre el guion con el PATH dado, el nombre de red, los pidfiles y el log de slirp del test.
 /// `extra` agrega variables al entorno.
 fn correr_con_path(e: &Escenario, path: &str, extra: &[(&str, &str)]) -> Output {
-    let mut orden = Command::new("bash");
+    // bash por ruta absoluta, resuelta con el PATH real de este proceso: el PATH del guion puede no tenerlo.
+    let mut orden = Command::new(ruta_de("bash"));
     orden
         .arg(SCRIPT)
         .env("PATH", path)
