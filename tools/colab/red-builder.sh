@@ -2,9 +2,12 @@
 # Prepara la red del builder de Colab. Corre como root, antes de la primera corrida.
 # Primero revisa que existan las herramientas: si falta una, sale con 1 sin tocar nada.
 # Crea el espacio de red con un sostén de espacio de usuario de root (unshare) y le pone el nombre
-# ROOT_RED_BUILDER con ip netns attach. Apaga IPv6 dentro de el y pone la política de salida de ip6tables en DROP.
+# ROOT_RED_BUILDER con ip netns attach. Pone en DROP las políticas de OUTPUT, INPUT y FORWARD de ip6tables
+# dentro del espacio. Como /proc/sys es de solo lectura en Colab, no toca sysctl: revisa que no quede
+# IPv6 con ruta por defecto ni dirección global.
 # Lanza slirp4netns con su salida en ROOT_SLIRP_LOG (modo 0600), pone las reglas de salida de IPv4
-# y comprueba la resolución. Es idempotente.
+# y comprueba la resolución. iptables, ip6tables e ip corren dentro del sostén con nsenter.
+# Es idempotente.
 # Uso: red-builder.sh
 set -euo pipefail
 
@@ -76,11 +79,18 @@ asegurar_tun() {
     mknod -m 0666 "$ROOT_DEV_NET_TUN" c 10 200
 }
 
-# Paso 2: apaga IPv6 dentro del espacio y pone la política de salida de ip6tables en DROP.
-apagar_ipv6() {
-    ip netns exec "$ROOT_RED_BUILDER" sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
-    ip netns exec "$ROOT_RED_BUILDER" sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null
-    ip netns exec "$ROOT_RED_BUILDER" ip6tables -P OUTPUT DROP
+# Prefijo de cada llamada al espacio: entra al sostén (pid de ROOT_SOSTEN_PID) en sus espacios de usuario y de red.
+en_sosten() {
+    local pid
+    pid="$(cat "$ROOT_SOSTEN_PID")"
+    nsenter -t "$pid" -U -n "$@"
+}
+
+# Paso 2: pone en DROP las tres políticas de ip6tables dentro del espacio.
+cerrar_ipv6() {
+    en_sosten ip6tables -P OUTPUT DROP
+    en_sosten ip6tables -P INPUT DROP
+    en_sosten ip6tables -P FORWARD DROP
 }
 
 # Dice si el pid guardado en el archivo dado sigue vivo.
@@ -109,10 +119,10 @@ asegurar_slirp() {
 
 # Añade una regla de OUTPUT dentro del espacio solo si falta. Lo que sigue son los argumentos de la regla.
 regla() {
-    if ip netns exec "$ROOT_RED_BUILDER" iptables -C OUTPUT "$@" 2>/dev/null; then
+    if en_sosten iptables -C OUTPUT "$@" 2>/dev/null; then
         return 0
     fi
-    ip netns exec "$ROOT_RED_BUILDER" iptables -A OUTPUT "$@"
+    en_sosten iptables -A OUTPUT "$@"
 }
 
 # Paso 4: primero acepta el DNS de slirp, luego corta los rangos privados y especiales.
@@ -123,6 +133,18 @@ reglas_de_salida() {
     for rango in "${RANGOS_CORTADOS[@]}"; do
         regla ! -o lo -d "$rango" -j DROP
     done
+}
+
+# Paso 4b: revisa que IPv6 no quede activo dentro del espacio: sin ruta por defecto ni dirección global.
+# Si algo imprime, avisa por stderr y sale con 1.
+revisar_ipv6() {
+    local ruta direccion
+    ruta="$(en_sosten ip -6 route show default)"
+    direccion="$(en_sosten ip -6 addr show scope global)"
+    if [ -n "$ruta" ] || [ -n "$direccion" ]; then
+        echo "mal red-builder: IPv6 sigue activo dentro de $ROOT_RED_BUILDER" >&2
+        exit 1
+    fi
 }
 
 # Paso 5: comprueba que api.anthropic.com resuelve dentro del espacio.
@@ -146,9 +168,10 @@ principal() {
     preparar_pidfiles
     asegurar_espacio
     asegurar_tun
-    apagar_ipv6
+    cerrar_ipv6
     asegurar_slirp
     reglas_de_salida
+    revisar_ipv6
     comprobar_red
 }
 

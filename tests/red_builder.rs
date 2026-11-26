@@ -32,6 +32,8 @@ const REGLAS_ESPERADAS: [&str; 8] = [
 
 /// `ip` falso. `netns attach NOMBRE` crea $ROOT_NETNS_DIR/NOMBRE; `netns delete NOMBRE` lo borra.
 /// `netns exec` ejecuta lo que sigue. `netns add` solo se anota: el guion nuevo no lo debe usar.
+/// `-6 route show default` y `-6 addr show scope global` salen vacíos, salvo que exista la marca
+/// de IPv6 activo: entonces imprimen una ruta y una dirección global falsas.
 const IP_FALSO: &str = r#"#!/bin/sh
 echo "ip $*" >> 'REGISTRO'
 if [ "$1" = netns ] && [ "$2" = add ]; then
@@ -52,6 +54,14 @@ if [ "$1" = netns ] && [ "$2" = exec ]; then
   shift 3
   exec "$@"
 fi
+if [ "$1" = -6 ] && [ "$2" = route ]; then
+  if [ -f 'IPV6' ]; then echo "default via fe80::1 dev tap0 proto ra"; fi
+  exit 0
+fi
+if [ "$1" = -6 ] && [ "$2" = addr ]; then
+  if [ -f 'IPV6' ]; then echo "inet6 2001:db8::2/64 scope global"; fi
+  exit 0
+fi
 exit 2
 "#;
 
@@ -61,10 +71,12 @@ echo "unshare $*" >> 'REGISTRO'
 exec 'SLEEP_REAL' 30
 "#;
 
-/// `nsenter` falso. Anota la llamada y sale 0. El guion todavía no lo usa: solo se revisa que exista.
+/// `nsenter` falso. Anota la llamada, saltea `-t PID -U -n` (4 argumentos) y ejecuta lo que sigue,
+/// así `iptables`, `ip6tables` e `ip` falsos anotan su propia línea.
 const NSENTER_FALSO: &str = r#"#!/bin/sh
 echo "nsenter $*" >> 'REGISTRO'
-exit 0
+shift 4
+exec "$@"
 "#;
 
 /// `mknod` falso. Anota la llamada, crea un archivo vacío en la ruta (`$3`) y sale 0.
@@ -139,6 +151,8 @@ struct Escenario {
     netns_dir: PathBuf,
     /// Nodo de tun del test (`ROOT_DEV_NET_TUN`), dentro de la raíz temporal.
     tun: PathBuf,
+    /// Marca de IPv6 activo: si existe, el `ip` falso imprime ruta y dirección global.
+    ipv6: PathBuf,
     _raiz: tempfile::TempDir,
 }
 
@@ -193,11 +207,13 @@ fn escenario() -> Escenario {
     let reglas = raiz.path().join("reglas.txt");
     let fallo = raiz.path().join("getent-falla");
     let sleep_real = ruta_de("sleep").display().to_string();
+    let ipv6 = raiz.path().join("ipv6-activo");
     let completar = |guion: &str| {
         guion
             .replace("REGISTRO", &registro.display().to_string())
             .replace("REGLAS", &reglas.display().to_string())
             .replace("FALLO", &fallo.display().to_string())
+            .replace("IPV6", &ipv6.display().to_string())
             .replace("SLEEP_REAL", &sleep_real)
     };
     escribir_ejecutable(&falsos.join("ip"), &completar(IP_FALSO));
@@ -220,6 +236,7 @@ fn escenario() -> Escenario {
         slirp_log: raiz.path().join("slirp.log"),
         netns_dir,
         tun: raiz.path().join("dev").join("net").join("tun"),
+        ipv6,
         _raiz: raiz,
     }
 }
@@ -423,10 +440,18 @@ fn ningun_secreto_llega_a_la_salida_ni_al_registro() {
     assert!(!registro.contains("sk-falso"), "el registro tiene secreto");
 }
 
+/// PID del sostén, tal como lo escribió el guion en su pidfile.
+fn pid_del_sosten(e: &Escenario) -> String {
+    fs::read_to_string(&e.sosten_pid)
+        .expect("el guion escribe sosten.pid")
+        .trim()
+        .to_string()
+}
+
 #[test]
-fn apaga_ipv6_y_pone_drop_en_ip6tables() {
+fn ninguna_llamada_a_sysctl() {
     if !bash_disponible() {
-        eprintln!("sin bash: se saltea apaga_ipv6_y_pone_drop_en_ip6tables");
+        eprintln!("sin bash: se saltea ninguna_llamada_a_sysctl");
         return;
     }
     let e = escenario();
@@ -437,16 +462,95 @@ fn apaga_ipv6_y_pone_drop_en_ip6tables() {
         String::from_utf8_lossy(&salida.stderr)
     );
     let ls = llamadas(&e);
-    for esperada in [
-        "ip netns exec red-prueba sysctl -w net.ipv6.conf.all.disable_ipv6=1",
-        "ip netns exec red-prueba sysctl -w net.ipv6.conf.default.disable_ipv6=1",
-        "ip netns exec red-prueba ip6tables -P OUTPUT DROP",
-    ] {
-        assert!(
-            ls.iter().any(|l| l == esperada),
-            "falta `{esperada}`: {ls:?}"
+    assert!(
+        !ls.iter().any(|l| l.starts_with("sysctl")),
+        "no debe llamar a sysctl: {ls:?}"
+    );
+}
+
+#[test]
+fn toda_regla_va_detras_de_nsenter() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea toda_regla_va_detras_de_nsenter");
+        return;
+    }
+    let e = escenario();
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let pid = pid_del_sosten(&e);
+    let ls = llamadas(&e);
+    let posiciones: Vec<usize> = ls
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("iptables ") || l.starts_with("ip6tables "))
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !posiciones.is_empty(),
+        "debe haber llamadas a iptables o ip6tables: {ls:?}"
+    );
+    for i in posiciones {
+        let llamada = &ls[i];
+        let previa = i.checked_sub(1).map(|j| ls[j].as_str());
+        let esperada = format!("nsenter -t {pid} -U -n {llamada}");
+        assert_eq!(
+            previa,
+            Some(esperada.as_str()),
+            "`{llamada}` debe ir justo detrás de nsenter: {ls:?}"
         );
     }
+    for prohibida in [
+        format!("ip netns exec {RED} iptables"),
+        format!("ip netns exec {RED} ip6tables"),
+    ] {
+        assert!(
+            !ls.iter().any(|l| l.starts_with(prohibida.as_str())),
+            "no debe llamar a `{prohibida}`: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn politicas_ip6tables_en_drop() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea politicas_ip6tables_en_drop");
+        return;
+    }
+    let e = escenario();
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let ls = llamadas(&e);
+    for cadena in ["OUTPUT", "INPUT", "FORWARD"] {
+        let esperada = format!("ip6tables -P {cadena} DROP");
+        assert!(ls.contains(&esperada), "falta `{esperada}`: {ls:?}");
+    }
+}
+
+#[test]
+fn ruta_ipv6_frena_el_guion() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea ruta_ipv6_frena_el_guion");
+        return;
+    }
+    let e = escenario();
+    fs::write(&e.ipv6, "").expect("marca IPv6 activo");
+    let salida = correr(&e, &[]);
+    assert_eq!(salida.status.code(), Some(1), "debe salir con 1");
+    let error = String::from_utf8_lossy(&salida.stderr);
+    assert!(error.contains("IPv6"), "stderr debe nombrar IPv6: {error}");
+    let ls = lineas(&salida.stdout);
+    assert!(
+        !ls.iter().any(|l| l == "red lista"),
+        "no debe imprimir red lista: {ls:?}"
+    );
 }
 
 #[test]
