@@ -2868,6 +2868,8 @@ COMPORTAMIENTO
         usr: PathBuf,
         /// Donde el `npm` falso anota sus argumentos.
         npm_args: PathBuf,
+        /// Donde el `setpriv` falso anota sus argumentos.
+        setpriv_log: PathBuf,
     }
 
     impl Prep {
@@ -2885,6 +2887,7 @@ COMPORTAMIENTO
                 runtime: raiz.path().join("preparar-runtime.sh"),
                 usr: raiz.path().join("usr-falso/bin"),
                 npm_args: raiz.path().join("npm-args.txt"),
+                setpriv_log: raiz.path().join("setpriv-args.txt"),
                 raiz,
             };
             for dir in [&p.paquete, &p.falsos, &p.root, &p.prefijo, &p.usr] {
@@ -2925,7 +2928,28 @@ COMPORTAMIENTO
                 "#!/bin/sh\necho \"useradd $*\"\n",
             );
             escribir_ejecutable(&p.falsos.join("chown"), "#!/bin/sh\nexit 0\n");
-            escribir_ejecutable(&p.falsos.join("id"), "#!/bin/sh\nexit 1\n");
+            // `id builder` sale 1 (no existe, crea el usuario). `id -u` y `id -g` dan el uid y gid 1001.
+            escribir_ejecutable(
+                &p.falsos.join("id"),
+                "#!/bin/sh\ncase \"$1\" in\n-u|-g) echo 1001 ;;\n*) exit 1 ;;\nesac\n",
+            );
+            escribir_ejecutable(
+                &p.falsos.join("cargo"),
+                "#!/bin/sh\necho 'cargo 1.91.0 (abc 2026-01-01)'\n",
+            );
+            escribir_ejecutable(
+                &p.falsos.join("git"),
+                "#!/bin/sh\necho 'git version 2.43.0'\n",
+            );
+            // `setpriv` falso: anota sus argumentos y salta las opciones `--...`; ejecuta el resto sin
+            // cambiar de usuario.
+            escribir_ejecutable(
+                &p.falsos.join("setpriv-falso"),
+                &format!(
+                    "#!/bin/sh\necho \"$*\" >> '{}'\nwhile [ \"$#\" -gt 0 ] && [ \"${{1#--}}\" != \"$1\" ]; do shift; done\nexec \"$@\"\n",
+                    p.setpriv_log.display()
+                ),
+            );
             // `claude` real queda en la carpeta "/usr" falsa; en `falsos` solo hay un enlace.
             let claude_real = escribir_ejecutable(
                 &p.usr.join("claude"),
@@ -2981,7 +3005,10 @@ COMPORTAMIENTO
                 .env(
                     "ROOT_RUSTUP_HOME",
                     self.raiz.path().join("usr/local/rustup"),
-                );
+                )
+                .env("ROOT_SETPRIV", self.falsos.join("setpriv-falso"))
+                // El CARGO_HOME temporal del guion sale bajo la raíz de la prueba, no en /tmp.
+                .env("TMPDIR", self.raiz.path());
             for (clave, valor) in extra {
                 orden.env(clave, valor);
             }
@@ -3250,9 +3277,12 @@ COMPORTAMIENTO
         );
         // El PATH de la prueba no trae el rustc real de /root/.cargo/bin.
         let path = format!("{}:/usr/bin:/bin", p.falsos.display());
+        // La revisión del builder también busca rustc: su PATH incluye la carpeta bin de cargo.
+        let path_builder = format!("{}:{}", p.falsos.display(), cargo.join("bin").display());
         let salida = p.correr_con(&[
             ("ROOT_CARGO_HOME", cargo.display().to_string()),
             ("PATH", path),
+            ("ROOT_PATH_BUILDER", path_builder),
         ]);
         assert!(salida.status.success(), "{}", texto(&salida));
         assert!(
@@ -3260,5 +3290,108 @@ COMPORTAMIENTO
             "{}",
             texto(&salida)
         );
+    }
+
+    /// PATH_FIJO del builder en bwrap.rs, leído del fuente: el módulo `bwrap` es privado de `corre`.
+    const FUENTE_BWRAP: &str = include_str!("corre/bwrap.rs");
+
+    fn path_fijo_de_bwrap() -> String {
+        FUENTE_BWRAP
+            .lines()
+            .find_map(|l| l.strip_prefix("const PATH_FIJO: &str = \""))
+            .and_then(|resto| resto.strip_suffix("\";"))
+            .expect("falta PATH_FIJO en bwrap.rs")
+            .to_string()
+    }
+
+    #[test]
+    fn preparar_corre_path_builder_por_omision_es_path_fijo_de_bwrap() {
+        falta_guion(PREPARAR);
+        let corre = fs::read_to_string(PREPARAR).expect("lee preparar-corre.sh");
+        let fijo = path_fijo_de_bwrap();
+        assert!(
+            fijo.starts_with("/usr/local/cargo/bin:"),
+            "PATH_FIJO debe llevar cargo primero: {fijo}"
+        );
+        assert_eq!(
+            omision_en_corre(&corre, "ROOT_PATH_BUILDER"),
+            fijo,
+            "ROOT_PATH_BUILDER de preparar-corre.sh debe ser igual a PATH_FIJO de bwrap.rs"
+        );
+    }
+
+    #[test]
+    fn preparar_corre_versiones_corre_el_entorno_del_builder_con_setpriv() {
+        if !bash_disponible() {
+            eprintln!(
+                "sin bash: se saltea preparar_corre_versiones_corre_el_entorno_del_builder_con_setpriv"
+            );
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        // El cargo falso anota RUSTUP_HOME y CARGO_HOME que recibe.
+        let anota = p.raiz.path().join("cargo-anotado.txt");
+        escribir_ejecutable(
+            &p.falsos.join("cargo"),
+            &format!(
+                "#!/bin/sh\necho \"$RUSTUP_HOME $CARGO_HOME\" > '{}'\necho 'cargo 1.91.0 (abc 2026-01-01)'\n",
+                anota.display()
+            ),
+        );
+        let salida = p.correr();
+        assert!(salida.status.success(), "{}", texto(&salida));
+
+        let log = fs::read_to_string(&p.setpriv_log).expect("setpriv no corrió");
+        assert!(
+            log.contains("--reuid=1001 --regid=1001 --clear-groups env -i"),
+            "{log}"
+        );
+        for nombre in ["cargo", "rustc", "node", "claude", "git"] {
+            assert!(
+                log.contains(&format!("{nombre} --version")),
+                "falta {nombre}: {log}"
+            );
+        }
+
+        let anotado = fs::read_to_string(&anota).expect("cargo no corrió");
+        let partes: Vec<&str> = anotado.split_whitespace().collect();
+        assert_eq!(
+            partes.first().copied(),
+            Some(
+                p.raiz
+                    .path()
+                    .join("usr/local/rustup")
+                    .to_str()
+                    .expect("ruta")
+            ),
+            "{anotado}"
+        );
+        let cargo_home = Path::new(partes.get(1).copied().unwrap_or_default());
+        assert!(cargo_home.starts_with(p.raiz.path()), "{anotado}");
+        assert!(!cargo_home.exists(), "queda el CARGO_HOME temporal");
+    }
+
+    #[test]
+    fn preparar_corre_frena_si_cargo_falla_con_el_entorno_del_builder() {
+        if !bash_disponible() {
+            eprintln!(
+                "sin bash: se saltea preparar_corre_frena_si_cargo_falla_con_el_entorno_del_builder"
+            );
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        escribir_ejecutable(
+            &p.falsos.join("cargo"),
+            "#!/bin/sh\necho 'cargo: no encontrado' >&2\nexit 1\n",
+        );
+        let salida = p.correr();
+        assert!(!salida.status.success(), "debe salir distinto de 0");
+        let dicho = texto(&salida);
+        assert!(dicho.contains("mal versiones: cargo"), "{dicho}");
+        assert!(!dicho.contains("paso root-home"), "no debe seguir: {dicho}");
     }
 }

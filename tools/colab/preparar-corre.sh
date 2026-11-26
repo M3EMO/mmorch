@@ -16,7 +16,11 @@ ROOT_DIR_RAIZ="${ROOT_DIR_RAIZ:-/root}"
 ROOT_RAIZ_DIR="${ROOT_RAIZ_DIR:-}"
 ROOT_NPM="${ROOT_NPM:-/usr/bin/npm}"
 ROOT_PREFIJO_USR="${ROOT_PREFIJO_USR:-/usr/}"
-ROOT_PATH_BUILDER="${ROOT_PATH_BUILDER:-/usr/local/bin:/usr/bin:/bin}"
+ROOT_PATH_BUILDER="${ROOT_PATH_BUILDER:-/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin}"
+# setpriv, usuario y chown del builder. Se pueden cambiar; los tests usan falsos.
+ROOT_SETPRIV="${ROOT_SETPRIV:-setpriv}"
+ROOT_USUARIO_BUILDER="${ROOT_USUARIO_BUILDER:-builder}"
+ROOT_CHOWN="${ROOT_CHOWN:-chown}"
 # Rust lo instala preparar-runtime.sh en estos valores. Son los mismos de ese guion.
 ROOT_RUSTUP_HOME="${ROOT_RUSTUP_HOME:-/usr/local/rustup}"
 ROOT_CARGO_HOME="${ROOT_CARGO_HOME:-/usr/local/cargo}"
@@ -122,9 +126,39 @@ instalar_y_verificar_versiones() {
         echo "mal versiones: rustc --version da $segundo y versiones-builder.env dice $RUST_VERSION"
         exit 1
     fi
+    revisar_entorno_builder
 }
 
-# Paso 4: crea el usuario builder si no existe. Sin carpeta propia ni grupos extra.
+# Corre cargo, rustc, node, claude y git como el builder, con entorno limpio (env -i). El CARGO_HOME es un
+# temporal de este guion, dado al builder. Lo borra al final, pase o no la revisión. Si uno falla, sale con 1.
+revisar_entorno_builder() {
+    local uid gid temporal nombre fallo=""
+    if ! uid="$(id -u "$ROOT_USUARIO_BUILDER")" || ! gid="$(id -g "$ROOT_USUARIO_BUILDER")"; then
+        echo "mal versiones: no se encuentra el usuario $ROOT_USUARIO_BUILDER"
+        exit 1
+    fi
+    temporal="$(mktemp -d)"
+    if ! "$ROOT_CHOWN" "$ROOT_USUARIO_BUILDER" "$temporal"; then
+        rm -rf "$temporal"
+        echo "mal versiones: no se pudo dar $temporal al usuario $ROOT_USUARIO_BUILDER"
+        exit 1
+    fi
+    for nombre in cargo rustc node claude git; do
+        if ! "$ROOT_SETPRIV" --reuid="$uid" --regid="$gid" --clear-groups \
+            env -i PATH="$ROOT_PATH_BUILDER" RUSTUP_HOME="$ROOT_RUSTUP_HOME" CARGO_HOME="$temporal" \
+            "$nombre" --version >/dev/null; then
+            fallo="$nombre"
+            break
+        fi
+    done
+    rm -rf "$temporal"
+    if [ -n "$fallo" ]; then
+        echo "mal versiones: $fallo --version falló con el entorno del builder (PATH=$ROOT_PATH_BUILDER)"
+        exit 1
+    fi
+}
+
+# Paso 3: crea el usuario builder (antes de `versiones`, que corre comandos como él) si no existe. Sin carpeta propia ni grupos extra.
 crear_builder() {
     if ! id builder >/dev/null 2>&1; then
         useradd --no-create-home --shell /usr/sbin/nologin builder
@@ -214,8 +248,8 @@ principal() {
 
     paso runtime llamar_runtime
     paso paquetes instalar_paquetes
-    paso versiones instalar_y_verificar_versiones
     paso builder crear_builder
+    paso versiones instalar_y_verificar_versiones
     paso root-home armar_root_home
     paso red-builder correr_red_builder
 }

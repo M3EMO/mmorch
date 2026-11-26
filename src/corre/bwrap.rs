@@ -32,8 +32,14 @@ use crate::oracle::contenedor::TOPE_SALIDA_BUILDER;
 
 /// HOME del builder dentro de bwrap. Es el destino del estado de claude y de la credencial.
 const HOME_BUILDER: &str = "/home/builder";
-/// PATH fijo del builder. No hereda el del proceso de r00t.
-const PATH_FIJO: &str = "/usr/local/bin:/usr/bin:/bin";
+/// PATH fijo del builder. No hereda el del proceso de r00t. `cargo` y `rustc` van primero: son proxies de rustup.
+const PATH_FIJO: &str = "/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin";
+/// RUSTUP_HOME del builder. Está dentro de `/usr`, que el sandbox monta en solo lectura.
+const RUSTUP_HOME_BUILDER: &str = "/usr/local/rustup";
+/// CARGO_HOME del builder. Está dentro del estado, que ya se monta con escritura en el HOME del builder.
+const CARGO_HOME_BUILDER: &str = "/home/builder/.claude/cargo-home";
+/// Carpeta de CARGO_HOME dentro del estado. Es la última parte de `CARGO_HOME_BUILDER`.
+const CARPETA_CARGO_HOME: &str = "cargo-home";
 /// Tope de procesos del builder (RLIMIT_NPROC). Frena una bomba de procesos. Va con `prlimit`.
 const LIMITE_PROCESOS: u32 = 4096;
 /// Comando de claude dentro del sandbox.
@@ -203,7 +209,10 @@ impl EjecutorBwrapBuilder {
                 cmd.env(clave, valor);
             }
         }
-        cmd.env("HOME", HOME_BUILDER).env("PATH", PATH_FIJO);
+        cmd.env("HOME", HOME_BUILDER)
+            .env("PATH", PATH_FIJO)
+            .env("RUSTUP_HOME", RUSTUP_HOME_BUILDER)
+            .env("CARGO_HOME", CARGO_HOME_BUILDER);
         if let Some(token) = token {
             cmd.env(VARIABLE_TOKEN, token);
         }
@@ -250,6 +259,7 @@ impl EjecutorBuilder for EjecutorBwrapBuilder {
             contexto: format!("crear el estado de claude en {}", estado.display()),
             fuente,
         })?;
+        crear_cargo_home(&estado)?;
         // El builder no ve la credencial del usuario: ve una copia sin `mcpOAuth`.
         let copia = match credencial {
             Some(credencial) => {
@@ -334,6 +344,30 @@ fn args_bwrap_builder(
     }
     args.extend(["--chdir", "/trabajo"].map(String::from));
     args
+}
+
+/// Crea `cargo-home/` dentro del estado antes de cada lanzamiento. Si el estado tiene otro uid o gid que la
+/// carpeta nueva, la carpeta toma el dueño del estado.
+fn crear_cargo_home(estado: &Path) -> Result<(), ErrorCorre> {
+    let carpeta = estado.join(CARPETA_CARGO_HOME);
+    let contexto = format!("crear CARGO_HOME en {}", carpeta.display());
+    fs::create_dir_all(&carpeta).map_err(|fuente| ErrorCorre::Io {
+        contexto: contexto.clone(),
+        fuente,
+    })?;
+    let dueno = fs::metadata(estado).map_err(|fuente| ErrorCorre::Io {
+        contexto: format!("leer el dueño del estado {}", estado.display()),
+        fuente,
+    })?;
+    let propia = fs::metadata(&carpeta).map_err(|fuente| ErrorCorre::Io {
+        contexto: contexto.clone(),
+        fuente,
+    })?;
+    if (dueno.uid(), dueno.gid()) != (propia.uid(), propia.gid()) {
+        std::os::unix::fs::chown(&carpeta, Some(dueno.uid()), Some(dueno.gid()))
+            .map_err(|fuente| ErrorCorre::Io { contexto, fuente })?;
+    }
+    Ok(())
 }
 
 /// Agrega `bandera origen destino` a `args`.
@@ -525,7 +559,7 @@ mod tests {
     use tempfile::TempDir;
 
     /// Mismo PATH que fija el ejecutor dentro del sandbox y en el lanzamiento.
-    const PATH_FIJO: &str = "/usr/local/bin:/usr/bin:/bin";
+    const PATH_FIJO: &str = "/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin";
 
     /// `setpriv` falso: salta las opciones `--...` y ejecuta el resto.
     const SETPRIV_FALSO: &str = "#!/bin/sh\nwhile [ \"$#\" -gt 0 ] && [ \"${1#--}\" != \"$1\" ]; do shift; done\nexec \"$@\"\n";
@@ -729,6 +763,43 @@ mod tests {
     }
 
     // --- Args de bwrap ---
+
+    /// Montajes de `args` como texto `bandera origen destino`, en orden. Solo `--bind` y `--ro-bind`.
+    fn montajes_de(args: &[String]) -> Vec<String> {
+        args.windows(3)
+            .filter(|w| w[0] == "--bind" || w[0] == "--ro-bind")
+            .map(|w| format!("{} {} {}", w[0], w[1], w[2]))
+            .collect()
+    }
+
+    #[test]
+    fn corre_bwrap_montajes_son_los_de_la_base() {
+        let d = disposicion();
+        let plugin = d.raiz.join("plugin");
+        fs::create_dir_all(&plugin).expect("plugin");
+        let mut l = lanzamiento(d.repo.clone(), Vec::new());
+        l.plugin = Some(plugin.clone());
+        let args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            &sistema_de_prueba,
+        );
+        // Guarda: la lista exacta de montajes de hoy. Un montaje nuevo rompe este test a propósito.
+        let esperados = vec![
+            "--ro-bind /usr /usr".to_string(),
+            "--ro-bind /etc /etc".to_string(),
+            "--ro-bind /bin /bin".to_string(),
+            format!("--bind {} /trabajo", d.repo.display()),
+            format!("--bind {} /home/builder/.claude", d.estado.display()),
+            format!(
+                "--ro-bind {} /home/builder/.claude/.credentials.json",
+                d.credencial.display()
+            ),
+            format!("--ro-bind {} /opt/plugin", plugin.display()),
+        ];
+        assert_eq!(montajes_de(&args), esperados, "{args:?}");
+    }
 
     #[test]
     fn corre_bwrap_args_no_montan_root_home_home_root_ni_content() {
@@ -991,7 +1062,49 @@ mod tests {
         assert_eq!(envs.get("HOME").map(String::as_str), Some("/home/builder"));
         assert_eq!(envs.get("PATH").map(String::as_str), Some(PATH_FIJO));
         assert_eq!(envs.get("LANG").map(String::as_str), Some("C.UTF-8"));
+        assert_eq!(
+            envs.get("RUSTUP_HOME").map(String::as_str),
+            Some("/usr/local/rustup")
+        );
+        assert_eq!(
+            envs.get("CARGO_HOME").map(String::as_str),
+            Some("/home/builder/.claude/cargo-home")
+        );
         assert!(!envs.contains_key("CLAUDE_CODE_OAUTH_TOKEN"), "{envs:?}");
+    }
+
+    #[test]
+    fn corre_bwrap_entorno_pone_cargo_primero_y_cargo_home_en_el_estado() {
+        let d = disposicion();
+        let l = lanzamiento(d.repo.clone(), Vec::new());
+        let ej = ejecutor_de(
+            &d,
+            &[
+                "ip".into(),
+                "prlimit".into(),
+                "setpriv".into(),
+                "bwrap".into(),
+            ],
+        );
+        let cmd = ej.armar_comando(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            (1001, 1001),
+            None,
+        );
+        let envs = entorno_de(&cmd);
+        let path = envs.get("PATH").cloned().unwrap_or_default();
+        assert_eq!(
+            path.split(':').next(),
+            Some("/usr/local/cargo/bin"),
+            "{path}"
+        );
+        let cargo_home = envs.get("CARGO_HOME").cloned().unwrap_or_default();
+        assert!(
+            cargo_home.starts_with(&format!("{ESTADO_EN_CONTENEDOR}/")),
+            "CARGO_HOME fuera del estado: {cargo_home}"
+        );
     }
 
     #[test]
@@ -1127,6 +1240,26 @@ mod tests {
             "{error}"
         );
         assert!(!d.raiz.join("bwrap-args").exists());
+    }
+
+    #[test]
+    fn corre_bwrap_crea_cargo_home_en_el_estado_antes_de_lanzar() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        // El `bwrap` falso anota si `cargo-home/` ya existe cuando se lanza.
+        let cuerpo = format!(
+            "#!/bin/sh\ntest -d '{}' && echo si > DIR/cargo-home-visto\necho salida-falsa\n",
+            d.estado.join("cargo-home").display()
+        );
+        let progs = cadena_falsa(&d.raiz, &cuerpo);
+        let salida = ejecutor_de(&d, &progs)
+            .lanzar(&lanzamiento(d.repo.clone(), Vec::new()))
+            .expect("lanza");
+        assert_eq!(salida.codigo, 0);
+        assert!(
+            d.raiz.join("cargo-home-visto").is_file(),
+            "no existía cargo-home/ dentro del estado al lanzar"
+        );
     }
 
     // --- Chequeos previos ---
@@ -1281,6 +1414,9 @@ mod tests {
         let permitidas = [
             "HOME",
             "PATH",
+            // Fijadas por el ejecutor: rustup y cargo del builder.
+            "RUSTUP_HOME",
+            "CARGO_HOME",
             "LANG",
             "PWD",
             "OLDPWD",
