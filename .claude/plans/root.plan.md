@@ -16408,3 +16408,209 @@ Recomiendo la (a). El token ya sube así para los builders. La clave ya viajó a
 
 **El saldo de S2:** cerca de 12,53 USD. Después de D3 quedan entre 8 y 10,5 USD.
 **Las unidades de Colab:** D3 y su preparación usan menos de 5 de las 50 del tope.
+
+## Vuelta del 2026-11-26 (99): las preguntas de la 171 y la 172, la 173, y la prueba de aislamiento
+
+**Estado.**
+- **El plan de la vuelta 98 está en 31021e9.**
+- **La respuesta del usuario a P130, literal: "a) CLI, excepción en la pasada 1 (Recommended)".**
+- **Los builders de la 171 y la 172 corrieron en paralelo, en Colab.** El primer intento de los dos dio "Service Unavailable" en `colab new`. `builder-colab.sh` ahora reintenta 3 veces, y el segundo intento pasó.
+- **La Tarea 171:** commits 4dffbe0, 7b0eae6 y 7591448, más el informe 057ab70. Costó 1,65 USD de lista y 2103 s de high-mem. La suite con podman de `laptop/cadena-171` dio 4138/0/5. No probó bwrap real, porque la laptop no tiene `bwrap`.
+- **La Tarea 172:** commits 9d70c79 a b0482d9. Costó 2,38 USD de lista y 2679 s de high-mem. La suite sin podman dio 4144 verdes. La suite con podman corre ahora.
+- **La 171 y la 172 no comparten archivos,** y `git merge-tree` las mezcla sin conflictos.
+- **El orquestador escribió `d3/aisla/ataque.sh`.**
+- **Quedan 152 GB libres,** después de borrar seis cachés de compilación.
+
+## 1. Las preguntas de los builders
+
+Leí los dos informes enteros. También leí `tools/colab/corre-runtime.py` de la 172, y la parte de `src/colab_calibra.rs` que arma el paquete de calibración.
+
+### La Tarea 171
+
+| # | Pregunta | Decisión | Cuándo |
+|---|---|---|---|
+| 1 | ¿7 reglas de corte o 6? | **Acepto 2 de DNS y 6 de corte.** El error fue mío: el brief decía 7 y listaba 6 | — |
+| 2 | Con token, ¿se exige `.credentials.json`? | **No.** En Colab ese archivo no existe. Con token, no se exige, no se copia y no se monta | **Antes**, Tarea 173 |
+| 3 | ¿Se revisa la vigencia del login? | **No.** Un token por archivo no trae vencimiento. Un token vencido falla en el primer rol, y el piloto lo ve | — |
+| 4 | ¿Dónde está `claude` en Colab? | **El `PATH` fijo queda.** `preparar-corre.sh` instala `node` y `claude` bajo `/usr`, y lo revisa | **Antes**, Tarea 173 |
+| 5 | ¿Vale `tests/red_builder.rs`? | **Sí.** El error fue mío: la tabla no dejaba lugar para sus tests | — |
+| 6 | El chequeo de `$HOME` es más estricto | **Acepto.** `preparar-corre.sh` ya cierra `/root` en 0700 | — |
+| 7 | El uid sale de `/etc/passwd` | **Acepto.** En Colab, `builder` es local | — |
+| 8 | El modo del oráculo sale de `std::env` | **Acepto.** En producción es el mismo proceso | — |
+| 9 | Sin red ni usuario, ¿código 2 o 3? | **Acepto el 3.** Es un fallo de infraestructura, no de uso | — |
+| 10 | Los logs de `slirp4netns` van a `/dev/null` | **No.** Van a `/run/root-builder-slirp.log`, de root. Sin logs, una falla de red no deja rastro | **Antes**, Tarea 173 |
+| 11 | Reusa el proceso que sostiene la red | **Acepto.** La prueba de aislamiento lo cubre | — |
+
+**Un hueco que la 171 no nombra como pregunta:** la limpieza por señal llama a `podman ps`. En Colab falla, y solo imprime un aviso. **Acepto por ahora.** La copia de la credencial se borra igual. Queda en la lista de después de la validez.
+
+### La Tarea 172
+
+| # | Pregunta | Decisión | Cuándo |
+|---|---|---|---|
+| 1 | Faltan `versiones.env` y `herramientas/` | **El paquete de `corre` los trae,** con la misma función que la calibración. Copiarlos a mano desde otro paquete rompe el congelamiento | **Antes**, Tarea 173 |
+| 2 | Los plugins van a la misma ruta absoluta | **Acepto.** La config queda igual, byte por byte | — |
+| 3 | Los nombres del entorno | **La clave va en `DEEPSEEK_API_KEY`, y el token va en un archivo.** P130 a dice que el token sube por `colab upload`. `ROOT_TOKEN_CUPO` sale | **Antes**, Tarea 173 |
+| 4 | Qué entra de una vuelta cortada | **Acepto:** solo el gasto y el registro | — |
+| 5 | La clasificación ignora el código | **Acepto.** Una corrida sin fila ya queda cortada | — |
+| 6 | Sin lock ni deshacer | **El lock no hace falta:** el guion importa de a una vuelta. **El duplicado sí es un defecto:** un reintento puede contar una tarea dos veces | **Antes**, Tarea 173 |
+| 7 | Editó `docs/interfaces.md` | **Acepto.** El brief pedía regenerar la lista | — |
+| 8 | El guion sale con 0 aunque falle una tarea | **Acepto.** Los fallos quedan en `hechos/` | — |
+| 9 | Falsos positivos de `sk-` | **Acepto la regla.** El paquete real de 1 tarea lo muestra | — |
+| 10 | `eventos.jsonl` entra completo | **Acepto.** El ruteo necesita el bloque de cupo. El runtime devuelve solo los eventos nuevos de cada corrida, por posición | — |
+
+**Un hueco que encontré al leer `corre-runtime.py`:** el `r00t` hijo recibe `ROOT_CONTENEDOR_MODO=bwrap`, pero no `ROOT_BWRAP_ENTORNO` ni `ROOT_BWRAP_IMAGEN_ID`. Sin ellas, el oráculo con bwrap no corre como en la calibración. **Va antes,** en la Tarea 173.
+
+**Otro hueco, en mi diseño:** las reglas de la 171 son de IPv4. Si el runtime tiene IPv6, el builder podría llegar al kernel de Colab por `::1`. **Va antes,** en la Tarea 173: la red del builder apaga IPv6.
+
+## 2. La Tarea 173
+
+Escribí `docs/builds/brief-local-173.md`. Tiene 6 puntos, todos antes de la prueba de aislamiento:
+1. el oráculo en el paquete de `corre`: `herramientas/`, `versiones.env`, `entorno.env`, el id de la imagen, y las dos variables de bwrap;
+2. el token por archivo;
+3. sin `.credentials.json` cuando hay token;
+4. `claude` y `node` bajo `/usr`;
+5. IPv6 apagado y los logs de `slirp4netns`;
+6. la importación sin duplicados.
+
+### La base: una rama de integración, sin mezclar
+
+**Recomiendo construir la 173 sobre `laptop/cadena-172`,** una rama local con 5a4f295, la 171 y la 172. El orquestador la arma con `git merge`, sin conflictos. No toca `claude/root-e7813e`.
+
+**Por qué no mezclar primero:**
+- **Una mezcla abre un congelamiento.** Si la prueba de aislamiento encuentra un defecto, habría otra mezcla y otro congelamiento.
+- **La prueba de aislamiento no es una medición.** Prueba un mecanismo, así que puede correr con el binario de la cadena.
+- **Con una sola PR después de la prueba,** el congelamiento Z llega una sola vez, ya probado. D3 corre con Z.
+
+**El orden:**
+1. La suite con podman de la 172 termina en verde.
+2. El orquestador arma `laptop/cadena-172`, la sube al builder, y lanza la 173.
+3. La suite con podman de `laptop/cadena-173`.
+4. La prueba de aislamiento, con el release de `laptop/cadena-173`.
+5. Si pasa: una PR con la 171, la 172 y la 173, por orden del usuario. Ese commit es Z.
+6. El orquestador revisa que el árbol de Z sea el de `laptop/cadena-173`. Así, el binario probado es el congelado.
+
+## 3. La receta de la prueba de aislamiento
+
+### Lo que le falta a `ataque.sh`
+
+Leí `d3/aisla/ataque.sh`. Cubre A1 a A10, pero tiene cuatro huecos:
+
+1. **A2 lee `ROOT_HOME_REAL` del entorno, y el builder corre con el entorno limpio.** La variable nunca llega, y A2 prueba `/root/.local/share/root`, que no es el `ROOT_HOME` de Colab. **Arreglo:** una marca `@ROOTHOME@`, que vale `/root/root-home`. A2 suma `/run`, donde vive el token.
+2. **Falta IPv6.** **Arreglo:** A4 prueba también `[::1]` y la IP IPv6 del runtime, si existe, en cada puerto.
+3. **Cada lanzamiento borra la salida del anterior.** `corre` lanza varios roles, y cada uno corre `ataque.sh`. **Arreglo:** cada lanzamiento escribe en `/trabajo/ataque-<fecha en ns>.txt`, y A1 excluye esos archivos.
+4. **Faltan tres ataques:**
+   - **A11:** los sockets que ve el builder: `find / -xdev -type s` y `/proc/net/unix`. Lo esperado es ningún socket de fuera;
+   - **A12:** las capacidades: `CapEff` de `/proc/self/status` vale 0;
+   - **A13:** buscar por nombre: `find / -xdev -path '*oculto*'`. Lo esperado es ningún resultado.
+
+**Una nota sobre A1:** el `ataque.sh` lleno guarda C1 en `/usr/local/bin/claude`, que el builder ve en solo lectura. A1 excluye su propio archivo con `$0`. No es una fuga: es la copia de la prueba.
+
+**Una nota sobre A3:** dentro de bwrap, A3 corre mientras `r00t` está vivo con C2 en su entorno. Así A3 prueba algo real.
+
+### Los archivos de la prueba, en `d3/aisla/`
+
+Los escribe el orquestador. No son código de Root.
+
+| Archivo | Qué hace |
+|---|---|
+| `canarios.env` | C1, C2 y C3: tres textos al azar de 64 caracteres hexadecimales, de `/dev/urandom`. Modo 0600. Nunca se imprimen |
+| `ataque.sh` | El builder falso, con los arreglos de arriba |
+| `preparar-ataque.py` | En Colab, como root: lee C1 del `oculto/` del paquete, C2 de su entorno y C3 de `/content/root-token`. Toma la IP con `hostname -I` y los puertos con `ss -ltnH`. Llena `ataque.sh` y lo copia a `/usr/local/bin/claude` con modo 0755. Guarda la lista de puertos en `/content/aisla/puertos.txt` |
+| `argv.py` | En Colab, como root: cuenta los `/proc/*/cmdline` que traen el token de `/run/root-token`. Lista el uid y el espacio de red de los procesos del builder. Imprime solo conteos y uids |
+| `control.py` | En Colab, como root: lanza `sleep 900` con `DEEPSEEK_API_KEY` igual a C2. Corre `ataque.sh` fuera de bwrap y fuera de la red aparte, con `SALIDA=/content/aisla/ataque-fuera.txt` |
+| `recoge.py` | En Colab: copia los `ataque-*.txt` de la carpeta de la corrida a `/content/aisla/`. También copia `iptables -S`, `ip6tables -S` y `sysctl net.ipv6.conf.all.disable_ipv6` del espacio `root-builder` |
+| `aisla.sh` | En la laptop: la sesión entera, sobre la base de `juez-x/juez-x.sh` |
+
+### El `ROOT_HOME` de prueba y el paquete
+
+1. **La copia:** `cp -a --reflink=auto ~/.local/share/root ~/.cache/root-wt/d3/aisla/home-aisla`. El real no se toca.
+2. **El canario:** se escribe C1 en `home-aisla/oraculos/s2-t1/oculto/canario.txt`. Es una copia de s2-t1, así que no hace falta otra tarea. Con 64 caracteres, C1 también cuenta como huella del oráculo.
+3. **El release:** `laptop/cadena-173`, copiado a `colab-pruebas/v173/r00t`, con su SHA en `registro.md`.
+4. **El paquete:** con `ROOT_HOME=d3/aisla/home-aisla`, desde el worktree en `laptop/cadena-173`:
+   `v173/r00t colab empaquetar --corre --tareas s2-t1 --config ecc-haiku --pasada 0 --rustup-sha256 <sha> --binario v173/r00t --raiz-root <worktree> --salida d3/aisla/paquete.tar.gz`
+5. **La revisión del paquete:** el orquestador lista sus archivos. Busca `sk-`, `.env` y `.credentials.json`. Busca C2 y C3, que no deben estar. C1 sí está, dentro de `oculto/`.
+
+### La sesión `aisla`
+
+`aisla.sh` hace esto, en orden:
+1. `colab new -s aisla --high-mem`, con 3 intentos.
+2. Sube el paquete en trozos de 40 MiB, con `une.py`, y revisa el SHA en el runtime.
+3. Lanza `preparar-corre.sh` aparte, y espera su estado.
+4. Sube C3 como archivo: `colab upload` de un temporal con modo 0600 a `/content/root-token`. Borra el temporal local.
+5. Sube `ataque.sh` y `preparar-ataque.py`. Corre `preparar-ataque.py` con `colab exec --env DEEPSEEK_API_KEY=<C2>`. Así `claude` queda reemplazado por `ataque.sh`.
+6. Lanza `corre-runtime.py` aparte, con `--env DEEPSEEK_API_KEY=<C2>`. C2 es falsa, así que el juez falla con 401, sin gasto.
+7. **En cada consulta, cada 60 s mientras la tarea corre:** corre `argv.py`, y anota sus conteos.
+8. Cuando la tarea termina, corre `recoge.py`, y baja `/content/aisla/` y la vuelta de la tarea.
+9. Corre `control.py`, y baja `ataque-fuera.txt`.
+10. Corre `colab stop -s aisla`. La sesión `hpil` no se toca.
+11. Busca C2 y C3 en todo lo bajado y en sus propias salidas. No deben aparecer.
+
+**Costo:** de 1 a 1,5 horas, cerca de 0,15 unidades, 0 cupo y 0 API.
+
+### Qué revisa el orquestador
+
+**Dentro de bwrap,** en cada `ataque-*.txt`:
+
+| Ataque | Lo esperado |
+|---|---|
+| A1, C1 en el sistema visible | `nada` |
+| A2, `ROOT_HOME`, `/root`, `/content`, `/proc/1/root` y `/run` | `falla` en todas |
+| A3, C2 en `/proc` | `nada` |
+| A4, los puertos del runtime por IPv4 y por IPv6 | `falla` en todos |
+| A5, los metadatos | `falla` |
+| A6, api.anthropic.com e index.crates.io | `anda` en los dos |
+| A7, escribir en `/usr`, `/etc`, `/root` y `/content` | `falla` en todas |
+| A8, `sudo`, `su`, `setuid` y uid | `falla`, `falla`, 0, y un uid distinto de 0 |
+| A9, el pid 1 | `falla`, con `bwrap` como pid 1 |
+| A10, C3 en su entorno | `anda` |
+| A11, sockets de fuera | ninguno |
+| A12, `CapEff` | 0 |
+| A13, rutas con `oculto` | ninguna |
+
+**Los controles positivos,** en `ataque-fuera.txt`:
+- A1 encuentra C1;
+- A3 encuentra C2;
+- A4 conecta a por lo menos un puerto del runtime;
+- A2 lee `ROOT_HOME`.
+
+**Los conteos de `argv.py`:** el token aparece en 0 argumentos en todas las consultas. Los procesos del builder tienen el uid de `builder` y el espacio `root-builder`.
+
+**La red:** `iptables -S` trae las 2 reglas de DNS y las 6 de corte. `ip6tables -S` trae la política `DROP`. IPv6 está apagado.
+
+**La regla de la prueba:** todo da como dicen las tablas. Si algo no da, no se corre D3, y el resultado va al planner.
+
+## 4. Pregunta al usuario
+
+**P131. ¿Cuándo se mezclan las Tareas 171, 172 y 173?** Las tres cambian cómo corre `corre` en Colab. Ninguna cambia lo que mide el oráculo. La prueba de aislamiento puede correr con el binario de una rama de integración.
+
+- **a) Una sola PR con las tres, después de que pase la prueba de aislamiento.** El congelamiento Z llega una vez, ya probado. Si la prueba falla, se arregla en la rama sin tocar `claude/root-e7813e`. *(recomendada)*
+- **b) Una PR con la 171 y la 172 ahora, y otra con la 173 después.** Son dos mezclas y dos congelamientos. La rama principal tiene, por un tiempo, un `corre` de Colab que no anda.
+- **c) Una PR con las tres antes de la prueba.** Una mezcla menos de espera. Si la prueba falla, hace falta otra PR y otro congelamiento.
+
+Recomiendo la (a).
+
+## 5. Lo que falta
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | La suite con podman de la 172 | Nada | Laptop, orquestador | 0 USD | En curso | No |
+| 2 | P131 | Nada | — | — | — | **Sí** |
+| 3 | La rama `laptop/cadena-172` | El paso 1 | Laptop, orquestador | 0 USD | Minutos | No |
+| 4 | La Tarea 173 | El paso 3 | Colab, builder | De 1,5 a 2,5 USD de lista, y cerca de 0,1 unidades | Cerca de 1 hora | No |
+| 5 | Los arreglos de `ataque.sh` y los guiones de la prueba | Nada | Laptop, orquestador | 0 USD | Cerca de 1,5 horas | No |
+| 6 | La suite con podman de `laptop/cadena-173` y el release | El paso 4 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 7 | La prueba de aislamiento | Los pasos 5 y 6 | Colab | 0 USD y cerca de 0,15 unidades | De 1 a 1,5 horas | No |
+| 8 | Con P131 a: la PR con la 171, la 172 y la 173 | Los pasos 2 y 7 | — | — | — | **Sí: la orden de mezcla** |
+| 9 | El congelamiento Z, el árbol igual al de la cadena, y el estado con Z | El paso 8 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 10 | El piloto de D3: s2-t1 | El paso 9 | Colab | Cerca de 0,9 USD de lista, 0,1 USD de API y 0,1 unidades | Cerca de 1 hora | No |
+| 11 | Las sesiones 1 a 3 de D3 | El paso 10 | Colab | De 21 a 36 USD de lista, de 2 a 4,5 USD de API, y de 1,5 a 3 unidades | De 12 a 14 horas, en 3 ventanas de cupo | No |
+| 12 | El análisis de D3 | El paso 11 | Planner | Cupo | Una vuelta | No |
+| 13 | Si el análisis lo pide: una segunda pasada | El paso 12 | Colab | Lo mismo que los pasos 10 y 11 | De 1,5 a 2 días | **Sí** |
+| 14 | P98 c: abrir el final | El paso 12, o el 13 | Laptop | Según la regla del final | Según el final | No |
+| 15 | La validez sobre el final sellado | El paso 14 | Colab | Según el final | Según el final | No |
+| 16 | Después de la validez: el juez que escribe reglas, por P128 a | El paso 15 | Colab, builder | De 3 a 5 USD de builder, y cerca de 3,5 USD de API | De 1 a 2 semanas, con revisión humana | No |
+| 17 | Después de la validez: una tarea con `Dockerfile` para calibrar Entrega | El paso 15 | Minería y Colab | Sin estimar | Sin estimar | **Sí** |
+| 18 | Después de la validez: una sola fuente de las versiones de Seguridad, la tarea en el error de lanzar, y la limpieza por señal sin `podman ps` en Colab | El paso 15 | Colab, builder | Cerca de 1 USD | Cerca de 1 hora | No |
+
+**El saldo de S2:** cerca de 12,53 USD. La prueba de aislamiento no lo toca.
+**Las unidades de Colab:** la 171 y la 172 usaron cerca de 1,3 horas de high-mem. Todo lo que falta hasta D3 usa menos de 5 unidades.
