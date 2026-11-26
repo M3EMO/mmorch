@@ -61,6 +61,12 @@ const RAIZ_ENLACES: [&str; 4] = ["/bin", "/lib", "/lib64", "/sbin"];
 /// Motivo de un builder matado con SIGKILL. Quien llama lo lee junto con el stdout conservado.
 const MENSAJE_SIGKILL: &str = "el builder fue matado por SIGKILL, a menudo por falta de memoria";
 
+/// Aviso del veredicto cuando el builder usa el procfs del runtime (`ROOT_PROC_BUILDER`).
+pub(crate) const AVISO_PROC_BUILDER: &str = "builder con /proc del runtime en solo lectura";
+
+/// Lista de montajes del proceso. Lo lee el chequeo previo solo con `ROOT_PROC_BUILDER`.
+const MOUNTINFO: &str = "/proc/self/mountinfo";
+
 /// Ejecutor del builder con bubblewrap. Nunca lo corre en el host sin `bwrap`.
 pub struct EjecutorBwrapBuilder {
     /// Credencial de Claude del host. Se copia sin `mcpOAuth` y entra en solo lectura.
@@ -77,6 +83,9 @@ pub struct EjecutorBwrapBuilder {
     pub usuario: String,
     /// Archivo con el token de Claude: `ROOT_TOKEN_BUILDER`. Sin él se usa la copia de la credencial.
     pub token: Option<PathBuf>,
+    /// Procfs ya montado: `ROOT_PROC_BUILDER`, en Colab `/proc`. Con él el builder ve ese procfs en solo
+    /// lectura. Sin él monta su propio `/proc`. Con él se revisa `mountinfo` antes de cada lanzamiento.
+    pub proc_builder: Option<PathBuf>,
     /// Programa `ip`. Los tests lo cambian por uno falso.
     pub ip: String,
     /// Programa `prlimit`. Los tests lo cambian por uno falso.
@@ -110,9 +119,9 @@ struct Permisos {
 }
 
 impl EjecutorBwrapBuilder {
-    /// Arma el ejecutor leyendo `ROOT_RED_BUILDER`, `ROOT_USUARIO_BUILDER` y `ROOT_TOKEN_BUILDER` de
-    /// `entorno`, no del proceso. Red y usuario son obligatorios y no vacíos. El token, si está, no puede
-    /// estar vacío. El archivo del token se lee al lanzar, no aquí.
+    /// Arma el ejecutor leyendo `ROOT_RED_BUILDER`, `ROOT_USUARIO_BUILDER`, `ROOT_TOKEN_BUILDER` y
+    /// `ROOT_PROC_BUILDER` de `entorno`, no del proceso. Red y usuario son obligatorios y no vacíos. El token
+    /// y el procfs, si están, no pueden estar vacíos. El archivo del token se lee al lanzar, no aquí.
     pub fn desde_entorno(
         entorno: &[(String, String)],
         credencial: PathBuf,
@@ -144,6 +153,15 @@ impl EjecutorBwrapBuilder {
             }
             Some(ruta) => Some(PathBuf::from(ruta)),
         };
+        let proc_builder = match buscar("ROOT_PROC_BUILDER") {
+            None => None,
+            Some(ruta) if ruta.is_empty() => {
+                return Err(ErrorCorre::Ejecutor(
+                    "ROOT_PROC_BUILDER está vacía: nombre una ruta de procfs o quítela".into(),
+                ));
+            }
+            Some(ruta) => Some(PathBuf::from(ruta)),
+        };
         Ok(Self {
             credencial,
             home,
@@ -152,6 +170,7 @@ impl EjecutorBwrapBuilder {
             red,
             usuario,
             token,
+            proc_builder,
             ip: "ip".into(),
             prlimit: "prlimit".into(),
             setpriv: "setpriv".into(),
@@ -179,7 +198,26 @@ impl EjecutorBwrapBuilder {
             permisos_de(&self.home, "ROOT_HOME")?,
             permisos_de(&self.home_usuario, "$HOME")?,
         )?;
+        // Solo con `ROOT_PROC_BUILDER` se lee la lista de montajes del proceso.
+        if self.proc_builder.is_some() {
+            let mountinfo = fs::read_to_string(MOUNTINFO)
+                .map_err(|e| ErrorCorre::Ejecutor(format!("no se pudo leer {MOUNTINFO}: {e}")))?;
+            self.revisar_proc_del_builder(&mountinfo)?;
+        }
         Ok(builder)
+    }
+
+    /// Revisa `mountinfo` contra `proc_builder`. Sin la variable no hace nada.
+    fn revisar_proc_del_builder(&self, mountinfo: &str) -> Result<(), ErrorCorre> {
+        match &self.proc_builder {
+            Some(ruta) => revisar_proc_builder(mountinfo, &ruta.to_string_lossy()),
+            None => Ok(()),
+        }
+    }
+
+    /// Aviso del veredicto cuando el builder usa el procfs del runtime. `None` sin `proc_builder`.
+    pub fn aviso_proc(&self) -> Option<&'static str> {
+        self.proc_builder.as_ref().map(|_| AVISO_PROC_BUILDER)
     }
 
     /// Arma el `Command` del lanzamiento sin lanzarlo. `l` y las rutas ya son físicas y validadas. El
@@ -192,7 +230,13 @@ impl EjecutorBwrapBuilder {
         (uid, gid): (u32, u32),
         token: Option<&str>,
     ) -> Command {
-        let montajes = args_bwrap_builder(l, credencial, estado, &entrada_de_raiz);
+        let montajes = args_bwrap_builder(
+            l,
+            credencial,
+            estado,
+            self.proc_builder.as_deref(),
+            &entrada_de_raiz,
+        );
         let mut cmd = Command::new(&self.ip);
         cmd.args(["netns", "exec"])
             .arg(&self.red)
@@ -320,10 +364,13 @@ impl EjecutorBuilder for EjecutorBwrapBuilder {
 /// credencial en solo lectura y el plugin si hay. El sistema va en solo lectura. Nunca monta `ROOT_HOME`,
 /// `$HOME`, `/root`, `/content` ni `/home` del host. Termina con `--chdir /trabajo`.
 /// `credencial` es la copia de la credencial: con token no hay y no se monta nada en su lugar.
+/// Sin `proc_builder` el builder monta su propio `/proc`. Con él monta ese procfs ya montado en `/proc`, en
+/// solo lectura. `--unshare-pid` va siempre.
 fn args_bwrap_builder(
     l: &Lanzamiento,
     credencial: Option<&Path>,
     estado: &Path,
+    proc_builder: Option<&Path>,
     entrada: &dyn Fn(&str) -> EntradaRaiz,
 ) -> Vec<String> {
     let mut args: Vec<String> = [
@@ -349,7 +396,11 @@ fn args_bwrap_builder(
             EntradaRaiz::Enlace(destino) => montar(&mut args, "--symlink", &destino, ruta),
         }
     }
-    args.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"].map(String::from));
+    match proc_builder {
+        Some(ruta) => montar_ruta(&mut args, "--ro-bind", ruta, "/proc"),
+        None => args.extend(["--proc", "/proc"].map(String::from)),
+    }
+    args.extend(["--dev", "/dev", "--tmpfs", "/tmp"].map(String::from));
     montar_ruta(&mut args, "--bind", &l.repo, "/trabajo");
     montar_ruta(&mut args, "--bind", estado, ESTADO_EN_CONTENEDOR);
     if let Some(credencial) = credencial {
@@ -360,6 +411,36 @@ fn args_bwrap_builder(
     }
     args.extend(["--chdir", "/trabajo"].map(String::from));
     args
+}
+
+/// Tipo de montaje de `ruta` en un texto de `mountinfo` (formato de `/proc/self/mountinfo`). El punto de
+/// montaje es el campo 5 y el tipo sigue al separador ` - `. Si hay varias líneas con la ruta, gana la última.
+fn tipo_de_montaje(mountinfo: &str, ruta: &str) -> Option<String> {
+    mountinfo
+        .lines()
+        .filter_map(|linea| {
+            let (antes, despues) = linea.split_once(" - ")?;
+            let punto = antes.split_whitespace().nth(4)?;
+            if punto != ruta {
+                return None;
+            }
+            despues.split_whitespace().next().map(String::from)
+        })
+        .next_back()
+}
+
+/// Revisa que `ruta` sea procfs en `mountinfo`. Sin montaje o con otro tipo da `ErrorCorre::Ejecutor` que
+/// la nombra. No exige opciones de procfs, como `hidepid`.
+fn revisar_proc_builder(mountinfo: &str, ruta: &str) -> Result<(), ErrorCorre> {
+    match tipo_de_montaje(mountinfo, ruta).as_deref() {
+        Some("proc") => Ok(()),
+        Some(tipo) => Err(ErrorCorre::Ejecutor(format!(
+            "ROOT_PROC_BUILDER {ruta} es de tipo {tipo}, no proc: el builder necesita un procfs"
+        ))),
+        None => Err(ErrorCorre::Ejecutor(format!(
+            "ROOT_PROC_BUILDER {ruta} no está montada en este proceso"
+        ))),
+    }
 }
 
 /// Crea `cargo-home/` dentro del estado antes de cada lanzamiento. Si el estado tiene otro uid o gid que la
@@ -810,6 +891,7 @@ mod tests {
             red: "red-prueba".into(),
             usuario: "root".into(),
             token: None,
+            proc_builder: None,
             ip: progs[0].clone(),
             prlimit: progs[1].clone(),
             setpriv: progs[2].clone(),
@@ -890,6 +972,7 @@ mod tests {
             &l,
             Some(d.credencial.as_path()),
             &d.estado,
+            None,
             &sistema_de_prueba,
         );
         // Guarda: la lista exacta de montajes de hoy. Un montaje nuevo rompe este test a propósito.
@@ -919,6 +1002,7 @@ mod tests {
             &l,
             Some(d.credencial.as_path()),
             &d.estado,
+            None,
             &sistema_de_prueba,
         );
         let origenes = origenes_de_montaje(&args);
@@ -959,6 +1043,7 @@ mod tests {
             &l,
             Some(d.credencial.as_path()),
             &d.estado,
+            None,
             &sistema_de_prueba,
         );
         for bandera in [
@@ -1026,6 +1111,7 @@ mod tests {
             &l,
             Some(d.credencial.as_path()),
             &d.estado,
+            None,
             &sistema_de_prueba,
         );
         assert!(
@@ -1061,6 +1147,7 @@ mod tests {
             &lanzamiento(d.repo.clone(), Vec::new()),
             Some(d.credencial.as_path()),
             &d.estado,
+            None,
             &sistema_de_prueba,
         );
         assert!(!sin.iter().any(|a| a == PLUGIN_EN_CONTENEDOR), "{sin:?}");
@@ -1072,6 +1159,7 @@ mod tests {
             &l,
             Some(d.credencial.as_path()),
             &d.estado,
+            None,
             &sistema_de_prueba,
         );
         let origen = plugin.display().to_string();
@@ -1080,6 +1168,187 @@ mod tests {
                 .any(|w| w == ["--ro-bind", origen.as_str(), "/opt/plugin"]),
             "{con:?}"
         );
+    }
+
+    // --- /proc del runtime ---
+
+    /// Mountinfo falso con procfs en `/proc`, como el de un runtime de Colab.
+    const MOUNTINFO_PROC: &str = "20 1 0:19 / /sys rw,nosuid,nodev,noexec,relatime shared:6 - sysfs sysfs rw\n\
+22 1 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw\n\
+23 22 0:22 / /dev rw,nosuid shared:2 - tmpfs tmpfs rw\n";
+
+    /// Mountinfo falso con tmpfs en `/proc`.
+    const MOUNTINFO_TMPFS: &str = "22 1 0:21 / /proc rw,nosuid,nodev shared:5 - tmpfs tmpfs rw\n";
+
+    #[test]
+    fn corre_bwrap_proc_builder_monta_el_procfs_en_solo_lectura() {
+        let d = disposicion();
+        let l = lanzamiento(d.repo.clone(), Vec::new());
+        let args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            Some(Path::new("/proc")),
+            &sistema_de_prueba,
+        );
+        assert!(
+            args.windows(3)
+                .any(|w| w == ["--ro-bind", "/proc", "/proc"]),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|a| a == "--proc"), "{args:?}");
+    }
+
+    #[test]
+    fn corre_bwrap_sin_proc_builder_monta_proc_propio() {
+        let d = disposicion();
+        let l = lanzamiento(d.repo.clone(), Vec::new());
+        let args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            None,
+            &sistema_de_prueba,
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["--proc", "/proc"]),
+            "{args:?}"
+        );
+        assert!(
+            !args
+                .windows(3)
+                .any(|w| w == ["--ro-bind", "/proc", "/proc"]),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn corre_bwrap_unshare_pid_con_y_sin_proc_builder() {
+        let d = disposicion();
+        let l = lanzamiento(d.repo.clone(), Vec::new());
+        for proc in [None, Some(Path::new("/proc"))] {
+            let args = args_bwrap_builder(
+                &l,
+                Some(d.credencial.as_path()),
+                &d.estado,
+                proc,
+                &sistema_de_prueba,
+            );
+            assert!(args.iter().any(|a| a == "--unshare-pid"), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn corre_bwrap_montajes_con_proc_builder_son_los_de_la_base() {
+        let d = disposicion();
+        let plugin = d.raiz.join("plugin");
+        fs::create_dir_all(&plugin).expect("plugin");
+        let mut l = lanzamiento(d.repo.clone(), Vec::new());
+        l.plugin = Some(plugin.clone());
+        let args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            Some(Path::new("/proc")),
+            &sistema_de_prueba,
+        );
+        // La lista de la base, con el procfs del runtime en el lugar del `/proc` propio.
+        let esperados = vec![
+            "--ro-bind /usr /usr".to_string(),
+            "--ro-bind /etc /etc".to_string(),
+            "--ro-bind /bin /bin".to_string(),
+            "--ro-bind /proc /proc".to_string(),
+            format!("--bind {} /trabajo", d.repo.display()),
+            format!("--bind {} /home/builder/.claude", d.estado.display()),
+            format!(
+                "--ro-bind {} /home/builder/.claude/.credentials.json",
+                d.credencial.display()
+            ),
+            format!("--ro-bind {} /opt/plugin", plugin.display()),
+        ];
+        assert_eq!(montajes_de(&args), esperados, "{args:?}");
+    }
+
+    #[test]
+    fn corre_bwrap_tipo_de_montaje_lee_el_campo_despues_del_guion() {
+        assert_eq!(
+            tipo_de_montaje(MOUNTINFO_PROC, "/proc"),
+            Some("proc".to_string())
+        );
+        assert_eq!(
+            tipo_de_montaje(MOUNTINFO_TMPFS, "/proc"),
+            Some("tmpfs".to_string())
+        );
+        assert_eq!(tipo_de_montaje(MOUNTINFO_PROC, "/ausente"), None);
+    }
+
+    #[test]
+    fn corre_bwrap_tipo_de_montaje_usa_la_ultima_linea_de_la_ruta() {
+        let apilado = format!("{MOUNTINFO_PROC}22 1 0:21 / /proc rw shared:5 - tmpfs tmpfs rw\n");
+        assert_eq!(
+            tipo_de_montaje(&apilado, "/proc"),
+            Some("tmpfs".to_string())
+        );
+    }
+
+    #[test]
+    fn corre_bwrap_revisar_proc_builder_acepta_procfs_y_nombra_el_tipo_si_no_lo_es() {
+        assert!(revisar_proc_builder(MOUNTINFO_PROC, "/proc").is_ok());
+        // No exige hidepid: un procfs con hidepid también pasa.
+        let con_hidepid =
+            "22 1 0:21 / /proc rw,nosuid,relatime shared:5 - proc proc rw,hidepid=2\n";
+        assert!(revisar_proc_builder(con_hidepid, "/proc").is_ok());
+        let error = revisar_proc_builder(MOUNTINFO_TMPFS, "/proc").expect_err("tmpfs no pasa");
+        assert!(
+            matches!(&error, ErrorCorre::Ejecutor(m) if m.contains("/proc") && m.contains("tmpfs")),
+            "{error}"
+        );
+        let error =
+            revisar_proc_builder(MOUNTINFO_PROC, "/ausente").expect_err("ruta ausente no pasa");
+        assert!(
+            matches!(&error, ErrorCorre::Ejecutor(m) if m.contains("/ausente")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn corre_bwrap_proc_builder_con_mountinfo_malo_frena_el_chequeo() {
+        let d = disposicion();
+        let progs = cadena_falsa(&d.raiz, BWRAP_OK);
+        let ej = EjecutorBwrapBuilder {
+            proc_builder: Some(PathBuf::from("/proc")),
+            ..ejecutor_de(&d, &progs)
+        };
+        // El chequeo recibe el texto de mountinfo: un tmpfs frena.
+        let error = ej
+            .revisar_proc_del_builder(MOUNTINFO_TMPFS)
+            .expect_err("tmpfs frena");
+        assert!(
+            matches!(&error, ErrorCorre::Ejecutor(m) if m.contains("tmpfs")),
+            "{error}"
+        );
+        // Sin la variable no se mira el mountinfo: cualquier texto pasa.
+        let sin = EjecutorBwrapBuilder {
+            proc_builder: None,
+            ..ejecutor_de(&d, &progs)
+        };
+        assert!(sin.revisar_proc_del_builder("basura").is_ok());
+    }
+
+    #[test]
+    fn corre_bwrap_aviso_proc_solo_con_proc_builder() {
+        let d = disposicion();
+        let progs = cadena_falsa(&d.raiz, BWRAP_OK);
+        let con = EjecutorBwrapBuilder {
+            proc_builder: Some(PathBuf::from("/proc")),
+            ..ejecutor_de(&d, &progs)
+        };
+        assert_eq!(
+            con.aviso_proc(),
+            Some("builder con /proc del runtime en solo lectura")
+        );
+        assert_eq!(con.aviso_proc(), Some(AVISO_PROC_BUILDER));
+        assert_eq!(ejecutor_de(&d, &progs).aviso_proc(), None);
     }
 
     // --- Orden del comando y entorno ---
@@ -1331,6 +1600,53 @@ mod tests {
                 PathBuf::from("/u"),
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn corre_bwrap_desde_entorno_lee_proc_builder() {
+        let base = [
+            par("ROOT_RED_BUILDER", "red-x"),
+            par("ROOT_USUARIO_BUILDER", "builder"),
+        ];
+        let mut con = base.to_vec();
+        con.push(par("ROOT_PROC_BUILDER", "/proc"));
+        let ej = EjecutorBwrapBuilder::desde_entorno(
+            &con,
+            PathBuf::from("/c"),
+            PathBuf::from("/h"),
+            PathBuf::from("/u"),
+        )
+        .expect("desde_entorno");
+        assert_eq!(ej.proc_builder, Some(PathBuf::from("/proc")));
+        let ej = EjecutorBwrapBuilder::desde_entorno(
+            &base,
+            PathBuf::from("/c"),
+            PathBuf::from("/h"),
+            PathBuf::from("/u"),
+        )
+        .expect("desde_entorno");
+        assert_eq!(ej.proc_builder, None);
+    }
+
+    #[test]
+    fn corre_bwrap_desde_entorno_proc_builder_vacia_es_error() {
+        let entorno = [
+            par("ROOT_RED_BUILDER", "red-x"),
+            par("ROOT_USUARIO_BUILDER", "builder"),
+            par("ROOT_PROC_BUILDER", ""),
+        ];
+        let error = EjecutorBwrapBuilder::desde_entorno(
+            &entorno,
+            PathBuf::from("/c"),
+            PathBuf::from("/h"),
+            PathBuf::from("/u"),
+        )
+        .err()
+        .expect("debe fallar");
+        assert!(
+            matches!(&error, ErrorCorre::Ejecutor(m) if m.contains("ROOT_PROC_BUILDER")),
+            "{error}"
         );
     }
 
@@ -1949,6 +2265,7 @@ mod tests {
             &l,
             Some(d.credencial.as_path()),
             &d.estado,
+            None,
             &entrada_de_raiz,
         );
         args.extend([
