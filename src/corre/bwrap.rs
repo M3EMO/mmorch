@@ -12,6 +12,7 @@
 //! Un código 137 (SIGKILL) da `Cortado` y conserva el stdout, como en podman.
 
 use std::fs;
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -172,7 +173,7 @@ impl EjecutorBwrapBuilder {
     fn armar_comando(
         &self,
         l: &Lanzamiento,
-        credencial: &Path,
+        credencial: Option<&Path>,
         estado: &Path,
         (uid, gid): (u32, u32),
         token: Option<&str>,
@@ -219,7 +220,12 @@ impl EjecutorBuilder for EjecutorBwrapBuilder {
             ));
         }
         let builder = self.chequeo_previo()?;
-        revisar_credencial(&self.credencial)?;
+        // Con token el archivo se revisa y se lee antes de tocar el estado. Con token no hay credencial que
+        // copiar ni montar; sin token la credencial es obligatoria, como en la 171.
+        let token = self.token.as_deref().map(leer_token).transpose()?;
+        if token.is_none() {
+            revisar_credencial(&self.credencial)?;
+        }
         if let Some(plugin) = &l.plugin {
             revisar_plugin(plugin)?;
         }
@@ -230,11 +236,12 @@ impl EjecutorBuilder for EjecutorBwrapBuilder {
                 l.repo.display()
             ))
         })?;
-        let mut montajes: Vec<(&str, &Path)> = vec![
-            ("repo", l.repo.as_path()),
-            ("estado", estado.as_path()),
-            ("credencial", self.credencial.as_path()),
-        ];
+        let credencial = token.is_none().then_some(self.credencial.as_path());
+        let mut montajes: Vec<(&str, &Path)> =
+            vec![("repo", l.repo.as_path()), ("estado", estado.as_path())];
+        if let Some(credencial) = credencial {
+            montajes.push(("credencial", credencial));
+        }
         if let Some(plugin) = &l.plugin {
             montajes.push(("plugin", plugin.as_path()));
         }
@@ -244,9 +251,14 @@ impl EjecutorBuilder for EjecutorBwrapBuilder {
             fuente,
         })?;
         // El builder no ve la credencial del usuario: ve una copia sin `mcpOAuth`.
-        let copia = estado.join(CREDENCIAL_COPIA);
-        copiar_sin_mcp(&self.credencial, &copia)?;
-        let token = self.token.as_deref().map(leer_token).transpose()?;
+        let copia = match credencial {
+            Some(credencial) => {
+                let copia = estado.join(CREDENCIAL_COPIA);
+                copiar_sin_mcp(credencial, &copia)?;
+                Some(copia)
+            }
+            None => None,
+        };
 
         // Los montajes van por ruta física: lo que se validó es lo que se monta.
         let mut real = l.clone();
@@ -257,8 +269,10 @@ impl EjecutorBuilder for EjecutorBwrapBuilder {
             .map(|plugin| fisica(plugin, "el plugin"))
             .transpose()?;
         let estado = fisica(&estado, "el estado")?;
-        let copia = fisica(&copia, "la copia de la credencial")?;
-        let cmd = self.armar_comando(&real, &copia, &estado, builder, token.as_deref());
+        let copia = copia
+            .map(|copia| fisica(&copia, "la copia de la credencial"))
+            .transpose()?;
+        let cmd = self.armar_comando(&real, copia.as_deref(), &estado, builder, token.as_deref());
 
         let plazo = l.plazo.min(self.timeout);
         match correr_comando_registrado(cmd, &self.ip, plazo, TOPE_SALIDA_BUILDER)? {
@@ -279,9 +293,10 @@ impl EjecutorBuilder for EjecutorBwrapBuilder {
 /// por `entrada`. Monta `repo` en `/trabajo`, el estado de claude en el HOME del builder, la copia de la
 /// credencial en solo lectura y el plugin si hay. El sistema va en solo lectura. Nunca monta `ROOT_HOME`,
 /// `$HOME`, `/root`, `/content` ni `/home` del host. Termina con `--chdir /trabajo`.
+/// `credencial` es la copia de la credencial: con token no hay y no se monta nada en su lugar.
 fn args_bwrap_builder(
     l: &Lanzamiento,
-    credencial: &Path,
+    credencial: Option<&Path>,
     estado: &Path,
     entrada: &dyn Fn(&str) -> EntradaRaiz,
 ) -> Vec<String> {
@@ -311,7 +326,9 @@ fn args_bwrap_builder(
     args.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"].map(String::from));
     montar_ruta(&mut args, "--bind", &l.repo, "/trabajo");
     montar_ruta(&mut args, "--bind", estado, ESTADO_EN_CONTENEDOR);
-    montar_ruta(&mut args, "--ro-bind", credencial, CREDENCIAL_EN_CONTENEDOR);
+    if let Some(credencial) = credencial {
+        montar_ruta(&mut args, "--ro-bind", credencial, CREDENCIAL_EN_CONTENEDOR);
+    }
     if let Some(plugin) = &l.plugin {
         montar_ruta(&mut args, "--ro-bind", plugin, PLUGIN_EN_CONTENEDOR);
     }
@@ -341,14 +358,30 @@ fn entrada_de_raiz(ruta: &str) -> EntradaRaiz {
     }
 }
 
-/// Lee el token de Claude del archivo `ruta`, sin espacios de sobra. El error nombra la ruta, nunca el contenido.
+/// Lee el token de Claude del archivo `ruta`, sin espacios de sobra. Antes revisa que sea un archivo con modo
+/// 0600 o más cerrado. El error nombra la ruta y, si hace falta, el modo; nunca el contenido.
 fn leer_token(ruta: &Path) -> Result<String, ErrorCorre> {
-    let texto = fs::read_to_string(ruta).map_err(|e| {
+    let sin_leer = |e: io::Error| {
         ErrorCorre::Ejecutor(format!(
             "no se pudo leer el token de Claude en {}: {e}",
             ruta.display()
         ))
-    })?;
+    };
+    let meta = fs::metadata(ruta).map_err(sin_leer)?;
+    if !meta.is_file() {
+        return Err(ErrorCorre::Ejecutor(format!(
+            "el token de Claude no es un archivo: {}",
+            ruta.display()
+        )));
+    }
+    let modo = meta.mode() & 0o777;
+    if modo & 0o177 != 0 {
+        return Err(ErrorCorre::Ejecutor(format!(
+            "el token de Claude en {} tiene modo {modo:04o}; debe ser 0600 o más cerrado",
+            ruta.display()
+        )));
+    }
+    let texto = fs::read_to_string(ruta).map_err(sin_leer)?;
     let token = texto.trim();
     if token.is_empty() {
         return Err(ErrorCorre::Ejecutor(format!(
@@ -684,6 +717,17 @@ mod tests {
         fs::read_to_string(d.raiz.join("env-hijo")).unwrap_or_default()
     }
 
+    /// Escribe un token con modo 0600, como debe estar el archivo de `ROOT_TOKEN_BUILDER`.
+    fn escribir_token(ruta: &Path, texto: &str) {
+        fs::write(ruta, texto).expect("token");
+        modo(ruta, 0o600);
+    }
+
+    /// Argumentos que dejó el `bwrap` falso de la disposición, como texto.
+    fn args_del_bwrap(d: &Disposicion) -> String {
+        fs::read_to_string(d.raiz.join("bwrap-args")).unwrap_or_default()
+    }
+
     // --- Args de bwrap ---
 
     #[test]
@@ -693,7 +737,12 @@ mod tests {
         fs::create_dir_all(&plugin).expect("plugin");
         let mut l = lanzamiento(d.repo.clone(), Vec::new());
         l.plugin = Some(plugin);
-        let args = args_bwrap_builder(&l, &d.credencial, &d.estado, &sistema_de_prueba);
+        let args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            &sistema_de_prueba,
+        );
         let origenes = origenes_de_montaje(&args);
         assert!(origenes.len() >= 4, "{args:?}");
         for origen in &origenes {
@@ -728,7 +777,12 @@ mod tests {
     fn corre_bwrap_args_traen_aislamiento_y_montajes_pedidos() {
         let d = disposicion();
         let l = lanzamiento(d.repo.clone(), Vec::new());
-        let args = args_bwrap_builder(&l, &d.credencial, &d.estado, &sistema_de_prueba);
+        let args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            &sistema_de_prueba,
+        );
         for bandera in [
             "--unshare-user",
             "--unshare-pid",
@@ -790,7 +844,12 @@ mod tests {
     fn corre_bwrap_sistema_solo_si_existe_y_enlaces_como_en_el_host() {
         let d = disposicion();
         let l = lanzamiento(d.repo.clone(), Vec::new());
-        let args = args_bwrap_builder(&l, &d.credencial, &d.estado, &sistema_de_prueba);
+        let args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            &sistema_de_prueba,
+        );
         assert!(
             args.windows(3).any(|w| w == ["--ro-bind", "/usr", "/usr"]),
             "{args:?}"
@@ -822,7 +881,7 @@ mod tests {
         let d = disposicion();
         let sin = args_bwrap_builder(
             &lanzamiento(d.repo.clone(), Vec::new()),
-            &d.credencial,
+            Some(d.credencial.as_path()),
             &d.estado,
             &sistema_de_prueba,
         );
@@ -831,7 +890,12 @@ mod tests {
         fs::create_dir_all(&plugin).expect("plugin");
         let mut l = lanzamiento(d.repo.clone(), Vec::new());
         l.plugin = Some(plugin.clone());
-        let con = args_bwrap_builder(&l, &d.credencial, &d.estado, &sistema_de_prueba);
+        let con = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            &sistema_de_prueba,
+        );
         let origen = plugin.display().to_string();
         assert!(
             con.windows(3)
@@ -855,7 +919,13 @@ mod tests {
                 "bwrap".into(),
             ],
         );
-        let cmd = ej.armar_comando(&l, &d.credencial, &d.estado, (1001, 1001), None);
+        let cmd = ej.armar_comando(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            (1001, 1001),
+            None,
+        );
         assert_eq!(cmd.get_program().to_string_lossy(), "ip");
         let argv = argv_de(&cmd);
         assert_eq!(&argv[..3], ["netns", "exec", "red-prueba"], "{argv:?}");
@@ -907,7 +977,13 @@ mod tests {
                 "bwrap".into(),
             ],
         );
-        let cmd = ej.armar_comando(&l, &d.credencial, &d.estado, (1001, 1001), None);
+        let cmd = ej.armar_comando(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            (1001, 1001),
+            None,
+        );
         let envs = entorno_de(&cmd);
         for clave in ["ROOT_HOME", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"] {
             assert!(!envs.contains_key(clave), "trae {clave}: {envs:?}");
@@ -922,7 +998,7 @@ mod tests {
     fn corre_bwrap_token_no_va_en_argv_y_si_en_el_entorno() {
         let d = disposicion();
         let ruta = d.raiz.join("token");
-        fs::write(&ruta, "  tok-falso-123\n").expect("token");
+        escribir_token(&ruta, "  tok-falso-123\n");
         let token = leer_token(&ruta).expect("lee el token");
         assert_eq!(token, "tok-falso-123");
         let l = lanzamiento(d.repo.clone(), Vec::new());
@@ -935,7 +1011,13 @@ mod tests {
                 "bwrap".into(),
             ],
         );
-        let cmd = ej.armar_comando(&l, &d.credencial, &d.estado, (1001, 1001), Some(&token));
+        let cmd = ej.armar_comando(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            (1001, 1001),
+            Some(&token),
+        );
         for a in argv_de(&cmd) {
             assert!(!a.contains("tok-falso-123"), "el token va en argv: {a}");
         }
@@ -1217,7 +1299,7 @@ mod tests {
         let _serie = serie_de_pruebas();
         let d = disposicion();
         let ruta = d.raiz.join("token");
-        fs::write(&ruta, "tok-falso-456\n").expect("token");
+        escribir_token(&ruta, "tok-falso-456\n");
         let progs = cadena_falsa(&d.raiz, BWRAP_OK);
         let mut ej = ejecutor_de(&d, &progs);
         ej.token = Some(ruta);
@@ -1229,6 +1311,125 @@ mod tests {
         assert!(env_del_hijo(&d).contains("CLAUDE_CODE_OAUTH_TOKEN=tok-falso-456"));
         let argv = fs::read_to_string(d.raiz.join("bwrap-args")).unwrap_or_default();
         assert!(!argv.contains("tok-falso-456"), "{argv}");
+    }
+
+    // --- Con token no hay credencial; sin token sí ---
+
+    #[test]
+    fn corre_bwrap_con_token_lanza_sin_credencial_en_el_host() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        fs::remove_file(&d.credencial).expect("quita la credencial");
+        let ruta = d.raiz.join("token");
+        escribir_token(&ruta, "tok-falso-788\n");
+        let progs = cadena_falsa(&d.raiz, BWRAP_OK);
+        let mut ej = ejecutor_de(&d, &progs);
+        ej.token = Some(ruta);
+        let salida = ej
+            .lanzar(&lanzamiento(d.repo.clone(), Vec::new()))
+            .expect("con token no hace falta la credencial");
+        assert_eq!(salida.codigo, 0);
+        assert!(d.raiz.join("bwrap-args").is_file(), "no lanzó");
+    }
+
+    #[test]
+    fn corre_bwrap_con_token_no_copia_ni_monta_la_credencial() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        let ruta = d.raiz.join("token");
+        escribir_token(&ruta, "tok-falso-790\n");
+        let progs = cadena_falsa(&d.raiz, BWRAP_OK);
+        let mut ej = ejecutor_de(&d, &progs);
+        ej.token = Some(ruta);
+        ej.lanzar(&lanzamiento(d.repo.clone(), Vec::new()))
+            .expect("lanza");
+        let args = args_del_bwrap(&d);
+        assert!(
+            !args.contains(".credentials.json"),
+            "monta credencial: {args}"
+        );
+        assert!(!args.contains(CREDENCIAL_EN_CONTENEDOR), "{args}");
+        assert!(
+            !d.estado.join(".credentials.json").exists(),
+            "copió la credencial al estado"
+        );
+    }
+
+    #[test]
+    fn corre_bwrap_con_token_de_modo_abierto_frena_sin_mostrar_contenido() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        let ruta = d.raiz.join("token");
+        fs::write(&ruta, "tok-secreto-falso-791\n").expect("token");
+        modo(&ruta, 0o644);
+        let progs = cadena_falsa(&d.raiz, BWRAP_OK);
+        let mut ej = ejecutor_de(&d, &progs);
+        ej.token = Some(ruta.clone());
+        let error = ej
+            .lanzar(&lanzamiento(d.repo.clone(), Vec::new()))
+            .expect_err("un token 0644 no lanza");
+        let texto = error.to_string();
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{texto}");
+        assert!(texto.contains(&ruta.display().to_string()), "{texto}");
+        assert!(texto.contains("0644"), "{texto}");
+        assert!(!texto.contains("tok-secreto-falso-791"), "{texto}");
+        assert!(!d.raiz.join("bwrap-args").exists(), "no debe lanzar");
+        assert!(
+            !d.estado.join(".credentials.json").exists(),
+            "copió antes de revisar el token"
+        );
+    }
+
+    #[test]
+    fn corre_bwrap_token_vacio_frena_antes_de_copiar_la_credencial() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        let ruta = d.raiz.join("token");
+        escribir_token(&ruta, " \n  ");
+        let progs = cadena_falsa(&d.raiz, BWRAP_OK);
+        let mut ej = ejecutor_de(&d, &progs);
+        ej.token = Some(ruta);
+        let error = ej
+            .lanzar(&lanzamiento(d.repo.clone(), Vec::new()))
+            .expect_err("un token vacío no lanza");
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains("vacío")),
+            "{error}"
+        );
+        assert!(
+            !d.estado.join(".credentials.json").exists(),
+            "copió la credencial antes de revisar el token"
+        );
+    }
+
+    #[test]
+    fn corre_bwrap_sin_token_sin_credencial_frena_con_el_mensaje_de_siempre() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        fs::remove_file(&d.credencial).expect("quita la credencial");
+        let progs = cadena_falsa(&d.raiz, BWRAP_OK);
+        let error = ejecutor_de(&d, &progs)
+            .lanzar(&lanzamiento(d.repo.clone(), Vec::new()))
+            .expect_err("sin token ni credencial no lanza");
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains("no existe la credencial de Claude")),
+            "{error}"
+        );
+        assert!(!d.raiz.join("bwrap-args").exists(), "no debe lanzar");
+    }
+
+    #[test]
+    fn corre_bwrap_sin_token_copia_la_credencial_y_la_monta() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        let progs = cadena_falsa(&d.raiz, BWRAP_OK);
+        let salida = ejecutor_de(&d, &progs)
+            .lanzar(&lanzamiento(d.repo.clone(), Vec::new()))
+            .expect("lanza");
+        assert_eq!(salida.codigo, 0);
+        assert!(d.estado.join(".credentials.json").is_file(), "no copió");
+        let args = args_del_bwrap(&d);
+        assert!(args.contains(CREDENCIAL_EN_CONTENEDOR), "{args}");
     }
 
     #[test]
@@ -1358,7 +1559,12 @@ mod tests {
         extra: &[String],
     ) -> std::process::Output {
         let l = lanzamiento(d.repo.clone(), Vec::new());
-        let mut args = args_bwrap_builder(&l, &d.credencial, &d.estado, &entrada_de_raiz);
+        let mut args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            &entrada_de_raiz,
+        );
         args.extend([
             "--ro-bind".to_string(),
             scripts.display().to_string(),
