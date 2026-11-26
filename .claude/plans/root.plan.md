@@ -17338,3 +17338,141 @@ Recomiendo la (a) solo si el usuario quiere la (d) de P133. Con la (b) de P133, 
 **Con P133 b, el paso 5 no hace falta.** Los modos b y a ya están medidos.
 **El saldo de S2:** cerca de 12,53 USD, sin cambios.
 **Las unidades de Colab:** todo lo que falta hasta D3 usa menos de 5.
+
+## Vuelta del 2026-11-26 (105): P133 b, el brief de la 176, y una llamada real de `claude -p`
+
+**Estado.**
+- **La vuelta 104 está en 7142cf21.**
+- **Las respuestas del usuario, literales:**
+  - P133: "b) Pids propios, /proc ro (Recommended)";
+  - P134: "a) Sí, una llamada por modo".
+- **El builder 175 sigue en Colab,** desde las 18:44.
+- **El paso 3 de la vuelta 104 está hecho** en `d3/aisla/`:
+  - el señuelo, con `sleep 20000`, porque la corrida puede durar 2,5 horas;
+  - la marca `@SENUELO@`;
+  - el A9 nuevo, con `LC_ALL=C`;
+  - `revisa.py` con el modo como segundo argumento, y `DUDOSO`.
+- **Un defecto viejo, arreglado:** cada marca de `ataque.sh` aparecía también en un comentario, y `preparar-ataque.py` pide una sola. La prueba habría cortado ahí.
+
+## 1. El brief de la 176, ajustado a P133 b
+
+Reescribí `docs/builds/brief-local-176.md`. La base sigue siendo `laptop/cadena-175`. Con P133 b, la tarea queda más chica que la de la vuelta 103: no hay ningún montaje nuevo en el runtime.
+
+| Qué | Con P133 b |
+|---|---|
+| La variable | `ROOT_PROC_BUILDER`. En Colab vale `/proc` |
+| Con la variable | bwrap usa `--ro-bind <ruta> /proc` en lugar de `--proc /proc`. `--unshare-pid` queda siempre |
+| Sin la variable | Todo queda como hoy |
+| El chequeo | La ruta es el punto de montaje de un procfs, según `/proc/self/mountinfo`. **No exige `hidepid`** |
+| `preparar-corre.sh` | **No cambia.** Sale el paso `proc-builder` del brief viejo |
+| `corre-runtime.py` | Fija `ROOT_PROC_BUILDER=/proc` en el entorno del `r00t` hijo |
+| El aviso | "builder con /proc del runtime en solo lectura" |
+| Los archivos | `src/corre/bwrap.rs`, `tools/colab/corre-runtime.py`, y el test de Python en `src/colab_corre.rs` |
+
+**Los tests:** los argumentos con y sin la variable, `--unshare-pid` siempre, la función pura de `mountinfo` con un procfs, un tmpfs y una ruta que no es un montaje, el aviso, y el entorno del hijo. Las guardas: los otros montajes no cambian, y podman no cambia.
+
+**Costo:** cerca de 1 USD de lista, 30 minutos y 0,05 unidades.
+
+## 2. ¿Conviene la llamada real de `claude -p` antes del piloto?
+
+**Sí, y antes de la PR.** Con P133 b, el riesgo de `/proc` ya no existe. Pero quedan cinco cosas que solo prueba una sesión real de `claude`, y ninguna la prueba la prueba de aislamiento, que usa un builder falso:
+1. **node 20.19.2 con `claude` 2.1.317,** que pide node 22, en una sesión real y no solo con `--version`;
+2. **el token por `CLAUDE_CODE_OAUTH_TOKEN`,** en el entorno, dentro de bwrap;
+3. **la red de la 175:** el DNS de slirp, y la API de Anthropic, que resuelve primero a IPv6, que no tiene ruta;
+4. **un `HOME` con el estado montado,** donde `claude` escribe su configuración;
+5. **la herramienta Bash de `claude`** dentro de bwrap, con `/dev/fd` sobre el `/proc` del runtime.
+
+**Si alguna falla en el piloto,** hace falta otra tarea, otra PR y otro congelamiento. Si falla ahora, el arreglo entra en la cadena antes de la PR.
+
+**Sobre el permiso.** P134 a dice: "Sí, una llamada por modo". La pregunta hablaba de la sonda 13 y de dos modos. Con P133 b queda un solo modo. Esta receta usa una sola llamada, en el modo b. Es menos de lo que el permiso permite.
+
+### La receta de la sonda 14, para el orquestador
+
+**Dónde:** una sesión CPU propia, `sonda-claude`, que se cierra al terminar. Las dos sesiones GPU ajenas no se tocan.
+
+**La preparación, como root en el runtime,** con un guion `d3/sonda-red/sonda.sh.14`:
+1. Instala `bubblewrap`, `slirp4netns`, `iptables`, `iproute2`, `curl` y `xz-utils`.
+2. Instala node 20.19.2 desde nodejs.org, con su SHA-256 de `SHASUMS256.txt`, bajo `/usr/local`. Instala `claude` 2.1.317 con ese `npm` y `--prefix /usr/local`.
+3. Crea el usuario `builder`, con uid 1000.
+4. Arma la red como la 175: el sostén con `unshare -Urn`, `ip netns attach root-builder`, `/dev/net/tun` con modo 0666, slirp4netns con `--userns-path`, las reglas con `nsenter -U -n`, y `/etc/netns/root-builder/resolv.conf`.
+5. Arma la corrida como la 174: `/srv/root-usuario/.cache/root/corridas/sonda/` con modo 0711 en cada nivel, y dentro `repo/` y `claude-estado/`, de `builder`. `repo/` es un repo de git vacío.
+
+**El token, por la excepción de P134 a:**
+1. El guion de la laptop revisa que `~/.config/root-colab/claude-token` exista con modo 600, como `builder-colab.sh`.
+2. Lo sube con `colab upload` a `/content/root-token`.
+3. En el runtime, un guion de Python lo mueve a `/run/root-token`, de root, con modo 0600, y borra `/content/root-token`.
+4. **El token entra al builder por el entorno, nunca por un argumento.** El guion de Python arma el entorno con `HOME=/home/builder`, `PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin` y `CLAUDE_CODE_OAUTH_TOKEN`, y lanza el comando con `subprocess.run(…, env=…)`. No usa `env VAR=valor`, que pondría el token en los argumentos.
+
+**La llamada, una sola:**
+```
+ip netns exec root-builder prlimit --nproc=4096 setpriv --reuid=builder --regid=builder --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --die-with-parent --new-session --ro-bind /usr /usr --ro-bind /etc /etc <los enlaces de /bin, /lib, /lib64 y /sbin> --ro-bind /proc /proc --dev /dev --tmpfs /tmp --bind <repo> /trabajo --bind <estado> /home/builder/.claude --chdir /trabajo claude -p "Usá la herramienta Bash para correr: echo ok-sonda. Respondé solo con su salida." --max-turns 3 --allowedTools "Bash(echo:*)" --output-format json
+```
+Son los mismos argumentos que arman la 171, la 175 y la 176.
+
+**Qué se anota,** sin el token y sin el texto del transcript:
+- el código de salida y la duración;
+- del JSON: `is_error`, `num_turns`, `total_cost_usd`, y si `result` es igual a `ok-sonda`;
+- las primeras 5 líneas de stderr, filtradas con la función `oculta` de `builder-colab.sh`;
+- si `claude-estado/` tiene archivos nuevos;
+- una vez, desde fuera y como root, el uid real del proceso `claude` y su espacio de red, como hace `argv.py`.
+
+**El cierre:**
+1. Borra `/run/root-token`, y revisa que `/run/root-token` y `/content/root-token` ya no existan.
+2. Mata slirp4netns y el sostén.
+3. Corre `colab stop -s sonda-claude`.
+4. Busca `sk-` y el prefijo del token en todo lo bajado y en sus salidas.
+5. Anota en `registro.md` el uso de P134 a: la sesión, la hora y el costo, sin valores.
+
+**La regla:**
+- **Si `result` es `ok-sonda`, con `is_error` falso:** la cadena sigue como está.
+- **Si falla:** la falla va al planner antes de la PR. La 176 sigue igual, porque no depende de esto.
+
+**Costo:** cerca de 0,05 USD de lista, 20 minutos y 0,02 unidades. No usa la clave de DeepSeek.
+
+## 3. La prueba de aislamiento con P133 b
+
+**Sí: `revisa.py` corre con el modo `b`.** Lo esperado, por la tabla de la vuelta 104:
+- `A9 senal` da `falla`, con "No such process";
+- `A9 espacio` da `propio`;
+- A15 da `vistos` mayor que 0, y `leidos=0`;
+- `vivos_builder=0`.
+
+**Lo demás de `d3/aisla/` no cambia por P133 b.** Lo revisé ataque por ataque:
+- **A2** prueba `/proc/1/root$ROOTHOME`. Con el `/proc` del runtime, el pid 1 es el init del contenedor, de root, y entrar a su raíz pide permiso de `ptrace`. Debe dar `falla`, como hoy.
+- **A3** busca C2 en el `environ` y el `cmdline` de los unos 24 procesos que ve. El `environ` de root no se lee, y ningún `cmdline` lleva C2. Debe dar `nada`.
+- **A1, A11 y A13** ya saltan `/proc` al buscar.
+- **`argv.py`** mira los procesos desde fuera, como root. No depende del `/proc` del builder.
+
+**Lo que sí cambia, fuera de `d3/aisla/`:**
+- `paso0-aisla.sh` apunta al release de `laptop/cadena-176`;
+- el usuario lo corre otra vez, porque cambian el binario y `corre-runtime.py`.
+
+## 4. Lo que falta
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | La Tarea 175, en curso | Nada | Colab, builder | Cerca de 1 USD de lista | Cerca de 40 minutos | No |
+| 2 | La sonda 14: una llamada real de `claude -p` en el modo b | Nada | Colab, orquestador | Cerca de 0,05 USD de lista y 0,02 unidades | Cerca de 20 minutos | No |
+| 3 | La suite con podman de `laptop/cadena-175` | El paso 1 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 4 | La Tarea 176 | El paso 3 | Colab, builder | Cerca de 1 USD de lista, y 0,05 unidades | Cerca de 30 minutos | No |
+| 5 | La suite con podman de `laptop/cadena-176`, y el release | El paso 4 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 6 | `paso0-aisla.sh` con el release de la 176 | El paso 5 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: lo corre el usuario** |
+| 7 | La prueba de aislamiento, con `revisa.py` en el modo `b` | El paso 6 | Colab | 0 USD y cerca de 0,15 unidades | De 1 a 1,5 horas | No |
+| 8 | La PR con la 171 a la 176 | Los pasos 2 y 7 | — | — | — | **Sí: la orden de mezcla** |
+| 9 | El congelamiento Z, el árbol igual al de la cadena 176, y el estado con Z | El paso 8 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 10 | El paquete del piloto, con `paso0-d3.sh` | El paso 9 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: la primera de las dos corridas de P132 a** |
+| 11 | El piloto de D3: s2-t1 | El paso 10 | Colab | Cerca de 0,9 USD de lista, 0,1 USD de API y 0,1 unidades | Cerca de 1 hora | No |
+| 12 | Los 3 paquetes de las tandas, y las sesiones 1 a 3 | El paso 11 | Laptop y Colab | De 21 a 36 USD de lista, de 2 a 4,5 USD de API, y de 1,5 a 3 unidades | De 12 a 14 horas, en 3 ventanas de cupo | **Sí: la segunda corrida de P132 a** |
+| 13 | El análisis de D3 | El paso 12 | Planner | Cupo | Una vuelta | No |
+| 14 | Si el análisis lo pide: una segunda pasada | El paso 13 | Colab | Lo mismo que los pasos 11 y 12 | De 1,5 a 2 días | **Sí** |
+| 15 | P98 c: abrir el final | El paso 13, o el 14 | Laptop | Según la regla del final | Según el final | No |
+| 16 | La validez sobre el final sellado | El paso 15 | Colab | Según el final | Según el final | No |
+| 17 | Después de la validez: el juez que escribe reglas, por P128 a | El paso 16 | Colab, builder | De 3 a 5 USD de builder, y cerca de 3,5 USD de API | De 1 a 2 semanas, con revisión humana | No |
+| 18 | Después de la validez: una tarea con `Dockerfile` para calibrar Entrega | El paso 16 | Minería y Colab | Sin estimar | Sin estimar | **Sí** |
+| 19 | Después de la validez: las versiones de Seguridad en una sola fuente, la tarea en el error de lanzar, la limpieza por señal sin `podman ps`, la clave de los eventos como línea entera, y la firma GPG de node | El paso 16 | Colab, builder | Cerca de 1 USD | Cerca de 1 hora | No |
+
+**Los pasos 1 y 2 corren en paralelo.**
+**El saldo de S2:** cerca de 12,53 USD, sin cambios.
+**Las unidades de Colab:** todo lo que falta hasta D3 usa menos de 5.
+
+**Preguntas al usuario:** ninguna nueva.
