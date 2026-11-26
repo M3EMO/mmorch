@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prepara la red del builder de Colab. Corre como root, antes de la primera corrida.
-# Primero revisa que exista ip6tables: si falta, sale con 1 sin tocar nada.
-# Crea el espacio de red, apaga IPv6 dentro de el y pone la política de salida de ip6tables en DROP.
+# Primero revisa que existan las herramientas: si falta una, sale con 1 sin tocar nada.
+# Crea el espacio de red con un sostén de espacio de usuario de root (unshare) y le pone el nombre
+# ROOT_RED_BUILDER con ip netns attach. Apaga IPv6 dentro de el y pone la política de salida de ip6tables en DROP.
 # Lanza slirp4netns con su salida en ROOT_SLIRP_LOG (modo 0600), pone las reglas de salida de IPv4
 # y comprueba la resolución. Es idempotente.
 # Uso: red-builder.sh
@@ -12,7 +13,8 @@ ROOT_SLIRP_PID="${ROOT_SLIRP_PID:-/run/root-builder-slirp.pid}"
 ROOT_SOSTEN_PID="${ROOT_SOSTEN_PID:-/run/root-builder-sosten.pid}"
 ROOT_SLIRP_LOG="${ROOT_SLIRP_LOG:-/run/root-builder-slirp.log}"
 ROOT_RED_INTENTOS="${ROOT_RED_INTENTOS:-10}"
-export ROOT_RED_BUILDER ROOT_SLIRP_PID ROOT_SOSTEN_PID ROOT_SLIRP_LOG ROOT_RED_INTENTOS
+ROOT_NETNS_DIR="${ROOT_NETNS_DIR:-/run/netns}"
+export ROOT_RED_BUILDER ROOT_SLIRP_PID ROOT_SOSTEN_PID ROOT_SLIRP_LOG ROOT_RED_INTENTOS ROOT_NETNS_DIR
 
 # DNS de slirp4netns. Es lo único que se acepta antes de los cortes.
 DNS_SLIRP="10.0.2.3"
@@ -20,27 +22,46 @@ DNS_SLIRP="10.0.2.3"
 # Rangos que se cortan para la salida. Son 6, no 7: el brief nombra 6 rangos.
 RANGOS_CORTADOS=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 127.0.0.0/8)
 
-# Paso 0: sin ip6tables no se puede cerrar IPv6. Se frena antes de crear nada.
-revisar_ip6tables() {
-    if ! command -v ip6tables >/dev/null 2>&1; then
-        echo "mal red-builder: falta ip6tables" >&2
-        exit 1
-    fi
+# Paso 0: sin estas herramientas no se puede armar ni cerrar la red. Se frena antes de crear nada.
+revisar_herramientas() {
+    local programa
+    for programa in unshare nsenter slirp4netns mknod iptables ip6tables; do
+        if ! command -v "$programa" >/dev/null 2>&1; then
+            echo "mal red-builder: falta $programa" >&2
+            exit 1
+        fi
+    done
 }
 
-# Crea las carpetas de los pidfiles y del log si no existen.
+# Crea las carpetas de los pidfiles, del log y de los nombres de red si no existen.
 preparar_pidfiles() {
-    mkdir -p "$(dirname "$ROOT_SLIRP_PID")" "$(dirname "$ROOT_SOSTEN_PID")" "$(dirname "$ROOT_SLIRP_LOG")"
+    mkdir -p "$(dirname "$ROOT_SLIRP_PID")" "$(dirname "$ROOT_SOSTEN_PID")" "$(dirname "$ROOT_SLIRP_LOG")" "$ROOT_NETNS_DIR"
 }
 
-# Paso 1: crea el espacio de red solo si no existe.
+# Lanza el sostén: un proceso en espacios de usuario y de red nuevos de root. Su pid va a ROOT_SOSTEN_PID.
+lanzar_sosten() {
+    unshare -Urn sleep infinity </dev/null >/dev/null 2>&1 &
+    echo "$!" >"$ROOT_SOSTEN_PID"
+}
+
+# Paso 1: deja el nombre ROOT_RED_BUILDER puesto sobre el espacio del sostén vivo.
+# Si el nombre ya está puesto y el sostén murió, borra el nombre, lanza un sostén nuevo y lo pone de nuevo.
 asegurar_espacio() {
-    local listado
-    listado="$(ip netns list | cut -d' ' -f1)"
-    if grep -qx "$ROOT_RED_BUILDER" <<<"$listado"; then
+    if [ -e "$ROOT_NETNS_DIR/$ROOT_RED_BUILDER" ]; then
+        if pid_vivo "$ROOT_SOSTEN_PID"; then
+            return 0
+        fi
+        ip netns delete "$ROOT_RED_BUILDER"
+        # slirp va atado al sostén viejo: se borra su pidfile para que se lance de nuevo.
+        rm -f "$ROOT_SLIRP_PID"
+        lanzar_sosten
+        ip netns attach "$ROOT_RED_BUILDER" "$(cat "$ROOT_SOSTEN_PID")"
         return 0
     fi
-    ip netns add "$ROOT_RED_BUILDER"
+    if ! pid_vivo "$ROOT_SOSTEN_PID"; then
+        lanzar_sosten
+    fi
+    ip netns attach "$ROOT_RED_BUILDER" "$(cat "$ROOT_SOSTEN_PID")"
 }
 
 # Paso 2: apaga IPv6 dentro del espacio y pone la política de salida de ip6tables en DROP.
@@ -59,15 +80,11 @@ pid_vivo() {
 }
 
 # Paso 3: lanza slirp4netns sobre el espacio. Si su pid sigue vivo, no hace nada.
-# Reusa el proceso de sostén si sigue vivo. slirp4netns necesita un pid dentro del espacio.
+# slirp4netns necesita el pid del sostén, que lee de ROOT_SOSTEN_PID (lo crea el paso 1).
 # Su salida va a ROOT_SLIRP_LOG, con modo 0600. Slirp no recibe secretos.
 asegurar_slirp() {
     if pid_vivo "$ROOT_SLIRP_PID"; then
         return 0
-    fi
-    if ! pid_vivo "$ROOT_SOSTEN_PID"; then
-        ip netns exec "$ROOT_RED_BUILDER" sleep infinity </dev/null >/dev/null 2>&1 &
-        echo "$!" >"$ROOT_SOSTEN_PID"
     fi
     # touch no borra lo que haya; chmod fija el modo aunque el archivo ya existiera.
     touch "$ROOT_SLIRP_LOG"
@@ -112,7 +129,7 @@ comprobar_red() {
 
 # Cuerpo principal. Corre solo si el script se ejecuta directo.
 principal() {
-    revisar_ip6tables
+    revisar_herramientas
     preparar_pidfiles
     asegurar_espacio
     apagar_ipv6

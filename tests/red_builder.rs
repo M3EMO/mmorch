@@ -1,4 +1,4 @@
-//! `tools/colab/red-builder.sh` contra `ip`, `iptables`, `ip6tables`, `sysctl`, `slirp4netns`, `getent` y `sleep` falsos.
+//! `tools/colab/red-builder.sh` contra `ip`, `unshare`, `nsenter`, `mknod`, `iptables`, `ip6tables`, `sysctl`, `slirp4netns`, `getent` y `sleep` falsos.
 //! Ningún test toca red ni corre `ip netns`, `iptables` o `slirp4netns` reales.
 //! Los temporales van en `tempfile`, que usa el TMPDIR de test-seguro.
 //! Corré con `tools/test-seguro.sh --test red_builder` (el filtro sin `--test` no casa nombres de función).
@@ -30,15 +30,22 @@ const REGLAS_ESPERADAS: [&str; 8] = [
     "-A OUTPUT ! -o lo -d 127.0.0.0/8 -j DROP",
 ];
 
-/// `ip` falso. Guarda los espacios de nombres en ESTADO. Ejecuta lo que sigue a `netns exec`.
+/// `ip` falso. `netns attach NOMBRE` crea $ROOT_NETNS_DIR/NOMBRE; `netns delete NOMBRE` lo borra.
+/// `netns exec` ejecuta lo que sigue. `netns add` solo se anota: el guion nuevo no lo debe usar.
 const IP_FALSO: &str = r#"#!/bin/sh
 echo "ip $*" >> 'REGISTRO'
 if [ "$1" = netns ] && [ "$2" = add ]; then
-  echo "$3" >> 'ESTADO'
   exit 0
 fi
 if [ "$1" = netns ] && [ "$2" = list ]; then
-  if [ -f 'ESTADO' ]; then cat 'ESTADO'; fi
+  exit 0
+fi
+if [ "$1" = netns ] && [ "$2" = attach ]; then
+  : > "$ROOT_NETNS_DIR/$3"
+  exit 0
+fi
+if [ "$1" = netns ] && [ "$2" = delete ]; then
+  rm -f "$ROOT_NETNS_DIR/$3"
   exit 0
 fi
 if [ "$1" = netns ] && [ "$2" = exec ]; then
@@ -46,6 +53,24 @@ if [ "$1" = netns ] && [ "$2" = exec ]; then
   exec "$@"
 fi
 exit 2
+"#;
+
+/// `unshare` falso. Anota la llamada y queda vivo como `sleep 30`, para que el guion guarde su pid.
+const UNSHARE_FALSO: &str = r#"#!/bin/sh
+echo "unshare $*" >> 'REGISTRO'
+exec 'SLEEP_REAL' 30
+"#;
+
+/// `nsenter` falso. Anota la llamada y sale 0. El guion todavía no lo usa: solo se revisa que exista.
+const NSENTER_FALSO: &str = r#"#!/bin/sh
+echo "nsenter $*" >> 'REGISTRO'
+exit 0
+"#;
+
+/// `mknod` falso. Anota la llamada y sale 0.
+const MKNOD_FALSO: &str = r#"#!/bin/sh
+echo "mknod $*" >> 'REGISTRO'
+exit 0
 "#;
 
 /// `iptables` falso. `-A` guarda la regla en REGLAS. `-C` sale 0 si la regla está, 1 si no.
@@ -108,6 +133,8 @@ struct Escenario {
     slirp_pid: PathBuf,
     sosten_pid: PathBuf,
     slirp_log: PathBuf,
+    /// Carpeta de los archivos de nombre de red (`ROOT_NETNS_DIR`).
+    netns_dir: PathBuf,
     _raiz: tempfile::TempDir,
 }
 
@@ -123,7 +150,9 @@ impl Drop for Escenario {
 }
 
 /// Programas reales que el guion llama y que no son falsos. Van enlazados en la carpeta `reales`.
-const PROGRAMAS_REALES: [&str; 7] = ["cat", "cut", "grep", "dirname", "mkdir", "touch", "chmod"];
+const PROGRAMAS_REALES: [&str; 8] = [
+    "cat", "cut", "grep", "dirname", "mkdir", "touch", "chmod", "rm",
+];
 
 fn bash_disponible() -> bool {
     Command::new("bash")
@@ -154,20 +183,23 @@ fn escenario() -> Escenario {
         std::os::unix::fs::symlink(ruta_de(programa), reales.join(programa))
             .expect("enlaza el programa real");
     }
+    let netns_dir = raiz.path().join("netns");
+    fs::create_dir_all(&netns_dir).expect("crea la carpeta de nombres de red");
     let registro = raiz.path().join("registro.txt");
-    let estado = raiz.path().join("netns.txt");
     let reglas = raiz.path().join("reglas.txt");
     let fallo = raiz.path().join("getent-falla");
     let sleep_real = ruta_de("sleep").display().to_string();
     let completar = |guion: &str| {
         guion
             .replace("REGISTRO", &registro.display().to_string())
-            .replace("ESTADO", &estado.display().to_string())
             .replace("REGLAS", &reglas.display().to_string())
             .replace("FALLO", &fallo.display().to_string())
             .replace("SLEEP_REAL", &sleep_real)
     };
     escribir_ejecutable(&falsos.join("ip"), &completar(IP_FALSO));
+    escribir_ejecutable(&falsos.join("unshare"), &completar(UNSHARE_FALSO));
+    escribir_ejecutable(&falsos.join("nsenter"), &completar(NSENTER_FALSO));
+    escribir_ejecutable(&falsos.join("mknod"), &completar(MKNOD_FALSO));
     escribir_ejecutable(&falsos.join("iptables"), &completar(IPTABLES_FALSO));
     escribir_ejecutable(&falsos.join("slirp4netns"), &completar(SLIRP_FALSO));
     escribir_ejecutable(&falsos.join("sleep"), &completar(SLEEP_FALSO));
@@ -182,15 +214,16 @@ fn escenario() -> Escenario {
         slirp_pid: raiz.path().join("slirp.pid"),
         sosten_pid: raiz.path().join("sosten.pid"),
         slirp_log: raiz.path().join("slirp.log"),
+        netns_dir,
         _raiz: raiz,
     }
 }
 
-/// PATH del test: los falsos primero, después el PATH real. Con `sin_ip6tables`, en vez del PATH
+/// PATH del test: los falsos primero, después el PATH real. Con `aislado`, en vez del PATH
 /// real va una carpeta propia con enlaces a los programas reales del guion: así el guion no encuentra
-/// `ip6tables` aunque viva en la misma carpeta que `bash`, `cat` o `grep` (en Fedora, `/usr/bin`).
-fn path_del_test(e: &Escenario, sin_ip6tables: bool) -> String {
-    let resto = if sin_ip6tables {
+/// `ip6tables` ni `nsenter` aunque vivan en la misma carpeta que `bash`, `cat` o `grep` (en Fedora, `/usr/bin`).
+fn path_del_test(e: &Escenario, aislado: bool) -> String {
+    let resto = if aislado {
         e.reales.clone().into_os_string()
     } else {
         std::env::var_os("PATH").unwrap_or_default()
@@ -213,6 +246,7 @@ fn correr_con_path(e: &Escenario, path: &str, extra: &[(&str, &str)]) -> Output 
         .env("ROOT_SLIRP_PID", &e.slirp_pid)
         .env("ROOT_SOSTEN_PID", &e.sosten_pid)
         .env("ROOT_SLIRP_LOG", &e.slirp_log)
+        .env("ROOT_NETNS_DIR", &e.netns_dir)
         .env("ROOT_RED_INTENTOS", "1");
     for (clave, valor) in extra {
         orden.env(clave, valor);
@@ -293,8 +327,11 @@ fn segunda_corrida_no_repite_nada() {
         String::from_utf8_lossy(&segunda.stderr)
     );
     let ls = llamadas(&e);
-    let altas_de_red = ls.iter().filter(|l| l.starts_with("ip netns add")).count();
-    assert_eq!(altas_de_red, 1, "ip netns add una sola vez: {ls:?}");
+    let altas_de_red = ls
+        .iter()
+        .filter(|l| l.starts_with("ip netns attach"))
+        .count();
+    assert_eq!(altas_de_red, 1, "ip netns attach una sola vez: {ls:?}");
     let slirp = ls.iter().filter(|l| l.starts_with("slirp4netns ")).count();
     assert_eq!(slirp, 1, "slirp4netns una sola vez: {ls:?}");
     assert!(
@@ -423,7 +460,7 @@ fn sin_ip6tables_frena_antes_de_crear_el_espacio() {
     );
     let ls = llamadas(&e);
     assert!(
-        !ls.iter().any(|l| l.starts_with("ip netns add")),
+        !ls.iter().any(|l| l.starts_with("ip netns")),
         "no debe crear el espacio: {ls:?}"
     );
     assert!(ls.is_empty(), "no debe llamar a ningún falso: {ls:?}");
@@ -463,4 +500,124 @@ fn log_de_slirp_va_al_archivo_con_modo_0600() {
         .mode()
         & 0o777;
     assert_eq!(modo, 0o600, "el log de slirp debe ser 0600");
+}
+
+#[test]
+fn unshare_y_attach() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea unshare_y_attach");
+        return;
+    }
+    let e = escenario();
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let ls = llamadas(&e);
+    let pid = fs::read_to_string(&e.sosten_pid).expect("el guion escribe sosten.pid");
+    let attach = format!("ip netns attach {RED} {}", pid.trim());
+    let pos_unshare = ls
+        .iter()
+        .position(|l| l == "unshare -Urn sleep infinity")
+        .unwrap_or_else(|| panic!("falta `unshare -Urn sleep infinity`: {ls:?}"));
+    let pos_attach = ls
+        .iter()
+        .position(|l| *l == attach)
+        .unwrap_or_else(|| panic!("falta `{attach}`: {ls:?}"));
+    assert!(pos_unshare < pos_attach, "unshare antes de attach: {ls:?}");
+    assert!(
+        !ls.iter().any(|l| l.starts_with("ip netns add")),
+        "no debe llamar a ip netns add: {ls:?}"
+    );
+}
+
+#[test]
+fn con_sosten_vivo_y_nombre_puesto_no_crea_nada() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea con_sosten_vivo_y_nombre_puesto_no_crea_nada");
+        return;
+    }
+    let e = escenario();
+    fs::write(e.netns_dir.join(RED), "").expect("pone el archivo de nombre");
+    let mut vivo = Command::new(ruta_de("sleep"))
+        .arg("30")
+        .spawn()
+        .expect("sostén vivo");
+    fs::write(&e.sosten_pid, vivo.id().to_string()).expect("escribe sosten.pid");
+    let salida = correr(&e, &[]);
+    let _ = vivo.kill();
+    let _ = vivo.wait();
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let ls = llamadas(&e);
+    for prohibida in [
+        "unshare",
+        "ip netns add",
+        "ip netns attach",
+        "ip netns delete",
+    ] {
+        assert!(
+            !ls.iter().any(|l| l.starts_with(prohibida)),
+            "no debe llamar a `{prohibida}`: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn con_nombre_puesto_y_sosten_muerto_recrea() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea con_nombre_puesto_y_sosten_muerto_recrea");
+        return;
+    }
+    let e = escenario();
+    fs::write(e.netns_dir.join(RED), "").expect("pone el archivo de nombre");
+    // Un proceso que ya terminó: su pid queda muerto.
+    let mut muerto = Command::new(ruta_de("true"))
+        .spawn()
+        .expect("proceso muerto");
+    muerto.wait().expect("espera al proceso muerto");
+    fs::write(&e.sosten_pid, muerto.id().to_string()).expect("escribe sosten.pid");
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let ls = llamadas(&e);
+    let pos = |prefijo: &str| {
+        ls.iter()
+            .position(|l| l.starts_with(prefijo))
+            .unwrap_or_else(|| panic!("falta `{prefijo}`: {ls:?}"))
+    };
+    let pos_borrar = pos("ip netns delete red-prueba");
+    let pos_unshare = pos("unshare ");
+    let pos_attach = pos("ip netns attach red-prueba ");
+    assert!(
+        pos_borrar < pos_unshare && pos_unshare < pos_attach,
+        "orden: delete, unshare, attach: {ls:?}"
+    );
+}
+
+#[test]
+fn sin_nsenter_frena_y_lo_nombra() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea sin_nsenter_frena_y_lo_nombra");
+        return;
+    }
+    let e = escenario();
+    fs::remove_file(e.falsos.join("nsenter")).expect("quita el nsenter falso");
+    let salida = correr_con_path(&e, &path_del_test(&e, true), &[]);
+    assert_eq!(salida.status.code(), Some(1), "debe salir con 1");
+    let error = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        error.contains("nsenter"),
+        "stderr debe nombrar nsenter: {error}"
+    );
+    let ls = llamadas(&e);
+    assert!(ls.is_empty(), "no debe llamar a ningún falso: {ls:?}");
 }
