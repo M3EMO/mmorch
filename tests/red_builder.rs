@@ -472,6 +472,57 @@ fn ninguna_llamada_a_sysctl() {
     );
 }
 
+/// Toda llamada `iptables ...` o `ip6tables ...` debe ir justo detrás de `nsenter -t {pid} -U -n` con esa misma llamada.
+fn revisar_adyacencia_nsenter(ls: &[String], pid: &str) -> Result<(), String> {
+    // El falso de slirp4netns corre en segundo plano: su línea puede caer en cualquier parte.
+    let sin_slirp: Vec<String> = ls
+        .iter()
+        .filter(|l| !l.starts_with("slirp4netns "))
+        .cloned()
+        .collect();
+    for (i, llamada) in sin_slirp.iter().enumerate() {
+        if !(llamada.starts_with("iptables ") || llamada.starts_with("ip6tables ")) {
+            continue;
+        }
+        let previa = i.checked_sub(1).map(|j| sin_slirp[j].as_str());
+        let esperada = format!("nsenter -t {pid} -U -n {llamada}");
+        if previa != Some(esperada.as_str()) {
+            return Err(format!(
+                "`{llamada}` debe ir justo detrás de nsenter: {ls:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn adyacencia_ignora_slirp_en_segundo_plano() {
+    let ls: Vec<String> = [
+        "nsenter -t 42 -U -n iptables -C OUTPUT -d 10.0.2.3 -j ACCEPT",
+        "slirp4netns --configure --disable-host-loopback --mtu=65520 --userns-path=/proc/42/ns/user tap0",
+        "iptables -C OUTPUT -d 10.0.2.3 -j ACCEPT",
+    ]
+    .iter()
+    .map(|l| l.to_string())
+    .collect();
+    assert!(
+        revisar_adyacencia_nsenter(&ls, "42").is_ok(),
+        "slirp en segundo plano no debe romper la adyacencia: {ls:?}"
+    );
+}
+
+#[test]
+fn adyacencia_exige_nsenter_justo_antes() {
+    let ls: Vec<String> = ["iptables -C OUTPUT -d 10.0.2.3 -j ACCEPT"]
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    assert!(
+        revisar_adyacencia_nsenter(&ls, "42").is_err(),
+        "sin nsenter antes debe fallar: {ls:?}"
+    );
+}
+
 #[test]
 fn toda_regla_va_detras_de_nsenter() {
     if !bash_disponible() {
@@ -487,25 +538,13 @@ fn toda_regla_va_detras_de_nsenter() {
     );
     let pid = pid_del_sosten(&e);
     let ls = llamadas(&e);
-    let posiciones: Vec<usize> = ls
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.starts_with("iptables ") || l.starts_with("ip6tables "))
-        .map(|(i, _)| i)
-        .collect();
     assert!(
-        !posiciones.is_empty(),
+        ls.iter()
+            .any(|l| l.starts_with("iptables ") || l.starts_with("ip6tables ")),
         "debe haber llamadas a iptables o ip6tables: {ls:?}"
     );
-    for i in posiciones {
-        let llamada = &ls[i];
-        let previa = i.checked_sub(1).map(|j| ls[j].as_str());
-        let esperada = format!("nsenter -t {pid} -U -n {llamada}");
-        assert_eq!(
-            previa,
-            Some(esperada.as_str()),
-            "`{llamada}` debe ir justo detrás de nsenter: {ls:?}"
-        );
+    if let Err(motivo) = revisar_adyacencia_nsenter(&ls, &pid) {
+        panic!("{motivo}");
     }
     for prohibida in [
         format!("ip netns exec {RED} iptables"),
