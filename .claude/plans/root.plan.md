@@ -17476,3 +17476,123 @@ Son los mismos argumentos que arman la 171, la 175 y la 176.
 **Las unidades de Colab:** todo lo que falta hasta D3 usa menos de 5.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-26 (106): la cadena 176b, las preguntas de los builders, y los briefs del orquestador
+
+**Estado.**
+- **La vuelta 105 está en 38e4387e.**
+- **La sonda 14 pasó,** con el permiso de P134 a. Leí `d3/sonda-claude/sonda-resultado.txt`:
+  - node v20.19.2 y `claude` 2.1.317;
+  - código 0 en 3,6 s, `is_error` falso, 2 turnos y 0,027 USD de lista, con el resultado esperado;
+  - `claude-estado/` con 8 archivos nuevos;
+  - visto desde fuera: uid 1000 en los cuatro campos, dentro de `root-builder`, y el token fuera de su argv;
+  - el token borrado, con 0 restos en `/run` y en `/content`.
+- **La Tarea 175:** 0,69 USD, en `laptop/tarea-175` (23e80ce). Un test fallaba 7 de 8 veces: el `slirp4netns` falso anotaba en segundo plano.
+- **La Tarea 175b,** con un brief del orquestador (189d6135), arregló solo ese test por 0,25 USD. Dio verde 10 de 10 veces.
+- **La Tarea 176:** 0,68 USD. Dejó el aviso sin cablear, porque `src/corre/corrida.rs` no estaba en la tabla.
+- **La Tarea 176b,** con un brief del orquestador (b2df6582), cableó el aviso por 0,31 USD.
+- **La suite de `laptop/cadena-176b`** (b2b308c) dio 4275/0/5. El binario es `colab-pruebas/v176b/r00t`.
+- **`paso0-aisla.sh` apunta a la 176b.** El paquete viejo quedó como `paquete.tar.gz.174`. Lo corre el usuario.
+
+## 1. Las preguntas de los builders
+
+Leí la sección 6 de `informe-local-175.md`, la sección 7 de `informe-local-176.md` y las preguntas de `informe-local-176b.md`, en `laptop/cadena-176b`.
+
+### La Tarea 175
+
+| # | Pregunta | Decisión |
+|---|---|---|
+| 1 | Con el sostén vivo y el nombre ausente, hace `attach` con el sostén que existe | **Queda.** Las reglas se vuelven a revisar en cada corrida del guion, así que el espacio queda con sus reglas |
+| 2 | Con el sostén muerto y slirp vivo, lanza otro slirp. El viejo queda huérfano | **Queda, con un arreglo después de la validez.** Ver abajo |
+| 3 | La revisión de IPv6 va antes de `comprobar_red` | **Queda.** Así, `red lista` sale solo con IPv6 cerrado |
+| 4 | `mknod -m 0666` en una sola llamada | **Queda.** No hay un instante con otro modo |
+
+**La pregunta 2, en detalle.** Cuando el sostén muere, el guion borra el nombre del espacio y crea uno nuevo, con su propio slirp y sus propias reglas. El slirp viejo sigue vivo, atado al espacio viejo.
+
+- **¿Abre un hueco de aislamiento?** No. El builder entra por el nombre `/run/netns/root-builder`, que ya apunta al espacio nuevo. Nadie entra al espacio viejo: no tiene nombre, y su sostén murió. El slirp viejo es de root, y el builder no lo alcanza: no puede leer su entorno ni mandarle señales, como midió la sonda 10b.
+- **¿Abre un hueco de recursos?** Uno chico: un proceso inactivo y su espacio, hasta que termina el runtime. Solo pasa si el guion corre dos veces en el mismo runtime, con el sostén muerto. Eso ocurre al retomar una sesión, no en una corrida normal.
+- **¿Lo detecta la prueba de aislamiento?** No. La prueba corre el guion una sola vez, con un sostén vivo. Tampoco hace falta: no es un riesgo de aislamiento.
+- **El arreglo, después de la validez:** antes de lanzar el slirp nuevo, el guion mata el slirp viejo por su pidfile. Lo sumo a la lista de arreglos chicos.
+
+### La Tarea 176
+
+| # | Pregunta | Decisión |
+|---|---|---|
+| 1 | ¿Se puede tocar `src/corre/corrida.rs` para cablear el aviso? | **Resuelta por la 176b.** El error fue mío: el aviso pedía ese archivo, y no lo puse en la tabla |
+| 2 | Un `ROOT_PROC_BUILDER` vacío da un error de infraestructura | **Queda.** Es lo mismo que con `ROOT_TOKEN_BUILDER` vacío |
+
+### La Tarea 176b
+
+| # | Pregunta | Decisión |
+|---|---|---|
+| 1 | Los tests no cubren una corrida completa en bwrap | **Queda.** La cubren la prueba de aislamiento y el piloto. Sumo una revisión: en las dos, la fila de `runs.jsonl` trae los dos avisos, "builder en bwrap" y "builder con /proc del runtime en solo lectura" |
+| 2 | El orden de los avisos no importa | **Queda.** Ningún código lee ese orden |
+
+**Ninguna pregunta pide una tarea nueva antes de la PR.**
+
+## 2. Los briefs del orquestador: un problema de proceso chico
+
+**Lo que pasó.** El orquestador escribió dos briefs sin pasar por el planner.
+- **El de la 175b** arregla solo un test, dentro del archivo de tests de la 175. No cambia ninguna conducta. Es lo mismo que pasó con la 173b, que acepté en la vuelta 100.
+- **El de la 176b** toca `src/corre/corrida.rs`, un archivo de producción que la tabla de la 176 no traía. Revisé el diff (896b797c): son 69 líneas, solo para pasar el aviso de la 176 al veredicto, con su test. Hace lo que pedía el punto 1.7 de mi brief, y nada más.
+
+**No hubo daño.** Pero la 176b cruzó una línea: amplió la tabla de archivos de un brief del planner. Esa decisión es del planner, porque la tabla es lo que limita a un builder.
+
+**La regla para la próxima vez.** El orquestador puede escribir un brief corto, sin el planner, solo si se cumplen las cuatro condiciones:
+1. **arregla un test que falla,** o un defecto que el orquestador vio al verificar la tarea madre;
+2. **toca solo archivos de la tabla de la tarea madre,** o archivos de tests;
+3. **no cambia ninguna conducta** que la tarea madre no pidiera;
+4. **queda anotado en `registro.md`,** y el planner lo revisa en la vuelta siguiente, antes de la PR.
+
+**Si falta una condición,** el brief va al planner. Un archivo de producción fuera de la tabla, como en la 176b, siempre va al planner. La vuelta puede ser corta: una tabla ampliada y una línea de motivo.
+
+## 3. La prueba de aislamiento, con la 176b
+
+**Corre tal como quedó, con `revisa.py bajado/aisla b`.** La 175b solo cambió un test. La 176b solo pasa el aviso al veredicto. Ninguna cambia lo que ve o hace el builder.
+
+**Una revisión más, a mano, después de `revisa.py`:** la fila de `runs.jsonl` de la vuelta trae los dos avisos, "builder en bwrap" y "builder con /proc del runtime en solo lectura". Así se prueba el cableado de la 176b en una corrida real.
+
+### Qué hace el orquestador con cada resultado
+
+| Resultado | Qué hace |
+|---|---|
+| `RESULTADO PASA`, y C2 y C3 en 0 archivos | Anota el resultado en `registro.md`, y pasa a la PR |
+| Una fila `FALLA` | No hay PR. Manda al planner las filas que fallan y las salidas de `d3/aisla/bajado/`, sin abrir `canarios.env` |
+| `DUDOSO` | El pid del señuelo pudo coincidir con un pid del sandbox. Repite la prueba una vez, en una sesión nueva, con un señuelo nuevo. Si vuelve a dar `DUDOSO`, va al planner |
+| C2 o C3 en algún archivo bajado o en una salida | **Es una fuga, aunque los canarios sean falsos:** existe un camino por donde sale un secreto. No hay PR. Manda al planner solo el nombre de cada archivo, nunca su contenido ni el valor. No copia esos archivos a ningún otro lugar |
+| El prefijo del token real o un `sk-` real en una salida | No debería pasar: la prueba usa C3, no el token real. Si pasa, el orquestador avisa al usuario enseguida, para que revoque el token y saque otro. No sigue nada hasta que el usuario responda |
+
+**Los canarios no se rotan.** Son falsos, y nadie los usa fuera de la prueba. Para repetir la prueba, `canarios.env` se puede reusar.
+
+## 4. Lo que falta hasta cerrar el hito 1
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | `paso0-aisla.sh` con el release de la 176b | Nada | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: lo corre el usuario** |
+| 2 | La prueba de aislamiento, con `revisa.py` en el modo `b`, y los dos avisos | El paso 1 | Colab | 0 USD y cerca de 0,15 unidades | De 1 a 1,5 horas | No |
+| 3 | La PR con la 171, la 172, la 173, la 173b, la 174, la 175, la 175b, la 176 y la 176b | El paso 2 | — | — | — | **Sí: la orden de mezcla** |
+| 4 | El congelamiento Z: el árbol igual al de `laptop/cadena-176b`, el release, y el estado con Z | El paso 3 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 5 | El paquete del piloto, con `paso0-d3.sh` | El paso 4 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: la primera de las dos corridas de P132 a** |
+| 6 | El piloto de D3: s2-t1, con la excepción de P130 a | El paso 5 | Colab | Cerca de 0,9 USD de lista, 0,1 USD de API y 0,1 unidades | Cerca de 1 hora | No |
+| 7 | Los 3 paquetes de las tandas | El paso 6 | Laptop, el usuario | 0 USD | Cerca de 15 minutos | **Sí: la segunda corrida de P132 a** |
+| 8 | Las sesiones 1 a 3 de D3, una por ventana de cupo | El paso 7 | Colab | De 21 a 36 USD de lista, de 2 a 4,5 USD de API, y de 1,5 a 3 unidades | De 12 a 14 horas, en 1,5 a 2 días | No |
+| 9 | Las tareas cortadas, en un paquete extra | El paso 8 | Laptop y Colab | Según cuántas | Una sesión más | **Sí, si hay cortes: el paquete lo arma el usuario** |
+| 10 | El análisis de D3 | Los pasos 8 y 9 | Planner | Cupo | Una vuelta | No |
+| 11 | Si el análisis lo pide: una segunda pasada | El paso 10 | Colab | Lo mismo que los pasos 6 a 9 | De 1,5 a 2 días | **Sí** |
+| 12 | P98 c: abrir el final, con la regla de 15 defectos reales y el tope de P115 a | El paso 10, o el 11 | Laptop | Según la regla del final | Según el final | No |
+| 13 | La validez sobre el final sellado | El paso 12 | Colab | Según el final | Según el final | No |
+| 14 | El informe de cierre del hito 1, con lo que la validez afirma y lo que no | El paso 13 | Planner | Cupo | Una vuelta | No |
+| 15 | El borrado de memora y brasa, si el dataset calibra | El paso 13 | Laptop, orquestador | 0 USD | Minutos | **Sí: lo confirma el usuario** |
+
+**Después del hito 1:**
+
+| Paso | Qué | Costo |
+|---|---|---|
+| 16 | El juez que escribe reglas, por P128 a | De 3 a 5 USD de builder, y cerca de 3,5 USD de API |
+| 17 | Una tarea con `Dockerfile` para calibrar Entrega | Sin estimar |
+| 18 | Los arreglos chicos: las versiones de Seguridad en una sola fuente, la tarea en el error de lanzar, la limpieza por señal sin `podman ps`, la clave de los eventos como línea entera, la firma GPG de node, y matar el slirp viejo en `red-builder.sh` | Cerca de 1 USD |
+
+**El saldo de S2:** cerca de 12,53 USD. La sonda 14 no lo tocó, porque fue por cupo. Después de D3 quedan entre 8 y 10,5 USD.
+**Las unidades de Colab:** todo lo que falta hasta el análisis de D3 usa menos de 5.
+
+**Preguntas al usuario:** ninguna nueva.
