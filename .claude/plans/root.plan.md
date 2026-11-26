@@ -16794,3 +16794,106 @@ Recomiendo la (a). Pide al usuario dos o tres corridas, no cuatro. El estado del
 
 **El saldo de S2:** cerca de 12,53 USD. La prueba de aislamiento no lo toca. El piloto usa cerca de 0,1 USD.
 **Las unidades de Colab:** la 173 y la 173b usaron cerca de 1,1 horas de high-mem. Todo lo que falta hasta D3 usa menos de 5 unidades.
+
+## Vuelta del 2026-11-26 (101): la prueba de aislamiento frenó, y la Tarea 174
+
+**Estado.**
+- **La vuelta 100 está en 92d6cbc1.** Los seis arreglos de `ataque.sh` y `revisa.py` están hechos. `revisa.py` pasó sus cuatro casos.
+- **La respuesta del usuario a P132, literal: "a) Dos corridas (Recommended)".**
+- **El orquestador adelantó el paso 7:** las listas `tareas-0.txt` a `tareas-3.txt`, `paso0-d3.sh`, `d3-colab.sh` y `d3/colab/`. Una prueba en seco importa cada vuelta una vez y cierra la sesión.
+- **El usuario corrió `paso0-aisla.sh`.** El paquete trae C1 en 1 archivo, y C2, C3, `.env`, la clave y el token reales en 0.
+- **La primera corrida de `aisla.sh`:** las subidas dieron 500 sin aviso, porque el guion no usaba `pipefail`. El orquestador lo arregló y la relanzó.
+- **La segunda corrida:** `preparar-corre.sh` salió con 1 en el paso `versiones`, a los 3 minutos, con `rustc: command not found`. npm avisó `EBADENGINE`: `claude` 2.1.317 pide node >=22, y apt dio node v18.19.1.
+- **La sesión `aisla` quedó cerrada,** sin gasto de cupo ni de API.
+
+## 1. Los defectos, confirmados
+
+Leí `src/corre/bwrap.rs`, `tools/colab/preparar-corre.sh` y `tools/colab/preparar-runtime.sh` en `laptop/cadena-173b` (8eb25e1). También leí las versiones del paquete de la prueba: `versiones.env`, `entorno.env` y `versiones-builder.env`.
+
+### `rustc` en el paso `versiones`: confirmado
+
+`preparar-runtime.sh` instala Rust con `RUSTUP_HOME=/usr/local/rustup` y `CARGO_HOME=/usr/local/cargo`, y suma `/usr/local/cargo/bin` a su `PATH`. Corre como un proceso aparte, así que ese entorno muere con él. `preparar-corre.sh` llama a `rustc` con su propio `PATH`, y no lo encuentra.
+
+**Las versiones no chocan:** `versiones.env` del oráculo y `versiones-builder.env` dicen las dos `RUST_VERSION=1.99.1`. Con el `PATH` arreglado, la revisión de versiones debería pasar.
+
+### El `PATH` del builder: confirmado, y es peor
+
+- **El `PATH`:** `PATH_FIJO` vale `/usr/local/bin:/usr/bin:/bin` (`bwrap.rs`, línea 36), con `env_clear()`. `cargo` y `rustc` viven en `/usr/local/cargo/bin`, que no está.
+- **`RUSTUP_HOME`:** aunque el `PATH` los encontrara, `cargo` y `rustc` son proxies de rustup. Sin `RUSTUP_HOME`, buscan el toolchain en `~/.rustup`, que no existe en el builder.
+- **`CARGO_HOME`:** sí, el builder necesita un `CARGO_HOME` escribible. Ahí `cargo` baja el registro y las dependencias. `/usr` está en solo lectura. En la imagen `root-builder:1`, la imagen oficial de Rust deja `/usr/local/cargo` escribible, y cada lanzamiento de podman empieza con esa carpeta limpia.
+- **`RUSTUP_HOME` puede quedar en solo lectura.** Ninguna tarea del dataset trae `rust-toolchain` ni `rust-toolchain.toml`. Ningún builder necesita instalar otro toolchain.
+
+**Si no se arregla, el builder de Colab no puede correr `cargo build` ni `cargo test`.** D3 mediría corridas sin tests. La prueba de aislamiento no lo habría visto, porque su builder es falso.
+
+### Node v18: no alcanza como prueba
+
+- `claude` 2.1.317 declara node >=22. Que `claude --version` pase con v18 no prueba que el resto funcione.
+- **La regla que vale es la paridad con la laptop.** En la laptop, `corre` corre con el `node` de `root-builder:1`, y ese anda. No sé qué versión trae: leerla pide podman. El arreglo la lee de la imagen y la instala igual en Colab.
+
+### Un defecto más, que la prueba tampoco alcanzó: la carpeta de corrida
+
+**Encontré un cuarto defecto,** más grave que los otros:
+- `corre` arma cada corrida en `$HOME/.cache/root/corridas/<id>/` (`src/corre/mod.rs`, línea 111), con `repo/` y `claude-estado/`.
+- En Colab, `r00t` corre como root, con `HOME=/root`, y `preparar-corre.sh` deja `/root` en 0700.
+- bwrap corre como `builder`, después de `setpriv`. Para montar `repo/` y el estado, tiene que poder entrar a esas carpetas. **Con `/root` en 0700, no puede.**
+- Aunque pudiera, `repo/` y el estado son de root. **El builder no podría escribir en `/trabajo` ni en su estado.** Ninguna parte de `src/corre/` cambia el dueño.
+- **Y cuando el builder deje archivos suyos,** el `git` de `r00t` fallaría con "dubious ownership".
+
+**En la prueba de aislamiento,** bwrap habría fallado al montar, y `ataque.sh` nunca habría corrido. `revisa.py` habría dado FALLA en "hay ataques de dentro". La prueba lo habría encontrado, pero una vuelta más tarde.
+
+## 2. La Tarea 174
+
+Escribí `docs/builds/brief-local-174.md`. Parte de `laptop/cadena-173b`. Sigue P121 a y P122 a: el builder arregla los defectos de Root que encuentra.
+
+| Punto | Qué | Archivos |
+|---|---|---|
+| 1 | `preparar-corre.sh` exporta el entorno de Rust de `preparar-runtime.sh`. Un test guarda que los literales son los mismos | `tools/colab/preparar-corre.sh` |
+| 2 | El builder suma `/usr/local/cargo/bin` al `PATH`, `RUSTUP_HOME`, y un `CARGO_HOME` dentro de su estado. `preparar-corre.sh` revisa, como `builder`, que `cargo`, `rustc`, `node`, `claude` y `git` anden | `src/corre/bwrap.rs`, `tools/colab/preparar-corre.sh` |
+| 3 | `NODE_VERSION` sale de la imagen del builder, y `preparar-corre.sh` instala esa versión exacta desde nodejs.org, con su SHA-256 | `src/colab_corre.rs`, `tools/colab/preparar-corre.sh` |
+| 4 | La corrida vive en `/srv/root-usuario`, con modo 0711. Root cambia el dueño de `repo/` y del estado a `builder` antes de cada lanzamiento. `git` acepta el repo del builder | `src/corre/bwrap.rs`, `tools/colab/preparar-corre.sh`, `tools/colab/corre-runtime.py` |
+
+**Una regla del brief: ningún montaje nuevo en bwrap.** `CARGO_HOME` vive dentro del estado, que ya está montado. Así, lo que pruebe la prueba de aislamiento vale para el builder real.
+
+**Costo:** de 1,5 a 2,5 USD de lista, cerca de 1 hora, y cerca de 0,1 unidades.
+
+## 3. ¿La prueba de aislamiento espera a la 174?
+
+**Sí, espera.**
+- **El `rustc` del paso `versiones` sí se puede saltar fuera de Root:** `aisla-runtime.sh` podría exportar el entorno de Rust antes de llamar a `preparar-corre.sh`.
+- **La carpeta de corrida no se puede saltar fuera de Root.** El dueño de `repo/` y del estado lo fija `r00t` en cada corrida. Sin la 174, bwrap falla al montar, y la prueba no prueba nada.
+- **Además, la prueba debe correr con el árbol que va a la PR,** por P131 a. Una prueba con la 173b y otra con la 174 serían dos corridas para el mismo resultado.
+
+**Lo que cambia para la prueba:**
+- el orquestador apunta `paso0-aisla.sh` al release de `laptop/cadena-174`, y aparta el paquete viejo;
+- el usuario corre `paso0-aisla.sh` otra vez, porque cambian `tools/colab/` y el binario;
+- `aisla.sh` y los otros guiones de `d3/aisla/` no cambian.
+
+## 4. ¿La PR de P131 a lleva la 174?
+
+**Sí.** La PR lleva la 171, la 172, la 173, la 173b y la 174. El árbol de Z debe ser el de `laptop/cadena-174`, que es el que pasa la prueba de aislamiento.
+
+**Preguntas al usuario:** ninguna nueva. Las decisiones de esta vuelta son técnicas: dónde vive la corrida, de quién es, y de dónde sale `node`. No cambian qué promete Root.
+
+## 5. Lo que falta
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | La Tarea 174 | Nada | Colab, builder | De 1,5 a 2,5 USD de lista, y cerca de 0,1 unidades | Cerca de 1 hora | No |
+| 2 | La suite con podman de `laptop/cadena-174`, el release, y `NODE_VERSION` contra la imagen | El paso 1 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 3 | `paso0-aisla.sh` con el release de la 174 | El paso 2 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: lo corre el usuario** |
+| 4 | La prueba de aislamiento | El paso 3 | Colab | 0 USD y cerca de 0,15 unidades | De 1 a 1,5 horas | No |
+| 5 | La PR con la 171, la 172, la 173, la 173b y la 174 | El paso 4 | — | — | — | **Sí: la orden de mezcla** |
+| 6 | El congelamiento Z, el árbol igual al de la cadena 174, y el estado con Z | El paso 5 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 7 | El paquete del piloto, con `paso0-d3.sh` | El paso 6 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: la primera de las dos corridas de P132 a** |
+| 8 | El piloto de D3: s2-t1 | El paso 7 | Colab | Cerca de 0,9 USD de lista, 0,1 USD de API y 0,1 unidades | Cerca de 1 hora | No |
+| 9 | Los 3 paquetes de las tandas, y las sesiones 1 a 3 | El paso 8 | Laptop y Colab | De 21 a 36 USD de lista, de 2 a 4,5 USD de API, y de 1,5 a 3 unidades | De 12 a 14 horas, en 3 ventanas de cupo | **Sí: la segunda corrida de P132 a** |
+| 10 | El análisis de D3 | El paso 9 | Planner | Cupo | Una vuelta | No |
+| 11 | Si el análisis lo pide: una segunda pasada | El paso 10 | Colab | Lo mismo que los pasos 8 y 9 | De 1,5 a 2 días | **Sí** |
+| 12 | P98 c: abrir el final | El paso 10, o el 11 | Laptop | Según la regla del final | Según el final | No |
+| 13 | La validez sobre el final sellado | El paso 12 | Colab | Según el final | Según el final | No |
+| 14 | Después de la validez: el juez que escribe reglas, por P128 a | El paso 13 | Colab, builder | De 3 a 5 USD de builder, y cerca de 3,5 USD de API | De 1 a 2 semanas, con revisión humana | No |
+| 15 | Después de la validez: una tarea con `Dockerfile` para calibrar Entrega | El paso 13 | Minería y Colab | Sin estimar | Sin estimar | **Sí** |
+| 16 | Después de la validez: las versiones de Seguridad en una sola fuente, la tarea en el error de lanzar, la limpieza por señal sin `podman ps`, y la clave de los eventos como línea entera | El paso 13 | Colab, builder | Cerca de 1 USD | Cerca de 1 hora | No |
+
+**El saldo de S2:** cerca de 12,53 USD, sin cambios.
+**Las unidades de Colab:** todo lo que falta hasta D3 usa menos de 5.
