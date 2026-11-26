@@ -14,7 +14,8 @@ ROOT_SOSTEN_PID="${ROOT_SOSTEN_PID:-/run/root-builder-sosten.pid}"
 ROOT_SLIRP_LOG="${ROOT_SLIRP_LOG:-/run/root-builder-slirp.log}"
 ROOT_RED_INTENTOS="${ROOT_RED_INTENTOS:-10}"
 ROOT_NETNS_DIR="${ROOT_NETNS_DIR:-/run/netns}"
-export ROOT_RED_BUILDER ROOT_SLIRP_PID ROOT_SOSTEN_PID ROOT_SLIRP_LOG ROOT_RED_INTENTOS ROOT_NETNS_DIR
+ROOT_DEV_NET_TUN="${ROOT_DEV_NET_TUN:-/dev/net/tun}"
+export ROOT_RED_BUILDER ROOT_SLIRP_PID ROOT_SOSTEN_PID ROOT_SLIRP_LOG ROOT_RED_INTENTOS ROOT_NETNS_DIR ROOT_DEV_NET_TUN
 
 # DNS de slirp4netns. Es lo único que se acepta antes de los cortes.
 DNS_SLIRP="10.0.2.3"
@@ -64,6 +65,17 @@ asegurar_espacio() {
     ip netns attach "$ROOT_RED_BUILDER" "$(cat "$ROOT_SOSTEN_PID")"
 }
 
+# Paso 1b: asegura el nodo de tun (ROOT_DEV_NET_TUN). Si ya existe, no lo toca ni llama a mknod.
+# Si no existe, lo crea con mknod -m 0666 c 10 200. 0666 es el modo de siempre: abrir el nodo
+# no da permiso para crear una interfaz.
+asegurar_tun() {
+    if [ -e "$ROOT_DEV_NET_TUN" ]; then
+        return 0
+    fi
+    mkdir -p "$(dirname "$ROOT_DEV_NET_TUN")"
+    mknod -m 0666 "$ROOT_DEV_NET_TUN" c 10 200
+}
+
 # Paso 2: apaga IPv6 dentro del espacio y pone la política de salida de ip6tables en DROP.
 apagar_ipv6() {
     ip netns exec "$ROOT_RED_BUILDER" sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
@@ -90,6 +102,7 @@ asegurar_slirp() {
     touch "$ROOT_SLIRP_LOG"
     chmod 0600 "$ROOT_SLIRP_LOG"
     slirp4netns --configure --disable-host-loopback --mtu=65520 \
+        --userns-path="/proc/$(cat "$ROOT_SOSTEN_PID")/ns/user" \
         "$(cat "$ROOT_SOSTEN_PID")" tap0 </dev/null >>"$ROOT_SLIRP_LOG" 2>&1 &
     echo "$!" >"$ROOT_SLIRP_PID"
 }
@@ -132,6 +145,7 @@ principal() {
     revisar_herramientas
     preparar_pidfiles
     asegurar_espacio
+    asegurar_tun
     apagar_ipv6
     asegurar_slirp
     reglas_de_salida

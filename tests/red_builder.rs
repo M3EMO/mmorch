@@ -67,9 +67,11 @@ echo "nsenter $*" >> 'REGISTRO'
 exit 0
 "#;
 
-/// `mknod` falso. Anota la llamada y sale 0.
+/// `mknod` falso. Anota la llamada, crea un archivo vacío en la ruta (`$3`) y sale 0.
+/// Así una segunda corrida ve el nodo y no vuelve a llamar a mknod.
 const MKNOD_FALSO: &str = r#"#!/bin/sh
 echo "mknod $*" >> 'REGISTRO'
+: > "$3"
 exit 0
 "#;
 
@@ -135,6 +137,8 @@ struct Escenario {
     slirp_log: PathBuf,
     /// Carpeta de los archivos de nombre de red (`ROOT_NETNS_DIR`).
     netns_dir: PathBuf,
+    /// Nodo de tun del test (`ROOT_DEV_NET_TUN`), dentro de la raíz temporal.
+    tun: PathBuf,
     _raiz: tempfile::TempDir,
 }
 
@@ -215,6 +219,7 @@ fn escenario() -> Escenario {
         sosten_pid: raiz.path().join("sosten.pid"),
         slirp_log: raiz.path().join("slirp.log"),
         netns_dir,
+        tun: raiz.path().join("dev").join("net").join("tun"),
         _raiz: raiz,
     }
 }
@@ -247,6 +252,7 @@ fn correr_con_path(e: &Escenario, path: &str, extra: &[(&str, &str)]) -> Output 
         .env("ROOT_SOSTEN_PID", &e.sosten_pid)
         .env("ROOT_SLIRP_LOG", &e.slirp_log)
         .env("ROOT_NETNS_DIR", &e.netns_dir)
+        .env("ROOT_DEV_NET_TUN", &e.tun)
         .env("ROOT_RED_INTENTOS", "1");
     for (clave, valor) in extra {
         orden.env(clave, valor);
@@ -335,9 +341,9 @@ fn segunda_corrida_no_repite_nada() {
     let slirp = ls.iter().filter(|l| l.starts_with("slirp4netns ")).count();
     assert_eq!(slirp, 1, "slirp4netns una sola vez: {ls:?}");
     assert!(
-        ls.iter().any(|l| l
-            .starts_with("slirp4netns --configure --disable-host-loopback --mtu=65520 ")
-            && l.ends_with(" tap0")),
+        ls.iter().any(|l| l.starts_with(
+            "slirp4netns --configure --disable-host-loopback --mtu=65520 --userns-path="
+        ) && l.ends_with(" tap0")),
         "faltan los argumentos de slirp4netns: {ls:?}"
     );
     assert_eq!(
@@ -600,6 +606,71 @@ fn con_nombre_puesto_y_sosten_muerto_recrea() {
     assert!(
         pos_borrar < pos_unshare && pos_unshare < pos_attach,
         "orden: delete, unshare, attach: {ls:?}"
+    );
+}
+
+#[test]
+fn sin_tun_lo_crea_con_c_10_200() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea sin_tun_lo_crea_con_c_10_200");
+        return;
+    }
+    let e = escenario();
+    assert!(!e.tun.exists(), "el nodo tun no debe existir al empezar");
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let ls = llamadas(&e);
+    let esperada = format!("mknod -m 0666 {} c 10 200", e.tun.display());
+    assert!(ls.contains(&esperada), "falta `{esperada}`: {ls:?}");
+}
+
+#[test]
+fn con_tun_no_llama_a_mknod() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea con_tun_no_llama_a_mknod");
+        return;
+    }
+    let e = escenario();
+    fs::create_dir_all(e.tun.parent().expect("carpeta de tun")).expect("crea dev/net");
+    fs::write(&e.tun, "").expect("pre-crea el nodo tun");
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let ls = llamadas(&e);
+    assert!(
+        !ls.iter().any(|l| l.starts_with("mknod ")),
+        "con tun existente no debe llamar a mknod: {ls:?}"
+    );
+}
+
+#[test]
+fn slirp_recibe_userns_path() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea slirp_recibe_userns_path");
+        return;
+    }
+    let e = escenario();
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let pid = fs::read_to_string(&e.sosten_pid).expect("el guion escribe sosten.pid");
+    let pid = pid.trim();
+    let userns = format!("--userns-path=/proc/{pid}/ns/user");
+    let ls = llamadas(&e);
+    assert!(
+        ls.iter()
+            .any(|l| l.starts_with("slirp4netns ") && l.contains(&userns)),
+        "falta `{userns}` en la línea de slirp4netns: {ls:?}"
     );
 }
 
