@@ -1,11 +1,14 @@
-//! `tools/colab/red-builder.sh` contra `ip`, `iptables`, `slirp4netns`, `getent` y `sleep` falsos.
+//! `tools/colab/red-builder.sh` contra `ip`, `iptables`, `ip6tables`, `sysctl`, `slirp4netns`, `getent` y `sleep` falsos.
 //! Ningún test toca red ni corre `ip netns`, `iptables` o `slirp4netns` reales.
 //! Los temporales van en `tempfile`, que usa el TMPDIR de test-seguro.
 //! Corré con `tools/test-seguro.sh --test red_builder` (el filtro sin `--test` no casa nombres de función).
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::thread;
+use std::time::Duration;
 
 #[path = "comun/ejecutable.rs"]
 mod ejecutable;
@@ -61,9 +64,23 @@ fi
 exit 2
 "#;
 
-/// `slirp4netns` falso. Anota la llamada y queda vivo como `sleep 30`, para que el guion guarde su pid.
+/// `sysctl` falso. Anota la llamada y sale 0.
+const SYSCTL_FALSO: &str = r#"#!/bin/sh
+echo "sysctl $*" >> 'REGISTRO'
+exit 0
+"#;
+
+/// `ip6tables` falso. Anota la llamada y sale 0.
+const IP6TABLES_FALSO: &str = r#"#!/bin/sh
+echo "ip6tables $*" >> 'REGISTRO'
+exit 0
+"#;
+
+/// `slirp4netns` falso. Anota la llamada, escribe una línea de log y queda vivo como `sleep 30`,
+/// para que el guion guarde su pid.
 const SLIRP_FALSO: &str = r#"#!/bin/sh
 echo "slirp4netns $*" >> 'REGISTRO'
+echo log-falso
 exec 'SLEEP_REAL' 30
 "#;
 
@@ -88,6 +105,7 @@ struct Escenario {
     fallo: PathBuf,
     slirp_pid: PathBuf,
     sosten_pid: PathBuf,
+    slirp_log: PathBuf,
     _raiz: tempfile::TempDir,
 }
 
@@ -143,24 +161,34 @@ fn escenario() -> Escenario {
     escribir_ejecutable(&falsos.join("slirp4netns"), &completar(SLIRP_FALSO));
     escribir_ejecutable(&falsos.join("sleep"), &completar(SLEEP_FALSO));
     escribir_ejecutable(&falsos.join("getent"), &completar(GETENT_FALSO));
+    escribir_ejecutable(&falsos.join("sysctl"), &completar(SYSCTL_FALSO));
+    escribir_ejecutable(&falsos.join("ip6tables"), &completar(IP6TABLES_FALSO));
     Escenario {
         falsos,
         registro,
         fallo,
         slirp_pid: raiz.path().join("slirp.pid"),
         sosten_pid: raiz.path().join("sosten.pid"),
+        slirp_log: raiz.path().join("slirp.log"),
         _raiz: raiz,
     }
 }
 
-/// Corre el guion con los falsos al inicio del PATH, el nombre de red y los pidfiles del test.
+/// PATH del test: los falsos primero, después el PATH real. Con `sin_ip6tables`, quita del PATH real
+/// las carpetas que tengan `ip6tables`, para que el guion no lo encuentre.
+fn path_del_test(e: &Escenario, sin_ip6tables: bool) -> String {
+    let resto = std::env::var_os("PATH").unwrap_or_default();
+    let carpetas = std::env::split_paths(&resto)
+        .filter(|carpeta| !(sin_ip6tables && carpeta.join("ip6tables").exists()));
+    std::env::join_paths(std::iter::once(e.falsos.clone()).chain(carpetas))
+        .expect("PATH válido")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Corre el guion con el PATH dado, el nombre de red, los pidfiles y el log de slirp del test.
 /// `extra` agrega variables al entorno.
-fn correr(e: &Escenario, extra: &[(&str, &str)]) -> Output {
-    let path = format!(
-        "{}:{}",
-        e.falsos.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+fn correr_con_path(e: &Escenario, path: &str, extra: &[(&str, &str)]) -> Output {
     let mut orden = Command::new("bash");
     orden
         .arg(SCRIPT)
@@ -168,11 +196,17 @@ fn correr(e: &Escenario, extra: &[(&str, &str)]) -> Output {
         .env("ROOT_RED_BUILDER", RED)
         .env("ROOT_SLIRP_PID", &e.slirp_pid)
         .env("ROOT_SOSTEN_PID", &e.sosten_pid)
+        .env("ROOT_SLIRP_LOG", &e.slirp_log)
         .env("ROOT_RED_INTENTOS", "1");
     for (clave, valor) in extra {
         orden.env(clave, valor);
     }
     orden.output().expect("lanza bash")
+}
+
+/// Corre el guion con los falsos al inicio del PATH.
+fn correr(e: &Escenario, extra: &[(&str, &str)]) -> Output {
+    correr_con_path(e, &path_del_test(e, false), extra)
 }
 
 /// Una entrada por llamada de los falsos, en orden. Vacía si nunca se llamó a ninguno.
@@ -328,4 +362,89 @@ fn ningun_secreto_llega_a_la_salida_ni_al_registro() {
     );
     let registro = fs::read_to_string(&e.registro).unwrap_or_default();
     assert!(!registro.contains("sk-falso"), "el registro tiene secreto");
+}
+
+#[test]
+fn apaga_ipv6_y_pone_drop_en_ip6tables() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea apaga_ipv6_y_pone_drop_en_ip6tables");
+        return;
+    }
+    let e = escenario();
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let ls = llamadas(&e);
+    for esperada in [
+        "ip netns exec red-prueba sysctl -w net.ipv6.conf.all.disable_ipv6=1",
+        "ip netns exec red-prueba sysctl -w net.ipv6.conf.default.disable_ipv6=1",
+        "ip netns exec red-prueba ip6tables -P OUTPUT DROP",
+    ] {
+        assert!(
+            ls.iter().any(|l| l == esperada),
+            "falta `{esperada}`: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn sin_ip6tables_frena_antes_de_crear_el_espacio() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea sin_ip6tables_frena_antes_de_crear_el_espacio");
+        return;
+    }
+    let e = escenario();
+    fs::remove_file(e.falsos.join("ip6tables")).expect("quita el ip6tables falso");
+    let salida = correr_con_path(&e, &path_del_test(&e, true), &[]);
+    assert_eq!(salida.status.code(), Some(1), "debe salir con 1");
+    let error = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        error.contains("ip6tables"),
+        "stderr debe nombrar ip6tables: {error}"
+    );
+    let ls = llamadas(&e);
+    assert!(
+        !ls.iter().any(|l| l.starts_with("ip netns add")),
+        "no debe crear el espacio: {ls:?}"
+    );
+    assert!(ls.is_empty(), "no debe llamar a ningún falso: {ls:?}");
+    assert!(!e.slirp_log.exists(), "no debe crear el log de slirp");
+}
+
+#[test]
+fn log_de_slirp_va_al_archivo_con_modo_0600() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea log_de_slirp_va_al_archivo_con_modo_0600");
+        return;
+    }
+    let e = escenario();
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    // slirp corre en segundo plano: se espera un poco a que escriba su línea.
+    let mut contenido = String::new();
+    for _ in 0..30 {
+        contenido = fs::read_to_string(&e.slirp_log).unwrap_or_default();
+        if contenido.lines().any(|l| l == "log-falso") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        contenido.lines().any(|l| l == "log-falso"),
+        "el log de slirp en {} debe tener la línea del falso: {contenido:?}",
+        e.slirp_log.display()
+    );
+    let modo = fs::metadata(&e.slirp_log)
+        .expect("metadatos del log de slirp")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(modo, 0o600, "el log de slirp debe ser 0600");
 }
