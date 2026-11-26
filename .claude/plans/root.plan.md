@@ -16187,3 +16187,224 @@ Lo escribe el orquestador. No es código de Root. Recibe el número de tanda y h
 | 11 | Después de la validez: una sola fuente de las versiones de Seguridad, y la tarea en el error de lanzar | El paso 8 | Laptop, builder | Cerca de 1 USD | Menos de 1 hora | No |
 
 **El saldo de S2:** cerca de 12,53 USD. Después de D3 quedan entre 8 y 10,5 USD.
+
+## Vuelta del 2026-11-26 (98): `corre` en Colab
+
+**Estado.**
+- **El plan de la vuelta 97 está en 2c5c1e8.**
+- **La respuesta del usuario a P129, literal: "b) Primero llevar corre a Colab".**
+- **Lo que ya funciona en Colab, por la CLI y sin Drive:**
+  - el builder de las tareas de Root, con el token de cupo subido por `colab upload`, por decisión del usuario;
+  - el juez de P107 a y de juez-x: el paquete en trozos de 40 MiB, un lanzamiento aparte, y una consulta cada 240 s. La clave de DeepSeek fue por `colab exec --env`, con permiso del usuario, una vez por corrida;
+  - el oráculo de calibración con bwrap.
+- **El saldo de Colab es de unas 719 unidades.** El tope del usuario para mediciones de Root es de 50.
+- **Hay una sesión GPU L4 ajena, `hpil`.** No es de Root. Ningún guion de D3 la toca.
+
+## 1. El diseño
+
+### Lo que hoy separa al builder
+
+Leí `src/corre/contenedor.rs`, `src/corre/ejecutor.rs` y `src/corre/args.rs` en 5a4f295.
+- **El builder corre en podman,** con `--cap-drop=all`, `no-new-privileges`, un tope de 4096 procesos y de 8 GB, y la red `pasta:--no-map-gw`.
+- **Ve solo tres cosas:** su carpeta de corrida en `/trabajo`, su estado de `claude`, y una copia de la credencial en solo lectura. También ve el plugin de ECC en solo lectura.
+- **`validar_montajes`** frena un montaje que toque `ROOT_HOME` o `$HOME`.
+- **`env_del_builder` y `VARIABLES_PROHIBIDAS`** dejan afuera `ROOT_HOME`, `DEEPSEEK_API_KEY` y `ANTHROPIC_API_KEY`.
+
+### Lo que Colab agrega como riesgo
+
+- **El kernel de Colab corre como root y escucha en la red local del runtime.** Un proceso que llega a ese puerto puede correr código como root. Desde ahí lee `ROOT_HOME` y los tests ocultos.
+- **El servidor de metadatos de la VM** responde en 169.254.169.254.
+- **No hay cgroups.** Sin podman, no hay tope de memoria.
+
+### Las tres formas de separar, pesadas
+
+| Forma | Qué separa | Costo | Riesgo |
+|---|---|---|---|
+| **Un usuario aparte, solo** | Los permisos de archivo: `ROOT_HOME` en 0700 de root | Poco código | **No alcanza.** El builder llega por la red al kernel de Colab, que corre como root |
+| **bwrap y una red aparte, en el mismo runtime** | Los archivos, los procesos y la red, en cuatro capas | 2 tareas de Root. Un runtime por sesión | Un error de configuración deja una puerta. Se baja con la prueba de ataque de la sección 4 |
+| **El oráculo en otro runtime** | Los tests ocultos no están en el runtime del builder | 2 runtimes por sesión, y un viaje de ida y vuelta en cada paso | `corre` alterna entre el builder y el oráculo: la vuelta de instalación de la 164 y la de eficiencia de la 116. Cada alternancia es un viaje por Colab, y los viajes fallan seguido (408, RemoteDisconnected) |
+
+**Elijo bwrap y una red aparte, en el mismo runtime.** Es una decisión técnica: no cambia qué promete Root. Repite la separación de podman, capa por capa:
+1. **Un usuario aparte:** `r00t` corre como root, y el `ROOT_HOME` es de root, en 0700. El builder corre como `builder`.
+2. **bwrap:** con espacios propios de usuario, procesos, IPC y UTS. El builder ve el sistema en solo lectura, y solo sus tres carpetas.
+3. **Una red aparte:** el espacio `root-builder` sale a Internet por `slirp4netns --disable-host-loopback`. `iptables` corta la red local, la de metadatos y la de loopback.
+4. **Sin privilegios nuevos:** `setpriv` quita las capacidades y fija `no_new_privs`.
+
+**La diferencia que queda con podman:** sin cgroups, la memoria del builder no tiene tope. Un builder que llena la memoria tira el runtime. Esa corrida queda cortada, y se repite.
+
+### El builder y el oráculo, en el mismo runtime
+
+- **Van juntos.** El oráculo de Colab ya corre con bwrap, sin secretos, y así se calibró. D3 mide al oráculo en el mismo entorno donde se calibró.
+- **Una sesión corre una tarea a la vez.** El cupo es el cuello de botella, no la CPU. Una ventana de cupo de 5 horas da cerca de 15 corridas. Una sesión en serie ya llena esa ventana.
+
+### Cómo llegan el token de cupo y la clave de DeepSeek
+
+**Lo medido:** un kernel creado por la CLI no lee Colab Secrets. La sonda `sonda-secreto` dio TimeoutException, porque no hay un navegador que conceda el secreto. Por eso la regla del usuario obliga a elegir: el notebook en el navegador, o una excepción.
+
+**Ningún secreto pasa por código de Root fuera del runtime.** Lo sube y lo lanza el guion del orquestador. Dentro del runtime:
+- **El token** queda en `/run/root-token`, de root, en 0600. Root lo lee y lo pasa al builder por el entorno, nunca por un argumento. El builder lo necesita, igual que hoy en podman.
+- **La clave de DeepSeek** queda solo en el entorno de `r00t`. El builder no la ve: corre en otro espacio de procesos, con otro usuario, y con el entorno limpio.
+- **Al terminar,** el guion borra el token.
+
+**Hace falta una decisión del usuario: P130.**
+
+### Cómo se reintenta una corrida cortada sin contarla dos veces
+
+1. **Cada tarea deja su vuelta apenas termina,** con su SHA. Si Colab corta la sesión, se pierde solo la tarea que corría.
+2. **La laptop baja cada vuelta terminada** mientras la sesión sigue.
+3. **`colab importar --corre` clasifica cada corrida:** completa, o cortada por plazo, por cupo o por la infraestructura.
+4. **El registro `colab-corre.json`** guarda una sola corrida completa por pasada y tarea. Una segunda completa no entra. Una cortada entra como cortada: su gasto cuenta, y su medición no.
+5. **El paquete de la sesión siguiente** lleva solo las tareas sin corrida completa.
+6. **Nunca se usa `--reanuda` entre runtimes.** La carpeta de la corrida murió con el runtime. La tarea corre de nuevo, desde cero.
+
+## 2. Las tareas de Root
+
+| Tarea | Qué hace | Archivos | Brief |
+|---|---|---|---|
+| **171** | El builder de `corre` con bwrap, la elección por `ROOT_CONTENEDOR_MODO`, y la red del builder | `src/corre/` y `tools/colab/red-builder.sh` | `docs/builds/brief-local-171.md` |
+| **172** | El paquete `colab empaquetar --corre`, los guiones del runtime, y `colab importar --corre` | `src/colab_corre.rs`, `src/cli.rs`, `src/lib.rs`, `tools/colab/preparar-corre.sh` y `tools/colab/corre-runtime.py` | `docs/builds/brief-local-172.md` |
+
+- **Las dos parten de 5a4f295.**
+- **Ninguna cambia una huella.** Las calibraciones de Y siguen contando con el binario nuevo.
+- **La subida, el lanzamiento y la bajada no van en Root.** Son guiones del orquestador, como los de juez-x. Así ningún secreto pasa por código de Root, y se reusa un camino ya probado.
+- **Cada una cabe en un builder de Colab.** La 171 es la más delicada. La 172 es la más larga, con tres puntos chicos.
+
+## 3. Qué va en paralelo y qué va en serie
+
+**En paralelo:**
+- **Los builders de la 171 y de la 172,** en dos runtimes de Colab. No comparten archivos. La regla de un builder a la vez cuidaba la carga de la laptop, y en Colab no la hay. Los dos gastan el mismo cupo, por poco tiempo.
+- **Mientras corren, el orquestador** arma el guion de D3, el guion de ataque y la tarea canario.
+
+**En serie:**
+1. Las suites con podman de la 171 y de la 172, una después de otra, en la laptop.
+2. La mezcla de las dos, con una PR, por orden del usuario.
+3. El congelamiento Z, y el estado con Z.
+4. La prueba de aislamiento en Colab.
+5. El piloto de D3.
+6. Las tandas de D3, una por ventana de cupo.
+
+## 4. La prueba de aislamiento, antes de medir
+
+**Va en una sesión propia, `aisla`, con una tarea canario y un builder falso.** No gasta cupo ni API.
+
+**La preparación:**
+1. **La tarea canario:** una copia de s2-t1 en un `ROOT_HOME` de prueba. Su `oculto/` suma un archivo con un texto al azar, C1.
+2. **El entorno de `r00t`:** `DEEPSEEK_API_KEY` vale un texto falso al azar, C2. No es la clave real.
+3. **El token:** `/run/root-token` guarda otro texto falso, C3.
+4. **El builder falso:** el orquestador reemplaza `/usr/local/bin/claude` del runtime por `ataque.sh`. `r00t corre` lo lanza como si fuera `claude`, con bwrap y la red aparte.
+
+**Los ataques de `ataque.sh`.** Cada uno anota su resultado en `/trabajo/ataque.txt`, que vuelve con la corrida.
+
+| # | Ataque | Lo esperado |
+|---|---|---|
+| A1 | `grep -r` de C1 en todo el sistema visible | Ningún resultado |
+| A2 | Leer `ROOT_HOME`, `/root`, `/content` y `/proc/1/root` | Falla |
+| A3 | Leer `/proc/*/environ` y `/proc/*/cmdline`, y buscar C2 | Ningún resultado. Solo se ven los procesos del builder |
+| A4 | Conectar a 127.0.0.1 y a la IP del runtime, en cada puerto que escucha el runtime | Falla. La lista de puertos sale de `ss -ltn`, fuera de bwrap |
+| A5 | Conectar a 169.254.169.254:80 | Falla |
+| A6 | Conectar a api.anthropic.com:443 y a index.crates.io:443 | **Anda.** El builder necesita las dos |
+| A7 | Escribir en `/usr`, `/etc`, `/root` y `/content` | Falla |
+| A8 | `su`, `sudo`, o un binario `setuid` | Falla |
+| A9 | `kill -0` a un pid de fuera | No ve el pid |
+| A10 | Leer C3 en su entorno | **Anda.** Es su credencial, como en podman |
+
+**Los controles positivos,** fuera de bwrap y como root:
+- **`ataque.sh` encuentra C1 y C2, y llega a los puertos del runtime.** Prueba que la prueba sabe detectar.
+- **`ps -eo args` en el runtime no muestra C3.** Prueba que el token no viaja en un argumento.
+
+**La regla:** cada ataque A1 a A9 falla, A6 y A10 andan, y los dos controles positivos detectan. Si algo no da así, no se corre D3, y el resultado va al planner.
+
+**Costo:** cerca de 1 hora y 0,1 unidades.
+
+## 5. La receta de D3 en Colab, para el orquestador
+
+Vale con P129 b, después de las tareas 171 y 172, del congelamiento Z y de la prueba de aislamiento.
+
+### Antes de la primera sesión
+
+1. **El binario:** `colab-pruebas/congelado-<Z>/r00t`, con su SHA en `registro.md`.
+2. **El worktree:** `~/.cache/root-wt/reparto/wt`, en Z.
+3. **Las versiones del builder:** `podman run --rm root-builder:1 claude --version` y `rustc --version`, en la laptop. Van en el paquete.
+4. **Las listas de tareas,** desde `dataset.json`, solo con ids:
+   - `tareas-0.txt`: `s2-t1`;
+   - `tareas-1.txt` a `tareas-3.txt`: las otras 30, unas 10 por lista, con los repos repartidos;
+   - b8d0db4058 con su lock real va en la última lista.
+5. **La carpeta:** `~/.cache/root-wt/d3/`, con una subcarpeta por sesión: `s0/` a `s3/`.
+
+### Una sesión, `d3-N`
+
+El orquestador escribe `d3/d3-colab.sh N` sobre la base de `juez-x/juez-x.sh`. No es código de Root.
+1. **El paquete:** `r00t colab empaquetar --corre --tareas <tareas-N, sin las que ya tienen corrida completa> --config ecc-haiku --pasada 1 --binario <Z> --raiz-root <worktree> --salida d3/sN/paquete.tar.gz`. El guion revisa que el paquete no traiga `sk-`, `.env` ni `.credentials.json`.
+2. **La sesión:** `colab new -s d3-N --high-mem`. Si `colab new` falla, reintenta 3 veces, con 60 s entre intentos.
+3. **La subida:** trozos de 40 MiB, cada uno con hasta 3 intentos. Después, `une.py` y la revisión del SHA en el runtime.
+4. **La preparación:** `preparar-corre.sh`, lanzado aparte. El guion espera su estado.
+5. **El lanzamiento:** `corre-runtime.py`, lanzado aparte, con la clave y el token como diga P130.
+6. **La consulta, cada 240 s:** `estado.json`. Tolera 5 fallas seguidas. Cada tarea nueva en `hechos/` se baja enseguida a `d3/sN/`, con su SHA.
+7. **La importación de cada vuelta,** apenas baja: primero en una copia, `d3/home-d3`, y después en el `ROOT_HOME` real, con `r00t colab importar --corre <vuelta> --sha <sha> --ida d3/sN/paquete.tar.gz`.
+8. **El cierre:** con `fin` o `error`, el guion baja lo que falte, y corre `colab stop -s d3-N`. Si una vuelta no bajó, la sesión queda abierta, y el guion avisa.
+9. **El chequeo de claves:** el guion busca `sk-` en todas sus salidas, como juez-x.
+
+**Se lanza así:** `systemd-run --user --unit serie-d3-N bash ~/.cache/root-wt/d3/d3-colab.sh N`. La laptop solo sube, consulta y baja.
+
+### El ritmo
+
+- **Una sesión por ventana de cupo de 5 horas.** Una sesión de 10 tareas usa cerca de 9 USD de lista, y una ventana da cerca de 13,6.
+- **Durante una sesión,** no corre ninguna sesión del planner ni un builder que gaste cupo.
+- **Las tareas cortadas** pasan al paquete de la sesión siguiente.
+
+### Qué revisa el orquestador después de cada sesión
+
+1. La clase de cada corrida: completa o cortada, con su motivo.
+2. Las lecturas del oráculo: los eventos `oraculo_leido` por motivo, y `r00t corre revisar-lectura` si hay alguno.
+3. Una fila por tarea en `registro.md`, sin nombres de tests:
+   - la decisión y el global;
+   - el contrato y el oculto, como pasa y total;
+   - `pide_humano` y las dimensiones sin veredicto;
+   - los minutos, el cupo y la API.
+4. El gasto de S2 en el real, que ya trae los eventos de Colab.
+5. Los casos para el planner: el oculto pasa entero y Root no da "listo", o el oculto falla y Root da "listo".
+6. La sesión cerrada: `colab sessions` no muestra `d3-N`. La sesión `hpil` no se toca.
+7. **Después del piloto:** si falla por la infraestructura, no se lanza la sesión 1. Va al planner.
+
+### Unidades de Colab por pasada
+
+- **Por sesión:** cerca de 30 minutos de preparación, y cerca de 22 minutos por tarea.
+- **Por pasada:** cuatro sesiones, de 13 a 15 horas de high-mem.
+- **La tasa medida** es de cerca de 0,08 unidades por hora: `calibrar-161b` usó cerca de 0,07 en 3286 s. Con margen, una pasada usa de 1,5 a 3 unidades.
+- **Con la prueba de aislamiento y los dos builders,** el total queda debajo de 5 unidades. Es menos de un décimo del tope de 50.
+
+**El cupo y la API no cambian** con la laptop: de 22 a 37 USD de lista, y de 2 a 4,6 USD de API.
+
+## 6. Pregunta al usuario
+
+**P130. ¿Cómo llegan a Colab el token de cupo y la clave de DeepSeek en las sesiones de D3?** Un kernel creado por la CLI no lee Colab Secrets: lo medimos. El builder necesita el token de cupo, y el juez de Estructura necesita la clave. D3 tiene 4 sesiones o más, una por ventana de cupo.
+
+- **a) Por la CLI, con una excepción para todas las sesiones de la pasada 1 de D3.** El token sube por `colab upload`, como hoy para los builders. La clave va por `colab exec --env` a un proceso hijo, como en juez-x. Root borra el token al terminar cada sesión. *(recomendada)*
+- **b) Por el notebook en el navegador, con Colab Secrets.** Cumple la regla sin excepción. El usuario abre el notebook y corre una celda al empezar cada sesión. El orquestador sigue el resto por la CLI.
+- **c) Por la CLI, con una excepción solo para el token, y sin la clave.** El juez no corre. Estructura queda sin veredicto en las 31 tareas, y D3 mide 5 dimensiones calibradas en vez de 6.
+
+Recomiendo la (a). El token ya sube así para los builders. La clave ya viajó así en P107 a y en juez-x, sin fugas en las salidas. La (b) pide la presencia del usuario en cada ventana de cupo, y eso alarga D3 varios días.
+
+## 7. Lo que falta
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | P130 | Nada | — | — | — | **Sí** |
+| 2 | Las Tareas 171 y 172, en paralelo | Nada | Colab, dos builders | De 2 a 3 USD de lista por cupo, y cerca de 0,5 unidades | De 2 a 3 horas | No |
+| 3 | El guion de D3, el de ataque y la tarea canario | Nada | Laptop, orquestador | 0 USD | Cerca de 2 horas | No |
+| 4 | Las suites con podman de la 171 y de la 172 | El paso 2 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 5 | La mezcla de la 171 y la 172 | El paso 4 | — | — | — | **Sí: la orden de mezcla** |
+| 6 | El congelamiento Z y el estado con Z | El paso 5 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 7 | La prueba de aislamiento | Los pasos 3 y 6 | Colab | 0 USD y cerca de 0,1 unidades | Cerca de 1 hora | No |
+| 8 | El piloto de D3: s2-t1 | Los pasos 1 y 7 | Colab | Cerca de 0,9 USD de lista, 0,1 USD de API y 0,1 unidades | Cerca de 1 hora | No |
+| 9 | Las sesiones 1 a 3 de D3 | El paso 8 | Colab | De 21 a 36 USD de lista, de 2 a 4,5 USD de API, y de 1,5 a 3 unidades | De 12 a 14 horas, en 3 ventanas de cupo | No |
+| 10 | El análisis de D3 | El paso 9 | Planner | Cupo | Una vuelta | No |
+| 11 | Si el análisis lo pide: una segunda pasada | El paso 10 | Colab | Lo mismo que los pasos 8 y 9 | De 1,5 a 2 días | **Sí** |
+| 12 | P98 c: abrir el final | El paso 10, o el 11 | Laptop | Según la regla del final | Según el final | No |
+| 13 | La validez sobre el final sellado | El paso 12 | Colab | Según el final | Según el final | No |
+| 14 | Después de la validez: el juez que escribe reglas, por P128 a | El paso 13 | Colab, builder | De 3 a 5 USD de builder, y cerca de 3,5 USD de API | De 1 a 2 semanas, con revisión humana | No |
+| 15 | Después de la validez: una tarea con `Dockerfile` para calibrar Entrega | El paso 13 | Minería y Colab | Sin estimar | Sin estimar | **Sí** |
+| 16 | Después de la validez: una sola fuente de las versiones de Seguridad, y la tarea en el error de lanzar | El paso 13 | Colab, builder | Cerca de 1 USD | Menos de 1 hora | No |
+
+**El saldo de S2:** cerca de 12,53 USD. Después de D3 quedan entre 8 y 10,5 USD.
+**Las unidades de Colab:** D3 y su preparación usan menos de 5 de las 50 del tope.
