@@ -10,7 +10,8 @@ Con `ROOT_SIN_PODMAN=1` y `tools/test-seguro.sh`.
 | Final (`laptop/tarea-176`) | 4271 | 0 | 5 |
 
 Los 13 tests nuevos son 11 en `src/corre/bwrap.rs` y 2 en `src/colab_corre.rs`. Ningún test de podman corrió.
-El hook no falló por tiempo. El primer commit del punto 1 falló por un lint de clippy (`double_ended_iterator_last`). Cambié `.last()` por `.next_back()` y el commit pasó.
+El commit del informe falló una vez en el hook por `oracle::contenedor::tests::bwrap_ejecutar_lanza_el_programa_con_los_argumentos_de_bwrap` (test ajeno, de tiempo). Reintenté una vez y pasó.
+El primer commit del punto 1 falló por un lint de clippy (`double_ended_iterator_last`). Cambié `.last()` por `.next_back()` y el commit pasó.
 
 ## 2. Commits
 
