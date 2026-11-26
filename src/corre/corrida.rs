@@ -134,6 +134,14 @@ impl EjecutorElegido<'_> {
     fn es_bwrap(&self) -> bool {
         matches!(self, EjecutorElegido::Bwrap(_))
     }
+
+    /// Aviso de `EjecutorBwrapBuilder::aviso_proc` si el builder usa el procfs del runtime. `None` en el resto.
+    fn aviso_proc(&self) -> Option<&'static str> {
+        match self {
+            EjecutorElegido::Bwrap(b) => b.aviso_proc(),
+            EjecutorElegido::Dado(_) => None,
+        }
+    }
 }
 
 /// Elige el ejecutor de la corrida. Lee `ROOT_CONTENEDOR_MODO` de `deps.entorno`, no del proceso.
@@ -159,10 +167,14 @@ fn elegir_ejecutor<'a>(deps: &DepsCorre<'a>) -> Result<EjecutorElegido<'a>, Erro
     }
 }
 
-/// Agrega `AVISO_BWRAP` al veredicto si el builder corrió en bwrap. Una sola vez: no repite el aviso.
-fn anotar_ejecutor(veredicto: &mut Veredicto, es_bwrap: bool) {
+/// Agrega `AVISO_BWRAP` al veredicto si el builder corrió en bwrap, y `aviso_proc` si viene `Some`.
+/// Cada aviso se agrega una sola vez: si ya está en `veredicto.avisos`, no se repite.
+fn anotar_ejecutor(veredicto: &mut Veredicto, es_bwrap: bool, aviso_proc: Option<&str>) {
     if es_bwrap && !veredicto.avisos.iter().any(|a| a == AVISO_BWRAP) {
         veredicto.avisos.push(AVISO_BWRAP.to_string());
+    }
+    if let Some(a) = aviso_proc.filter(|a| !veredicto.avisos.iter().any(|x| x == a)) {
+        veredicto.avisos.push(a.to_string());
     }
 }
 
@@ -270,7 +282,8 @@ struct ResultadoVuelta {
 /// Modo bwrap: si `ROOT_CONTENEDOR_MODO` vale exactamente `bwrap` en `deps.entorno`, el builder corre con
 /// `EjecutorBwrapBuilder` y no con `deps.ejecutor` (ver `elegir_ejecutor`). Hace falta `ROOT_RED_BUILDER` y
 /// `ROOT_USUARIO_BUILDER`; si faltan, la corrida sale con error antes de crear nada. El veredicto de la fila
-/// lleva el aviso "builder en bwrap" (ver `anotar_ejecutor`). Con otro valor, o sin la variable, no cambia nada.
+/// lleva el aviso "builder en bwrap" (ver `anotar_ejecutor`). En bwrap, con `ROOT_PROC_BUILDER` fijada, lleva además
+/// "builder con /proc del runtime en solo lectura" (ver `aviso_proc`). Con otro valor, o sin la variable, no cambia nada.
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
     correr_interno(deps, tarea, config, None)
 }
@@ -491,7 +504,7 @@ fn correr_interno(
         };
         (vuelta.veredicto, Some(registro))
     };
-    anotar_ejecutor(&mut veredicto, elegido.es_bwrap());
+    anotar_ejecutor(&mut veredicto, elegido.es_bwrap(), elegido.aviso_proc());
 
     // j) La fila. El resumen sale de los eventos de esta corrida.
     let resumen =
@@ -5379,8 +5392,8 @@ mod tests {
     #[test]
     fn corre_anotar_ejecutor_con_bwrap_deja_el_aviso_una_sola_vez() {
         let mut veredicto = Veredicto::default();
-        anotar_ejecutor(&mut veredicto, true);
-        anotar_ejecutor(&mut veredicto, true);
+        anotar_ejecutor(&mut veredicto, true, None);
+        anotar_ejecutor(&mut veredicto, true, None);
         let cuenta = veredicto
             .avisos
             .iter()
@@ -5392,8 +5405,57 @@ mod tests {
     #[test]
     fn corre_anotar_ejecutor_sin_bwrap_no_agrega_nada() {
         let mut veredicto = Veredicto::default();
-        anotar_ejecutor(&mut veredicto, false);
+        anotar_ejecutor(&mut veredicto, false, None);
         assert!(veredicto.avisos.is_empty(), "{:?}", veredicto.avisos);
+    }
+
+    #[test]
+    fn corre_aviso_proc_con_proc_builder_deja_el_aviso_una_sola_vez() {
+        let e = entorno();
+        let builder = Builder::default();
+        let mut vars = entorno_bwrap();
+        vars.push(("ROOT_PROC_BUILDER".into(), "/proc".into()));
+        let deps = deps_con(&e, &builder, &vars);
+        let elegido = elegir_ejecutor(&deps).expect("bwrap con /proc del builder");
+        let mut veredicto = Veredicto::default();
+        anotar_ejecutor(&mut veredicto, elegido.es_bwrap(), elegido.aviso_proc());
+        anotar_ejecutor(&mut veredicto, elegido.es_bwrap(), elegido.aviso_proc());
+        let cuenta_proc = veredicto
+            .avisos
+            .iter()
+            .filter(|a| a.as_str() == "builder con /proc del runtime en solo lectura")
+            .count();
+        let cuenta_bwrap = veredicto
+            .avisos
+            .iter()
+            .filter(|a| a.as_str() == "builder en bwrap")
+            .count();
+        assert_eq!(cuenta_proc, 1, "{:?}", veredicto.avisos);
+        assert_eq!(cuenta_bwrap, 1, "{:?}", veredicto.avisos);
+    }
+
+    #[test]
+    fn corre_aviso_proc_sin_proc_builder_no_lo_lleva() {
+        let e = entorno();
+        let builder = Builder::default();
+        let vars = entorno_bwrap();
+        let deps = deps_con(&e, &builder, &vars);
+        let elegido = elegir_ejecutor(&deps).expect("bwrap sin /proc del builder");
+        let mut veredicto = Veredicto::default();
+        anotar_ejecutor(&mut veredicto, elegido.es_bwrap(), elegido.aviso_proc());
+        assert!(
+            !veredicto
+                .avisos
+                .iter()
+                .any(|a| a == "builder con /proc del runtime en solo lectura"),
+            "{:?}",
+            veredicto.avisos
+        );
+        assert!(
+            veredicto.avisos.iter().any(|a| a == "builder en bwrap"),
+            "{:?}",
+            veredicto.avisos
+        );
     }
 
     #[test]
