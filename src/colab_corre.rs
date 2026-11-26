@@ -61,6 +61,8 @@ pub trait ImagenBuilder {
     fn version_claude(&self) -> Result<String, ErrorOraculo>;
     /// Salida de `rustc --version`.
     fn version_rustc(&self) -> Result<String, ErrorOraculo>;
+    /// Salida de `node --version`, por ejemplo `v22.11.0`.
+    fn version_node(&self) -> Result<String, ErrorOraculo>;
 }
 
 /// Imagen real: corre `claude` y `rustc` dentro de `root-builder:1` con podman.
@@ -95,6 +97,9 @@ impl ImagenBuilder for PodmanBuilder {
     }
     fn version_rustc(&self) -> Result<String, ErrorOraculo> {
         self.correr(&["rustc", "--version"])
+    }
+    fn version_node(&self) -> Result<String, ErrorOraculo> {
+        self.correr(&["node", "--version"])
     }
 }
 
@@ -282,6 +287,27 @@ fn plugins_de(config: &ConfigCorrida) -> Result<BTreeMap<PathBuf, String>, Error
     Ok(plugins)
 }
 
+/// Saca la versión de `node --version` sin la `v` inicial: `v22.11.0` da `22.11.0`.
+/// Si la salida está vacía o no tiene la forma `vN.N.N`, da Infra.
+fn version_de_node(salida: &str) -> Result<String, ErrorOraculo> {
+    let limpia = salida.trim();
+    if limpia.is_empty() {
+        return Err(ErrorOraculo::Infra("salida de node vacía".into()));
+    }
+    let numero = limpia.strip_prefix('v').unwrap_or("");
+    let partes: Vec<&str> = numero.split('.').collect();
+    let valida = partes.len() == 3
+        && partes
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    if !valida {
+        return Err(ErrorOraculo::Infra(format!(
+            "salida de node no reconocida: {limpia}"
+        )));
+    }
+    Ok(numero.to_string())
+}
+
 /// Llena la carpeta de trabajo, la revisa, escribe el manifiesto y empaqueta con `tar`.
 fn armar(
     a: &Armado,
@@ -301,6 +327,7 @@ fn armar(
             salida_rustc.trim()
         ))
     })?;
+    let version_node = version_de_node(&imagen.version_node()?)?;
 
     escribir(&staging.join(BINARIO), a.bytes)?;
     fijar_ejecutable(&staging.join(BINARIO))?;
@@ -309,7 +336,10 @@ fn armar(
         armar_oraculo_runtime(staging, &a.pedido.rustup_sha256, oraculo, IMAGEN_ORACULO)?;
     escribir(
         &staging.join(VERSIONES),
-        format!("CLAUDE_VERSION={version_claude}\nRUST_VERSION={version_rust}\n").as_bytes(),
+        format!(
+            "CLAUDE_VERSION={version_claude}\nRUST_VERSION={version_rust}\nNODE_VERSION={version_node}\n"
+        )
+        .as_bytes(),
     )?;
 
     copiar_arbol(
@@ -1171,6 +1201,24 @@ mod tests {
         fn version_rustc(&self) -> Result<String, ErrorOraculo> {
             Ok("rustc 1.91.0 (abc 2026-01-01)\n".into())
         }
+        fn version_node(&self) -> Result<String, ErrorOraculo> {
+            Ok("v22.11.0\n".into())
+        }
+    }
+
+    /// Doble con `node --version` fijo en `salida`. El resto de las versiones son las de `Falso`.
+    struct NodeFijo(&'static str);
+
+    impl ImagenBuilder for NodeFijo {
+        fn version_claude(&self) -> Result<String, ErrorOraculo> {
+            Falso.version_claude()
+        }
+        fn version_rustc(&self) -> Result<String, ErrorOraculo> {
+            Falso.version_rustc()
+        }
+        fn version_node(&self) -> Result<String, ErrorOraculo> {
+            Ok(self.0.into())
+        }
     }
 
     /// Bytes de un ELF de 64 bits, little endian, x86-64 (e_machine 0x3E).
@@ -1578,13 +1626,54 @@ mod tests {
     }
 
     #[test]
-    fn corre_versiones_builder_env_trae_las_dos_claves() {
+    fn corre_versiones_builder_env_trae_las_tres_claves() {
         let e = Escenario::nuevo();
         let resumen = e.empaqueta(&e.pedido(&["tarea-a"])).expect("empaqueta");
         let extraido = extraer(&resumen.salida);
         let texto = fs::read_to_string(extraido.path().join("versiones-builder.env"))
             .expect("lee versiones");
-        assert_eq!(texto, "CLAUDE_VERSION=2.1.5\nRUST_VERSION=1.91.0\n");
+        assert_eq!(
+            texto,
+            "CLAUDE_VERSION=2.1.5\nRUST_VERSION=1.91.0\nNODE_VERSION=22.11.0\n"
+        );
+    }
+
+    #[test]
+    fn corre_node_sin_version_da_infra() {
+        let e = Escenario::nuevo();
+        let resultado = empaquetar_corre(
+            e.home.path(),
+            e.raiz.path(),
+            "abc123",
+            &e.pedido(&["tarea-a"]),
+            &NodeFijo("\n"),
+            &DobleOraculo,
+        );
+        match resultado {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("node"), "{mensaje}");
+            }
+            _ => panic!("node vacío debe dar Infra"),
+        }
+    }
+
+    #[test]
+    fn corre_node_raro_da_infra() {
+        let e = Escenario::nuevo();
+        let resultado = empaquetar_corre(
+            e.home.path(),
+            e.raiz.path(),
+            "abc123",
+            &e.pedido(&["tarea-a"]),
+            &NodeFijo("Node 22 (no es v)\n"),
+            &DobleOraculo,
+        );
+        match resultado {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("Node 22"), "{mensaje}");
+            }
+            _ => panic!("node raro debe dar Infra"),
+        }
     }
 
     #[test]
@@ -2310,7 +2399,10 @@ echo "{\"evento\":\"$tarea\"}" >> "$ROOT_HOME/eventos.jsonl"
 COMPORTAMIENTO
 "#;
 
-    const VERSIONES_OK: &str = "CLAUDE_VERSION=2.1.5\nRUST_VERSION=1.91.0\n";
+    const VERSIONES_OK: &str = "CLAUDE_VERSION=2.1.5\nRUST_VERSION=1.91.0\nNODE_VERSION=22.11.0\n";
+
+    /// Nombre del tarball de node 22.11.0 para linux x64, como lo publica nodejs.org.
+    const TARBALL_NODE: &str = "node-v22.11.0-linux-x64.tar.xz";
 
     /// Id de imagen falso que trae el manifiesto de prueba.
     const IMAGEN_ID: &str = "sha256:imagen-prueba";
@@ -2870,6 +2962,16 @@ COMPORTAMIENTO
         npm_args: PathBuf,
         /// Donde el `setpriv` falso anota sus argumentos.
         setpriv_log: PathBuf,
+        /// Prefijo de node dentro de la raíz temporal (ROOT_PREFIJO_NODE).
+        prefijo_node: PathBuf,
+        /// Donde el `curl` falso anota las URLs que recibe.
+        curl_log: PathBuf,
+        /// Donde el `tar` falso anota sus argumentos.
+        tar_log: PathBuf,
+        /// Tarball falso de node. El `curl` falso lo copia como si fuera el de nodejs.org.
+        tarball: PathBuf,
+        /// SHASUMS256.txt falso. Tiene el SHA-256 correcto del tarball falso.
+        shasums: PathBuf,
     }
 
     impl Prep {
@@ -2888,11 +2990,35 @@ COMPORTAMIENTO
                 usr: raiz.path().join("usr-falso/bin"),
                 npm_args: raiz.path().join("npm-args.txt"),
                 setpriv_log: raiz.path().join("setpriv-args.txt"),
+                prefijo_node: raiz.path().join("prefijo-node"),
+                curl_log: raiz.path().join("curl-args.txt"),
+                tar_log: raiz.path().join("tar-args.txt"),
+                tarball: raiz.path().join("tarball-node.tar.xz"),
+                shasums: raiz.path().join("SHASUMS256.txt"),
                 raiz,
             };
-            for dir in [&p.paquete, &p.falsos, &p.root, &p.prefijo, &p.usr] {
+            for dir in [
+                &p.paquete,
+                &p.falsos,
+                &p.root,
+                &p.prefijo,
+                &p.usr,
+                &p.prefijo_node,
+            ] {
                 fs::create_dir_all(dir).expect("crea carpeta");
             }
+            // El SHA-256 de SHASUMS256.txt es el del tarball falso. Los tests que quieren otro hash
+            // reescriben este archivo.
+            let contenido_tarball = b"tarball falso de node\n";
+            fs::write(&p.tarball, contenido_tarball).expect("tarball");
+            fs::write(
+                &p.shasums,
+                format!(
+                    "{}  {TARBALL_NODE}\n",
+                    crate::colab_calibra::sha256_hex(contenido_tarball)
+                ),
+            )
+            .expect("SHASUMS256.txt");
             fs::write(p.paquete.join("versiones-builder.env"), versiones).expect("versiones");
             fs::write(
                 p.paquete.join("manifiesto.json"),
@@ -2957,7 +3083,22 @@ COMPORTAMIENTO
             );
             std::os::unix::fs::symlink(&claude_real, p.falsos.join("claude"))
                 .expect("enlace de claude");
-            escribir_ejecutable(&p.falsos.join("node"), "#!/bin/sh\necho 'v22.0.0'\n");
+            escribir_ejecutable(&p.falsos.join("node"), "#!/bin/sh\necho 'v22.11.0'\n");
+            // `curl` falso: anota la URL y copia el tarball o el SHASUMS256.txt falsos a `-o`.
+            escribir_ejecutable(
+                &p.falsos.join("curl"),
+                &format!(
+                    "#!/bin/sh\nsalida=''\nurl=''\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    -o) salida=\"$2\"; shift 2 ;;\n    -*) shift ;;\n    *) url=\"$1\"; shift ;;\n  esac\ndone\necho \"$url\" >> '{log}'\ncase \"$url\" in\n  *SHASUMS256.txt) cp '{shasums}' \"$salida\" ;;\n  *.tar.xz) cp '{tarball}' \"$salida\" ;;\n  *) exit 22 ;;\nesac\n",
+                    log = p.curl_log.display(),
+                    shasums = p.shasums.display(),
+                    tarball = p.tarball.display(),
+                ),
+            );
+            // `tar` falso: anota sus argumentos. No extrae nada.
+            escribir_ejecutable(
+                &p.falsos.join("tar"),
+                &format!("#!/bin/sh\necho \"$*\" >> '{}'\n", p.tar_log.display()),
+            );
             escribir_ejecutable(
                 &p.falsos.join("rustc"),
                 "#!/bin/sh\necho 'rustc 1.91.0 (abc 2026-01-01)'\n",
@@ -2999,6 +3140,8 @@ COMPORTAMIENTO
                 .env("ROOT_RAIZ_DIR", &self.prefijo)
                 .env("ROOT_APT_ESPERA", "0")
                 .env("ROOT_NPM", npm)
+                .env("ROOT_CURL", self.falsos.join("curl"))
+                .env("ROOT_PREFIJO_NODE", &self.prefijo_node)
                 .env("ROOT_PREFIJO_USR", prefijo_usr)
                 .env("ROOT_PATH_BUILDER", self.falsos.display().to_string())
                 .env("ROOT_CARGO_HOME", self.raiz.path().join("usr/local/cargo"))
@@ -3108,12 +3251,142 @@ COMPORTAMIENTO
     }
 
     #[test]
-    fn preparar_corre_root_npm_por_omision_es_usr_bin_npm() {
+    fn preparar_corre_root_npm_por_omision_es_usr_local_bin_npm() {
         falta_guion(PREPARAR);
         let guion = fs::read_to_string(PREPARAR).expect("lee el guion");
         assert!(
-            guion.contains("ROOT_NPM=\"${ROOT_NPM:-/usr/bin/npm}\""),
-            "falta el default ROOT_NPM=/usr/bin/npm en el guion"
+            guion.contains("ROOT_NPM=\"${ROOT_NPM:-/usr/local/bin/npm}\""),
+            "falta el default ROOT_NPM=/usr/local/bin/npm en el guion"
+        );
+    }
+
+    #[test]
+    fn preparar_corre_apt_no_trae_nodejs_ni_npm() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_apt_no_trae_nodejs_ni_npm");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        let salida = p.correr();
+        assert!(salida.status.success(), "{}", texto(&salida));
+        let apt: Vec<String> = texto(&salida)
+            .lines()
+            .filter(|l| l.starts_with("apt-get"))
+            .map(str::to_string)
+            .collect();
+        assert!(
+            apt.iter()
+                .any(|l| l.ends_with("install -y xz-utils slirp4netns iptables iproute2")),
+            "{apt:?}"
+        );
+        for linea in &apt {
+            assert!(
+                !linea
+                    .split_whitespace()
+                    .any(|t| t == "nodejs" || t == "npm"),
+                "apt no debe instalar node ni npm: {linea}"
+            );
+        }
+    }
+
+    #[test]
+    fn preparar_corre_sin_node_version_frena_y_nombra_la_clave() {
+        if !bash_disponible() {
+            eprintln!(
+                "sin bash: se saltea preparar_corre_sin_node_version_frena_y_nombra_la_clave"
+            );
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo(
+            "2.1.5 (Claude Code)",
+            "CLAUDE_VERSION=2.1.5\nRUST_VERSION=1.91.0\n",
+        );
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        let salida = p.correr();
+        assert!(!salida.status.success(), "debe salir distinto de 0");
+        let dicho = texto(&salida);
+        assert!(
+            dicho.contains("mal versiones-builder.env: falta la clave NODE_VERSION"),
+            "{dicho}"
+        );
+        assert!(!dicho.contains("paso runtime"), "no debe seguir: {dicho}");
+    }
+
+    #[test]
+    fn preparar_corre_baja_node_con_sha_correcto_y_lo_extrae() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_baja_node_con_sha_correcto_y_lo_extrae");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        let salida = p.correr();
+        assert!(salida.status.success(), "{}", texto(&salida));
+
+        let curl = fs::read_to_string(&p.curl_log).expect("curl no corrió");
+        assert_eq!(
+            curl,
+            format!(
+                "https://nodejs.org/dist/v22.11.0/{TARBALL_NODE}\n\
+                 https://nodejs.org/dist/v22.11.0/SHASUMS256.txt\n"
+            )
+        );
+
+        let tar = fs::read_to_string(&p.tar_log).expect("tar no corrió");
+        assert!(tar.contains("-xJf "), "{tar}");
+        assert!(tar.contains(TARBALL_NODE), "{tar}");
+        assert!(
+            tar.contains(&format!(
+                "-C {} --strip-components=1",
+                p.prefijo_node.display()
+            )),
+            "{tar}"
+        );
+    }
+
+    #[test]
+    fn preparar_corre_frena_si_sha_de_node_no_coincide() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_frena_si_sha_de_node_no_coincide");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        fs::write(&p.shasums, format!("{}  {TARBALL_NODE}\n", "0".repeat(64)))
+            .expect("SHASUMS256.txt con otro hash");
+        let salida = p.correr();
+        assert!(!salida.status.success(), "debe salir distinto de 0");
+        let dicho = texto(&salida);
+        assert!(dicho.contains("mal node"), "{dicho}");
+        assert!(dicho.contains("no coincide"), "{dicho}");
+        assert!(dicho.contains(TARBALL_NODE), "{dicho}");
+        assert!(!p.tar_log.exists(), "no debe extraer node con SHA malo");
+        assert!(!dicho.contains("paso versiones"), "no debe seguir: {dicho}");
+    }
+
+    #[test]
+    fn preparar_corre_frena_si_node_no_coincide_con_versiones() {
+        if !bash_disponible() {
+            eprintln!("sin bash: se saltea preparar_corre_frena_si_node_no_coincide_con_versiones");
+            return;
+        }
+        falta_guion(PREPARAR);
+        let p = Prep::nuevo("2.1.5 (Claude Code)", VERSIONES_OK);
+        escribir_ejecutable(&p.red, "#!/bin/sh\necho red-ok\n");
+        escribir_ejecutable(&p.falsos.join("node"), "#!/bin/sh\necho 'v22.0.0'\n");
+        let salida = p.correr();
+        assert!(!salida.status.success(), "debe salir distinto de 0");
+        let dicho = texto(&salida);
+        assert!(
+            dicho.contains(
+                "mal versiones: node --version da 22.0.0 y versiones-builder.env dice 22.11.0"
+            ),
+            "{dicho}"
         );
     }
 

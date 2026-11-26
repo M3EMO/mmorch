@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Prepara el runtime de Colab para `corre`. Corre como root en Ubuntu 24.04.
-# Llama a preparar-runtime.sh, instala Node y las herramientas de red, instala claude con npm
+# Llama a preparar-runtime.sh, instala las herramientas de red con apt, baja Node de nodejs.org
+# (la versión NODE_VERSION de versiones-builder.env, con SHA-256 revisado), instala claude con npm
 # --prefix /usr/local (claude y node tienen que quedar bajo /usr, donde bwrap los monta), fija
-# claude y rustc, crea el usuario builder, mueve el root-home del paquete y deja el plugin en su
-# ruta original.
+# claude, node y rustc, crea el usuario builder, mueve el root-home del paquete y deja el plugin en
+# su ruta original.
 # Termina llamando a red-builder.sh (lo trae la Tarea 171).
 # Uso: preparar-corre.sh <carpeta_del_paquete>
 set -euo pipefail
@@ -14,8 +15,12 @@ ROOT_BIN_DIR="${ROOT_BIN_DIR:-/usr/local/bin}"
 ROOT_HOME_DESTINO="${ROOT_HOME_DESTINO:-/root/root-home}"
 ROOT_DIR_RAIZ="${ROOT_DIR_RAIZ:-/root}"
 ROOT_RAIZ_DIR="${ROOT_RAIZ_DIR:-}"
-ROOT_NPM="${ROOT_NPM:-/usr/bin/npm}"
+ROOT_NPM="${ROOT_NPM:-/usr/local/bin/npm}"
 ROOT_PREFIJO_USR="${ROOT_PREFIJO_USR:-/usr/}"
+# Node se baja con curl de ROOT_NODE_URL y se extrae en ROOT_PREFIJO_NODE. Los tests usan falsos.
+ROOT_CURL="${ROOT_CURL:-curl}"
+ROOT_NODE_URL="${ROOT_NODE_URL:-https://nodejs.org/dist}"
+ROOT_PREFIJO_NODE="${ROOT_PREFIJO_NODE:-/usr/local}"
 ROOT_PATH_BUILDER="${ROOT_PATH_BUILDER:-/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin}"
 # setpriv, usuario y chown del builder. Se pueden cambiar; los tests usan falsos.
 ROOT_SETPRIV="${ROOT_SETPRIV:-setpriv}"
@@ -28,7 +33,8 @@ export ROOT_BIN_DIR ROOT_HOME_DESTINO ROOT_DIR_RAIZ ROOT_RAIZ_DIR ROOT_NPM ROOT_
 export ROOT_RUSTUP_HOME ROOT_CARGO_HOME
 
 # Paquetes que el builder necesita. Igual que el par update + install de preparar-runtime.sh.
-PAQUETES_APT=(nodejs npm slirp4netns iptables iproute2)
+# Node no va por apt: la versión de apt no sirve para Claude Code. Va en instalar_node.
+PAQUETES_APT=(xz-utils slirp4netns iptables iproute2)
 INTENTOS_APT=3
 APT_OPCIONES=(-o Acquire::Retries=5 -o Acquire::http::Timeout=30)
 
@@ -98,6 +104,35 @@ revisar_bajo_usr() {
     esac
 }
 
+# Paso 2b: baja Node NODE_VERSION de ROOT_NODE_URL y lo extrae en ROOT_PREFIJO_NODE. Antes compara el
+# SHA-256 del tarball con la línea de SHASUMS256.txt. Si no coincide, sale con 1 sin extraer nada.
+# El temporal sale de mktemp (respeta TMPDIR) y se borra en todos los caminos.
+instalar_node() {
+    local temporal archivo base esperado bajado
+    archivo="node-v$NODE_VERSION-linux-x64.tar.xz"
+    base="$ROOT_NODE_URL/v$NODE_VERSION"
+    temporal="$(mktemp -d)"
+    if ! "$ROOT_CURL" -fsSL -o "$temporal/$archivo" "$base/$archivo" ||
+        ! "$ROOT_CURL" -fsSL -o "$temporal/SHASUMS256.txt" "$base/SHASUMS256.txt"; then
+        rm -rf "$temporal"
+        echo "mal node: no se pudo bajar $base/$archivo"
+        exit 1
+    fi
+    esperado="$(awk -v f="$archivo" '$2 == f { print $1; exit }' "$temporal/SHASUMS256.txt")"
+    bajado="$(sha256sum "$temporal/$archivo" | cut -d' ' -f1)"
+    if [ -z "$esperado" ] || [ "$bajado" != "$esperado" ]; then
+        rm -rf "$temporal"
+        echo "mal node: el SHA-256 de $archivo no coincide (SHASUMS256.txt dice ${esperado:-nada}, el archivo da $bajado)"
+        exit 1
+    fi
+    if ! tar -xJf "$temporal/$archivo" -C "$ROOT_PREFIJO_NODE" --strip-components=1; then
+        rm -rf "$temporal"
+        echo "mal node: tar no pudo extraer $archivo en $ROOT_PREFIJO_NODE"
+        exit 1
+    fi
+    rm -rf "$temporal"
+}
+
 # Paso 3: instala claude fijado con el npm de apt y --prefix /usr/local. Revisa que claude y node
 # queden bajo /usr y que claude --version (con el PATH del builder) dé la versión fijada.
 # Revisa las versiones de claude y de rustc. Si no coinciden con versiones-builder.env, sale con 1.
@@ -114,6 +149,16 @@ instalar_y_verificar_versiones() {
     read -r primero _ <<<"$salida"
     if [ "$primero" != "$CLAUDE_VERSION" ]; then
         echo "mal versiones: claude --version da $primero y versiones-builder.env dice $CLAUDE_VERSION"
+        exit 1
+    fi
+
+    salida="$(env PATH="$ROOT_PATH_BUILDER" node --version)" || {
+        echo "mal versiones: node --version falló"
+        exit 1
+    }
+    read -r primero _ <<<"$salida"
+    if [ "${primero#v}" != "$NODE_VERSION" ]; then
+        echo "mal versiones: node --version da ${primero#v} y versiones-builder.env dice $NODE_VERSION"
         exit 1
     fi
 
@@ -237,7 +282,7 @@ principal() {
         echo "mal preparar-corre.sh: falta $archivo"
         exit 1
     fi
-    for clave_requerida in CLAUDE_VERSION RUST_VERSION; do
+    for clave_requerida in CLAUDE_VERSION RUST_VERSION NODE_VERSION; do
         if [ -z "$(clave "$clave_requerida")" ]; then
             echo "mal versiones-builder.env: falta la clave $clave_requerida"
             exit 1
@@ -245,9 +290,11 @@ principal() {
     done
     CLAUDE_VERSION="$(clave CLAUDE_VERSION)"
     RUST_VERSION="$(clave RUST_VERSION)"
+    NODE_VERSION="$(clave NODE_VERSION)"
 
     paso runtime llamar_runtime
     paso paquetes instalar_paquetes
+    paso node instalar_node
     paso builder crear_builder
     paso versiones instalar_y_verificar_versiones
     paso root-home armar_root_home
