@@ -851,3 +851,75 @@ fn no_toca_el_resolv_del_runtime() {
         "el resolv.conf del runtime no debe cambiar"
     );
 }
+
+#[test]
+fn comprobacion_usa_ip_netns_exec_getent() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea comprobacion_usa_ip_netns_exec_getent");
+        return;
+    }
+    let e = escenario();
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let ls = llamadas(&e);
+    let esperada = format!("ip netns exec {RED} getent hosts api.anthropic.com");
+    assert!(ls.contains(&esperada), "falta `{esperada}`: {ls:?}");
+}
+
+#[test]
+fn getent_reintenta_antes_de_rendirse() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea getent_reintenta_antes_de_rendirse");
+        return;
+    }
+    let e = escenario();
+    fs::write(&e.fallo, "").expect("marca el fallo de getent");
+    let salida = correr(&e, &[("ROOT_RED_INTENTOS", "3")]);
+    assert_eq!(salida.status.code(), Some(1), "debe salir con 1");
+    let ls = llamadas(&e);
+    let intentos = ls
+        .iter()
+        .filter(|l| l.as_str() == "getent hosts api.anthropic.com")
+        .count();
+    assert_eq!(intentos, 3, "3 intentos de getent: {ls:?}");
+}
+
+#[test]
+fn la_comprobacion_corre_al_final() {
+    if !bash_disponible() {
+        eprintln!("sin bash: se saltea la_comprobacion_corre_al_final");
+        return;
+    }
+    let e = escenario();
+    let salida = correr(&e, &[]);
+    assert!(
+        salida.status.success(),
+        "debe salir 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let ls = llamadas(&e);
+    let getent = ls
+        .iter()
+        .rposition(|l| l == "getent hosts api.anthropic.com")
+        .unwrap_or_else(|| panic!("falta la llamada a getent: {ls:?}"));
+    let ultima_regla = ls
+        .iter()
+        .rposition(|l| l.starts_with("iptables -A "))
+        .unwrap_or_else(|| panic!("falta iptables -A: {ls:?}"));
+    assert!(
+        getent > ultima_regla,
+        "getent debe ir después de la última iptables -A: {ls:?}"
+    );
+    let ruta_v6 = ls
+        .iter()
+        .rposition(|l| l.starts_with("nsenter ") && l.ends_with(" ip -6 route show default"))
+        .unwrap_or_else(|| panic!("falta nsenter ... ip -6 route show default: {ls:?}"));
+    assert!(
+        getent > ruta_v6,
+        "getent debe ir después de nsenter ... ip -6 route show default: {ls:?}"
+    );
+}
