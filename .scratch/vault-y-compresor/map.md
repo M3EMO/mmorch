@@ -29,6 +29,7 @@ Una spec que ECC construye, con dos piezas:
 - [Supersesión en sistemas de memoria de agentes](issues/04-supersesion-en-memorias.md) — Un registro determinista (`valid_to`, `superseded_by`, clave sujeto-relación) supera al LLM al escribir. En StaleBench, el rerank por fecha da 0.925 contra 53% de error del coseno. Zep y mem0 no miden la supersesión aislada.
 - [Lecturas y tamaños de las notas del vault](issues/05-lecturas-del-vault.md) — Comprimir notas ahorra disco, no cupo. El mes tuvo 53 lecturas, unos 21k tokens estimados (~0.009% del input) y 0 llamadas a `mmorch_recall`. Una nota p50 pesa unos 1.5k tokens, y se lee en promedio el 43% de cada nota.
 - [Desglose medido del contexto de arranque](issues/02-desglose-del-arranque.md) — El arranque real mide 66.8k tokens de mediana en 11 sesiones. ECC aporta unos 43k: skills 29.7k, agentes 7.8k y comandos 5.6k. Los CLAUDE.md, AGENTS.md y MEMORY.md suman unos 6.4k. `skillOverrides` está vacío hoy, y los agentes de ECC solo se apagan con el plugin entero.
+- [Oráculo de fidelidad del compresor](issues/06-oraculo-de-fidelidad.md) — Haiku responde por API una batería de 200 preguntas exactas, de ruteo y de reglas. Un gate final de 10 tareas reales corre con `claude -p`. El piso es una retención de 0.965 o más, 100% en guardrails y cero regresiones en tareas.
 
 ## Not yet specified
 
