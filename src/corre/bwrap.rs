@@ -55,7 +55,9 @@ const PREFIJOS_INFRA: [&str; 5] = [
     "Cannot open network namespace",
 ];
 /// Carpetas del host que se montan en solo lectura si existen.
-const RAIZ_SOLO_LECTURA: [&str; 3] = ["/usr", "/etc", "/opt"];
+/// `/opt` no está: el plugin se monta en `/opt/plugin`, y un `/opt` en solo lectura impide crearlo.
+/// El builder no usa nada del `/opt` del host.
+const RAIZ_SOLO_LECTURA: [&str; 2] = ["/usr", "/etc"];
 /// Enlaces de la raíz del host. Si son carpeta se montan; si son enlace se copian como enlace.
 const RAIZ_ENLACES: [&str; 4] = ["/bin", "/lib", "/lib64", "/sbin"];
 /// Motivo de un builder matado con SIGKILL. Quien llama lo lee junto con el stdout conservado.
@@ -710,7 +712,8 @@ fn cambiar_dueno(programa: &str, ruta: &Path, (uid, gid): (u32, u32)) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::corre::args::PLUGIN_EN_CONTENEDOR;
+    use crate::corre::args::{PLUGIN_EN_CONTENEDOR, args_claude};
+    use crate::corre::config::{ClaudeCorrida, ClaudeRol};
     use crate::corre::contenedor::TIMEOUT_BUILDER;
     use crate::corre::ejecutor::serie_de_pruebas;
     use crate::prueba_ejecutable::escribir_ejecutable;
@@ -1167,6 +1170,83 @@ mod tests {
             con.windows(3)
                 .any(|w| w == ["--ro-bind", origen.as_str(), "/opt/plugin"]),
             "{con:?}"
+        );
+    }
+
+    /// Sistema de prueba con `/opt` como carpeta, como en un host que tiene `/opt` real.
+    fn sistema_con_opt(ruta: &str) -> EntradaRaiz {
+        match ruta {
+            "/usr" | "/etc" | "/opt" => EntradaRaiz::Dir,
+            _ => EntradaRaiz::NoExiste,
+        }
+    }
+
+    #[test]
+    fn corre_bwrap_con_opt_no_monta_opt_y_el_plugin_va_a_opt_plugin() {
+        let d = disposicion();
+        let plugin = d.raiz.join("plugin");
+        fs::create_dir_all(&plugin).expect("plugin");
+        let mut l = lanzamiento(d.repo.clone(), Vec::new());
+        l.plugin = Some(plugin.clone());
+        let args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            None,
+            &sistema_con_opt,
+        );
+        // Con /opt montado en solo lectura, bwrap no puede crear /opt/plugin. Por eso no debe montarse.
+        assert!(
+            !args.windows(3).any(|w| w == ["--ro-bind", "/opt", "/opt"]),
+            "{args:?}"
+        );
+        let origen = plugin.display().to_string();
+        assert!(
+            args.windows(3)
+                .any(|w| w == ["--ro-bind", origen.as_str(), "/opt/plugin"]),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn corre_bwrap_con_opt_sigue_montando_usr_y_etc_en_solo_lectura() {
+        let d = disposicion();
+        let l = lanzamiento(d.repo.clone(), Vec::new());
+        let args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            None,
+            &sistema_con_opt,
+        );
+        assert!(
+            args.windows(3).any(|w| w == ["--ro-bind", "/usr", "/usr"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(3).any(|w| w == ["--ro-bind", "/etc", "/etc"]),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn corre_args_claude_con_plugin_traen_plugin_dir_en_opt_plugin() {
+        let d = disposicion();
+        let claude = ClaudeCorrida {
+            rol: BTreeMap::from([(
+                Rol::Construye,
+                ClaudeRol {
+                    plugin_dir: Some("/ruta/del/host/ecc".to_string()),
+                    subagent_model: None,
+                },
+            )]),
+            ..Default::default()
+        };
+        let args = args_claude("p", "m", &d.home, &claude, Rol::Construye);
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--plugin-dir", PLUGIN_EN_CONTENEDOR]),
+            "{args:?}"
         );
     }
 
