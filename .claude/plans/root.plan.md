@@ -17692,3 +17692,136 @@ Leí `orquestador/pr-171-176c.md`. Describe bien la 176c: el defecto, el arreglo
 
 **El saldo de S2:** cerca de 12,53 USD, sin cambios.
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-27 (108): aisla-8 cortó en `/opt/plugin`, y la Tarea 177
+
+**Estado.**
+- **La vuelta 107 está en 595297e1.** Aprobó el brief de la 176c.
+- **aisla-8 corrió entera,** con el paquete de la 176c. El chequeo del GOAL pasó. Sus archivos están en `d3/aisla/bajado.8/`.
+- **`r00t corre` salió con 3 a los 2 segundos:** "bwrap: Can't mkdir /opt/plugin: Read-only file system". El builder nunca arrancó.
+- **`revisa.py bajado/aisla b` dio `RESULTADO FALLA 3 filas`:** no hubo ataques de dentro, y no se vio el builder ni el token. Pasaron los ataques de fuera, las reglas, IPv6 y A16.
+- **C2, C3, el prefijo del token y `sk-ant-` dieron 0.**
+- **Por la regla de la vuelta 106,** con FALLA no hay PR, y el caso viene al planner.
+
+## 1. La causa: confirmada
+
+Leí `src/corre/bwrap.rs` y `src/corre/args.rs` en `laptop/cadena-176c` (ae50e34).
+
+1. **`RAIZ_SOLO_LECTURA` vale `["/usr", "/etc", "/opt"]`** (`bwrap.rs`, línea 58).
+2. **`args_bwrap_builder` monta cada una con `--ro-bind`** si existe en el host (líneas 387 a 391). En Colab, `/opt` existe.
+3. **Después monta el plugin en `PLUGIN_EN_CONTENEDOR`,** que vale `/opt/plugin` (`args.rs`, línea 15; `bwrap.rs`, línea 410).
+4. **bwrap tiene que crear `/opt/plugin`** dentro de un `/opt` que ya es de solo lectura, y no puede.
+
+**Por qué no lo vieron los tests:** el test de la línea 1129 dice "/opt no existe en el sistema de prueba: no se monta". Ningún test arma una raíz con `/opt` y con plugin a la vez.
+
+**Por qué no lo vio la sonda 14:** su comando montaba `/usr` y `/etc`, sin `/opt`, y no llevaba plugin.
+
+**El error fue mío.** El brief de la 171 pidió montar `/opt` en solo lectura "si existe", y dejó el plugin en `/opt/plugin`, igual que en podman. No vi que las dos reglas chocan.
+
+## 2. El arreglo
+
+**¿Necesita el builder algo del `/opt` de Colab?** No.
+- `preparar-corre.sh` instala `node`, `claude` y Rust bajo `/usr`.
+- La sonda 14 corrió `claude -p` de verdad sin `/opt`, y anduvo.
+
+| Opción | Qué toca | ¿Rompe el modo podman? | Riesgo |
+|---|---|---|---|
+| **a) Sacar `/opt` de `RAIZ_SOLO_LECTURA`** | Una constante de `bwrap.rs` | No: podman no usa esa constante | Ninguno conocido. El builder ve menos del host |
+| **b) Montar el plugin en otra ruta, solo en bwrap** | `PLUGIN_EN_CONTENEDOR`, o una ruta por ejecutor. También los argumentos de `claude`, porque llevan `--plugin-dir /opt/plugin` (`args.rs`, línea 46) | No, si se hace con cuidado | Los argumentos de `claude` cambian según el ejecutor. La laptop y Colab dejan de darle a `claude` lo mismo, y eso toca la paridad de D3 |
+| **c) Montar `/opt` con un tmpfs encima y después el plugin** | Varios montajes nuevos en `bwrap.rs` | No | Más montajes para revisar, para dar algo que el builder no usa |
+
+**Elijo la (a).** Toca menos, no cambia los argumentos de `claude`, y no toca podman. Es una decisión técnica: no cambia qué promete Root.
+
+**Además, una guarda:** una función pura revisa los argumentos de bwrap antes de lanzar. Si un destino queda dentro de una carpeta de la raíz que ya se montó en solo lectura, frena con un error que nombra las dos. Así, el próximo choque sale con un mensaje claro, en la laptop, y no como un "Read-only file system" en Colab.
+
+## 3. Otros montajes que podrían chocar
+
+Revisé cada destino de `args_bwrap_builder`, en orden:
+
+| Destino | ¿Dentro de una carpeta de solo lectura? |
+|---|---|
+| `/usr`, `/etc` | Son las carpetas de solo lectura. Se montan sobre sí mismas |
+| `/bin`, `/lib`, `/lib64`, `/sbin` | Sobre sí mismas, o como enlaces |
+| `/proc` | No. bwrap lo crea sobre su raíz |
+| `/dev`, `/tmp` | No |
+| `/trabajo` | No |
+| `/home/builder/.claude`, el estado | No: `/home` no se monta desde el host |
+| `/home/builder/.claude/.credentials.json` | No: queda dentro del estado, que es escribible. Con token, no se monta |
+| `/opt/plugin` | **Sí: es el único choque** |
+| `/etc/resolv.conf` | No es un montaje de bwrap. Lo pone `ip netns exec` antes, desde `/etc/netns/root-builder/` |
+
+**Hoy no hay otro choque.** Pero cualquier montaje nuevo bajo `/usr` o `/etc` chocaría igual. La guarda de la 177 lo frena.
+
+### ¿Lo puede detectar la prueba de humo del orquestador antes de Colab?
+
+**En la laptop, hoy no.** La laptop no tiene `bwrap`, así que la prueba de humo frena justo antes de lanzarlo. Además, el defecto depende de qué carpetas existen en el host.
+
+**Dos formas de detectarlo antes de la prueba de aislamiento:**
+1. **La guarda de la 177, en la suite.** Es una función pura: no necesita `bwrap`. Un test con una raíz falsa como la de Colab, con `/opt`, la corre en cada commit.
+2. **Una sonda de humo en Colab, del orquestador, antes de pedirle otro `paso0-aisla.sh` al usuario.** Ver abajo.
+
+**Instalar `bubblewrap` en la laptop** dejaría que la prueba de humo local llegue a bwrap. Pero la laptop no tiene la red de la 175, y es un cambio en la máquina del usuario. No lo propongo ahora.
+
+## 4. La Tarea 177
+
+Escribí `docs/builds/brief-local-177.md`. Parte de `laptop/cadena-176c`, y sigue P121 a y P122 a. Toca solo `src/corre/bwrap.rs`.
+
+| Punto | Qué |
+|---|---|
+| 1 | `RAIZ_SOLO_LECTURA` pasa a `["/usr", "/etc"]`. El plugin sigue en `/opt/plugin` |
+| 2 | La guarda: una función pura que revisa los destinos, y que `lanzar` corre antes de bwrap |
+
+**El test que monta una raíz con `/opt`:** la raíz falsa tiene `/usr`, `/etc`, `/opt`, `/bin` como carpeta y `/lib` como enlace, con plugin, credencial y `ROOT_PROC_BUILDER`. Hoy sus argumentos traen `--ro-bind /opt /opt` y `/opt/plugin`, y la guarda da rojo.
+
+**El oráculo no cambia.** `args.rs`, `contenedor.rs` y `src/oracle/` no se tocan.
+
+**Costo:** cerca de 0,5 USD de lista, 20 minutos y 0,03 unidades.
+
+## 5. La sonda de humo en Colab, antes de la próxima prueba
+
+**Para qué:** probar que el builder arranca en Colab con el binario de la 177, antes de pedirle al usuario otro `paso0-aisla.sh`. No usa secretos reales.
+
+**La receta, para el orquestador:**
+1. Una sesión CPU propia, `humo-177`, que se cierra al terminar. Las dos sesiones GPU ajenas no se tocan.
+2. Sube el paquete de aisla-8, que ya armó el usuario, y el release de `laptop/cadena-177`, aparte. **No hace falta otro `paso0`:** la 177 solo cambia `bwrap.rs`, y los guiones del paquete son los mismos.
+3. Corre `preparar-corre.sh` del paquete, como en aisla-8.
+4. Reemplaza `claude` por un guion de humo: escribe `/trabajo/humo-ok`, anota `ls /opt` y el uid, y sale con 0.
+5. Sube un token falso, un texto de 64 hexadecimales, a `/content/root-token`, y lo mueve a `/run/root-token` con modo 0600.
+6. Corre el binario de la 177 directo, sin `corre-runtime.py`, desde la carpeta del paquete: `r00t corre --tarea s2-t1 --config ecc-haiku`, con `ROOT_HOME`, `ROOT_CONTENEDOR_MODO=bwrap`, `ROOT_RED_BUILDER`, `ROOT_USUARIO_BUILDER`, `ROOT_TOKEN_BUILDER`, `ROOT_PROC_BUILDER` y `HOME=/srv/root-usuario`, como los fija `corre-runtime.py`. Sin `DEEPSEEK_API_KEY`.
+7. **Lo que se revisa:**
+   - la salida de `r00t` no trae "Can't mkdir" ni otro error de bwrap;
+   - la carpeta de la corrida tiene `humo-ok`;
+   - `ls /opt` muestra solo `plugin`, y el uid es 1000.
+8. La corrida puede fallar después, en la evaluación, porque no hay clave. Eso no importa para la sonda.
+
+**La regla:** si el builder arranca, el orquestador pide al usuario `paso0-aisla.sh` con el release de la 177. Si no arranca, va al planner con la salida.
+
+**Costo:** cerca de 30 minutos y 0,05 unidades.
+
+## 6. Lo que falta hasta cerrar el hito 1
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | La Tarea 177 | Nada | Colab, builder | Cerca de 0,5 USD de lista, y 0,03 unidades | Cerca de 20 minutos | No |
+| 2 | La suite con podman de `laptop/cadena-177`, y el release | El paso 1 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 3 | La sonda de humo `humo-177` | El paso 2 | Colab, orquestador | Cerca de 0,05 unidades | Cerca de 30 minutos | No |
+| 4 | `paso0-aisla.sh` con el release de la 177 | El paso 3 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: lo corre el usuario** |
+| 5 | La prueba de aislamiento, aisla-9, con `revisa.py` en el modo `b` y los dos avisos | El paso 4 | Colab | 0 USD y cerca de 0,15 unidades | De 1 a 1,5 horas | No |
+| 6 | El borrador de la PR, con los arreglos de la vuelta 107, la 177 y el resultado de aisla-9 | El paso 5 | Laptop, orquestador | 0 USD | Cerca de 15 minutos | No |
+| 7 | La PR con la 171 a la 177 | El paso 6 | — | — | — | **Sí: la orden de mezcla** |
+| 8 | El congelamiento Z: el árbol igual al de `laptop/cadena-177`, el release, y el estado con Z | El paso 7 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 9 | El paquete del piloto, con `paso0-d3.sh` | El paso 8 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: la primera de las dos corridas de P132 a** |
+| 10 | El piloto de D3: s2-t1 | El paso 9 | Colab | Cerca de 0,9 USD de lista, 0,1 USD de API y 0,1 unidades | Cerca de 1 hora | No |
+| 11 | Los 3 paquetes de las tandas | El paso 10 | Laptop, el usuario | 0 USD | Cerca de 15 minutos | **Sí: la segunda corrida de P132 a** |
+| 12 | Las sesiones 1 a 3 de D3 | El paso 11 | Colab | De 21 a 36 USD de lista, de 2 a 4,5 USD de API, y de 1,5 a 3 unidades | De 12 a 14 horas, en 1,5 a 2 días | No |
+| 13 | Las tareas cortadas, en un paquete extra | El paso 12 | Laptop y Colab | Según cuántas | Una sesión más | **Sí, si hay cortes** |
+| 14 | El análisis de D3 | Los pasos 12 y 13 | Planner | Cupo | Una vuelta | No |
+| 15 | Si el análisis lo pide: una segunda pasada | El paso 14 | Colab | Lo mismo que los pasos 10 a 13 | De 1,5 a 2 días | **Sí** |
+| 16 | P98 c: abrir el final | El paso 14, o el 15 | Laptop | Según la regla del final | Según el final | No |
+| 17 | La validez sobre el final sellado | El paso 16 | Colab | Según el final | Según el final | No |
+| 18 | El informe de cierre del hito 1 | El paso 17 | Planner | Cupo | Una vuelta | No |
+| 19 | El borrado de memora y brasa, si el dataset calibra | El paso 17 | Laptop, orquestador | 0 USD | Minutos | **Sí: lo confirma el usuario** |
+
+**El saldo de S2:** cerca de 12,53 USD, sin cambios.
+**Las unidades de Colab:** todo lo que falta hasta el análisis de D3 usa menos de 5.
+**Preguntas al usuario:** ninguna nueva.
