@@ -17825,3 +17825,95 @@ Escribí `docs/builds/brief-local-177.md`. Parte de `laptop/cadena-176c`, y sigu
 **El saldo de S2:** cerca de 12,53 USD, sin cambios.
 **Las unidades de Colab:** todo lo que falta hasta el análisis de D3 usa menos de 5.
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-27 (109): aisla-10 pasa, y la PR de la 171 a la 177
+
+**Estado.**
+- **La vuelta 108 está en 63238fcb.**
+- **La Tarea 177:** 0,66 USD, en `laptop/tarea-177` (8084140). La suite con podman de `laptop/cadena-177` dio 4287/0/5. El release está en `colab-pruebas/v177/r00t`, con SHA c3564c67….
+- **La sonda humo-177** corrió `corre-runtime.py` con el r00t de la 177, y todo falso: `claude`, token y clave. El primer intento falló por dos defectos de la sonda. El segundo pasó: el builder arrancó, `/opt` mostró solo `plugin`, y el uid fue 1001, el de `builder`. En Colab, el 1000 es de `ubuntu`.
+- **El paquete nuevo** (47ac01b9…) trae C1 en 1 archivo, y C2 y C3 en 0.
+- **aisla-9** corrió el builder en `root-builder`, pero dio FALLA en 1 fila: 0 ataques de dentro. `recoge.py` no buscaba en `/srv`, donde viven las corridas. El orquestador lo arregló y relanzó con el mismo paquete.
+- **aisla-10 dio `RESULTADO PASA`** en 35 filas, con `revisa.py bajado/aisla b`. C2, C3, el prefijo del token y `sk-ant-` dieron 0.
+- **El chequeo de los dos avisos no se pudo hacer:** `runs.jsonl` quedó vacío. El `claude` falso no deja una línea `result`, y la corrida corta en el rol `planifica` con código 3, antes del veredicto.
+- **El borrador de la PR** está en `orquestador/pr-171-177.md`, con un solo PENDIENTE: los dos avisos.
+
+## 1. Los dos avisos en `runs.jsonl`
+
+**Decisión: el chequeo pasa al piloto de D3, y la PR se abre sin él.**
+
+**Por qué la PR no espera:**
+- **Los avisos no son parte del aislamiento.** Solo dejan anotado, en el veredicto, en qué modo corrió el builder. Ningún código los lee.
+- **Lo que sí importa ya está probado.** aisla-10 corrió el ataque dentro del bwrap real, con la red de la 175 y el `/proc` de la 176.
+- **El cableado tiene tests.** La 176b prueba `anotar_ejecutor` y `elegir_ejecutor` con `ROOT_PROC_BUILDER=/proc`. Falta solo una corrida completa, de punta a punta.
+
+**Por qué el piloto y no otra prueba:**
+- **El piloto corre `claude` de verdad,** así que llega al veredicto y escribe la fila de `runs.jsonl`.
+- **Hacer que el `claude` falso deje un `result`** pediría un `claude` falso más complejo, solo para ver un texto. El piloto lo ve sin costo extra.
+
+**Qué hace el orquestador en el piloto:** revisa que la fila de `runs.jsonl` de s2-t1 traiga "builder en bwrap" y "builder con /proc del runtime en solo lectura".
+
+**Si faltan:**
+- **no frena las tandas de D3.** Todas las corridas de D3 son de Colab con bwrap, y `registro.md` lo deja escrito. El análisis de D3 no depende de los avisos;
+- **el arreglo va a la lista de después de la validez.** Un arreglo antes de las tandas pediría otro binario y otro congelamiento, para un texto que nadie lee.
+
+## 2. El arreglo de `recoge.py`, y aisla-10
+
+**El arreglo del orquestador está bien.**
+- `recoge.py` es un guion de la prueba, no código de Root. La regla de los briefs de la vuelta 106 no se aplica: no hubo builder.
+- El cambio solo suma `/srv` a las carpetas donde busca los `ataque-*.txt`. No cambia qué mide la prueba, ni qué pide `revisa.py`.
+- **El defecto es mío:** la vuelta 101 movió las corridas a `/srv/root-usuario`, y no avisé que `recoge.py` buscaba en `/root`.
+
+**aisla-10 vale como la prueba de aislamiento de P131 a.**
+- **Corrió el binario y el paquete de la punta de la PR:** el release de `laptop/cadena-177` (8084140), y el paquete 47ac01b9…, armado por el usuario con ese release.
+- **El ataque corrió dentro del builder real:** bwrap, `setpriv`, la red `root-builder` y el `/proc` del runtime en solo lectura.
+- **`revisa.py` en el modo `b` pasó las 35 filas:** A1 a A16, los controles de fuera, `argv.py`, las reglas de IPv4, IPv6 en `DROP`, y los procesos que sobreviven.
+- **Ningún secreto apareció** en lo bajado.
+- **El corte en `planifica` es esperado:** el `claude` falso no da resultado. El ataque ya había corrido en ese lanzamiento.
+
+## 3. Las preguntas de la 177
+
+| # | Pregunta | Decisión |
+|---|---|---|
+| 1 | `revisar_destinos` trata cualquier `--ro-bind X X` como carpeta de solo lectura, no solo las de las dos listas | **Queda.** Es más general que mi regla, y más segura: si mañana se monta otra carpeta del host sobre sí misma, la guarda la cubre sin tocar las listas. Mi brief tenía una contradicción: sus tests usaban `/opt`, que el punto 1 sacaba de la lista |
+| 2 | La revisión corre después del `chown` del repo y del estado, y después de crear `cargo-home` | **Queda.** Esos cambios son idempotentes, y tocan carpetas del propio builder. Un conflicto frena antes de bwrap, y el próximo intento hace lo mismo. Mover la revisión antes queda en la lista de después de la validez, como orden más limpio |
+
+**Ninguna pide una tarea antes de la PR.**
+
+## 4. El borrador de la PR
+
+Leí `orquestador/pr-171-177.md`. Trae los arreglos de la vuelta 107: la 173 con IPv6, el orden de la cadena, la base y la punta, el diff vacío del oráculo, la función pública de `src/colab_calibra.rs`, las decisiones del usuario y los límites. La suma de costos da 10,89 USD, y coincide.
+
+**Lo que hay que cambiar antes de pedir la orden de mezcla:**
+1. **El PENDIENTE de los avisos.** Cambia por: "Los dos avisos se revisan en el piloto de D3. Los cubren tests de `anotar_ejecutor` y `elegir_ejecutor`. La prueba de aislamiento no llega al veredicto, porque su `claude` es falso".
+2. **aisla-10, con lo que la identifica:** el release c3564c67… de 8084140, y el paquete 47ac01b9…. Así queda claro que la prueba corrió la punta de la PR.
+3. **"Las once llevan `corre` a Colab".** La 173b y la 175b solo arreglan tests. Cambia por: "Juntas llevan `corre` a Colab".
+4. **El uid del builder.** Suma un límite conocido: en Colab, el uid de `builder` es 1001, porque el 1000 es de `ubuntu`. Root lo lee de `/etc/passwd`, y `argv.py` compara con ese valor. Nada depende del número.
+5. **Los briefs del orquestador.** Suma una línea: los briefs de la 173b, la 175b, la 176b y la 176c los escribió el orquestador, y el planner los revisó en las vueltas 100, 106 y 107.
+6. **El título:** "Root: corre en Colab con bwrap (Tareas 171 a 177)".
+
+**Con esos cambios, el orquestador puede pedir la orden de mezcla.**
+
+## 5. Lo que falta hasta cerrar el hito 1
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | Los seis cambios del borrador de la PR | Nada | Laptop, orquestador | 0 USD | Cerca de 15 minutos | No |
+| 2 | La PR con la 171 a la 177 | El paso 1 | — | — | — | **Sí: la orden de mezcla** |
+| 3 | El congelamiento Z: el árbol igual al de 8084140, el release, y el estado con Z | El paso 2 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 4 | El paquete del piloto, con `paso0-d3.sh` | El paso 3 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: la primera de las dos corridas de P132 a** |
+| 5 | El piloto de D3: s2-t1, con la excepción de P130 a, y los dos avisos en `runs.jsonl` | El paso 4 | Colab | Cerca de 0,9 USD de lista, 0,1 USD de API y 0,1 unidades | Cerca de 1 hora | No |
+| 6 | Los 3 paquetes de las tandas | El paso 5 | Laptop, el usuario | 0 USD | Cerca de 15 minutos | **Sí: la segunda corrida de P132 a** |
+| 7 | Las sesiones 1 a 3 de D3 | El paso 6 | Colab | De 21 a 36 USD de lista, de 2 a 4,5 USD de API, y de 1,5 a 3 unidades | De 12 a 14 horas, en 1,5 a 2 días | No |
+| 8 | Las tareas cortadas, en un paquete extra | El paso 7 | Laptop y Colab | Según cuántas | Una sesión más | **Sí, si hay cortes** |
+| 9 | El análisis de D3 | Los pasos 7 y 8 | Planner | Cupo | Una vuelta | No |
+| 10 | Si el análisis lo pide: una segunda pasada | El paso 9 | Colab | Lo mismo que los pasos 5 a 8 | De 1,5 a 2 días | **Sí** |
+| 11 | P98 c: abrir el final | El paso 9, o el 10 | Laptop | Según la regla del final | Según el final | No |
+| 12 | La validez sobre el final sellado | El paso 11 | Colab | Según el final | Según el final | No |
+| 13 | El informe de cierre del hito 1 | El paso 12 | Planner | Cupo | Una vuelta | No |
+| 14 | El borrado de memora y brasa, si el dataset calibra | El paso 12 | Laptop, orquestador | 0 USD | Minutos | **Sí: lo confirma el usuario** |
+
+**Después del hito 1,** la lista de arreglos chicos suma dos: los avisos en `runs.jsonl`, si el piloto no los muestra, y la revisión de destinos antes del `chown`.
+
+**El saldo de S2:** cerca de 12,53 USD, sin cambios.
+**Preguntas al usuario:** ninguna nueva. La orden de mezcla la pide el orquestador con el borrador corregido.
