@@ -24,6 +24,7 @@ EXCLUIR = {
     "cli": "entrypoint CLI: parsea argv y ejecuta comandos reales",
     "nightly": "pipeline nocturno completo: LLM/API real y estado del home real",
     "sdlc_bench": "CLI: corre el builder sdlc con API real sobre una task del bench",
+    "vault_seeds": "CLI sobre el vault y los transcripts reales; sus piezas puras van en test_vault_seeds.py",
     "cursor_worker": "CLI: lanza cursor-agent real en un worktree; sus piezas puras van en test_cursor_worker.py",
 }
 

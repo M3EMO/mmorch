@@ -64,7 +64,26 @@ def test_moc_excluye_infra_y_archive(tmp_vault):
     write_validated("Nota dos", "cuerpo", project="mmorch",
                     remember_fn=rem)
     moc = (tmp_vault / "moc" / "mmorch.md").read_text(encoding="utf-8")
-    assert "viejo" not in moc and "lexicon" not in moc
+    assert "lexicon" not in moc
+    assert moc.count("[[viejo]]") == 1 and moc.split("## Archivadas")[1].count("[[viejo]]") == 1
+
+
+def test_moc_reemplazada_y_archivada(tmp_vault):
+    """A3: una reemplazada sale solo en Reemplazadas con link; una seed archivada, sin sucesora."""
+    _, rem = _fakes()
+    (tmp_vault / "research").mkdir()
+    (tmp_vault / "research" / "vieja.md").write_text(
+        "---\ntitle: vieja\ntags: [mmorch]\n---\nx", encoding="utf-8")
+    (tmp_vault / "archive").mkdir()
+    (tmp_vault / "archive" / "seed.md").write_text(
+        "---\ntitle: seed\ntags: [mmorch]\nstatus: seed\n---\nx", encoding="utf-8")
+    write_validated("Nueva", "cuerpo", project="mmorch", supersedes=["vieja"], remember_fn=rem)
+    moc = (tmp_vault / "moc" / "mmorch.md").read_text(encoding="utf-8")
+    rep = moc.split("## Reemplazadas\n")[1].split("\n## ")[0]
+    arc = moc.split("## Archivadas\n")[1]
+    assert rep.strip() == "- [[vieja]] → [[nueva]]"
+    assert arc.strip() == "- [[seed]]"
+    assert moc.count("[[vieja]]") == 1
 
 
 def test_moc_incluye_tags_inline_y_applies_to_en_bloque(tmp_vault):

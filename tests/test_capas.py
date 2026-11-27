@@ -25,6 +25,7 @@ PKG = REPO / "mmorch"
 
 _ENTRADAS = ("mcp_server", "server", "nightly", "cli", "auto_apply_nightly", "hillclimb", "autoresearch",
              "sdlc_bench",  # CLI `python -m mmorch.sdlc_bench`: mmorch mide el builder sdlc (paquete aparte)
+             "vault_seeds",  # CLI `python -m mmorch.vault_seeds`: archivo manual de seeds (A4)
              "gates_bench")  # CLI `python -m mmorch.gates_bench`: precision de los chequeos de mmorch/gates.py
 _DINAMICOS = {"loop"}   # cargado por nombre desde loop_nightly; 4173 usos en 90 dias
 

@@ -191,3 +191,7 @@ def spec(model_key: str) -> ModelSpec:
         raise KeyError(
             f"unknown model '{model_key}'. known: {sorted(REGISTRY)}"
         ) from None
+
+
+# Modulos apagables del vault (spec vault-y-compresor A1/A2); `vault` los lee en runtime.
+VAULT_MODULES = frozenset({"supersedes", "code"})

@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**118 módulos · 44 MCP tools · 1207 tests.**
+**119 módulos · 44 MCP tools · 1242 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -125,6 +125,7 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/transcript_store.py` | transcript_store — per-job inter-agent transcript (in-memory). |
 | `mmorch/triage.py` | Triage mecanico de branches propuestas — cero LLM, cero cupo, determinista. |
 | `mmorch/vault.py` | vault — memoria de largo plazo mmorch-legible sobre el vault Obsidian. |
+| `mmorch/vault_seeds.py` | vault_seeds — A4: archiva a mano las seeds que nadie leyo por nombre en 60 dias. |
 | `mmorch/weights.py` | weights — gestion de pesos de nodos neuronales (model-cards + verificacion). Source of |
 | `mmorch/workflow_evolve.py` | workflow_evolve — la poblacion de variantes del engine EVOLUCIONA (backlog #1 |
 | `mmorch/workflow_race.py` | workflow_race — corre N VARIANTES de workflow sobre una task congelada del bench y |

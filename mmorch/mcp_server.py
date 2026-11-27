@@ -603,12 +603,16 @@ def mmorch_vault_write(
     confidence: str = "",
     sources: str = "",
     tags: str = "",
+    supersedes: str = "",
+    code: str = "",
 ) -> str:
     """Write a research note to the GLOBAL knowledge vault (single validated door,
     spec vault-global ticket 03). Validates title + project tag (hard minimum),
     autocompletes `created`, regenerates the project's MOC, bridges a gist to
     memory (scope global -> recall finds it, sessions read the note by path).
     No babel derivative is written. `sources`/`tags` = comma-separated.
+    `supersedes` = comma-separated stems of live notes to retire to archive/ (error, nothing written, if one is missing).
+    `code` = comma-separated repo-relative paths the note describes; a later commit there flags it 'a revisar'.
     Returns JSON {path, moc}.
     """
     # W5.1: toda la orquestacion (frontmatter CSV, bridge a memoria)
@@ -616,7 +620,8 @@ def mmorch_vault_write(
     from mmorch.vault import write_research_note
     p, moc = write_research_note(title, body, project=project, folder=folder,
                                  status=status, confidence=confidence,
-                                 sources=sources, tags=tags)
+                                 sources=sources, tags=tags,
+                                 supersedes=supersedes, code=code)
     return json.dumps({"path": str(p), "moc": str(moc)}, ensure_ascii=False)
 
 

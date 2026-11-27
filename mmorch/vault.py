@@ -9,9 +9,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from datetime import date
 from pathlib import Path
 
+from . import config
 from .paths import home
 
 VAULT = home() / "vault"
@@ -152,12 +154,18 @@ def log_op(op: str, title: str, *, base: Path | None = None) -> None:
 
 
 def write_validated(title: str, body: str, *, project: str, folder: str = 'research',
-                    frontmatter: dict | None = None, remember_fn=None) -> Path:
-    """Escribe una nota validada, regenera el MOC y dispara callbacks opcionales."""
+                    frontmatter: dict | None = None, remember_fn=None,
+                    supersedes: list[str] | None = None,
+                    code: list[str] | None = None) -> Path:
+    """Escribe una nota validada, regenera el MOC y dispara callbacks opcionales.
+    `supersedes` (stems de notas vivas): se validan TODAS antes de escribir; despues la
+    nueva guarda `supersedes` y las viejas se retiran a archive/ (ver _retire)."""
     if not title or not title.strip():
         raise ValueError("title must be non-empty")
     if not project or not project.strip():
         raise ValueError("project must be non-empty")
+    _check_code(code)
+    olds = _plan_supersedes(supersedes)
 
     fm = {
         "created": date.today().isoformat(),
@@ -166,9 +174,21 @@ def write_validated(title: str, body: str, *, project: str, folder: str = 'resea
     }
     if "tags" in fm and isinstance(fm["tags"], list) and project not in fm["tags"]:
         fm["tags"].append(project)
+    if olds:
+        fm["supersedes"] = [o.stem for o in olds]
+    if code:
+        fm["code"] = list(code)
 
+    old_tags = {project}
+    for o in olds:
+        old_tags.update(_members(_read_frontmatter_only(o)))
     p = write_note(folder, title, body, frontmatter=fm)
-    regenerate_moc(project)
+    for o in olds:
+        _retire(o, p.stem)
+    # el MOC del proyecto siempre; el de otro tag de la vieja solo si ya existe
+    for t in sorted(old_tags):
+        if t == project or _moc_path(t).exists():
+            regenerate_moc(t)
     log_op("write", f"{title} [{project}]")
 
     if remember_fn is not None:
@@ -181,11 +201,160 @@ def write_validated(title: str, body: str, *, project: str, folder: str = 'resea
     return p
 
 
+def _check_code(code: list[str] | None) -> None:
+    """`code` ata la nota a paths del repo; llega del MCP, asi que se valida antes de escribir."""
+    if not code:
+        return
+    if "code" not in config.VAULT_MODULES:
+        raise ValueError("modulo 'code' apagado (config.VAULT_MODULES)")
+    for c in code:
+        if (not c.strip() or not c.isprintable() or c.startswith(("/", "-", ":")) or "\\" in c
+                or ".." in c.split("/")):
+            raise ValueError(f"code invalido (path relativo al repo, sin '..'): {c!r}")
+
+
+def _a_revisar(fm: dict) -> bool:
+    """Marca 'a revisar': un commit en un path de `code` mas nuevo (estricto, P3) que
+    `reviewed` o, si falta, que `created`. La marca no oculta la nota ni la reemplaza."""
+    paths, ref = _as_list(fm.get("code", "")), fm.get("reviewed") or fm.get("created")
+    if not paths or not ref or "code" not in config.VAULT_MODULES:
+        return False
+    for c in paths:
+        try:
+            r = subprocess.run(["git", "-C", str(VAULT), "log", "-1", "--format=%cs",
+                                "--", f":(top){c}"], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue  # side-channel: sin git no hay marca, nunca error
+        if r.returncode == 0 and r.stdout.strip() > ref:
+            return True
+    return False
+
+
+def note_a_revisar(path: str | Path) -> bool:
+    """`_a_revisar` sobre una nota por su path (la usa el recall)."""
+    p = Path(path)
+    return p.is_file() and _a_revisar(_read_frontmatter_only(p))
+
+
+_NO_VIVAS = {"moc", "templates", "archive", ".obsidian"}
+
+
+def _live_folders() -> list[Path]:
+    if not VAULT.is_dir():
+        return []
+    return [f for f in sorted(VAULT.iterdir()) if f.is_dir() and f.name not in _NO_VIVAS]
+
+
+def _members(fm: dict) -> list[str]:
+    """Proyectos de una nota: `tags` o `applies_to` (notas viejas)."""
+    return _as_list(fm.get("tags", "")) + _as_list(fm.get("applies_to", ""))
+
+
+def _resolve_note(name: str) -> Path:
+    """Stem de `[[stem]]` -> path de la nota viva. El nombre llega del MCP: nada fuera
+    del vault se resuelve. 0 o >1 coincidencias dan ValueError."""
+    if not name or name in (".", "..") or Path(name).name != name or "\\" in name:
+        raise ValueError(f"supersedes invalido: {name!r}")
+    hits = [h for f in _live_folders()
+            if (h := f / f"{name}.md").exists() and not h.is_symlink()]
+    if len(hits) != 1:
+        raise ValueError(f"supersedes {name!r}: {len(hits)} notas vivas (se esperaba 1)")
+    return hits[0]
+
+
+def _successor(fm: dict) -> str:
+    """`superseded_by` del frontmatter (escalar o lista en bloque: vale el primero), sin [[ ]]."""
+    return (_as_list(fm.get("superseded_by", "")) or [""])[0].strip("[] ")
+
+
+def _existe(name: str) -> bool:
+    """La nota `name` existe viva o en archive/ (nombre ya validado contra traversal)."""
+    try:
+        _resolve_note(name)
+        return True
+    except ValueError:
+        return bool(name) and Path(name).name == name and (VAULT / "archive" / f"{name}.md").exists()
+
+
+def _plan_supersedes(names: list[str] | None) -> list[Path]:
+    """Valida todo antes de escribir: modulo prendido, nombres resolubles, sin choque en archive/."""
+    if not names:
+        return []
+    if "supersedes" not in config.VAULT_MODULES:
+        raise ValueError("modulo 'supersedes' apagado (config.VAULT_MODULES)")
+    olds = [_resolve_note(n) for n in dict.fromkeys(names)]
+    for o in olds:
+        if (VAULT / "archive" / o.name).exists():
+            raise ValueError(f"archive/{o.name} ya existe: no se pisa")
+    return olds
+
+
+def _retire(p: Path, successor: str | None) -> Path:
+    """Mueve la nota a archive/ y, con sucesora, inserta `superseded_by` antes del cierre
+    del frontmatter (sin reserializar: las listas en bloque sobreviven) y la linea
+    "Reemplazada por [[x]]" al tope del cuerpo. Idempotente. successor=None solo mueve."""
+    dest = VAULT / "archive" / p.name
+    if p != dest and p.exists():
+        if dest.exists():
+            raise FileExistsError(f"archive/{p.name} ya existe: no se pisa")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        p.rename(dest)
+    if successor and dest.exists():
+        lines = dest.read_text(encoding="utf-8").split("\n")
+        close = next((i for i, ln in enumerate(lines[1:], 1) if ln.strip() == "---"), None) \
+            if lines and lines[0].strip() == "---" else None
+        if close is None:
+            lines = ["---", "---", *lines]
+            close = 1
+        if not any(ln.startswith("superseded_by:") for ln in lines[1:close]):
+            lines.insert(close, f"superseded_by: {_yaml_str(successor)}")
+            close += 1
+        aviso = f"Reemplazada por [[{successor}]]"
+        if aviso not in lines[close + 1:close + 3]:
+            lines[close + 1:close + 1] = [aviso, ""]
+        dest.write_text("\n".join(lines), encoding="utf-8")
+    return dest
+
+
+def _complete_by_hand(project: str) -> set[str]:
+    """Completa la mitad que falta de una supersesion editada a mano (solo notas del
+    proyecto). Un `supersedes` o `superseded_by` roto se loguea y se saltea: nunca rompe
+    la regeneracion. Devuelve los proyectos de las viejas retiradas (sus MOC quedan viejos)."""
+    tags: set[str] = set()
+    if "supersedes" not in config.VAULT_MODULES:
+        return tags
+    for folder in _live_folders():
+        for p in sorted(folder.glob("*.md")):
+            if not p.exists() or p.is_symlink():  # la retiro una pasada anterior de este bucle
+                continue
+            fm = _read_frontmatter_only(p)
+            if project not in _members(fm):
+                continue
+            try:
+                for name in _as_list(fm.get("supersedes", "")):
+                    if (VAULT / "archive" / f"{name}.md").exists():
+                        continue
+                    try:
+                        old = _resolve_note(name)
+                        tags.update(_members(_read_frontmatter_only(old)))
+                        _retire(old, p.stem)
+                    except ValueError as e:
+                        log_op("supersedes_roto", f"{p.stem}: {e}")
+                sb = _successor(fm)
+                if sb and not _existe(sb):
+                    log_op("supersedes_roto", f"{p.stem}: superseded_by {sb!r} no existe")
+                elif sb:
+                    _retire(p, sb)
+            except OSError as e:
+                log_op("supersedes_roto", f"{p.stem}: {e}")
+    return tags
+
+
 def write_research_note(title: str, body: str, *, project: str, folder: str = "research",
                         status: str = "seed", confidence: str = "", sources: str = "",
-                        tags: str = "") -> tuple[Path, Path]:
+                        tags: str = "", supersedes: str = "", code: str = "") -> tuple[Path, Path]:
     """Puerta de ALTO nivel para callers de borde (MCP/CLI): arma el frontmatter desde
-    strings CSV, escribe la nota validada y puentea un gist a memoria (scope global).
+    strings CSV (`supersedes` = stems de notas a reemplazar, `code` = paths del repo), escribe la nota validada y puentea un gist a memoria (scope global).
     Babel se borro el 2026-11-26: nadie leyo un .babel.md en un mes y babel mas el
     lexicon costaba 96% del original. Devuelve (nota, moc)."""
     fm: dict = {"status": status or "seed"}
@@ -204,7 +373,9 @@ def write_research_note(title: str, body: str, *, project: str, folder: str = "r
         remember("global", gist, kind="vault_note")
 
     p = write_validated(title, body, project=project, folder=folder,
-                        frontmatter=fm, remember_fn=_bridge)
+                        frontmatter=fm, remember_fn=_bridge,
+                        supersedes=[s.strip() for s in supersedes.split(",") if s.strip()],
+                        code=[c.strip() for c in code.split(",") if c.strip()])
     return p, _moc_path(project)
 
 
@@ -219,23 +390,20 @@ def _moc_path(project: str) -> Path:
     return VAULT / "moc" / f"{slug}.md"
 
 
-def regenerate_moc(project: str) -> Path:
+def regenerate_moc(project: str, *, _completar: bool = True) -> Path:
     """Genera/actualiza el MOC del proyecto escaneando el vault."""
     if not project or not project.strip():
         raise ValueError("project must be non-empty")
 
+    otros = _complete_by_hand(project) if _completar else set()
     sections: dict[str, list[str]] = {}
-    excluded_dirs = {"moc", "templates", "archive", ".obsidian"}
 
-    for folder in sorted(VAULT.iterdir()):
-        if not folder.is_dir() or folder.name in excluded_dirs:
-            continue
+    for folder in _live_folders():
         for p in sorted(folder.glob("*.md")):
             fm = _read_frontmatter_only(p)
             # una nota declara su proyecto en `tags` o en `applies_to` (notas viejas,
             # 2026-10-01: sin esto desaparecian del MOC en cada regeneracion)
-            members = _as_list(fm.get("tags", "")) + _as_list(fm.get("applies_to", ""))
-            if project not in members:
+            if project not in _members(fm):
                 continue
             # los frontmatter viejos traen comentarios inline ("applied   # ..."):
             # el MOC muestra solo el valor
@@ -246,15 +414,42 @@ def regenerate_moc(project: str) -> Path:
                 parts.append(f"— {status}")
             if confidence:
                 parts.append(f"· conf {confidence}")
+            if _a_revisar(fm):
+                parts.append("· a revisar")
             sections.setdefault(folder.name, []).append(" ".join(parts))
+
+    # archive/ solo arma las dos secciones finales (A3): con sucesora = Reemplazadas
+    for p in sorted((VAULT / "archive").glob("*.md")):
+        fm = _read_frontmatter_only(p)
+        if project not in _members(fm):
+            continue
+        sb = _successor(fm)
+        if sb:
+            sections.setdefault("Reemplazadas", []).append(f"- [[{p.stem}]] → [[{sb}]]")
+        else:
+            sections.setdefault("Archivadas", []).append(f"- [[{p.stem}]]")
 
     moc_path = _moc_path(project)
     moc_path.parent.mkdir(parents=True, exist_ok=True)
 
     lines = [f"# {project}", ""]
-    for sec in sorted(sections):
+    # las dos secciones de archive/ van al final, en este orden
+    orden = [x for x in sorted(sections) if x not in ("Reemplazadas", "Archivadas")]
+    orden += [x for x in ("Reemplazadas", "Archivadas") if x in sections]
+    for sec in orden:
         lines.append(f"## {sec}")
         lines.extend(sections[sec])
         lines.append("")
     moc_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    # MOC de otros proyectos con viejas retiradas a mano: solo los que ya existen y sin
+    # volver a completar (evita la recursion)
+    for t in sorted(otros - {project}):
+        if _moc_path(t).exists():
+            regenerate_moc(t, _completar=False)
     return moc_path
+
+
+def is_retired(path: str | Path) -> bool:
+    """Una nota esta retirada si su path original falta y existe `archive/<nombre>`."""
+    p = Path(path)
+    return not p.exists() and (VAULT / "archive" / p.name).exists()

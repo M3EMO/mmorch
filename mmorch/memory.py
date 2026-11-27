@@ -361,8 +361,55 @@ def _scope_chain(scope: str) -> list[str]:
     return [scope, "global"]
 
 
+def _vault_links(con) -> dict[tuple[str, int], list[str]]:
+    """(layer, id) -> paths de notas del vault que respaldan esa fila. El path sale del
+    payload del episodio kind='vault_note'; una fila semantica hereda el de sus source_ids."""
+    ep: dict[int, str] = {}
+    for eid, payload in con.execute(
+            "SELECT id, payload FROM episodic WHERE kind = 'vault_note'").fetchall():
+        _, sep, path = (payload or "").rpartition(" — nota del vault en ")
+        if sep and path.strip():
+            ep[int(eid)] = path.strip()
+    links: dict[tuple[str, int], list[str]] = {("episodic", e): [p] for e, p in ep.items()}
+    if ep:
+        for sid, src in con.execute(
+                "SELECT id, source_ids FROM semantic WHERE NOT tombstone").fetchall():
+            try:
+                paths = [ep[int(e)] for e in json.loads(src or "[]") if int(e) in ep]
+            except (ValueError, TypeError):
+                continue
+            if paths:
+                links[("semantic", int(sid))] = paths
+    return links
+
+
+def _retired_ids(con) -> tuple[set[int], set[int]]:
+    """Ids (semanticos, episodicos) respaldados por una nota del vault retirada. Una fila
+    semantica se oculta si CUALQUIERA de sus source_ids esta retirado (consolidate)."""
+    from . import vault  # lazy: memory no depende duro de vault
+    sem: set[int] = set()
+    epi: set[int] = set()
+    for (layer, rid), paths in _vault_links(con).items():
+        if any(vault.is_retired(p) for p in paths):
+            (sem if layer == "semantic" else epi).add(rid)
+    return sem, epi
+
+
+
+def _mark_revisar(con, notes: list[Note]) -> None:
+    """Antepone '[a revisar] ' a las notas DEVUELTAS cuya nota del vault esta atada a codigo
+    que cambio despues (la nota sigue visible). Solo mira el set final, no los candidatos."""
+    from . import vault  # lazy: memory no depende duro de vault
+    if not notes:
+        return
+    links = _vault_links(con)
+    for n in notes:
+        if any(vault.note_a_revisar(p) for p in links.get((n.layer, n.id), [])):
+            n.text = f"[a revisar] {n.text}"
+
+
 def recall(query: str, scope: str = "global", *, kind: str = 'text',
-           k: int = 5, window_days: float | None = None, track: bool = True,
+           k: int = 5, window_days: float | None = None, track: bool = True, mark: bool = True,
            path: Path = _DB_PATH) -> list[Note]:
     """Recall clinico 2-stage:
       COARSE  scope-chain + (opcional) ventana de recencia. SIN keyword-gate (FIX A).
@@ -405,6 +452,8 @@ def recall(query: str, scope: str = "global", *, kind: str = 'text',
                   AND NOT tombstone AND NOT needs_review
                 ORDER BY ts DESC""",
             [*chain, cutoff]).fetchall()
+        sem_dead, epi_dead = _retired_ids(con)
+        rows = [r for r in rows if r[0] not in sem_dead]
 
         notes: list[Note] = []
         if qvec is not None:
@@ -443,14 +492,19 @@ def recall(query: str, scope: str = "global", *, kind: str = 'text',
         # FIX B: completar desde episodic raw si falta (solo para kind='text').
         if len(notes) < k and kind == 'text':
             need = k - len(notes)
+            # los retirados se excluyen en SQL, antes del LIMIT (DuckDB no probado con lista)
+            nd = ",".join("?" for _ in epi_dead)
             erows = con.execute(
                 f"""SELECT id, ts, scope, kind, payload FROM episodic
                     WHERE scope IN ({placeholders}) AND ts >= ?
+                    {f"AND id NOT IN ({nd})" if epi_dead else ""}
                     ORDER BY ts DESC LIMIT ?""",
-                [*chain, cutoff, need]).fetchall()
+                [*chain, cutoff, *epi_dead, need]).fetchall()
             for rid, ts, sc, kind, payload in erows:
                 notes.append(Note(rid, ts, sc, f"[{kind}] {payload}", 0.0, "episodic"))
 
+        if mark:
+            _mark_revisar(con, notes)
         if track:
             touch_notes([n.id for n in notes if n.layer == "semantic"], con=con)
         return notes
@@ -466,7 +520,8 @@ def _tokens(text: str) -> list[str]:
 
 
 def recall_keyword(query: str, scope: str = "global", *, k: int = 5,
-                   window_days: float | None = None, path: Path = _DB_PATH) -> list[Note]:
+                   window_days: float | None = None, mark: bool = True,
+                   path: Path = _DB_PATH) -> list[Note]:
     """Recall por KEYWORD (idea Hermes FTS5): BM25-lite sobre las notas in-scope. Atrapa
     el termino EXACTO que el embedding difumina (nombres, flags, ids) y anda sin fastembed.
     Cero dep (tokenizador propio, no necesita la extension FTS de DuckDB)."""
@@ -481,6 +536,8 @@ def recall_keyword(query: str, scope: str = "global", *, k: int = 5,
                 WHERE scope IN ({ph}) AND ts >= ?
                   AND NOT tombstone AND NOT needs_review""",
             [*chain, cutoff]).fetchall()
+        dead = _retired_ids(con)[0]
+        rows = [r for r in rows if r[0] not in dead]
         if not rows:
             return []
         qtok = set(_tokens(query))
@@ -511,7 +568,10 @@ def recall_keyword(query: str, scope: str = "global", *, k: int = 5,
             if score > 0:
                 scored.append(Note(rid, ts, sc, text, round(score, 4), "semantic"))
         scored.sort(key=lambda n: -n.score)
-        return scored[:k]
+        top = scored[:k]
+        if mark:
+            _mark_revisar(con, top)
+        return top
     finally:
         con.close()
 
@@ -521,8 +581,10 @@ def recall_hybrid(query: str, scope: str = "global", *, k: int = 5,
     """Fusion de recall semantico (embedding) + keyword (BM25-lite) por Reciprocal Rank
     Fusion (RRF). Lo mejor de los dos: sinonimos del embedding + termino exacto del keyword.
     Si fastembed falta, degrada a keyword-only sin romper."""
-    sem = recall(query, scope, k=k * 2, window_days=window_days, track=False, path=path)
-    kw = recall_keyword(query, scope, k=k * 2, window_days=window_days, path=path)
+    sem = recall(query, scope, k=k * 2, window_days=window_days, track=False,
+                 mark=False, path=path)
+    kw = recall_keyword(query, scope, k=k * 2, window_days=window_days, mark=False,
+                        path=path)
     C = 60.0
     fused: dict[int, list] = {}
     for rank, n in enumerate(sem):
@@ -531,6 +593,11 @@ def recall_hybrid(query: str, scope: str = "global", *, k: int = 5,
         fused.setdefault(n.id, [n, 0.0])[1] += 1.0 / (C + rank)
     out = sorted(fused.values(), key=lambda nv: -nv[1])
     top = [Note(n.id, n.ts, n.scope, n.text, round(sc, 5), n.layer) for n, sc in out[:k]]
+    con = _connect(path)
+    try:
+        _mark_revisar(con, top)
+    finally:
+        con.close()
     # track sobre el set final fusionado (no sobre los candidatos k*2): evita doble-conteo.
     touch_notes([n.id for n in top if n.layer == "semantic"], path=path)
     return top

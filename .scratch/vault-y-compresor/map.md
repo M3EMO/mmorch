@@ -4,7 +4,7 @@ Label: wayfinder:map · Creado: 2026-11-26 · Tickets en `issues/` · Tracker: l
 ## Destination
 
 Confirmado con el usuario en [Destino y hogar del compresor](issues/01-destino-y-hogar.md).
-Una spec que ECC construye, con dos piezas. La spec está escrita: [spec.md](spec.md) (2026-11-26).
+Una spec que ECC construye, con dos piezas. La spec está escrita: [spec.md](spec.md) (2026-11-26). El plan de la pieza A vive en [plan-pieza-a.md](plan-pieza-a.md).
 - Supersesión en el vault de este repo (`mmorch/vault.py`). Está lista cuando un test determinista de pares pasa en el 100%: el recall nunca devuelve una nota reemplazada.
 - Compresor del contexto de arranque, en Root. Está listo con un arranque medido de 55k tokens o menos (hoy 66.8k; la meta bajó de 52k el 2026-11-26), sobre el piso de fidelidad del oráculo.
 
