@@ -21,7 +21,7 @@ use crate::oracle::contenedor::{
 use crate::tipos::Rol;
 
 /// Nombre de la copia de la credencial dentro del estado de `claude`. Es el que ve el builder.
-const CREDENCIAL_COPIA: &str = ".credentials.json";
+pub(super) const CREDENCIAL_COPIA: &str = ".credentials.json";
 
 /// Un `claude -p` de un rol: sus argumentos, su entorno, el repo donde corre y el plugin de ECC del rol.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,7 +110,7 @@ pub struct EjecutorContenedorBuilder {
 }
 
 /// Código con que podman avisa que mató el contenedor con SIGKILL. El stdout del builder sigue válido.
-const CODIGO_SIGKILL: i32 = 137;
+pub(super) const CODIGO_SIGKILL: i32 = 137;
 
 /// Motivo de un contenedor matado con SIGKILL. Lo lee quien llama junto con el stdout conservado.
 const MENSAJE_SIGKILL: &str = "el contenedor fue matado por SIGKILL, a menudo por falta de memoria";
@@ -273,7 +273,7 @@ fn ahora_ms() -> u64 {
 }
 
 /// Revisa que la credencial de Claude sea un archivo. El mensaje nombra solo la ruta, nunca el contenido.
-fn revisar_credencial(credencial: &Path) -> Result<(), ErrorCorre> {
+pub(super) fn revisar_credencial(credencial: &Path) -> Result<(), ErrorCorre> {
     match fs::metadata(credencial) {
         Ok(meta) if meta.is_file() => Ok(()),
         Ok(_) => Err(ErrorCorre::Ejecutor(format!(
@@ -292,7 +292,7 @@ fn revisar_credencial(credencial: &Path) -> Result<(), ErrorCorre> {
 }
 
 /// Revisa que el plugin de ECC del rol sea una carpeta. El mensaje nombra solo la ruta.
-fn revisar_plugin(plugin: &Path) -> Result<(), ErrorCorre> {
+pub(super) fn revisar_plugin(plugin: &Path) -> Result<(), ErrorCorre> {
     match fs::metadata(plugin) {
         Ok(meta) if meta.is_dir() => Ok(()),
         Ok(_) => Err(ErrorCorre::Ejecutor(format!(
@@ -611,9 +611,35 @@ fn tomar_pipes(hijo: &mut Child, tope: usize) -> Pipes {
 /// Si la espera falla, borra por nombre el contenedor `contenedor`, si lo hay, con `programa`.
 /// Si la señal ya terminó el ejecutor, no borra: su limpieza ya quitó los contenedores.
 fn correr_registrado(
-    mut estado: MutexGuard<'static, EstadoHijo>,
+    estado: MutexGuard<'static, EstadoHijo>,
     programa: &str,
     args: &[String],
+    plazo: Duration,
+    tope: usize,
+    contenedor: Option<&str>,
+) -> Result<Fin, ErrorCorre> {
+    let mut cmd = Command::new(programa);
+    cmd.args(args);
+    correr_registrado_con(estado, cmd, programa, plazo, tope, contenedor)
+}
+
+/// Corre `cmd` como hijo registrado bajo el cerrojo, con el mismo registro y la misma espera que el
+/// builder de podman. Lo usa el ejecutor de bwrap, que necesita entorno propio (`env_clear`). `programa`
+/// nombra el programa en los errores.
+pub(super) fn correr_comando_registrado(
+    cmd: Command,
+    programa: &str,
+    plazo: Duration,
+    tope: usize,
+) -> Result<Fin, ErrorCorre> {
+    correr_registrado_con(estado_hijo(), cmd, programa, plazo, tope, None)
+}
+
+/// Núcleo de `correr_registrado`: lanza `cmd` bajo el cerrojo tomado y lo registra. Ver `correr_registrado`.
+fn correr_registrado_con(
+    mut estado: MutexGuard<'static, EstadoHijo>,
+    cmd: Command,
+    programa: &str,
     plazo: Duration,
     tope: usize,
     contenedor: Option<&str>,
@@ -628,7 +654,7 @@ fn correr_registrado(
             "no se lanza {programa}: ya hay un hijo en curso"
         )));
     }
-    let mut hijo = spawn_hijo(programa, args)?;
+    let mut hijo = spawn_con(cmd, programa)?;
     let pipes = tomar_pipes(&mut hijo, tope);
     #[cfg(test)]
     llamar_costura(&COSTURA_ENTRE_SPAWN_Y_REGISTRO);
@@ -646,7 +672,7 @@ fn correr_registrado(
 
 /// Dice si una señal ya terminó el ejecutor. Toma el cerrojo solo un instante.
 /// La señal marca `terminando` y corre su limpieza con el cerrojo tomado. Así, al ver `true`, la limpieza ya acabó.
-fn senal_termino_el_ejecutor() -> bool {
+pub(super) fn senal_termino_el_ejecutor() -> bool {
     estado_hijo().terminando
 }
 
@@ -738,9 +764,14 @@ fn consultar(hijo: &mut Child) -> io::Result<Option<ExitStatus>> {
 /// Lanza `programa` con sus flujos de salida en pipe y en grupo de procesos propio. Sin registro ni cerrojo.
 /// El grupo permite que `matar_grupo` mate también a los nietos del hijo.
 fn spawn_hijo(programa: &str, args: &[String]) -> Result<Child, ErrorCorre> {
-    Command::new(programa)
-        .args(args)
-        .stdin(Stdio::null())
+    let mut cmd = Command::new(programa);
+    cmd.args(args);
+    spawn_con(cmd, programa)
+}
+
+/// Lanza `cmd` con flujos en pipe y grupo de procesos propio. Ver `spawn_hijo`.
+fn spawn_con(mut cmd: Command, programa: &str) -> Result<Child, ErrorCorre> {
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)

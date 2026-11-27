@@ -16,7 +16,7 @@ use crate::borrado;
 use crate::config::Config;
 use crate::corre::args::{args_claude, con_resume, env_del_builder};
 use crate::corre::config::ConfigCorrida;
-use crate::corre::contenedor::{TIMEOUT_BUILDER, estado_de};
+use crate::corre::contenedor::{TIMEOUT_BUILDER, credencial_de, estado_de};
 use crate::corre::costo_cortado::{
     costo_de_uso, evento_de_corte, evento_sesion_de_corte, precio_de_rol, turnos_de_transcript,
     uso_de_transcript,
@@ -25,13 +25,14 @@ use crate::corre::ejecutor;
 use crate::corre::git_seguro;
 use crate::corre::redacta::{redactar, token_de_copia};
 use crate::corre::{
-    Corrida, EjecutorBuilder, ErrorCorre, Lanzamiento, barrido, dir_corridas, guardar_transcript,
-    preparar_corrida, reabrir_corrida,
+    Corrida, EjecutorBuilder, EjecutorBwrapBuilder, ErrorCorre, Lanzamiento, barrido, dir_corridas,
+    guardar_transcript, preparar_corrida, reabrir_corrida,
 };
 use crate::goal::verificar_goal;
 use crate::observe::claude::registrar_sesion_claude;
 use crate::observe::transcript::{HuellasOraculo, registrar_lecturas};
 use crate::observe::{self, ErrorObserve};
+use crate::oracle::contenedor::{Backend, VARIABLE_CONTENEDOR_MODO, backend_de};
 use crate::oracle::descarga::{self, Corte};
 use crate::oracle::tarea::{Tarea, cargar_en};
 use crate::oracle::{ErrorOraculo, OpcionesOraculo, comando_git, corte_del_veredicto};
@@ -106,7 +107,75 @@ pub struct DepsCorre<'a> {
     /// Evalúa el repo que dejó el builder con la tarea.
     pub evaluar: &'a dyn Fn(&Path, &Tarea, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo>,
     /// Entorno del proceso. Solo `PATH` y `LANG` llegan al builder, y eso lo decide `env_del_builder`.
+    /// `ROOT_CONTENEDOR_MODO` de este slice elige el ejecutor (ver `elegir_ejecutor`).
     pub entorno: &'a [(String, String)],
+}
+
+/// Aviso que lleva el veredicto cuando el builder corrió en bwrap.
+const AVISO_BWRAP: &str = "builder en bwrap";
+
+/// Ejecutor que corre el builder de una corrida: el que pasó el llamador, o el de bwrap.
+enum EjecutorElegido<'a> {
+    /// El ejecutor de `DepsCorre.ejecutor`, tal cual.
+    Dado(&'a dyn EjecutorBuilder),
+    /// `EjecutorBwrapBuilder`, armado con las variables de `DepsCorre.entorno`.
+    Bwrap(Box<EjecutorBwrapBuilder>),
+}
+
+impl EjecutorElegido<'_> {
+    /// El ejecutor como trait object, para `DepsCorre.ejecutor`.
+    fn como_dyn(&self) -> &dyn EjecutorBuilder {
+        match self {
+            EjecutorElegido::Dado(ejecutor) => *ejecutor,
+            EjecutorElegido::Bwrap(bwrap) => bwrap.as_ref(),
+        }
+    }
+
+    fn es_bwrap(&self) -> bool {
+        matches!(self, EjecutorElegido::Bwrap(_))
+    }
+
+    /// Aviso de `EjecutorBwrapBuilder::aviso_proc` si el builder usa el procfs del runtime. `None` en el resto.
+    fn aviso_proc(&self) -> Option<&'static str> {
+        match self {
+            EjecutorElegido::Bwrap(b) => b.aviso_proc(),
+            EjecutorElegido::Dado(_) => None,
+        }
+    }
+}
+
+/// Elige el ejecutor de la corrida. Lee `ROOT_CONTENEDOR_MODO` de `deps.entorno`, no del proceso.
+/// Solo el valor exacto `bwrap` elige `EjecutorBwrapBuilder`. Otro valor, o no tenerla, usa
+/// `deps.ejecutor` tal cual. Con bwrap, faltar `ROOT_RED_BUILDER` o `ROOT_USUARIO_BUILDER` es error.
+fn elegir_ejecutor<'a>(deps: &DepsCorre<'a>) -> Result<EjecutorElegido<'a>, ErrorCorre> {
+    let valor = deps
+        .entorno
+        .iter()
+        .find(|(clave, _)| clave == VARIABLE_CONTENEDOR_MODO)
+        .map(|(_, valor)| valor.as_str());
+    match backend_de(valor) {
+        Backend::Podman => Ok(EjecutorElegido::Dado(deps.ejecutor)),
+        Backend::Bwrap => {
+            let bwrap = EjecutorBwrapBuilder::desde_entorno(
+                deps.entorno,
+                credencial_de(deps.home_usuario),
+                deps.home.to_path_buf(),
+                deps.home_usuario.to_path_buf(),
+            )?;
+            Ok(EjecutorElegido::Bwrap(Box::new(bwrap)))
+        }
+    }
+}
+
+/// Agrega `AVISO_BWRAP` al veredicto si el builder corrió en bwrap, y `aviso_proc` si viene `Some`.
+/// Cada aviso se agrega una sola vez: si ya está en `veredicto.avisos`, no se repite.
+fn anotar_ejecutor(veredicto: &mut Veredicto, es_bwrap: bool, aviso_proc: Option<&str>) {
+    if es_bwrap && !veredicto.avisos.iter().any(|a| a == AVISO_BWRAP) {
+        veredicto.avisos.push(AVISO_BWRAP.to_string());
+    }
+    if let Some(a) = aviso_proc.filter(|a| !veredicto.avisos.iter().any(|x| x == a)) {
+        veredicto.avisos.push(a.to_string());
+    }
 }
 
 /// Instrucción de la vuelta de eficiencia: la constante, una línea por medida y el prompt del rol.
@@ -209,6 +278,12 @@ struct ResultadoVuelta {
 /// (ver `vueltas_de_instalacion`).
 /// Si la primera evaluación marca regresión de eficiencia, hay una vuelta de eficiencia más
 /// (ver `correr_vuelta_eficiencia`). Su evaluación es la que cuenta.
+///
+/// Modo bwrap: si `ROOT_CONTENEDOR_MODO` vale exactamente `bwrap` en `deps.entorno`, el builder corre con
+/// `EjecutorBwrapBuilder` y no con `deps.ejecutor` (ver `elegir_ejecutor`). Hace falta `ROOT_RED_BUILDER` y
+/// `ROOT_USUARIO_BUILDER`; si faltan, la corrida sale con error antes de crear nada. El veredicto de la fila
+/// lleva el aviso "builder en bwrap" (ver `anotar_ejecutor`). En bwrap, con `ROOT_PROC_BUILDER` fijada, lleva además
+/// "builder con /proc del runtime en solo lectura" (ver `aviso_proc`). Con otro valor, o sin la variable, no cambia nada.
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
     correr_interno(deps, tarea, config, None)
 }
@@ -242,6 +317,18 @@ fn correr_interno(
 ) -> Result<Fila, ErrorCorre> {
     // a) GOAL: sin autorización no arranca y no se crea nada.
     verificar_goal(deps.repo_root)?;
+
+    // Ejecutor de los builders: bwrap si el entorno lo pide, si no el que vino en `deps`. Antes de lanzar o crear nada.
+    let elegido = elegir_ejecutor(deps)?;
+    let deps_local = DepsCorre {
+        home: deps.home,
+        home_usuario: deps.home_usuario,
+        repo_root: deps.repo_root,
+        ejecutor: elegido.como_dyn(),
+        evaluar: deps.evaluar,
+        entorno: deps.entorno,
+    };
+    let deps = &deps_local;
 
     // b) Tarea, config y huellas del oráculo. Las huellas van antes de lanzar: sin ellas no hay lecturas que revisar.
     let tarea_cargada = cargar_en(deps.home, tarea).map_err(|e| ErrorCorre::Uso(e.to_string()))?;
@@ -406,7 +493,7 @@ fn correr_interno(
     // Vuelta de eficiencia: si la evaluación marca regresión, un lanzamiento más y una evaluación más.
     // Se mira el veredicto que quedó después de la instalación.
     let regresiones = regresiones_de_vuelta(&primera, &config_cargada.roles, &av.lanzados);
-    let (veredicto, vuelta_eficiencia) = if regresiones.is_empty() {
+    let (mut veredicto, vuelta_eficiencia) = if regresiones.is_empty() {
         (primera, None)
     } else {
         let vuelta = correr_vuelta_eficiencia(&c, &mut av, primera, &regresiones)?;
@@ -417,6 +504,7 @@ fn correr_interno(
         };
         (vuelta.veredicto, Some(registro))
     };
+    anotar_ejecutor(&mut veredicto, elegido.es_bwrap(), elegido.aviso_proc());
 
     // j) La fila. El resumen sale de los eventos de esta corrida.
     let resumen =
@@ -5224,6 +5312,162 @@ mod tests {
         let prefijo = "pide intervención humana: el producto no instala y la vuelta del builder no terminó (2 vueltas corridas): ";
         assert!(
             fila.veredicto.avisos.iter().any(|a| a.starts_with(prefijo)),
+            "{:?}",
+            fila.veredicto.avisos
+        );
+    }
+
+    /// `DepsCorre` con el entorno que el test pide y el evaluador falso.
+    fn deps_con<'a>(
+        e: &'a Entorno,
+        ejecutor: &'a dyn EjecutorBuilder,
+        entorno: &'a [(String, String)],
+    ) -> DepsCorre<'a> {
+        DepsCorre {
+            home: &e.home,
+            home_usuario: &e.usuario,
+            repo_root: &e.repo,
+            ejecutor,
+            evaluar: &evaluador_falso,
+            entorno,
+        }
+    }
+
+    /// Entorno de bwrap completo: el modo y las dos variables obligatorias.
+    fn entorno_bwrap() -> Vec<(String, String)> {
+        vec![
+            ("ROOT_CONTENEDOR_MODO".into(), "bwrap".into()),
+            ("ROOT_RED_BUILDER".into(), "red-builder".into()),
+            ("ROOT_USUARIO_BUILDER".into(), "usuario-builder".into()),
+        ]
+    }
+
+    #[test]
+    fn corre_elegir_ejecutor_con_bwrap_arma_el_de_bwrap() {
+        let e = entorno();
+        let builder = Builder::default();
+        let vars = entorno_bwrap();
+        let deps = deps_con(&e, &builder, &vars);
+        let elegido = elegir_ejecutor(&deps).expect("bwrap con sus variables");
+        assert!(elegido.es_bwrap());
+    }
+
+    #[test]
+    fn corre_elegir_ejecutor_sin_bwrap_usa_el_pasado() {
+        let e = entorno();
+        let builder = Builder::default();
+        let mut casos: Vec<Vec<(String, String)>> = vec![Vec::new()];
+        for valor in ["podman", "BWRAP", ""] {
+            casos.push(vec![("ROOT_CONTENEDOR_MODO".into(), valor.into())]);
+        }
+        for vars in &casos {
+            let deps = deps_con(&e, &builder, vars);
+            let elegido = elegir_ejecutor(&deps).expect("sin bwrap no hay error");
+            assert!(!elegido.es_bwrap(), "{vars:?}");
+            assert!(
+                std::ptr::addr_eq(elegido.como_dyn(), deps.ejecutor),
+                "{vars:?}: debe usar el ejecutor pasado"
+            );
+        }
+    }
+
+    #[test]
+    fn corre_elegir_ejecutor_bwrap_sin_red_da_error_de_ejecutor() {
+        let e = entorno();
+        let builder = Builder::default();
+        let vars: Vec<(String, String)> = entorno_bwrap()
+            .into_iter()
+            .filter(|(clave, _)| clave != "ROOT_RED_BUILDER")
+            .collect();
+        let deps = deps_con(&e, &builder, &vars);
+        let error = elegir_ejecutor(&deps)
+            .err()
+            .expect("sin ROOT_RED_BUILDER debe fallar");
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains("ROOT_RED_BUILDER")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn corre_anotar_ejecutor_con_bwrap_deja_el_aviso_una_sola_vez() {
+        let mut veredicto = Veredicto::default();
+        anotar_ejecutor(&mut veredicto, true, None);
+        anotar_ejecutor(&mut veredicto, true, None);
+        let cuenta = veredicto
+            .avisos
+            .iter()
+            .filter(|a| a.as_str() == "builder en bwrap")
+            .count();
+        assert_eq!(cuenta, 1, "{:?}", veredicto.avisos);
+    }
+
+    #[test]
+    fn corre_anotar_ejecutor_sin_bwrap_no_agrega_nada() {
+        let mut veredicto = Veredicto::default();
+        anotar_ejecutor(&mut veredicto, false, None);
+        assert!(veredicto.avisos.is_empty(), "{:?}", veredicto.avisos);
+    }
+
+    #[test]
+    fn corre_aviso_proc_con_proc_builder_deja_el_aviso_una_sola_vez() {
+        let e = entorno();
+        let builder = Builder::default();
+        let mut vars = entorno_bwrap();
+        vars.push(("ROOT_PROC_BUILDER".into(), "/proc".into()));
+        let deps = deps_con(&e, &builder, &vars);
+        let elegido = elegir_ejecutor(&deps).expect("bwrap con /proc del builder");
+        let mut veredicto = Veredicto::default();
+        anotar_ejecutor(&mut veredicto, elegido.es_bwrap(), elegido.aviso_proc());
+        anotar_ejecutor(&mut veredicto, elegido.es_bwrap(), elegido.aviso_proc());
+        let cuenta_proc = veredicto
+            .avisos
+            .iter()
+            .filter(|a| a.as_str() == "builder con /proc del runtime en solo lectura")
+            .count();
+        let cuenta_bwrap = veredicto
+            .avisos
+            .iter()
+            .filter(|a| a.as_str() == "builder en bwrap")
+            .count();
+        assert_eq!(cuenta_proc, 1, "{:?}", veredicto.avisos);
+        assert_eq!(cuenta_bwrap, 1, "{:?}", veredicto.avisos);
+    }
+
+    #[test]
+    fn corre_aviso_proc_sin_proc_builder_no_lo_lleva() {
+        let e = entorno();
+        let builder = Builder::default();
+        let vars = entorno_bwrap();
+        let deps = deps_con(&e, &builder, &vars);
+        let elegido = elegir_ejecutor(&deps).expect("bwrap sin /proc del builder");
+        let mut veredicto = Veredicto::default();
+        anotar_ejecutor(&mut veredicto, elegido.es_bwrap(), elegido.aviso_proc());
+        assert!(
+            !veredicto
+                .avisos
+                .iter()
+                .any(|a| a == "builder con /proc del runtime en solo lectura"),
+            "{:?}",
+            veredicto.avisos
+        );
+        assert!(
+            veredicto.avisos.iter().any(|a| a == "builder en bwrap"),
+            "{:?}",
+            veredicto.avisos
+        );
+    }
+
+    #[test]
+    fn corre_sin_bwrap_la_fila_no_lleva_el_aviso_de_bwrap() {
+        let e = entorno();
+        let fila = correr_con(&e, &EjecutorFalso, &[], CONFIG).expect("corre");
+        assert!(
+            !fila
+                .veredicto
+                .avisos
+                .iter()
+                .any(|a| a == "builder en bwrap"),
             "{:?}",
             fila.veredicto.avisos
         );

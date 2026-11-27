@@ -30,14 +30,14 @@ const LIMITE_MEMORIA: &str = "--memory=8g";
 /// Carpeta del estado de `claude`, dentro de la carpeta de la corrida (fuera de `repo/`).
 const CARPETA_ESTADO: &str = "claude-estado";
 /// Destino del estado de `claude` dentro del contenedor: el HOME del builder.
-const ESTADO_EN_CONTENEDOR: &str = "/home/builder/.claude";
+pub(super) const ESTADO_EN_CONTENEDOR: &str = "/home/builder/.claude";
 /// Carpeta de datos de ECC del builder. Vive dentro del estado montado: cada corrida tiene la suya.
 pub(super) const ECC_DATOS_EN_CONTENEDOR: &str = "/home/builder/.claude/ecc-datos";
 /// Destino de la credencial dentro del contenedor.
-const CREDENCIAL_EN_CONTENEDOR: &str = "/home/builder/.claude/.credentials.json";
+pub(super) const CREDENCIAL_EN_CONTENEDOR: &str = "/home/builder/.claude/.credentials.json";
 /// Variables que no pasan al contenedor, aunque el lanzamiento las traiga. Es la segunda defensa: la
 /// primera es `env_del_builder`. `HOME` y `PATH` los fija la imagen.
-const VARIABLES_PROHIBIDAS: &[&str] = &[
+pub(super) const VARIABLES_PROHIBIDAS: &[&str] = &[
     "ROOT_HOME",
     "DEEPSEEK_API_KEY",
     "ANTHROPIC_API_KEY",

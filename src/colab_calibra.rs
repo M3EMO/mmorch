@@ -499,21 +499,16 @@ pub fn empaquetar(paquete: &Paquete, imagen: &dyn Imagen) -> Result<Resumen, Err
     Ok(resumen)
 }
 
-/// Llena la carpeta de trabajo y la empaqueta con `tar`.
-fn armar_y_empaquetar(
-    paquete: &Paquete,
+/// Escribe en `staging` lo que el oráculo necesita de la imagen: `herramientas/` con las
+/// herramientas de `HERRAMIENTAS`, `versiones.env` y `entorno.env`. Devuelve el id de la imagen.
+/// Lo usan el paquete de calibración y el de `corre`.
+pub fn armar_oraculo_runtime(
     staging: &Path,
-    bytes: &[u8],
-    tareas: &BTreeMap<String, Tarea>,
+    rustup_sha256: &str,
     imagen: &dyn Imagen,
     nombre_imagen: &str,
-    gasto: Option<&GastoS2>,
-) -> Result<Resumen, ErrorOraculo> {
+) -> Result<String, ErrorOraculo> {
     let id = imagen.id(nombre_imagen)?;
-
-    escribir(&staging.join("r00t"), bytes)?;
-    fijar_ejecutable(&staging.join("r00t"))?;
-    let binario_sha256 = sha256_hex(bytes);
 
     let carpeta = staging.join("herramientas");
     fs::create_dir_all(&carpeta)
@@ -537,13 +532,31 @@ fn armar_y_empaquetar(
     })?;
     escribir(
         &staging.join("versiones.env"),
-        versiones_env(&rust, &paquete.rustup_sha256, &hashes).as_bytes(),
+        versiones_env(&rust, rustup_sha256, &hashes).as_bytes(),
     )?;
     let entorno = filtrar_entorno(&imagen.entorno(nombre_imagen)?);
     escribir(
         &staging.join("entorno.env"),
         lineas_texto(&entorno).as_bytes(),
     )?;
+    Ok(id)
+}
+
+/// Llena la carpeta de trabajo y la empaqueta con `tar`.
+fn armar_y_empaquetar(
+    paquete: &Paquete,
+    staging: &Path,
+    bytes: &[u8],
+    tareas: &BTreeMap<String, Tarea>,
+    imagen: &dyn Imagen,
+    nombre_imagen: &str,
+    gasto: Option<&GastoS2>,
+) -> Result<Resumen, ErrorOraculo> {
+    let id = armar_oraculo_runtime(staging, &paquete.rustup_sha256, imagen, nombre_imagen)?;
+
+    escribir(&staging.join("r00t"), bytes)?;
+    fijar_ejecutable(&staging.join("r00t"))?;
+    let binario_sha256 = sha256_hex(bytes);
 
     copiar_dir(
         &paquete.raiz_root.join("tools/colab"),
@@ -993,7 +1006,7 @@ pub fn es_sha256_hex(texto: &str) -> bool {
 }
 
 /// Ruta del binario de podman: la variable `ROOT_PODMAN_BIN`, o `podman`.
-fn binario_podman() -> PathBuf {
+pub fn binario_podman() -> PathBuf {
     std::env::var_os(ROOT_PODMAN_BIN)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("podman"))
@@ -3866,6 +3879,50 @@ mod tests {
             .expect("tar");
         assert!(estado.success(), "tar falló");
         dir
+    }
+
+    /// Guarda del refactor: el paquete de calibración trae el mismo contenido en las partes que
+    /// arma el oráculo. Los SHA salen de `sha256sum` sobre el texto que arma el doble.
+    #[test]
+    fn paquete_de_calibracion_guarda_shas_del_oraculo() {
+        let e = Escenario::con_contrato("cargo test");
+        let resumen = empaquetar(&e.paquete(&[("tarea-prueba", Dimension::Funciona)]), &Doble)
+            .expect("empaqueta");
+        let dir = extraer(&resumen.salida);
+        let esperados = [
+            (
+                "herramientas/cargo-audit",
+                "4d6e046b926ba16ea0d7bf783c637ff2a1e8aafe844b1d138e068194e597c9b6",
+            ),
+            (
+                "herramientas/cargo-mutants",
+                "fd4efb685089c8a04fd59bde34c5e37229ed40a3f602a2f6ab5b7fd87a982aa4",
+            ),
+            (
+                "herramientas/cargo-nextest",
+                "bca7bc56a79fa820c48d7e220ac966309af49f8fa437affe89e1b25f0763b2dd",
+            ),
+            (
+                "herramientas/gitleaks",
+                "d4f4652a173047357a76dab22c89e5ac5f5658da5320d2cdfc47baa0cbd5ad8b",
+            ),
+            (
+                "herramientas/hadolint",
+                "4fc569f4f0e0766498bb04c40497da3f4d7959793bde971637a5bda09dc1449f",
+            ),
+            (
+                "versiones.env",
+                "cccb56e92aa57204a1c2200cba65d0bf4b84cda76b09be2c784504e2c6491515",
+            ),
+            (
+                "entorno.env",
+                "a4b373f8921788f07b539a55d8651bc1964fecd6991c083054baf60cd02efd1c",
+            ),
+        ];
+        for (relativa, sha) in esperados {
+            let bytes = fs::read(dir.path().join(relativa)).expect("lee el archivo");
+            assert_eq!(sha256_hex(&bytes), sha, "SHA distinto en {relativa}");
+        }
     }
 
     #[test]
