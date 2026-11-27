@@ -66,6 +66,9 @@ const MENSAJE_SIGKILL: &str = "el builder fue matado por SIGKILL, a menudo por f
 /// Aviso del veredicto cuando el builder usa el procfs del runtime (`ROOT_PROC_BUILDER`).
 pub(crate) const AVISO_PROC_BUILDER: &str = "builder con /proc del runtime en solo lectura";
 
+/// Arma los args de bwrap: recibe el lanzamiento, la copia de la credencial (o ninguna) y el estado.
+type MontajesDe<'a> = dyn Fn(&Lanzamiento, Option<&Path>, &Path) -> Vec<String> + 'a;
+
 /// Lista de montajes del proceso. Lo lee el chequeo previo solo con `ROOT_PROC_BUILDER`.
 const MOUNTINFO: &str = "/proc/self/mountinfo";
 
@@ -222,23 +225,17 @@ impl EjecutorBwrapBuilder {
         self.proc_builder.as_ref().map(|_| AVISO_PROC_BUILDER)
     }
 
-    /// Arma el `Command` del lanzamiento sin lanzarlo. `l` y las rutas ya son físicas y validadas. El
-    /// entorno sale de cero: `l.env` sin variables prohibidas, `HOME` y `PATH` fijos y, si hay, el token.
+    /// Arma el `Command` del lanzamiento sin lanzarlo. `montajes` son los args de bwrap ya armados. Antes
+    /// revisa que ningún destino quede dentro de una carpeta en solo lectura. El entorno sale de cero:
+    /// `l.env` sin variables prohibidas, `HOME` y `PATH` fijos y, si hay, el token.
     fn armar_comando(
         &self,
         l: &Lanzamiento,
-        credencial: Option<&Path>,
-        estado: &Path,
+        montajes: &[String],
         (uid, gid): (u32, u32),
         token: Option<&str>,
-    ) -> Command {
-        let montajes = args_bwrap_builder(
-            l,
-            credencial,
-            estado,
-            self.proc_builder.as_deref(),
-            &entrada_de_raiz,
-        );
+    ) -> Result<Command, ErrorCorre> {
+        revisar_destinos(montajes)?;
         let mut cmd = Command::new(&self.ip);
         cmd.args(["netns", "exec"])
             .arg(&self.red)
@@ -254,7 +251,7 @@ impl EjecutorBwrapBuilder {
                 "--no-new-privs",
             ])
             .arg(&self.bwrap)
-            .args(&montajes)
+            .args(montajes)
             .arg(CLAUDE)
             .args(&l.args);
         cmd.env_clear();
@@ -270,12 +267,16 @@ impl EjecutorBwrapBuilder {
         if let Some(token) = token {
             cmd.env(VARIABLE_TOKEN, token);
         }
-        cmd
+        Ok(cmd)
     }
-}
 
-impl EjecutorBuilder for EjecutorBwrapBuilder {
-    fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+    /// Lanza el builder con `l`. `montajes_de` arma los args de bwrap con rutas ya físicas.
+    /// Recibe `l`, la copia de la credencial (o ninguna) y el estado. `lanzar` le pasa `args_bwrap_builder`.
+    fn lanzar_con(
+        &self,
+        l: &Lanzamiento,
+        montajes_de: &MontajesDe<'_>,
+    ) -> Result<SalidaClaude, ErrorCorre> {
         // Con el ejecutor terminando no se crea copia ni se lanza nada. Bajo el cerrojo se vuelve a mirar.
         if senal_termino_el_ejecutor() {
             return Err(ErrorCorre::Ejecutor(
@@ -344,7 +345,8 @@ impl EjecutorBuilder for EjecutorBwrapBuilder {
         revisar_ancestros(builder, &ancestros)?;
         cambiar_dueno(&self.chown, &real.repo, builder)?;
         cambiar_dueno(&self.chown, &estado, builder)?;
-        let cmd = self.armar_comando(&real, copia.as_deref(), &estado, builder, token.as_deref());
+        let montajes = montajes_de(&real, copia.as_deref(), &estado);
+        let cmd = self.armar_comando(&real, &montajes, builder, token.as_deref())?;
 
         let plazo = l.plazo.min(self.timeout);
         match correr_comando_registrado(cmd, &self.ip, plazo, TOPE_SALIDA_BUILDER)? {
@@ -359,6 +361,66 @@ impl EjecutorBuilder for EjecutorBwrapBuilder {
             }),
         }
     }
+}
+
+impl EjecutorBuilder for EjecutorBwrapBuilder {
+    fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+        self.lanzar_con(l, &|real, copia, estado| {
+            args_bwrap_builder(
+                real,
+                copia,
+                estado,
+                self.proc_builder.as_deref(),
+                &entrada_de_raiz,
+            )
+        })
+    }
+}
+
+/// Revisa que ningún destino de montaje quede dentro de una carpeta montada antes en solo lectura. Función
+/// pura. Una carpeta de solo lectura es un `--ro-bind X X`. Con un operando solo se mira el destino.
+/// `--chdir` no monta nada y se salta.
+fn revisar_destinos(args: &[String]) -> Result<(), ErrorCorre> {
+    let mut solo_lectura: Vec<&Path> = Vec::new();
+    let mut resto = args.iter();
+    while let Some(bandera) = resto.next() {
+        match bandera.as_str() {
+            "--bind" | "--ro-bind" | "--symlink" => {
+                let (Some(origen), Some(destino)) = (resto.next(), resto.next()) else {
+                    break;
+                };
+                revisar_destino(destino, &solo_lectura)?;
+                if bandera == "--ro-bind" && Path::new(origen) == Path::new(destino) {
+                    solo_lectura.push(Path::new(destino));
+                }
+            }
+            "--proc" | "--dev" | "--tmpfs" => {
+                if let Some(destino) = resto.next() {
+                    revisar_destino(destino, &solo_lectura)?;
+                }
+            }
+            "--chdir" => {
+                resto.next();
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Da error si `destino` queda dentro de una carpeta de `solo_lectura` sin ser esa carpeta. Compara por
+/// componentes de ruta.
+fn revisar_destino(destino: &str, solo_lectura: &[&Path]) -> Result<(), ErrorCorre> {
+    let ruta = Path::new(destino);
+    for carpeta in solo_lectura {
+        if ruta != *carpeta && ruta.starts_with(carpeta) {
+            return Err(ErrorCorre::Ejecutor(format!(
+                "el destino {destino} queda dentro de {}, montada en solo lectura",
+                carpeta.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Argumentos de `bwrap` del builder, sin el binario ni `claude`. Función pura: el sistema de la raíz llega
@@ -1447,13 +1509,16 @@ mod tests {
                 "chown".into(),
             ],
         );
-        let cmd = ej.armar_comando(
+        let montajes = args_bwrap_builder(
             &l,
             Some(d.credencial.as_path()),
             &d.estado,
-            (1001, 1001),
             None,
+            &sistema_de_prueba,
         );
+        let cmd = ej
+            .armar_comando(&l, &montajes, (1001, 1001), None)
+            .expect("arma el comando");
         assert_eq!(cmd.get_program().to_string_lossy(), "ip");
         let argv = argv_de(&cmd);
         assert_eq!(&argv[..3], ["netns", "exec", "red-prueba"], "{argv:?}");
@@ -1506,13 +1571,16 @@ mod tests {
                 "chown".into(),
             ],
         );
-        let cmd = ej.armar_comando(
+        let montajes = args_bwrap_builder(
             &l,
             Some(d.credencial.as_path()),
             &d.estado,
-            (1001, 1001),
             None,
+            &sistema_de_prueba,
         );
+        let cmd = ej
+            .armar_comando(&l, &montajes, (1001, 1001), None)
+            .expect("arma el comando");
         let envs = entorno_de(&cmd);
         for clave in ["ROOT_HOME", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"] {
             assert!(!envs.contains_key(clave), "trae {clave}: {envs:?}");
@@ -1545,13 +1613,16 @@ mod tests {
                 "chown".into(),
             ],
         );
-        let cmd = ej.armar_comando(
+        let montajes = args_bwrap_builder(
             &l,
             Some(d.credencial.as_path()),
             &d.estado,
-            (1001, 1001),
             None,
+            &sistema_de_prueba,
         );
+        let cmd = ej
+            .armar_comando(&l, &montajes, (1001, 1001), None)
+            .expect("arma el comando");
         let envs = entorno_de(&cmd);
         let path = envs.get("PATH").cloned().unwrap_or_default();
         assert_eq!(
@@ -1584,13 +1655,16 @@ mod tests {
                 "chown".into(),
             ],
         );
-        let cmd = ej.armar_comando(
+        let montajes = args_bwrap_builder(
             &l,
             Some(d.credencial.as_path()),
             &d.estado,
-            (1001, 1001),
-            Some(&token),
+            None,
+            &sistema_de_prueba,
         );
+        let cmd = ej
+            .armar_comando(&l, &montajes, (1001, 1001), Some(&token))
+            .expect("arma el comando");
         for a in argv_de(&cmd) {
             assert!(!a.contains("tok-falso-123"), "el token va en argv: {a}");
         }
@@ -1767,6 +1841,150 @@ mod tests {
             d.raiz.join("cargo-home-visto").is_file(),
             "no existía cargo-home/ dentro del estado al lanzar"
         );
+    }
+
+    // --- Destinos de montaje ---
+
+    /// Sistema de prueba con `/lib` como enlace a `usr/lib`, `/opt` como carpeta y el resto de la raíz.
+    fn sistema_con_enlace_lib(ruta: &str) -> EntradaRaiz {
+        match ruta {
+            "/usr" | "/etc" | "/opt" | "/bin" => EntradaRaiz::Dir,
+            "/lib" => EntradaRaiz::Enlace("usr/lib".into()),
+            _ => EntradaRaiz::NoExiste,
+        }
+    }
+
+    #[test]
+    fn revisar_destinos_destino_dentro_de_carpeta_ro_falla_y_nombra_ambas() {
+        let args: Vec<String> = [
+            "--ro-bind",
+            "/opt",
+            "/opt",
+            "--ro-bind",
+            "/x",
+            "/opt/plugin",
+        ]
+        .map(String::from)
+        .into();
+        let error = revisar_destinos(&args).expect_err("/opt/plugin queda dentro de /opt");
+        assert!(
+            matches!(&error, ErrorCorre::Ejecutor(m) if m.contains("/opt/plugin") && m.contains("/opt")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn revisar_destinos_args_reales_del_builder_pasan() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        let plugin = d.raiz.join("plugin");
+        let procfs = d.raiz.join("procfs");
+        for carpeta in [&plugin, &procfs] {
+            fs::create_dir_all(carpeta).expect("carpeta");
+        }
+        let mut l = lanzamiento(d.repo.clone(), Vec::new());
+        l.plugin = Some(plugin);
+        let args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            Some(procfs.as_path()),
+            &sistema_con_enlace_lib,
+        );
+        revisar_destinos(&args).expect("los args reales no chocan");
+    }
+
+    #[test]
+    fn revisar_destinos_bind_dentro_de_usr_tras_ro_bind_de_usr_falla() {
+        let args: Vec<String> = ["--ro-bind", "/usr", "/usr", "--bind", "/x", "/usr/local/x"]
+            .map(String::from)
+            .into();
+        let error = revisar_destinos(&args).expect_err("/usr/local/x queda dentro de /usr");
+        assert!(
+            matches!(&error, ErrorCorre::Ejecutor(m) if m.contains("/usr/local/x") && m.contains("/usr")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn revisar_destinos_ro_bind_de_usr_solo_no_choca() {
+        let args: Vec<String> = ["--ro-bind", "/usr", "/usr"].map(String::from).into();
+        revisar_destinos(&args).expect("montar /usr sobre sí misma no choca");
+    }
+
+    #[test]
+    fn revisar_destinos_solo_cuenta_carpetas_montadas_antes_del_destino() {
+        let args: Vec<String> = ["--bind", "/x", "/usr/local/x", "--ro-bind", "/usr", "/usr"]
+            .map(String::from)
+            .into();
+        revisar_destinos(&args).expect("la carpeta ro llega después del destino");
+    }
+
+    #[test]
+    fn corre_bwrap_conflicto_de_destinos_frena_antes_de_lanzar_bwrap() {
+        let _serie = serie_de_pruebas();
+        let d = disposicion();
+        let plugin = d.raiz.join("plugin");
+        fs::create_dir_all(&plugin).expect("plugin");
+        // El `bwrap` falso deja una marca si se ejecuta. Con el conflicto no debe ejecutarse.
+        let cuerpo = "#!/bin/sh\necho corrio > DIR/bwrap-corrido\necho salida-falsa\n";
+        let progs = cadena_falsa(&d.raiz, cuerpo);
+        let mut l = lanzamiento(d.repo.clone(), Vec::new());
+        l.plugin = Some(plugin);
+        let error = ejecutor_de(&d, &progs)
+            .lanzar_con(&l, &|real, copia, estado| {
+                let mut montajes: Vec<String> =
+                    ["--ro-bind", "/opt", "/opt"].map(String::from).into();
+                montajes.extend(args_bwrap_builder(
+                    real,
+                    copia,
+                    estado,
+                    None,
+                    &sistema_con_opt,
+                ));
+                montajes
+            })
+            .expect_err("el conflicto frena el lanzamiento");
+        assert!(
+            matches!(&error, ErrorCorre::Ejecutor(m) if m.contains("/opt/plugin") && m.contains("/opt")),
+            "{error}"
+        );
+        assert!(
+            !d.raiz.join("bwrap-corrido").exists(),
+            "bwrap corrió con un conflicto de destinos"
+        );
+    }
+
+    #[test]
+    fn corre_bwrap_guarda_montajes_de_trabajo_estado_credencial_y_plugin() {
+        let d = disposicion();
+        let plugin = d.raiz.join("plugin");
+        fs::create_dir_all(&plugin).expect("plugin");
+        let mut l = lanzamiento(d.repo.clone(), Vec::new());
+        l.plugin = Some(plugin.clone());
+        let args = args_bwrap_builder(
+            &l,
+            Some(d.credencial.as_path()),
+            &d.estado,
+            None,
+            &sistema_de_prueba,
+        );
+        let repo = d.repo.display().to_string();
+        let estado = d.estado.display().to_string();
+        let cred = d.credencial.display().to_string();
+        let plug = plugin.display().to_string();
+        let esperados = [
+            ["--bind", repo.as_str(), "/trabajo"],
+            ["--bind", estado.as_str(), ESTADO_EN_CONTENEDOR],
+            ["--ro-bind", cred.as_str(), CREDENCIAL_EN_CONTENEDOR],
+            ["--ro-bind", plug.as_str(), PLUGIN_EN_CONTENEDOR],
+        ];
+        for esperado in esperados {
+            assert!(
+                args.windows(3).any(|w| w == esperado),
+                "falta {esperado:?}: {args:?}"
+            );
+        }
     }
 
     // --- Chequeos previos ---
