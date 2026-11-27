@@ -17596,3 +17596,99 @@ Leí la sección 6 de `informe-local-175.md`, la sección 7 de `informe-local-17
 **Las unidades de Colab:** todo lo que falta hasta el análisis de D3 usa menos de 5.
 
 **Preguntas al usuario:** ninguna nueva.
+
+## Vuelta del 2026-11-27 (107): la revisión de la 176c y el borrador de la PR
+
+**Estado.**
+- **La vuelta 106 está en b40b4902.** Fijó la regla de los briefs del orquestador.
+- **La prueba aisla-7 corrió entera,** pero `r00t corre` salió con 3: "GOAL no autorizado: falta GOAL.hash". El builder nunca arrancó. C2 y C3 dieron 0. Una prueba local de humo confirmó que era el único faltante antes del lanzamiento.
+- **El orquestador escribió el brief de la 176c** (472ad478).
+- **El builder 176c terminó** con 0,29 USD, en `laptop/tarea-176c`, con el arreglo en 9f066bb.
+- **La suite de `laptop/cadena-176c`** (ae50e34) dio 4277/0/5. El binario es `colab-pruebas/v176c/r00t`.
+- **El paquete nuevo** trae `GOAL.md` y `GOAL.hash`. C1 está en 1 archivo, y C2 y C3 en 0.
+- **La prueba aisla-8 corre en Colab.** Su resultado no está todavía.
+- **El borrador de la PR** está en `orquestador/pr-171-176c.md`.
+
+## 1. El brief de la 176c contra la regla de la vuelta 106
+
+| Condición | ¿Cumple? | Por qué |
+|---|---|---|
+| 1. Arregla un test que falla, o un defecto visto al verificar | **Sí** | El defecto salió de aisla-7, la verificación de la cadena en Colab |
+| 2. Toca solo archivos de la tabla de la tarea madre, o de tests | **Sí** | Toca solo `src/colab_corre.rs`, que está en la tabla de la 172, y el informe |
+| 3. No cambia ninguna conducta que la tarea madre no pidiera | **Sí** | El brief de la 172 pedía, en su punto 1.2, que el paquete trajera `GOAL.md` "porque `corre` necesita `GOAL.md`". `corre` necesita los dos archivos. La conducta nueva, el error sin `GOAL.hash`, completa lo que pedía la 172 |
+| 4. Queda en `registro.md`, y el planner lo revisa antes de la PR | **Sí** | `registro.md` lo anota a las 10:44:30, con la regla citada. Esta vuelta es la revisión |
+
+**El brief cumple las cuatro.** El error de fondo fue mío: el brief de la 172 nombró `GOAL.md` y no `GOAL.hash`.
+
+**Una nota sobre su forma:** el brief de la 176c es más corto que los del planner. No trae la sección "Qué es Root", ni las reglas de commits y de archivos prohibidos. Para un arreglo de un archivo alcanza, porque el builder trabaja con las mismas reglas del repo. Si la regla de la vuelta 106 se usa para algo más grande, el brief debe traer esas secciones.
+
+## 2. El diff de la 176c contra el brief
+
+Leí 9f066bb. Toca solo `src/colab_corre.rs`, con 30 líneas nuevas y 1 cambiada.
+
+| Punto del brief | Lo que hace el diff |
+|---|---|
+| 1, test rojo: el paquete trae `GOAL.hash` igual al de la raíz | `corre_paquete_trae_goal_hash_igual_al_de_la_raiz`: arma el paquete, lo extrae y compara los bytes |
+| 2, test rojo: sin `GOAL.hash`, error de uso que lo nombra | `corre_sin_goal_hash_en_la_raiz_es_error_de_uso`: borra el archivo y pide un error de uso con "GOAL.hash" |
+| 3, copiar y exigir | Un chequeo nuevo, junto al de `GOAL.md` (líneas 177 a 188), y una copia nueva, junto a la de `GOAL.md` (línea 356) |
+| 4, arreglar los tests viejos | El escenario de los tests escribe `GOAL.hash` en la raíz (línea 1255) |
+| Sin verificar el hash al empaquetar | No lo verifica |
+
+**No cambia ninguna conducta que no pidiera.**
+- El paquete suma un archivo. El manifiesto lista cada archivo del paquete con su SHA, así que `GOAL.hash` entra solo al manifiesto.
+- `colab empaquetar --corre` suma un error, sin `GOAL.hash`. La calibración no cambia: el arreglo está en `src/colab_corre.rs`, no en `src/colab_calibra.rs`.
+
+**¿Prueban los 2 tests el defecto de aisla-7?** **En parte.**
+- **Prueban la causa:** el paquete de antes no traía `GOAL.hash`, y ahora lo trae, con los mismos bytes.
+- **No prueban el efecto:** que `r00t corre` pase el chequeo del GOAL con el paquete armado. Eso lo prueban la prueba de humo del orquestador y aisla-8, que corre ahora.
+- **Para la próxima tarea de este tipo,** conviene un test que arme el paquete, lo extraiga, y llame a `verificar_goal` sobre esa carpeta. Así, la causa y el efecto quedan en el mismo test. No hace falta para esta PR: aisla-8 cubre el efecto.
+
+## 3. Las preguntas del informe de la 176c
+
+**El informe dice: "Ninguna".** No hay nada que decidir.
+
+## 4. El borrador de la PR
+
+Leí `orquestador/pr-171-176c.md`. Describe bien la 176c: el defecto, el arreglo y su mensaje de error. La suma de costos da 10,23 USD, y coincide.
+
+**Lo que está mal:**
+- **La Tarea 173 dice "apaga IPv6".** La 173 intentó apagarlo con `sysctl`, y en Colab eso no anda. La 175 lo reemplazó: IPv6 sin rutas, y `ip6tables` en `DROP`. El texto debe decir eso.
+- **El orden de la lista pone la 175b después de la 176.** Conviene el orden de la cadena: 175, 175b, 176, 176b y 176c.
+
+**Lo que falta, además del resultado de aisla-8:**
+1. **La base y la punta:** la base es 5a4f295, el congelado Y, y la punta es ae50e34. El árbol de Z debe ser el de ae50e34.
+2. **La prueba de que el oráculo no cambia:** `git diff 5a4f295 ae50e34` sale vacío en `rubricas/`, `imagenes/`, `tools/colab/versiones.env` y `src/oracle/`. Lo revisé en esta vuelta. Con eso, las huellas y las calibraciones de Y siguen valiendo.
+3. **Una excepción a esa frase:** la 173 hizo pública una función de `src/colab_calibra.rs`, para que el paquete de `corre` arme la parte del oráculo con el mismo código. Lo que arma la calibración no cambia, y un test lo guarda.
+4. **Las decisiones del usuario que la PR aplica:** P129 b, `corre` en Colab; P130 a, el token por `colab upload` y la clave por `--env` en la pasada 1; P131 a, una sola PR después de la prueba; P133 b, pids propios y `/proc` en solo lectura; P134 a, la sonda 14.
+5. **Lo que la PR no cierra, como límites conocidos:**
+   - el builder no tiene tope de memoria en Colab, porque no hay cgroups;
+   - el builder ve la lista de procesos del runtime y sus líneas de comandos, por P133 b;
+   - un slirp viejo puede quedar huérfano al retomar una sesión;
+   - `claude` 2.1.317 pide node 22, y el builder usa node 20.19.2, igual que la imagen de la laptop.
+6. **El builder de la laptop no cambia:** sigue con podman. Todo lo nuevo corre solo con `ROOT_CONTENEDOR_MODO=bwrap`.
+7. **La prueba de aislamiento, con su historia:** aisla-7 cortó por `GOAL.hash` antes del builder, y eso trajo la 176c. Faltan el resultado de `revisa.py` en el modo `b`, la búsqueda de C2 y C3, y los dos avisos en la fila de `runs.jsonl`.
+
+**La PR no se abre hasta que aisla-8 dé `RESULTADO PASA`,** por P131 a.
+
+## 5. Lo que falta hasta cerrar el hito 1
+
+| Paso | Qué | Depende de | Dónde | Costo | Tiempo | ¿Espera al usuario? |
+|---|---|---|---|---|---|---|
+| 1 | aisla-8, en curso, con `revisa.py` en el modo `b` y los dos avisos | Nada | Colab | 0 USD y cerca de 0,15 unidades | De 1 a 1,5 horas | No |
+| 2 | Los arreglos del borrador de la PR, y el resultado de aisla-8 | El paso 1 | Laptop, orquestador | 0 USD | Cerca de 15 minutos | No |
+| 3 | La PR con la 171 a la 176c | El paso 2 | — | — | — | **Sí: la orden de mezcla** |
+| 4 | El congelamiento Z: el árbol igual al de ae50e34, el release, y el estado con Z | El paso 3 | Laptop, orquestador | 0 USD | Cerca de 1 hora | No |
+| 5 | El paquete del piloto, con `paso0-d3.sh` | El paso 4 | Laptop, el usuario | 0 USD | Cerca de 10 minutos | **Sí: la primera de las dos corridas de P132 a** |
+| 6 | El piloto de D3: s2-t1 | El paso 5 | Colab | Cerca de 0,9 USD de lista, 0,1 USD de API y 0,1 unidades | Cerca de 1 hora | No |
+| 7 | Los 3 paquetes de las tandas | El paso 6 | Laptop, el usuario | 0 USD | Cerca de 15 minutos | **Sí: la segunda corrida de P132 a** |
+| 8 | Las sesiones 1 a 3 de D3 | El paso 7 | Colab | De 21 a 36 USD de lista, de 2 a 4,5 USD de API, y de 1,5 a 3 unidades | De 12 a 14 horas, en 1,5 a 2 días | No |
+| 9 | Las tareas cortadas, en un paquete extra | El paso 8 | Laptop y Colab | Según cuántas | Una sesión más | **Sí, si hay cortes** |
+| 10 | El análisis de D3 | Los pasos 8 y 9 | Planner | Cupo | Una vuelta | No |
+| 11 | Si el análisis lo pide: una segunda pasada | El paso 10 | Colab | Lo mismo que los pasos 6 a 9 | De 1,5 a 2 días | **Sí** |
+| 12 | P98 c: abrir el final | El paso 10, o el 11 | Laptop | Según la regla del final | Según el final | No |
+| 13 | La validez sobre el final sellado | El paso 12 | Colab | Según el final | Según el final | No |
+| 14 | El informe de cierre del hito 1 | El paso 13 | Planner | Cupo | Una vuelta | No |
+| 15 | El borrado de memora y brasa, si el dataset calibra | El paso 13 | Laptop, orquestador | 0 USD | Minutos | **Sí: lo confirma el usuario** |
+
+**El saldo de S2:** cerca de 12,53 USD, sin cambios.
+**Preguntas al usuario:** ninguna nueva.
