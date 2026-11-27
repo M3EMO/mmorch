@@ -1,6 +1,6 @@
 //! Paquete de `corre` para Colab: `r00t colab empaquetar --corre`.
 //!
-//! El paquete lleva el binario, `GOAL.md`, `tools/colab/`, la config de la corrida, los plugins de
+//! El paquete lleva el binario, `GOAL.md`, `GOAL.hash`, `tools/colab/`, la config de la corrida, los plugins de
 //! ECC que la config fija, los oráculos de las tareas pedidas y un manifiesto. Del ROOT_HOME solo
 //! sale lo que la lista dice. Una revisión final frena claves, `.env` y `.credentials.json`.
 
@@ -180,6 +180,12 @@ pub fn empaquetar_corre(
             raiz_root.display()
         )));
     }
+    if !raiz_root.join("GOAL.hash").is_file() {
+        return Err(ErrorOraculo::Uso(format!(
+            "falta GOAL.hash en {}",
+            raiz_root.display()
+        )));
+    }
     let root_toml = home.join("root.toml");
     if root_toml.is_file() {
         let texto = fs::read_to_string(&root_toml)
@@ -347,6 +353,7 @@ fn armar(
         &staging.join("tools/colab"),
     )?;
     copiar_archivo(&a.raiz_root.join("GOAL.md"), &staging.join("GOAL.md"))?;
+    copiar_archivo(&a.raiz_root.join("GOAL.hash"), &staging.join("GOAL.hash"))?;
 
     let raiz_home = staging.join(RAIZ_HOME);
     let configs = raiz_home.join("configs");
@@ -1245,6 +1252,7 @@ mod tests {
             fs::create_dir_all(raiz.path().join("tools/colab")).expect("dir");
             fs::write(raiz.path().join("tools/colab/prepara.py"), "print()\n").expect("escribe");
             fs::write(raiz.path().join("GOAL.md"), "# meta\n").expect("escribe");
+            fs::write(raiz.path().join("GOAL.hash"), "hash-de-prueba\n").expect("escribe");
             let e = Escenario {
                 home: tempfile::tempdir().expect("home"),
                 raiz,
@@ -1715,6 +1723,27 @@ mod tests {
         fs::write(&e.binario, b"texto plano, no es un binario").expect("escribe");
         let mensaje = uso(e.empaqueta(&e.pedido(&["tarea-a"])));
         assert!(mensaje.contains("ELF"), "{mensaje}");
+    }
+
+    #[test]
+    fn corre_paquete_trae_goal_hash_igual_al_de_la_raiz() {
+        let e = Escenario::nuevo();
+        let resumen = e.empaqueta(&e.pedido(&["tarea-a"])).expect("empaqueta");
+        let extraido = extraer(&resumen.salida);
+        let del_paquete = extraido.path().join("GOAL.hash");
+        assert!(del_paquete.is_file(), "falta GOAL.hash en el paquete");
+        assert_eq!(
+            fs::read(&del_paquete).expect("lee"),
+            fs::read(e.raiz.path().join("GOAL.hash")).expect("lee raiz")
+        );
+    }
+
+    #[test]
+    fn corre_sin_goal_hash_en_la_raiz_es_error_de_uso() {
+        let e = Escenario::nuevo();
+        fs::remove_file(e.raiz.path().join("GOAL.hash")).expect("borra");
+        let mensaje = uso(e.empaqueta(&e.pedido(&["tarea-a"])));
+        assert!(mensaje.contains("GOAL.hash"), "{mensaje}");
     }
 
     // ----- colab importar --corre -----
